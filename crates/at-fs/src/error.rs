@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::backup::BackupError;
+use crate::guard::{Remedy, TargetKind};
 
 /// Why a filesystem operation did not happen (or did not complete).
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +77,26 @@ pub enum FsError {
     NoParent {
         /// Destination path.
         path: PathBuf,
+    },
+    /// Something AgenTuna does not own already exists at the target. Nothing was written.
+    #[error("{}: {kind:?} already exists and is not managed by AgenTuna", .path.display())]
+    RefusedOverwrite {
+        /// Target path.
+        path: PathBuf,
+        /// What is there.
+        kind: TargetKind,
+        /// SHA-256 of the existing file, when it is a hashable regular file.
+        existing_hash: Option<String>,
+        /// What the user can do next.
+        remedies: Vec<Remedy>,
+    },
+    /// The path is not usable (relative, contains `..`, or an ancestor is not a directory).
+    #[error("{}: {reason}", .path.display())]
+    InvalidPath {
+        /// Offending path.
+        path: PathBuf,
+        /// Why.
+        reason: &'static str,
     },
     /// Backup creation or verification failed.
     #[error(transparent)]

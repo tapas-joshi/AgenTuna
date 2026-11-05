@@ -10,7 +10,7 @@ macOS first. A headless CLI uses the same engine as the GUI.
 Implemented so far: the 12-crate Cargo workspace, `at-model` domain types
 (TF-001, TF-002), a Tauri 2 shell with a one-command React frontend in `ui/`, the
 `agentuna --version` CLI stub, and the `at-fs` guarded write pipeline with backup
-copy (TF-004, TF-041; Unix only). Everything else in the contract and backlog is
+copy (TF-004, TF-041) and the refuse-to-overwrite guard (TF-005; Unix only). Everything else in the contract and backlog is
 planned, not shipped. Do not describe planned crates, commands or acceptance
 criteria as shipped behaviour. Keep this paragraph current; the backlog workbook
 tracks per-story status.
