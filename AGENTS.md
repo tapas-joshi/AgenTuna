@@ -248,6 +248,10 @@ dependencies.
   later `CLAUDE.md` should point here rather than copy these instructions.
 - Do not commit, push, install software or publish releases unless requested.
   When asked to commit, use the relevant technical-story ID in the message.
+- `main` is protected: no direct pushes. Work on a branch named for the story
+  (for example `tf-004-safe-write`), open a pull request, and squash-merge it once
+  the `rust`, `frontend` and `supply-chain` checks pass and review threads are
+  resolved. Keep the PR title in the form `TF-004: short summary`.
 
 ## Public repository hygiene
 
