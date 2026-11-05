@@ -14,6 +14,7 @@ pub mod backup;
 pub mod concurrency;
 pub mod diff;
 mod error;
+pub mod guard;
 mod hash;
 pub mod symlink;
 pub mod watch;
@@ -22,6 +23,11 @@ pub use atomic::{BackupPolicy, WriteMode, WriteOutcome, WriteRequest, apply};
 pub use backup::{BackupError, BackupMeta, BackupSidecar};
 pub use concurrency::ExpectedState;
 pub use error::FsError;
+pub use guard::{
+    Classification, DeploymentLookup, MoveAsideOutcome, OverwriteGuard, OwnershipContext,
+    OwnershipGuard, Remedy, TargetKind, classify_target, create_parents_if_target_absent,
+    move_aside,
+};
 pub use hash::sha256_hex;
 pub use symlink::SymlinkWrite;
 

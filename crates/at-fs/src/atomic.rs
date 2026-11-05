@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use time::OffsetDateTime;
@@ -11,6 +12,7 @@ use time::OffsetDateTime;
 use crate::backup::{self, BackupFiles, BackupMeta};
 use crate::concurrency::{ExpectedState, Observed};
 use crate::error::FsError;
+use crate::guard::OverwriteGuard;
 use crate::hash::sha256_hex;
 use crate::symlink::{self, SymlinkWrite};
 use crate::{MAX_FILE_BYTES, diff};
@@ -52,6 +54,9 @@ pub struct WriteRequest {
     pub allow_empty_dir: bool,
     /// Scope and relative path recorded in the backup sidecar.
     pub backup_meta: BackupMeta,
+    /// Refuse-to-overwrite guard, checked before staging and again before the rename.
+    /// Deployments and copies into agent folders must set this.
+    pub guard: Option<Arc<dyn OverwriteGuard>>,
 }
 
 impl WriteRequest {
@@ -67,6 +72,7 @@ impl WriteRequest {
             mode: WriteMode::Replace,
             allow_empty_dir: false,
             backup_meta: BackupMeta::default(),
+            guard: None,
         }
     }
 
@@ -260,6 +266,9 @@ pub fn apply_with_hook(
         .to_string_lossy()
         .into_owned();
 
+    if let Some(guard) = &request.guard {
+        guard.check(&dest, request.allow_empty_dir)?;
+    }
     let current = read_current(&dest, request.allow_empty_dir)?;
     match (request.mode, &current.observed) {
         (_, Observed::Directory) => return Err(FsError::DestinationIsDirectory { path: dest }),
@@ -349,6 +358,9 @@ fn install(
     hook: &mut dyn FnMut(Stage),
 ) -> Result<(), FsError> {
     hook(Stage::BeforeRename);
+    if let Some(guard) = &request.guard {
+        guard.check(dest, request.allow_empty_dir)?;
+    }
     let now = read_current(dest, request.allow_empty_dir)?;
     if now.observed != before.observed || now.empty_dir != before.empty_dir {
         return Err(concurrent(
