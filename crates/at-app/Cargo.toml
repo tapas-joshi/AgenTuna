@@ -1,0 +1,29 @@
+[package]
+name = "at-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[lib]
+name = "at_app"
+
+[[bin]]
+name = "agentuna-app"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+at-model.workspace = true
+tauri.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+ts-rs.workspace = true

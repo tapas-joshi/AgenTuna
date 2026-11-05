@@ -1,0 +1,754 @@
+{
+ "epics": [
+  {
+   "id": "E01",
+   "name": "Scope model & effective config",
+   "goal": "Global / User / Project scopes with precedence, locks and a 'why is this on?' trace",
+   "priority": "P0",
+   "phase": "MVP"
+  },
+  {
+   "id": "E02",
+   "name": "Skills management",
+   "goal": "Searchable list, per-agent enable with shared-root coupling, shadow/lock states, detail view, bulk actions",
+   "priority": "P0",
+   "phase": "MVP"
+  },
+  {
+   "id": "E03",
+   "name": "MCP server management",
+   "goal": "Searchable per-agent matrix with source and ownership, add/edit, health checks, Keychain secrets",
+   "priority": "P0",
+   "phase": "MVP"
+  },
+  {
+   "id": "E04",
+   "name": "Add skill flow & sources",
+   "goal": "Create and import from git or library with source and destination shown; later marketplace, folder, zip",
+   "priority": "P1",
+   "phase": "MVP"
+  },
+  {
+   "id": "E05",
+   "name": "Central store & migration",
+   "goal": "AgenTuna store folder as master copy; scan, resolve, reviewed plan with explicit original handling, apply and undo",
+   "priority": "P0",
+   "phase": "MVP"
+  },
+  {
+   "id": "E06",
+   "name": "Safety & trust",
+   "goal": "Refuse overwrite and stale previews, diff before write, backups, new secrets in credential store",
+   "priority": "P0",
+   "phase": "MVP"
+  },
+  {
+   "id": "E07",
+   "name": "Sync, drift & backups",
+   "goal": "Detect external edits, adopt/restore, sync labels, restore from backup",
+   "priority": "P1",
+   "phase": "v1"
+  },
+  {
+   "id": "E08",
+   "name": "Agents & detection",
+   "goal": "Detect agents and config paths, per-agent health, custom agents, copy vs link",
+   "priority": "P1",
+   "phase": "v1"
+  },
+  {
+   "id": "E09",
+   "name": "Instructions (rule files)",
+   "goal": "Edit CLAUDE.md / AGENTS.md per scope; render to each agent",
+   "priority": "P1",
+   "phase": "v1"
+  },
+  {
+   "id": "E10",
+   "name": "Project & navigation",
+   "goal": "Searchable project picker, scope switcher, command palette",
+   "priority": "P1",
+   "phase": "MVP"
+  },
+  {
+   "id": "E11",
+   "name": "Presets",
+   "goal": "Named sets of skills and MCP servers applied per agent or repo",
+   "priority": "P2",
+   "phase": "v1"
+  },
+  {
+   "id": "E12",
+   "name": "Agent-operable CLI",
+   "goal": "agentuna CLI + skill so agents can manage AgenTuna",
+   "priority": "P2",
+   "phase": "v2"
+  },
+  {
+   "id": "E13",
+   "name": "Remote backup & sync",
+   "goal": "Private GitHub repo backup, multi-machine sync",
+   "priority": "P3",
+   "phase": "v2"
+  },
+  {
+   "id": "E14",
+   "name": "Update tracking",
+   "goal": "Update badge for git-sourced skills, optional auto-update",
+   "priority": "P3",
+   "phase": "v2"
+  }
+ ],
+ "stories": [
+  {
+   "id": "S-001",
+   "epic": "E01",
+   "story": "As a user I switch between Global, User and Project scope from the top bar",
+   "acceptance": "Switcher visible on every screen; each scope opens its own Overview",
+   "priority": "P0",
+   "points": 3,
+   "status": "Designed",
+   "screen": "01 Overview, 01b, 01c"
+  },
+  {
+   "id": "S-002",
+   "epic": "E01",
+   "story": "As a user I see skill, server and rule counts per scope on Overview",
+   "acceptance": "Three scope cards with counts, last-edited and lock count",
+   "priority": "P0",
+   "points": 3,
+   "status": "Designed",
+   "screen": "01 Overview"
+  },
+  {
+   "id": "S-003",
+   "epic": "E01",
+   "story": "As a user I see which scope wins for any item",
+   "acceptance": "Effective config lists items with scope badge; nearest scope wins",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "04 Effective config"
+  },
+  {
+   "id": "S-004",
+   "epic": "E01",
+   "story": "As a user I can ask 'why is this on?' for a server",
+   "acceptance": "Trace shows Global, User, Project, Local with the winning one marked",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "04 Effective config"
+  },
+  {
+   "id": "S-005",
+   "epic": "E01",
+   "story": "As an admin I can lock a Global value",
+   "acceptance": "Locked rows show padlock; lower-scope toggles disabled with a reason",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "02 Skills, 06 MCP Servers"
+  },
+  {
+   "id": "S-006",
+   "epic": "E01",
+   "story": "As a user I disable an inherited server for this repo only",
+   "acceptance": "Writes one line to project config; User definition unchanged",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "04 Effective config"
+  },
+  {
+   "id": "S-007",
+   "epic": "E02",
+   "story": "As a user I see all skills with scope, ownership and status",
+   "acceptance": "Search box and filter chips by scope; table shows source path, ownership and per-agent state",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "02 Skills"
+  },
+  {
+   "id": "S-008",
+   "epic": "E02",
+   "story": "As a user I turn a skill on or off per agent, with coupled roots shown as one control",
+   "acceptance": "Per-agent switch for Claude Code, Codex, omp; shared roots such as `.agents/skills` are one labeled control with the coupled effect explained",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "02 Skills"
+  },
+  {
+   "id": "S-009",
+   "epic": "E02",
+   "story": "As a user I see shadowed skills and which copy wins",
+   "acceptance": "Shadowed row dimmed; detail explains and offers Compare",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "02 Skills, 09 Skill detail"
+  },
+  {
+   "id": "S-010",
+   "epic": "E02",
+   "story": "As a user I open a skill and read its SKILL.md",
+   "acceptance": "Detail shows file, agents, history and shadow note",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "09 Skill detail"
+  },
+  {
+   "id": "S-011",
+   "epic": "E02",
+   "story": "As a user I promote or move skills between scopes",
+   "acceptance": "Dialog warns when a copy exists; backup kept",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "Overlay: Promote"
+  },
+  {
+   "id": "S-012",
+   "epic": "E02",
+   "story": "As a user I act on several skills at once",
+   "acceptance": "Checkbox selection shows bulk bar: promote, enable, move, disable",
+   "priority": "P2",
+   "points": 5,
+   "status": "Designed",
+   "screen": "02b Skills selected"
+  },
+  {
+   "id": "S-013",
+   "epic": "E02",
+   "story": "As a user I delete a skill from a scope",
+   "acceptance": "Confirm dialog; backup kept; lower-scope copy loads again",
+   "priority": "P2",
+   "points": 2,
+   "status": "Designed",
+   "screen": "Overlay: Delete"
+  },
+  {
+   "id": "S-014",
+   "epic": "E03",
+   "story": "As a user I see a searchable per-agent MCP matrix with health, source and ownership",
+   "acceptance": "Filter box matches name, command and URL; one labeled cell per agent; each row shows scope, source path and AgenTuna or native ownership",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "06 MCP Servers"
+  },
+  {
+   "id": "S-015",
+   "epic": "E03",
+   "story": "As a user I add an MCP server once for many agents",
+   "acceptance": "Form: name, transport, command, env, scope, agents",
+   "priority": "P0",
+   "points": 8,
+   "status": "Designed",
+   "screen": "03 MCP server editor"
+  },
+  {
+   "id": "S-016",
+   "epic": "E03",
+   "story": "As a user I test a server connection",
+   "acceptance": "Shows tool count, latency and tool names or the error",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "03 editor, 10 detail"
+  },
+  {
+   "id": "S-017",
+   "epic": "E03",
+   "story": "As a user I see a server's health history",
+   "acceptance": "Last 5 checks, every 5 minutes, failing state with Fix action",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "10 MCP server detail"
+  },
+  {
+   "id": "S-018",
+   "epic": "E03",
+   "story": "As a user I edit an existing server",
+   "acceptance": "Edit form pre-filled; diff shown before save; an external edit since the form opened is detected and never silently overwritten",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "03b Edit server"
+  },
+  {
+   "id": "S-019",
+   "epic": "E03",
+   "story": "As a user I store tokens in the macOS Keychain",
+   "acceptance": "Files get ${VAR} refs; value never written to disk",
+   "priority": "P0",
+   "points": 8,
+   "status": "Designed",
+   "screen": "03 MCP server editor"
+  },
+  {
+   "id": "S-020",
+   "epic": "E03",
+   "story": "As a user I turn a server on or off per agent",
+   "acceptance": "Per-agent switches on detail and list; native or unmanaged entries offer Adopt or Resolve instead of toggling",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "10 MCP server detail"
+  },
+  {
+   "id": "S-021",
+   "epic": "E03",
+   "story": "As a user I sign in to an HTTP/OAuth server",
+   "acceptance": "Sign in action; tools listed after auth",
+   "priority": "P2",
+   "points": 5,
+   "status": "Designed",
+   "screen": "10 detail: sentry"
+  },
+  {
+   "id": "S-022",
+   "epic": "E04",
+   "story": "As a user I choose where a new skill comes from",
+   "acceptance": "Source step: write new, import from git, from library",
+   "priority": "P0",
+   "points": 2,
+   "status": "Designed",
+   "screen": "11 Add skill 1"
+  },
+  {
+   "id": "S-023",
+   "epic": "E04",
+   "story": "As a user I write a new skill from a template",
+   "acceptance": "Name, 'use when' line, template; live SKILL.md preview",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "11 Add skill 2"
+  },
+  {
+   "id": "S-024",
+   "epic": "E04",
+   "story": "As a user I import skills from a git repo",
+   "acceptance": "Fetch lists skills; pick several; preview SKILL.md; review names the repo source plus destination store and agent paths",
+   "priority": "P1",
+   "points": 8,
+   "status": "Designed",
+   "screen": "11 Add skill 2 git"
+  },
+  {
+   "id": "S-025",
+   "epic": "E04",
+   "story": "As a user I copy skills from another project or scope",
+   "acceptance": "Source list shows scope or project and counts; Copy or Link; review names source and destination; the source stays read-only",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "11 Add skill 2 library"
+  },
+  {
+   "id": "S-026",
+   "epic": "E04",
+   "story": "As a user I pick scope and agents and see name clashes",
+   "acceptance": "Scope cards; agent checkboxes show resolved target paths; shared roots are one grouped control with coupled effect explained",
+   "priority": "P0",
+   "points": 3,
+   "status": "Designed",
+   "screen": "11 Add skill 3"
+  },
+  {
+   "id": "S-027",
+   "epic": "E04",
+   "story": "As a user I review the exact files before creating",
+   "acceptance": "Review lists files to write and git-stage option",
+   "priority": "P0",
+   "points": 3,
+   "status": "Designed",
+   "screen": "11 Add skill 4"
+  },
+  {
+   "id": "S-028",
+   "epic": "E04",
+   "story": "As a user I browse a marketplace with install counts",
+   "acceptance": "skills.sh style tab inside Source step",
+   "priority": "P2",
+   "points": 8,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-029",
+   "epic": "E04",
+   "story": "As a user I import from a local folder or .zip",
+   "acceptance": "Two more source cards",
+   "priority": "P2",
+   "points": 3,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-030",
+   "epic": "E05",
+   "story": "As a user I see items that live only in agent folders",
+   "acceptance": "Rows show 'not in AgenTuna', source path, owning agent and scope; banner with count; unadopted native entries are never overwritten",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "02 Skills, 06 MCP Servers"
+  },
+  {
+   "id": "S-031",
+   "epic": "E05",
+   "story": "As a user I scan agent folders for native items",
+   "acceptance": "Scan lists folders and new items with type, scope, source path and owning agent",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "12 Migrate 1"
+  },
+  {
+   "id": "S-032",
+   "epic": "E05",
+   "story": "As a user I resolve conflicting copies",
+   "acceptance": "Side-by-side diff; keep one or keep both renamed",
+   "priority": "P0",
+   "points": 8,
+   "status": "Designed",
+   "screen": "12 Migrate 2"
+  },
+  {
+   "id": "S-033",
+   "epic": "E05",
+   "story": "As a user I plan what happens to originals",
+   "acceptance": "Originals stay unless the reviewed plan explicitly selects replacement; per-item source, destination and backup path shown",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "12 Migrate 3"
+  },
+  {
+   "id": "S-034",
+   "epic": "E05",
+   "story": "As a user I apply the migration with backups",
+   "acceptance": "Backups verified first; apply refuses if the plan or any source or target changed since preview and returns to review",
+   "priority": "P0",
+   "points": 13,
+   "status": "Designed",
+   "screen": "12 Migrate done"
+  },
+  {
+   "id": "S-035",
+   "epic": "E05",
+   "story": "As a user I undo a migration",
+   "acceptance": "Restore originals from backups within 30 days; refuse when later external edits would be lost",
+   "priority": "P1",
+   "points": 8,
+   "status": "Designed",
+   "screen": "12 Migrate done"
+  },
+  {
+   "id": "S-036",
+   "epic": "E05",
+   "story": "As a user I dry-run a migration",
+   "acceptance": "Show exact file list without writing",
+   "priority": "P2",
+   "points": 3,
+   "status": "Designed",
+   "screen": "12 Migrate 3"
+  },
+  {
+   "id": "S-037",
+   "epic": "E05",
+   "story": "As a user I adopt a single native item",
+   "acceptance": "Adopt opens a review naming source, store destination and original handling; a stale scan is refused",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "02 Skills, 06 MCP Servers"
+  },
+  {
+   "id": "S-038",
+   "epic": "E06",
+   "story": "As a user I never lose files to a deploy",
+   "acceptance": "Deploy onto an unmanaged folder or entry fails, names path, offers Adopt or Move aside; a name match never implies ownership",
+   "priority": "P0",
+   "points": 5,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-039",
+   "epic": "E06",
+   "story": "As a user I see a diff before any write",
+   "acceptance": "Diff shown in editor, drift and migrate flows; a diff or plan that went stale blocks apply and reopens for review",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "03 editor, 05 drift"
+  },
+  {
+   "id": "S-040",
+   "epic": "E06",
+   "story": "As a user I get a backup for every file AgenTuna touches",
+   "acceptance": "Backup path shown; restore from Sync & drift",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "05 Sync & drift"
+  },
+  {
+   "id": "S-041",
+   "epic": "E06",
+   "story": "As a user I know the app sends nothing without my action",
+   "acceptance": "No account, no telemetry; network only on explicit actions",
+   "priority": "P2",
+   "points": 2,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-042",
+   "epic": "E07",
+   "story": "As a user I see files changed outside AgenTuna",
+   "acceptance": "Drift list and banner with what changed",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "05 Sync & drift"
+  },
+  {
+   "id": "S-043",
+   "epic": "E07",
+   "story": "As a user I adopt or restore after drift",
+   "acceptance": "Split diff; Adopt on-disk or Restore AgenTuna version",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "05 Sync & drift"
+  },
+  {
+   "id": "S-044",
+   "epic": "E07",
+   "story": "As a user I restore from a backup",
+   "acceptance": "Backups list with Restore",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "05 Sync & drift"
+  },
+  {
+   "id": "S-045",
+   "epic": "E07",
+   "story": "As a user I see sync state for project items",
+   "acceptance": "Labels: In sync, Project only, Library newer, Project newer; push/pull",
+   "priority": "P1",
+   "points": 5,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-046",
+   "epic": "E08",
+   "story": "As a user I see which agents are installed",
+   "acceptance": "Agents page with path, format, managed counts and items outside AgenTuna",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "08 Agents"
+  },
+  {
+   "id": "S-047",
+   "epic": "E08",
+   "story": "As a user I see a one-line health per agent",
+   "acceptance": "path · N / N managed · N in sync",
+   "priority": "P2",
+   "points": 2,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-048",
+   "epic": "E08",
+   "story": "As a user I point AgenTuna at an unfound agent",
+   "acceptance": "Connect dialog with Browse",
+   "priority": "P2",
+   "points": 3,
+   "status": "Designed",
+   "screen": "Overlay: Connect Cursor"
+  },
+  {
+   "id": "S-049",
+   "epic": "E08",
+   "story": "As a user I add a custom agent by folder",
+   "acceptance": "Registry entry for any tool; no release needed",
+   "priority": "P2",
+   "points": 5,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-050",
+   "epic": "E08",
+   "story": "As a user I choose copy or link per agent",
+   "acceptance": "Setting for tools that don't follow symlinks",
+   "priority": "P2",
+   "points": 3,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-051",
+   "epic": "E09",
+   "story": "As a user I edit CLAUDE.md / AGENTS.md for a scope",
+   "acceptance": "Editor with file list, scope badge, Save, Discard",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "07 Instructions"
+  },
+  {
+   "id": "S-052",
+   "epic": "E09",
+   "story": "As a user I create a new rule file",
+   "acceptance": "Dialog: file type and scope",
+   "priority": "P2",
+   "points": 2,
+   "status": "Designed",
+   "screen": "Overlay: New rule"
+  },
+  {
+   "id": "S-053",
+   "epic": "E09",
+   "story": "As a user I keep CLAUDE.md and AGENTS.md in sync",
+   "acceptance": "One source rendered to both files",
+   "priority": "P2",
+   "points": 8,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-054",
+   "epic": "E10",
+   "story": "As a user I switch project from a list of all projects",
+   "acceptance": "Picker lists all folders, scrolls, shows counts",
+   "priority": "P0",
+   "points": 5,
+   "status": "Designed",
+   "screen": "Overlay: Project picker"
+  },
+  {
+   "id": "S-055",
+   "epic": "E10",
+   "story": "As a user I search projects",
+   "acceptance": "Search box filters and highlights matches",
+   "priority": "P0",
+   "points": 3,
+   "status": "Designed",
+   "screen": "Overlay: Picker search"
+  },
+  {
+   "id": "S-056",
+   "epic": "E10",
+   "story": "As a user I add a project folder or scan ~/Projects",
+   "acceptance": "Two actions at the picker footer",
+   "priority": "P1",
+   "points": 3,
+   "status": "Designed",
+   "screen": "Overlay: Project picker"
+  },
+  {
+   "id": "S-057",
+   "epic": "E10",
+   "story": "As a user I jump anywhere with a command palette",
+   "acceptance": "Cmd+K searches servers, skills, files, actions",
+   "priority": "P1",
+   "points": 5,
+   "status": "Designed",
+   "screen": "Overlay: Palette"
+  },
+  {
+   "id": "S-058",
+   "epic": "E11",
+   "story": "As a user I group skills and servers into a preset",
+   "acceptance": "Named preset with members",
+   "priority": "P2",
+   "points": 8,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-059",
+   "epic": "E11",
+   "story": "As a user I apply a preset to an agent or repo",
+   "acceptance": "One click; shows applied as 2/7 or ✓",
+   "priority": "P2",
+   "points": 5,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-060",
+   "epic": "E12",
+   "story": "As an agent I run AgenTuna from the command line",
+   "acceptance": "--json commands: list, install, deploy, migrate",
+   "priority": "P2",
+   "points": 13,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-061",
+   "epic": "E12",
+   "story": "As a user I install an AgenTuna skill that teaches agents the CLI",
+   "acceptance": "npx skills add … installs SKILL.md",
+   "priority": "P3",
+   "points": 3,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-062",
+   "epic": "E13",
+   "story": "As a user I back up my library to a private GitHub repo",
+   "acceptance": "Sign in once; token in Keychain",
+   "priority": "P3",
+   "points": 8,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-063",
+   "epic": "E13",
+   "story": "As a user I sync my library across machines",
+   "acceptance": "Conflicts never overwrite my copy",
+   "priority": "P3",
+   "points": 13,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-064",
+   "epic": "E14",
+   "story": "As a user I see an Update badge for git-sourced skills",
+   "acceptance": "Badge when source changed",
+   "priority": "P3",
+   "points": 5,
+   "status": "Backlog",
+   "screen": "New"
+  },
+  {
+   "id": "S-065",
+   "epic": "E14",
+   "story": "As a user I turn on auto-update for a skill",
+   "acceptance": "Per-skill or global setting",
+   "priority": "P3",
+   "points": 3,
+   "status": "Backlog",
+   "screen": "New"
+  }
+ ]
+}

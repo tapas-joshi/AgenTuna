@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/at-model",
+    "crates/at-fs",
+    "crates/at-adapters",
+    "crates/at-store",
+    "crates/at-engine",
+    "crates/at-db",
+    "crates/at-mcp",
+    "crates/at-secrets",
+    "crates/at-git",
+    "crates/at-migrate",
+    "crates/at-cli",
+    "crates/at-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["AgenTuna Contributors"]
+license = "MIT"
+publish = false
+repository = "https://github.com/tapas-joshi/AgenTuna"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = 0 }
+
+[workspace.dependencies]
+# First-party crates
+at-model = { path = "crates/at-model" }
+at-fs = { path = "crates/at-fs" }
+at-adapters = { path = "crates/at-adapters" }
+at-store = { path = "crates/at-store" }
+at-engine = { path = "crates/at-engine" }
+at-db = { path = "crates/at-db" }
+at-mcp = { path = "crates/at-mcp" }
+at-secrets = { path = "crates/at-secrets" }
+at-git = { path = "crates/at-git" }
+at-migrate = { path = "crates/at-migrate" }
+at-cli = { path = "crates/at-cli" }
+at-app = { path = "crates/at-app" }
+
+# Third-party shared dependencies
+tauri = { version = "2.12", default-features = false, features = ["wry", "compression"] }
+tauri-build = "2.7"
+ts-rs = "12"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+toml_edit = "0.25"
+jsonc-parser = "0.34"
+notify = "8.0.0"
+notify-debouncer-full = "0.7"
+similar = "3.2"
+saphyr = "0.3"
+keyring = "4.2"
+tracing = "0.1"
+directories = "6.0"
+
+# Common utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.11", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
