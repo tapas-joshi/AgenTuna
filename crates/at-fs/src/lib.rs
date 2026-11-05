@@ -1,8 +1,29 @@
-//! Safe write pipeline, diffing, atomic writes, backups, and file watching.
+//! Safe write pipeline: diff preview, backup, atomic replace and optimistic concurrency.
+//!
+//! Unix only for now (macOS first); Windows support arrives with TF-038.
+//!
+//! Every production mutation of a config or store file goes through [`apply`]. It never
+//! overwrites silently: the caller states what it expects to find, and a mismatch is an
+//! error that writes nothing.
+
+#[cfg(not(unix))]
+compile_error!("at-fs currently supports Unix platforms only");
 
 pub mod atomic;
 pub mod backup;
 pub mod concurrency;
 pub mod diff;
+mod error;
+mod hash;
 pub mod symlink;
 pub mod watch;
+
+pub use atomic::{BackupPolicy, WriteMode, WriteOutcome, WriteRequest, apply};
+pub use backup::{BackupError, BackupMeta, BackupSidecar};
+pub use concurrency::ExpectedState;
+pub use error::FsError;
+pub use hash::sha256_hex;
+pub use symlink::SymlinkWrite;
+
+/// Largest file `at-fs` will read or write in one operation (64 MiB).
+pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;

@@ -251,10 +251,16 @@ name = "at-fs"
 version = "0.1.0"
 dependencies = [
  "at-model",
+ "libc",
  "notify",
  "notify-debouncer-full",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "similar",
+ "tempfile",
  "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]
