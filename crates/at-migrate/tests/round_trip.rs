@@ -667,6 +667,7 @@ impl Scenario {
                 backup_root: &backup_root,
                 authorized_roots: &roots,
                 actor: at_db::ops::OperationActor::Migration,
+                force: false,
             },
             operation_id,
         )

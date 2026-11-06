@@ -23,11 +23,13 @@
 mod agents;
 mod builtin;
 pub mod cli;
+mod adopt;
 pub mod doctor;
 mod effective;
 pub mod error;
 pub mod globals;
 mod mcp;
+mod migrate;
 pub mod output;
 mod overview;
 mod projects;

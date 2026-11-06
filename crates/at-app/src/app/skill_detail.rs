@@ -1,10 +1,13 @@
 //! Typed read command for the managed skill detail screen.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use ts_rs::TS;
 
 use super::commands::{CommandError, CommandErrorCode};
+use super::paths::resolve_process_paths;
 use super::state::AppState;
 
 /// One historical version of a skill.
@@ -455,6 +458,10 @@ pub struct SkillCopyView {
     pub hash: String,
     /// Agent ids with deployments of this copy.
     pub deployments: Vec<String>,
+    /// Absolute package folder path.
+    pub path: String,
+    /// RFC 3339 modification time of SKILL.md.
+    pub mtime: String,
 }
 
 /// Typed pairwise comparison payload for a shadowed skill.
@@ -591,21 +598,379 @@ pub fn skill_compare_copies(
         compared.a.text.as_bytes(),
     );
     Ok(SkillCompareView {
-        winner: SkillCopyView {
-            scope: compared.a.scope.to_string(),
-            markdown: compared.a.text,
-            hash: compared.a.folder_hash,
-            deployments: compared.a.deployments,
-        },
-        shadow: SkillCopyView {
-            scope: compared.b.scope.to_string(),
-            markdown: compared.b.text,
-            hash: compared.b.folder_hash,
-            deployments: compared.b.deployments,
-        },
+        winner: copy_view(&compared.a),
+        shadow: copy_view(&compared.b),
         identical: compared.identical,
         diff,
     })
+}
+
+/// Serializes one compared copy for the compare-copies dialog.
+fn copy_view(copy: &at_engine::skill_shadows::SkillCopy) -> SkillCopyView {
+    let mtime = time::OffsetDateTime::from(copy.mtime)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| String::from("unknown"));
+    SkillCopyView {
+        scope: copy.scope.to_string(),
+        markdown: copy.text.clone(),
+        hash: copy.folder_hash.clone(),
+        deployments: copy.deployments.clone(),
+        path: copy.path.display().to_string(),
+        mtime,
+    }
+}
+
+/// Request to keep one copy of a shadowed skill and overwrite the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillKeepCopyRequest {
+    /// Stable skill identity in the scope the dialog was opened from.
+    pub item_id: String,
+    /// Scope whose copy survives.
+    pub keep_scope: String,
+    /// Scope whose copy is replaced by the kept version.
+    pub drop_scope: String,
+}
+
+/// Read-only review of one keep-copy plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillKeepCopyPreviewView {
+    /// Identity of the exact cached plan the apply command will execute.
+    pub preview_id: String,
+    /// Package-relative paths the reviewed operation will change.
+    pub files: Vec<String>,
+    /// Unified SKILL.md diff from the replaced copy to the kept copy.
+    pub diff: String,
+    /// Whether both packages already match, making apply a no-op.
+    pub identical: bool,
+}
+
+/// Outcome of applying a keep-copy plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillKeepCopyResultView {
+    /// Operation journal identity; absent when nothing changed.
+    pub operation_id: Option<String>,
+    /// Package hash of the replaced copy after the operation.
+    pub expected_hash: String,
+}
+
+struct CachedKeepPlan {
+    set: at_model::ChangeSet,
+    store_root: std::path::PathBuf,
+    backup_root: std::path::PathBuf,
+    authorized_roots: Vec<std::path::PathBuf>,
+    drop_item_id: at_model::ItemId,
+    drop_scope: at_model::Scope,
+    project_id: Option<String>,
+    drop_dir: std::path::PathBuf,
+}
+
+static KEEP_PLANS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, CachedKeepPlan>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Reviews the exact package overwrite that keeps one copy and replaces the other.
+#[tauri::command]
+pub fn skill_keep_copy_preview(
+    state: State<'_, AppState>,
+    request: SkillKeepCopyRequest,
+) -> Result<SkillKeepCopyPreviewView, CommandError> {
+    let id = parse_skill_id(&request.item_id)?;
+    let keep_scope = request
+        .keep_scope
+        .parse::<at_model::Scope>()
+        .map_err(|_| CommandError::invalid_argument("keep_scope", "unknown scope"))?;
+    let drop_scope = request
+        .drop_scope
+        .parse::<at_model::Scope>()
+        .map_err(|_| CommandError::invalid_argument("drop_scope", "unknown scope"))?;
+    if keep_scope == drop_scope {
+        return Err(CommandError::invalid_argument(
+            "drop_scope",
+            "the kept and replaced copies must be different scopes",
+        ));
+    }
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let (keep_item, drop_item) = shadow_copy_items(database.connection(), &id, drop_scope)?;
+    let project_root = drop_item.project_id.as_deref().and_then(|project_id| {
+        at_db::projects::find_project_by_id(database.connection(), project_id)
+            .ok()
+            .flatten()
+            .map(|project| std::path::PathBuf::from(project.path))
+    });
+    let paths = resolve_process_paths(project_root.as_deref())
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let keep_dir = package_path(&keep_item)?;
+    let drop_dir = package_path(&drop_item)?;
+    let keep = at_store::skill_package::SkillPackage::read(&keep_dir).map_err(|_| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "The kept skill package is unavailable.",
+        )
+    })?;
+    let drop = at_store::skill_package::SkillPackage::read(&drop_dir).map_err(|_| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "The replaced skill package is unavailable.",
+        )
+    })?;
+    let store_root = drop_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|parent| parent.to_path_buf())
+        .ok_or_else(|| CommandError::internal("skill store path is invalid"))?;
+    let mut ops = Vec::new();
+    let mut files = Vec::new();
+    for relative in keep.package.paths() {
+        let bytes = keep
+            .package
+            .get(relative)
+            .map(|file| file.bytes.clone())
+            .ok_or_else(|| CommandError::internal("the kept package changed during review"))?;
+        let destination = drop_dir.join(relative);
+        let expected = match std::fs::read(&destination) {
+            Ok(existing) => at_model::ExpectedState::hash(at_fs::sha256_hex(&existing))
+                .map_err(|_| CommandError::internal("replaced file hash is invalid"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                at_model::ExpectedState::absent()
+            }
+            Err(_) => {
+                return Err(CommandError::new(
+                    CommandErrorCode::Conflict,
+                    "the replaced skill package could not be inspected safely",
+                ));
+            }
+        };
+        ops.push(at_model::FileOp::Write {
+            path: destination.clone(),
+            bytes,
+            expected,
+            follow_symlink: false,
+            backup: true,
+        });
+        files.push((*relative).to_owned());
+    }
+    for relative in package_file_list(&drop_dir)? {
+        if keep.package.get(&relative).is_some() {
+            continue;
+        }
+        let bytes = std::fs::read(drop_dir.join(&relative)).map_err(|_| {
+            CommandError::new(
+                CommandErrorCode::Conflict,
+                "the replaced skill package changed during review",
+            )
+        })?;
+        ops.push(at_model::FileOp::Delete {
+            path: drop_dir.join(&relative),
+            expected: at_model::ExpectedState::hash(at_fs::sha256_hex(&bytes))
+                .map_err(|_| CommandError::internal("replaced file hash is invalid"))?,
+        });
+        files.push(relative);
+    }
+    files.sort();
+    let keep_doc = keep.package.get("SKILL.md").map(|file| file.bytes.clone());
+    let drop_doc = drop.package.get("SKILL.md").map(|file| file.bytes.clone());
+    let diff = at_fs::diff::unified(
+        "SKILL.md",
+        drop_doc.as_deref(),
+        keep_doc.as_deref().unwrap_or(&[]),
+    );
+    let identical = keep.hash == drop.hash;
+    let preview_id = uuid::Uuid::now_v7().to_string();
+    let change_set = at_model::ChangeSet {
+        id: uuid::Uuid::now_v7().to_string(),
+        preview_id: preview_id.clone(),
+        operation_kind: at_model::change_set::OperationKind::parse("edit_skill")
+            .map_err(|_| CommandError::internal("skill edit operation kind is invalid"))?,
+        scope: Some(drop_scope),
+        project_id: drop_item.project_id.clone(),
+        summary: format!(
+            "Keep {} copy of {} over {}",
+            keep_scope, keep_item.name, drop_scope
+        ),
+        ops,
+        created_at_unix_seconds: time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64,
+    };
+    let mut authorized_roots = vec![
+        paths
+            .home_dir()
+            .ok_or_else(|| CommandError::unavailable("home directory is unavailable"))?
+            .to_path_buf(),
+    ];
+    if let Some(root) = project_root
+        .as_ref()
+        .filter(|root| !authorized_roots.contains(root))
+    {
+        authorized_roots.push(root.clone());
+    }
+    for root in [keep_dir.parent(), Some(store_root.as_path())]
+        .into_iter()
+        .flatten()
+    {
+        if !authorized_roots.iter().any(|allowed| root.starts_with(allowed)) {
+            authorized_roots.push(root.to_path_buf());
+        }
+    }
+    KEEP_PLANS
+        .lock()
+        .map_err(|_| CommandError::internal("keep-copy plan cache is unavailable"))?
+        .insert(
+            preview_id.clone(),
+            CachedKeepPlan {
+                set: change_set,
+                backup_root: paths.support_dir().join(at_store::layout::BACKUPS_DIR),
+                store_root,
+                authorized_roots,
+                drop_item_id: drop_item.id,
+                drop_scope,
+                project_id: drop_item.project_id.clone(),
+                drop_dir,
+            },
+        );
+    Ok(SkillKeepCopyPreviewView {
+        preview_id,
+        files,
+        diff,
+        identical,
+    })
+}
+
+/// Applies a reviewed keep-copy plan through the journaled safe-write pipeline.
+#[tauri::command]
+pub fn skill_keep_copy_apply(
+    state: State<'_, AppState>,
+    preview_id: String,
+) -> Result<SkillKeepCopyResultView, CommandError> {
+    let cached = KEEP_PLANS
+        .lock()
+        .map_err(|_| CommandError::internal("keep-copy plan cache is unavailable"))?
+        .remove(&preview_id)
+        .ok_or_else(|| {
+            CommandError::invalid_argument(
+                "preview_id",
+                "the keep-copy review expired; compare the copies again",
+            )
+        })?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let roots = at_fs::changeset::ApplyRoots::new(cached.authorized_roots)
+        .map_err(|_| CommandError::unavailable("authorized skill roots are unavailable"))?;
+    let mut recorder = at_fs::changeset::DbOperationRecorder::new(database.connection(), 30);
+    let mut context = at_fs::changeset::ApplyContext {
+        store_root: &cached.store_root,
+        backup_folder: &cached.backup_root,
+        recorder: &mut recorder,
+    };
+    let outcome = at_fs::changeset::apply_with_roots(&cached.set, &mut context, &roots).map_err(
+        |error| match error {
+            at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
+                CommandErrorCode::Conflict,
+                format!(
+                    "The replaced copy changed at {}. Compare the copies again.",
+                    path.display()
+                ),
+            ),
+            other => CommandError::from(other),
+        },
+    )?;
+    state.record_writes(&cached.set, &cached.store_root);
+    let updated = at_store::skill_package::SkillPackage::read(&cached.drop_dir).map_err(|_| {
+        CommandError::internal("the replaced skill package could not be re-read")
+    })?;
+    let operation_id = outcome.operation_id.clone();
+    at_db::versions::record_skill_version(
+        database.connection(),
+        &at_db::versions::NewVersion::new(
+            &cached.drop_item_id,
+            cached.drop_scope,
+            &updated.hash.to_string(),
+        )
+        .with_path("SKILL.md")
+        .with_operation(&operation_id),
+    )
+    .map_err(|_| {
+        CommandError::internal("the copies were reconciled but history could not be recorded")
+    })?;
+    Ok(SkillKeepCopyResultView {
+        operation_id: Some(operation_id),
+        expected_hash: updated.hash.to_string(),
+    })
+}
+
+/// Resolves the kept and replaced item rows for one shadowed skill.
+fn shadow_copy_items(
+    connection: &rusqlite::Connection,
+    id: &at_model::ItemId,
+    drop_scope: at_model::Scope,
+) -> Result<(at_db::shared::ItemRow, at_db::shared::ItemRow), CommandError> {
+    let current = skill_item(connection, id)?;
+    let rows = at_db::skills_index::list_skills(connection, &Default::default())
+        .map_err(|_| CommandError::internal("could not query skill copies"))?;
+    let other = rows
+        .iter()
+        .find(|row| row.name.eq_ignore_ascii_case(&current.name) && row.scope == drop_scope)
+        .ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::NotFound,
+                "The other skill copy is no longer indexed.",
+            )
+        })?
+        .item_id;
+    let drop_item = other
+        .and_then(|other_id| {
+            at_db::shared::items_by_ids(connection, std::slice::from_ref(&other_id))
+                .ok()
+                .and_then(|items| items.into_iter().next())
+        })
+        .filter(|item| item.kind == at_model::ItemKind::Skill)
+        .ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::NotFound,
+                "The other skill copy is no longer indexed.",
+            )
+        })?;
+    Ok((current, drop_item))
+}
+
+/// Lists package-relative regular files beneath one skill folder, bounded.
+fn package_file_list(
+    dir: &std::path::Path,
+) -> Result<Vec<String>, CommandError> {
+    const MAX_FILES: usize = 500;
+    const MAX_DEPTH: usize = 16;
+    let mut out = Vec::new();
+    let mut stack = vec![(std::path::PathBuf::from(dir), 0_usize)];
+    while let Some((current, depth)) = stack.pop() {
+        let entries = std::fs::read_dir(&current).map_err(|_| {
+            CommandError::new(
+                CommandErrorCode::Conflict,
+                "the replaced skill package could not be listed",
+            )
+        })?;
+        for entry in entries.flatten() {
+            if out.len() >= MAX_FILES {
+                return Ok(out);
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                if depth < MAX_DEPTH {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if kind.is_symlink() {
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(dir) {
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Ok(out)
 }
 /// Reveals the managed skill package in the system file manager.
 #[tauri::command]

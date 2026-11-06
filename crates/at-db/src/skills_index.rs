@@ -45,6 +45,8 @@ pub struct SkillRow {
     pub update_available: bool,
     /// Last item update timestamp or native scan timestamp.
     pub updated_at: String,
+    /// One-line description parsed from SKILL.md at index time; native-only rows have none.
+    pub description: Option<String>,
 }
 
 /// Lists canonical skills and optionally native-only discoveries.
@@ -70,13 +72,15 @@ pub fn list_skills(
                    ORDER BY CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END DESC LIMIT 1), \
                 (SELECT s.update_available FROM sources s WHERE s.item_id=i.id AND s.deleted_at IS NULL LIMIT 1), \
                 (SELECT n.path FROM native_items n WHERE n.kind='skill' AND n.status='new' AND n.adopted_item_id IS NULL \
-                   AND (n.name=i.name OR n.name=i.slug) ORDER BY n.path LIMIT 1), a.id, a.installed, d.state \
+                   AND (n.name=i.name OR n.name=i.slug) ORDER BY n.path LIMIT 1), a.id, a.installed, d.state, \
+                json_extract(i.tags_json,'$.description') \
            FROM items i \
            LEFT JOIN agents a ON (?4 IS NULL OR a.id=?4) \
            LEFT JOIN deployments d ON d.item_id=i.id AND d.agent_id=a.id AND d.scope=i.scope AND d.project_id IS i.project_id \
           WHERE i.kind='skill' \
              AND (?1 IS NULL OR i.scope=?1) \
-             AND (?2 IS NULL OR lower(i.name) LIKE '%' || lower(?2) || '%' OR lower(i.slug) LIKE '%' || lower(?2) || '%' OR lower(COALESCE(i.tags_json,'')) LIKE '%' || lower(?2) || '%') \
+             AND (?2 IS NULL OR lower(i.name) LIKE '%' || lower(?2) || '%' OR lower(i.slug) LIKE '%' || lower(?2) || '%' OR lower(COALESCE(i.tags_json,'')) LIKE '%' || lower(?2) || '%' \
+                  OR lower(COALESCE(json_extract(i.tags_json,'$.description'),'')) LIKE '%' || lower(?2) || '%') \
              AND (?3=0 OR EXISTS (SELECT 1 FROM items i2 WHERE i2.kind='skill' AND i2.slug=i.slug AND i2.scope != i.scope \
                    AND (i2.scope NOT IN ('project','local') OR i2.project_id IS i.project_id) \
                    AND CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END > \
@@ -103,6 +107,7 @@ pub fn list_skills(
                 r.get::<_, Option<String>>(8)?,
                 r.get::<_, Option<bool>>(9)?,
                 r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
             ))
         },
     )?;
@@ -120,6 +125,7 @@ pub fn list_skills(
             agent_text,
             installed,
             deployment_state,
+            description,
         ) = row?;
         let id: ItemId = id_text.parse()?;
         let scope: Scope =
@@ -153,6 +159,7 @@ pub fn list_skills(
                 native_path,
                 update_available,
                 updated_at,
+                description,
             });
             index
         };
@@ -235,6 +242,7 @@ pub fn list_skills(
                 native_path: Some(path),
                 update_available: false,
                 updated_at,
+                description: None,
             });
         }
         rows.sort_by(|a, b| {

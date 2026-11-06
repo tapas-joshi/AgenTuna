@@ -88,6 +88,7 @@ fn undo_of_linked_directory_restores_original_tree_from_directory_backup() {
             backup_root: &backups,
             authorized_roots: &roots,
             actor: ops::OperationActor::Ui,
+            force: false,
         },
         &applied.operation_id,
     )
@@ -160,6 +161,7 @@ fn undo_of_created_file_removes_it_and_records_a_linked_undo_operation() {
             backup_root: &backups,
             authorized_roots: &roots,
             actor: ops::OperationActor::Ui,
+            force: false,
         },
         &applied.operation_id,
     )
@@ -288,6 +290,7 @@ fn undo_request<'a>(
         backup_root: &fixture.backups,
         authorized_roots: roots,
         actor: ops::OperationActor::Ui,
+        force: false,
     }
 }
 
@@ -463,6 +466,7 @@ fn undo_of_a_drift_adopt_or_sync_push_restores_recorded_bytes_with_its_own_backu
                 backup_root: &backups,
                 authorized_roots: &roots,
                 actor: ops::OperationActor::Cli,
+                force: false,
             },
             &applied.operation_id,
         )
@@ -541,6 +545,7 @@ fn undo_window_is_thirty_days_evaluated_in_utc() {
                 backup_root: &backups,
                 authorized_roots: &roots,
                 actor: ops::OperationActor::Ui,
+                force: false,
             },
             &applied.operation_id,
         )
@@ -589,6 +594,7 @@ fn undo_of_an_operation_without_file_rows_is_recorded_and_idempotent() {
             backup_root: &backups,
             authorized_roots: &roots,
             actor: ops::OperationActor::Ui,
+            force: false,
         },
         operation.as_str(),
     )
@@ -610,6 +616,7 @@ fn undo_of_an_operation_without_file_rows_is_recorded_and_idempotent() {
                 backup_root: &backups,
                 authorized_roots: &roots,
                 actor: ops::OperationActor::Ui,
+                force: false,
             },
             operation.as_str(),
         )

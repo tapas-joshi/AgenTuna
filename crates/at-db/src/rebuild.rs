@@ -42,9 +42,11 @@
 //! If any error occurs or the operation is cancelled, the transaction is rolled back,
 //! leaving the previous derived data intact.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1273,10 +1275,16 @@ fn scan_store_directory(
         && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes)
         && let Some(items_arr) = val.get("items").and_then(|v| v.as_array())
     {
+        let mcp_transports = scan_mcp_transports(store_dir);
         for item_val in items_arr {
-            if let Some(parsed) =
-                parse_manifest_item(item_val, store_dir, scope, project_id.as_deref(), warnings)
-            {
+            if let Some(parsed) = parse_manifest_item(
+                item_val,
+                store_dir,
+                scope,
+                project_id.as_deref(),
+                warnings,
+                &mcp_transports,
+            ) {
                 input.items.push(parsed.item);
                 if let Some(ver) = parsed.version {
                     input.item_versions.push(ver);
@@ -1324,12 +1332,181 @@ struct ParsedItemResult {
     source: Option<DiscoveredSource>,
 }
 
+/// Upper bound on bytes read from one SKILL.md while extracting a description.
+///
+/// The frontmatter with `name` and `description` sits in the first lines of the
+/// document, so a small prefix is enough; the cap keeps a pathological store
+/// entry from dominating a rescan.
+const DESCRIPTION_SCAN_BYTES: u64 = 64 * 1024;
+
+/// Upper bound on bytes read from one `mcp.json` while extracting transports.
+///
+/// Matches the store's own document limit (see `at_store::mcp_store`).
+const MCP_STORE_SCAN_BYTES: u64 = 1024 * 1024;
+
+/// Merges the searchable metadata of one item into its stored `tags_json`.
+///
+/// Skills keep their tags and gain a `description` parsed from the manifest
+/// entry or the item's own `SKILL.md` frontmatter; MCP servers gain
+/// `mcp_command` and `mcp_url` from the store's `mcp.json` so the list
+/// projection can show a transport subtitle without touching the filesystem.
+/// Everything else keeps the previous raw-tags text unchanged.
+fn indexed_tags_json(
+    val: &serde_json::Value,
+    kind: ItemKind,
+    store_dir: &Path,
+    path_str: Option<&str>,
+    mcp_transports: &HashMap<String, (Option<String>, Option<String>)>,
+) -> Option<String> {
+    match kind {
+        ItemKind::Skill => {
+            let mut object = serde_json::Map::new();
+            if let Some(tags) = val.get("tags") {
+                object.insert(String::from("tags"), tags.clone());
+            }
+            let description = val
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    path_str
+                        .map(|relative| store_dir.join(relative))
+                        .and_then(|dir| skill_folder_description(&dir))
+                });
+            if let Some(description) = description {
+                object.insert(
+                    String::from("description"),
+                    serde_json::Value::String(description),
+                );
+            }
+            if object.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(object).to_string())
+            }
+        }
+        ItemKind::McpServer => {
+            let slug = val
+                .get("slug")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| val.get("id").and_then(serde_json::Value::as_str))?;
+            let (command, url) = mcp_transports.get(slug)?;
+            let mut object = serde_json::Map::new();
+            if let Some(tags) = val.get("tags") {
+                object.insert(String::from("tags"), tags.clone());
+            }
+            if let Some(command) = command {
+                object.insert(
+                    String::from("mcp_command"),
+                    serde_json::Value::String(command.clone()),
+                );
+            }
+            if let Some(url) = url {
+                object.insert(
+                    String::from("mcp_url"),
+                    serde_json::Value::String(url.clone()),
+                );
+            }
+            if object.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(object).to_string())
+            }
+        }
+        ItemKind::Rule => val.get("tags").map(|tags| tags.to_string()),
+    }
+}
+
+/// Reads the SKILL.md frontmatter description of one store skill folder.
+///
+/// Untrusted input rules apply: the read is capped at
+/// [`DESCRIPTION_SCAN_BYTES`], only the frontmatter block is scanned, and a
+/// multi-line (block scalar) description yields `None` rather than a partial
+/// value.
+fn skill_folder_description(item_dir: &Path) -> Option<String> {
+    let file = fs::File::open(item_dir.join(at_model::skill::SKILL_FILE_NAME)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(DESCRIPTION_SCAN_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    frontmatter_description(&bytes)
+}
+
+/// Extracts the single-line `description:` value from a SKILL.md frontmatter block.
+fn frontmatter_description(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.lines();
+    if !lines.next()?.trim_end().eq("---") {
+        return None;
+    }
+    for line in lines {
+        let trimmed_end = line.trim_end();
+        if trimmed_end.eq("---") {
+            return None;
+        }
+        let Some(rest) = trimmed_end.strip_prefix("description:") else {
+            continue;
+        };
+        let value = rest.trim();
+        if value.is_empty() || value.starts_with('|') || value.starts_with('>') {
+            return None;
+        }
+        let unquoted = value
+            .strip_prefix('"')
+            .and_then(|quoted| quoted.strip_suffix('"'))
+            .unwrap_or(value);
+        return Some(unquoted.to_owned());
+    }
+    None
+}
+
+/// Loads slug → (command, url) pairs from one store's `mcp.json`.
+///
+/// The read is capped at [`MCP_STORE_SCAN_BYTES`]; a missing or malformed
+/// document simply yields no transport data, which the list projection renders
+/// as "unknown" instead of failing the whole scan.
+fn scan_mcp_transports(store_dir: &Path) -> HashMap<String, (Option<String>, Option<String>)> {
+    let mut transports = HashMap::new();
+    let Ok(metadata) = fs::metadata(store_dir.join("mcp.json")) else {
+        return transports;
+    };
+    if !metadata.is_file() || metadata.len() > MCP_STORE_SCAN_BYTES {
+        return transports;
+    }
+    let Ok(bytes) = fs::read(store_dir.join("mcp.json")) else {
+        return transports;
+    };
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return transports;
+    };
+    let Some(servers) = document
+        .get("servers")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return transports;
+    };
+    for (slug, entry) in servers {
+        let transport = entry.get("transport");
+        let command = transport
+            .and_then(|transport| transport.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let url = transport
+            .and_then(|transport| transport.get("url"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        transports.insert(slug.clone(), (command, url));
+    }
+    transports
+}
+
 fn parse_manifest_item(
     val: &serde_json::Value,
     store_dir: &Path,
     scope: Scope,
     project_id: Option<&str>,
     warnings: &mut Vec<String>,
+    mcp_transports: &HashMap<String, (Option<String>, Option<String>)>,
 ) -> Option<ParsedItemResult> {
     let id_str = val.get("id")?.as_str()?;
     let item_id = id_str.parse::<ItemId>().ok()?;
@@ -1383,7 +1560,7 @@ fn parse_manifest_item(
         ("active".to_string(), hash, None, None)
     };
 
-    let tags_json = val.get("tags").map(|t| t.to_string());
+    let tags_json = indexed_tags_json(val, kind, store_dir, path_str, mcp_transports);
     let enabled_default = val.get("enabled_default").and_then(|v| v.as_bool());
 
     let mut source_record = None;

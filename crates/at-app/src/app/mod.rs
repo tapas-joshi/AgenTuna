@@ -1,5 +1,6 @@
 //! Tauri application setup: builder, command registry and window lifecycle.
 
+pub mod agent_connect;
 pub mod bridge;
 pub mod bulk_skill;
 pub mod cli_install;
@@ -28,6 +29,7 @@ pub mod project_sync;
 pub mod projects;
 pub mod recovery;
 pub mod remote_backup;
+pub mod rule_create;
 pub mod secrets;
 pub mod settings;
 pub mod skill_agent;
@@ -303,6 +305,8 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::reveal_item,
         skill_detail::skill_edit_preview,
         skill_detail::skill_edit_apply,
+        skill_detail::skill_keep_copy_preview,
+        skill_detail::skill_keep_copy_apply,
         window_state::window_state_load,
         window_state::window_state_save,
         window_state::window_state_reset,
@@ -349,13 +353,17 @@ pub fn run() -> tauri::Result<()> {
         migrate::migrate_conflicts,
         workflows::instructions_list,
         workflows::instruction_save,
-        workflows::instruction_create_project,
+        rule_create::instruction_create_options,
+        rule_create::instruction_create_preview,
+        rule_create::instruction_create,
         workflows::agents_list,
         workflows::agent_manage_set,
         workflows::agent_link_mode_set,
         workflows::agents_rescan,
         workflows::agent_path_set,
         workflows::agent_path_choose,
+        agent_connect::agent_path_candidates,
+        agent_connect::agent_path_validate,
         workflows::presets_list,
         workflows::preset_create,
         workflows::preset_rename,
@@ -416,6 +424,8 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::reveal_item,
         skill_detail::skill_edit_preview,
         skill_detail::skill_edit_apply,
+        skill_detail::skill_keep_copy_preview,
+        skill_detail::skill_keep_copy_apply,
         window_state::window_state_load,
         window_state::window_state_save,
         window_state::window_state_reset,
@@ -462,13 +472,17 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_add_apply,
         workflows::instructions_list,
         workflows::instruction_save,
-        workflows::instruction_create_project,
+        rule_create::instruction_create_options,
+        rule_create::instruction_create_preview,
+        rule_create::instruction_create,
         workflows::agents_list,
         workflows::agent_manage_set,
         workflows::agent_link_mode_set,
         workflows::agents_rescan,
         workflows::agent_path_set,
         workflows::agent_path_choose,
+        agent_connect::agent_path_candidates,
+        agent_connect::agent_path_validate,
         workflows::presets_list,
         workflows::preset_create,
         workflows::preset_rename,

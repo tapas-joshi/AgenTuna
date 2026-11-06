@@ -2,6 +2,7 @@
 use at_model::{AgentId, ItemId, Scope};
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::DbError;
 
@@ -113,16 +114,17 @@ pub fn mcp_list_rows(
                   EXISTS (SELECT 1 FROM items higher WHERE higher.kind='mcp_server' AND higher.slug=i.slug AND higher.scope != i.scope \
                     AND (higher.scope NOT IN ('project','local') OR higher.project_id IS i.project_id) \
                     AND CASE higher.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END > CASE i.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END) AS shadowed, \
-                  (SELECT h.status FROM health_checks h WHERE h.item_id=i.id ORDER BY h.checked_at DESC, h.id DESC LIMIT 1) AS health, i.source_path \
+                  (SELECT h.status FROM health_checks h WHERE h.item_id=i.id ORDER BY h.checked_at DESC, h.id DESC LIMIT 1) AS health, i.source_path, \
+                  json_extract(i.tags_json,'$.mcp_command') AS mcp_command, json_extract(i.tags_json,'$.mcp_url') AS mcp_url \
              FROM items i WHERE i.kind='mcp_server' AND (?1 IS NULL OR i.scope=?1) AND (?2 IS NULL OR i.project_id=?2 OR i.project_id IS NULL) \
            UNION ALL \
            SELECT NULL, n.name, n.scope, n.name, NULL, 1, n.path, n.agent_id, NULL, 0, \
-                  (SELECT h.status FROM health_checks h WHERE h.item_id=n.id OR (h.item_id IS NULL AND h.agent_id=n.agent_id AND h.server_name=n.name) ORDER BY h.checked_at DESC, h.id DESC LIMIT 1), n.path \
+                  (SELECT h.status FROM health_checks h WHERE h.item_id=n.id OR (h.item_id IS NULL AND h.agent_id=n.agent_id AND h.server_name=n.name) ORDER BY h.checked_at DESC, h.id DESC LIMIT 1), n.path, NULL, NULL \
              FROM native_items n WHERE n.kind='mcp_server' AND n.status='new' AND n.adopted_item_id IS NULL \
                AND (?1 IS NULL OR n.scope=?1) AND (?2 IS NULL OR n.scope NOT IN ('project','local') OR ?1 IN ('project','local')) \
            ) \
          SELECT s.item_id, s.name, s.scope, s.native_only, s.native_path, s.native_agent, s.locked_by, s.shadowed, s.health, \
-                a.id, a.installed, d.state, d.target_path, s.source_path \
+                a.id, a.installed, d.state, d.target_path, s.source_path, s.mcp_command, s.mcp_url \
            FROM servers s CROSS JOIN agents a \
            LEFT JOIN deployments d ON d.item_id=s.item_id AND d.agent_id=a.id AND d.scope=s.scope AND d.project_id IS s.project_id \
           ORDER BY s.native_only, lower(s.name), s.name, a.id"
@@ -143,6 +145,8 @@ pub fn mcp_list_rows(
             r.get::<_, Option<String>>(11)?,
             r.get::<_, Option<String>>(12)?,
             r.get::<_, Option<String>>(13)?,
+            r.get::<_, Option<String>>(14)?,
+            r.get::<_, Option<String>>(15)?,
         ))
     })?;
     let mut result: Vec<McpListRow> = Vec::new();
@@ -163,6 +167,8 @@ pub fn mcp_list_rows(
             deployment_state,
             target_path,
             source_path,
+            mcp_command,
+            mcp_url,
         ) = row?;
         let row_scope = parse_scope(&scope_text, "items.scope")?;
         let item_id = id
@@ -230,8 +236,12 @@ pub fn mcp_list_rows(
             .map(ToString::to_string)
             .or(native_path.clone())
             .unwrap_or_else(|| name.clone());
+        let transport_subtitle = transport_subtitle(&mcp_command, &mcp_url);
         if let Some(index) = indexes.get(&key).copied() {
             result[index].agents.push(cell);
+            if result[index].transport_subtitle.is_none() {
+                result[index].transport_subtitle = transport_subtitle;
+            }
         } else {
             indexes.insert(key, result.len());
             result.push(McpListRow {
@@ -239,7 +249,7 @@ pub fn mcp_list_rows(
                 display_name: name,
                 scope: row_scope,
                 source_path,
-                transport_subtitle: None,
+                transport_subtitle,
                 locked_by,
                 latest_health: health,
                 agents: vec![cell],
@@ -248,6 +258,42 @@ pub fn mcp_list_rows(
         }
     }
     Ok(result)
+}
+
+/// Derives the list subtitle from the stored definition: the command's file
+/// name for stdio servers, or the URL host for HTTP servers.
+fn transport_subtitle(command: &Option<String>, url: &Option<String>) -> Option<String> {
+    if let Some(command) = command.as_deref() {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            return Some(
+                Path::new(trimmed)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| trimmed.to_owned()),
+            );
+        }
+    }
+    let url = url.as_deref()?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let without_scheme = url
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .unwrap_or(url);
+    let without_path = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    // Drop userinfo (`user@host`) and a trailing `:port`.
+    let host = without_path.rsplit('@').next().unwrap_or(without_path);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
 }
 
 fn parse_scope(value: &str, field: &'static str) -> Result<Scope, DbError> {

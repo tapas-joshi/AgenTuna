@@ -176,6 +176,11 @@ pub enum JobError {
         /// Secret-free failure details for the remote-backup screen.
         failure: super::remote_backup::actions::RemoteBackupFailure,
     },
+    /// A migration apply failed with a typed remedy.
+    Migration {
+        /// Secret-free failure details for the migrate screens.
+        failure: super::migrate::MigrationApplyFailure,
+    },
 }
 
 impl JobError {
@@ -185,6 +190,7 @@ impl JobError {
         match self {
             Self::Panic { message } | Self::Failed { message } => message,
             Self::RemoteBackup { failure } => &failure.message,
+            Self::Migration { failure } => &failure.message,
         }
     }
 }

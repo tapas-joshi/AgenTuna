@@ -727,6 +727,7 @@ fn rejected_symlink_falls_back_to_copy_and_records_copy_mode_with_a_warning()
             backup_root: &backup_root,
             authorized_roots: &roots,
             actor: at_db::ops::OperationActor::Migration,
+            force: false,
         },
         &outcome.operation_id,
     )?;

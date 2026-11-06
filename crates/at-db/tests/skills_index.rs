@@ -90,3 +90,86 @@ fn search_ranks_code_review_before_review_standards_case_insensitively() {
     assert_eq!(rows[0].name, "Code Review");
     assert_eq!(rows[1].name, "Review Standards");
 }
+
+#[test]
+fn search_matches_description_substrings_case_insensitively() {
+    let db = common::open_with(common::ALL_VERSIONS);
+    let described = add_skill(&db, Scope::User, "deploy-guide", "Deploy Guide");
+    db.connection()
+        .execute(
+            "UPDATE items SET tags_json = ?1 WHERE id = ?2",
+            params![
+                r#"{"description":"Code review helpers for pull requests"}"#,
+                described.to_string()
+            ],
+        )
+        .expect("store description");
+    add_skill(&db, Scope::User, "release-notes", "Release Notes");
+
+    let rows = search_skills(db.connection(), "REV").expect("search skills");
+    assert_eq!(rows.len(), 1, "only the described skill matches");
+    assert_eq!(rows[0].name, "Deploy Guide");
+    assert_eq!(
+        rows[0].description.as_deref(),
+        Some("Code review helpers for pull requests"),
+        "the projection carries the stored description"
+    );
+
+    let lowered = list_skills(
+        db.connection(),
+        &SkillFilter {
+            text: Some(String::from("code review")),
+            ..SkillFilter::default()
+        },
+    )
+    .expect("filter by description text");
+    assert_eq!(lowered.len(), 1);
+    assert_eq!(lowered[0].item_id, Some(described));
+}
+
+#[test]
+fn list_skills_over_500_seeded_skills_returns_within_the_ci_bound() {
+    let db = common::open_with(common::ALL_VERSIONS);
+    db.connection()
+        .execute(
+            "INSERT INTO agents(id,display_name,installed) VALUES ('codex','Codex',1)",
+            [],
+        )
+        .expect("insert agent");
+    let mut statements = Vec::new();
+    for index in 0..500 {
+        let id = ItemId::new().to_string();
+        statements.push((id, format!("skill-{index:03}"), format!("Skill {index:03}")));
+    }
+    db.connection().execute_batch("BEGIN").expect("begin batch");
+    for (id, slug, name) in &statements {
+        db.connection()
+            .execute(
+                "INSERT INTO items (id,kind,scope,slug,name,state,managed,tags_json) VALUES (?1,'skill','user',?2,?3,'active',1,?4)",
+                params![id, slug, name, r#"{"description":"Fixture skill for the timed projection"}"#],
+            )
+            .expect("insert skill");
+    }
+    db.connection()
+        .execute_batch("COMMIT")
+        .expect("commit batch");
+
+    let filter = SkillFilter {
+        include_native: true,
+        ..SkillFilter::default()
+    };
+    let started = std::time::Instant::now();
+    let rows = list_skills(db.connection(), &filter).expect("list 500 skills");
+    let elapsed = started.elapsed();
+    assert_eq!(rows.len(), 500, "one row per seeded skill");
+    assert!(
+        rows.iter().all(|row| row.description.is_some()),
+        "every seeded row carries its stored description"
+    );
+    // Generous CI bound: the dev Mac measures well under 50 ms; the assertion
+    // only fails when the projection degrades catastrophically.
+    assert!(
+        elapsed < std::time::Duration::from_millis(2_000),
+        "list_skills over 500 skills took {elapsed:?}"
+    );
+}
