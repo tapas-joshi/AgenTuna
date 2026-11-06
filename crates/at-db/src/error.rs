@@ -64,6 +64,21 @@ pub enum DbError {
         #[source]
         source: std::io::Error,
     },
+    /// A database integrity pragma returned a failure row.
+    #[error("database integrity check failed: {details}")]
+    IntegrityCheckFailed {
+        /// SQLite's integrity-check output, which contains no database contents.
+        details: String,
+    },
+    /// A database file or its backup could not be maintained.
+    #[error("{path}: {source}", path = .path.display())]
+    FileOperation {
+        /// File or directory involved.
+        path: PathBuf,
+        /// Operating-system failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// A settings value could not be encoded as JSON.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

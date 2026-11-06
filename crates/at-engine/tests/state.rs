@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use at_engine::state::{DeploymentFacts, DerivedState, TargetOrigin, classify};
+use at_engine::state::{DeploymentFacts, TargetOrigin, classify};
 use at_model::{Deployment, ItemState, LinkMode, SyncLabel};
 
 struct Row {
@@ -41,6 +41,7 @@ impl Row {
             target_hash: self.target,
             baseline_hash: self.baseline,
             origin: self.origin,
+            state_version: 0,
         }
     }
 }
@@ -57,7 +58,7 @@ fn state_precedence_table_covers_every_transition() {
             Some("b"),
             None,
             ItemState::Conflict,
-            None,
+            Some(SyncLabel::Conflict),
         ),
         Row::managed(
             "baseline known, both sides moved apart",
@@ -65,7 +66,7 @@ fn state_precedence_table_covers_every_transition() {
             Some("c"),
             Some("a"),
             ItemState::Conflict,
-            None,
+            Some(SyncLabel::Conflict),
         ),
         // Drifted: the deployed copy moved, the store did not.
         Row::managed(
@@ -129,9 +130,8 @@ fn state_precedence_table_covers_every_transition() {
             ItemState::Linked,
             Some(SyncLabel::LibraryNewer),
         ),
-        // Off: nothing is deployed at the target, or there is no store copy to deploy.
         Row::managed(
-            "target missing, baseline recorded",
+            "project-only copy",
             Some("a"),
             None,
             Some("a"),
@@ -147,12 +147,20 @@ fn state_precedence_table_covers_every_transition() {
             None,
         ),
         Row::managed(
-            "store copy gone, target present",
+            "library-only copy",
             None,
             Some("a"),
             Some("a"),
             ItemState::Off,
+            Some(SyncLabel::LibraryOnly),
+        ),
+        Row::managed(
+            "library copy moved without project copy",
             None,
+            Some("b"),
+            Some("a"),
+            ItemState::Off,
+            Some(SyncLabel::Drifted),
         ),
         Row {
             case: "nothing anywhere",
@@ -187,28 +195,20 @@ fn state_precedence_table_covers_every_transition() {
 /// `Drifted` + `ProjectNewer`.
 #[test]
 fn agreement_is_in_sync_and_target_movement_is_drift() {
-    assert_eq!(
-        classify(DeploymentFacts::managed(
-            Some("abc"),
-            Some("abc"),
-            Some("abc")
-        )),
-        DerivedState {
-            state: ItemState::Linked,
-            sync_label: Some(SyncLabel::InSync),
-        }
-    );
-    assert_eq!(
-        classify(DeploymentFacts::managed(
-            Some("abc"),
-            Some("def"),
-            Some("abc")
-        )),
-        DerivedState {
-            state: ItemState::Drifted,
-            sync_label: Some(SyncLabel::ProjectNewer),
-        }
-    );
+    let in_sync = classify(DeploymentFacts::managed(
+        Some("abc"),
+        Some("abc"),
+        Some("abc"),
+    ));
+    assert_eq!(in_sync.state, ItemState::Linked);
+    assert_eq!(in_sync.sync_label, Some(SyncLabel::InSync));
+    let drifted = classify(DeploymentFacts::managed(
+        Some("abc"),
+        Some("def"),
+        Some("abc"),
+    ));
+    assert_eq!(drifted.state, ItemState::Drifted);
+    assert_eq!(drifted.sync_label, Some(SyncLabel::ProjectNewer));
 }
 
 /// An unmanaged folder that happens to have the same name and the same bytes as a
@@ -216,12 +216,7 @@ fn agreement_is_in_sync_and_target_movement_is_drift() {
 /// item has no baseline row.
 #[test]
 fn identical_content_does_not_make_an_unmanaged_folder_linked() {
-    let derived = classify(DeploymentFacts {
-        store_hash: Some("same"),
-        target_hash: Some("same"),
-        baseline_hash: None,
-        origin: TargetOrigin::Native,
-    });
+    let derived = classify(DeploymentFacts::native(Some("same")));
     assert_eq!(derived.state, ItemState::Native);
     assert_eq!(derived.sync_label, None);
 
@@ -233,20 +228,12 @@ fn identical_content_does_not_make_an_unmanaged_folder_linked() {
 /// `Off` with no label to show.
 #[test]
 fn missing_target_is_off() {
-    assert_eq!(
-        classify(DeploymentFacts::managed(Some("abc"), None, Some("abc"))),
-        DerivedState {
-            state: ItemState::Off,
-            sync_label: Some(SyncLabel::ProjectOnly),
-        }
-    );
-    assert_eq!(
-        classify(DeploymentFacts::managed(Some("abc"), None, None)),
-        DerivedState {
-            state: ItemState::Off,
-            sync_label: None,
-        }
-    );
+    let project_only = classify(DeploymentFacts::managed(Some("abc"), None, Some("abc")));
+    assert_eq!(project_only.state, ItemState::Off);
+    assert_eq!(project_only.sync_label, Some(SyncLabel::ProjectOnly));
+    let no_label = classify(DeploymentFacts::managed(Some("abc"), None, None));
+    assert_eq!(no_label.state, ItemState::Off);
+    assert_eq!(no_label.sync_label, None);
 }
 
 /// The sync-and-drift screen reads a stored `deployments` row, so the facts
@@ -263,12 +250,23 @@ fn stored_deployment_row_classifies_from_its_hashes() {
         sync_label: Some(SyncLabel::InSync),
     };
     let derived = classify(DeploymentFacts::from_deployment(&row));
-    assert_eq!(
-        derived,
-        DerivedState {
-            state: ItemState::Drifted,
-            sync_label: Some(SyncLabel::ProjectNewer),
-        },
-        "the stored label is never trusted over the hashes"
+    assert_eq!(derived.state, ItemState::Drifted);
+    assert_eq!(derived.sync_label, Some(SyncLabel::ProjectNewer));
+}
+
+#[test]
+fn classification_preserves_source_version_and_hash_evidence() {
+    let derived = classify(
+        DeploymentFacts::managed(
+            Some("project-hash"),
+            Some("library-hash"),
+            Some("base-hash"),
+        )
+        .with_state_version(42),
     );
+    assert_eq!(derived.state_version, 42);
+    assert_eq!(derived.sync_label, Some(SyncLabel::Conflict));
+    assert_eq!(derived.evidence.project_hash, Some("project-hash"));
+    assert_eq!(derived.evidence.library_hash, Some("library-hash"));
+    assert_eq!(derived.evidence.base_hash, Some("base-hash"));
 }

@@ -47,6 +47,8 @@ pub struct DeploymentFacts<'a> {
     pub baseline_hash: Option<&'a str>,
     /// Whether AgenTuna created the target.
     pub origin: TargetOrigin,
+    /// Version of the source state used for this classification.
+    pub state_version: u64,
 }
 
 impl<'a> DeploymentFacts<'a> {
@@ -62,7 +64,15 @@ impl<'a> DeploymentFacts<'a> {
             target_hash,
             baseline_hash,
             origin: TargetOrigin::Managed,
+            state_version: 0,
         }
+    }
+
+    /// Sets the source state version used to invalidate consumer caches.
+    #[must_use]
+    pub const fn with_state_version(mut self, state_version: u64) -> Self {
+        self.state_version = state_version;
+        self
     }
 
     /// A real folder or entry that AgenTuna did not create. It has no baseline.
@@ -73,6 +83,7 @@ impl<'a> DeploymentFacts<'a> {
             target_hash,
             baseline_hash: None,
             origin: TargetOrigin::Native,
+            state_version: 0,
         }
     }
 
@@ -87,13 +98,28 @@ impl<'a> DeploymentFacts<'a> {
     }
 }
 
+/// Content hashes retained as evidence for the derived sync label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncEvidence<'a> {
+    /// Hash of the Project/store copy, if present.
+    pub project_hash: Option<&'a str>,
+    /// Hash of the User/library copy, if present.
+    pub library_hash: Option<&'a str>,
+    /// Hash recorded as the last common baseline, if present.
+    pub base_hash: Option<&'a str>,
+}
+
 /// The state and label one deployment has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DerivedState {
+pub struct DerivedState<'a> {
     /// Current deployment state.
     pub state: ItemState,
     /// Library-versus-project relation, when one is meaningful.
     pub sync_label: Option<SyncLabel>,
+    /// Source state version used for this result.
+    pub state_version: u64,
+    /// Hashes used by the existing TA-005 derivation.
+    pub evidence: SyncEvidence<'a>,
 }
 
 /// Classifies one deployment.
@@ -116,7 +142,7 @@ pub struct DerivedState {
 /// Callers that already store the result must not recompute it (decision 12);
 /// `TC-015` reads `deployments.state` and `deployments.sync_label` as written.
 #[must_use]
-pub fn classify(facts: DeploymentFacts<'_>) -> DerivedState {
+pub fn classify(facts: DeploymentFacts<'_>) -> DerivedState<'_> {
     let conflict = is_conflict(facts);
     let drifted = !conflict && is_drifted(facts);
     let native = facts.origin == TargetOrigin::Native && facts.target_hash.is_some();
@@ -142,6 +168,12 @@ pub fn classify(facts: DeploymentFacts<'_>) -> DerivedState {
     DerivedState {
         state,
         sync_label: derive_label(facts),
+        state_version: facts.state_version,
+        evidence: SyncEvidence {
+            project_hash: facts.store_hash,
+            library_hash: facts.target_hash,
+            base_hash: facts.baseline_hash,
+        },
     }
 }
 
@@ -185,12 +217,17 @@ fn derive_label(facts: DeploymentFacts<'_>) -> Option<SyncLabel> {
         (Some(store), Some(target)) => match facts.baseline_hash {
             Some(baseline) if baseline == store => Some(SyncLabel::ProjectNewer),
             Some(baseline) if baseline == target => Some(SyncLabel::LibraryNewer),
-            _ => None,
+            _ => Some(SyncLabel::Conflict),
         },
         (Some(_), None) => facts
             .baseline_hash
             .is_some()
             .then_some(SyncLabel::ProjectOnly),
-        _ => None,
+        (None, Some(target)) => Some(match facts.baseline_hash {
+            Some(baseline) if baseline == target => SyncLabel::LibraryOnly,
+            Some(_) => SyncLabel::Drifted,
+            None => SyncLabel::LibraryOnly,
+        }),
+        (None, None) => None,
     }
 }

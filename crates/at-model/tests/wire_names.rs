@@ -33,7 +33,10 @@ fn wire_names_are_locked() {
             r#""in_sync""#,
             r#""project_only""#,
             r#""library_newer""#,
-            r#""project_newer""#
+            r#""project_newer""#,
+            r#""library_only""#,
+            r#""conflict""#,
+            r#""drifted""#
         ]
     );
     let modes: Vec<String> = LinkMode::ALL.iter().map(json).collect();

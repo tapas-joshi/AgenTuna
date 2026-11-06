@@ -322,7 +322,7 @@ impl LoopbackListener {
     /// `OAuthStateMismatch` when the callback is malformed, `OAuthError` on
     /// timeout or listener failure.
     pub async fn wait(mut self, timeout: Duration) -> Result<CallbackRequest, SignInError> {
-        let Some(task) = self.task.take() else {
+        let Some(task) = self.task.as_mut() else {
             return Err(SignInError::new(
                 SignInErrorKind::OAuthError,
                 "The sign-in listener was already consumed.",
@@ -534,6 +534,7 @@ impl PolicyOAuthHttpClient {
     /// Builds the gated client.
     #[must_use]
     pub fn new(policy: Arc<NetworkPolicy>, log: Arc<AsyncMutex<NetworkEventLog>>) -> Self {
+        crate::tls::ensure_crypto_provider();
         let follow_redirects = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::default())

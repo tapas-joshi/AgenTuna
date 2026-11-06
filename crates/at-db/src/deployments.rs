@@ -160,14 +160,22 @@ impl<'a> DeploymentSpec<'a> {
 /// `updated_at` in place instead of inserting a second row. `updated_at` is set
 /// to the current UTC timestamp on every call.
 ///
-/// # Errors
-///
-/// [`DbError::Constraint`] when `item_id` does not exist in `items` (the
-/// foreign key), or a SQLite failure.
+/// [`DbError::Constraint`] when `item_id` does not exist in `items`, a SQLite failure, or
+/// [`DbError::InvalidValue`] when the label is query-derived and excluded by schema v4.
 pub fn upsert_deployment(
     connection: &Connection,
     spec: &DeploymentSpec<'_>,
 ) -> Result<(), DbError> {
+    if matches!(
+        spec.sync_label,
+        Some(SyncLabel::LibraryOnly | SyncLabel::Conflict | SyncLabel::Drifted)
+    ) {
+        return Err(DbError::InvalidValue {
+            field: "sync_label",
+            reason: "library_only, conflict, and drifted are query-derived and cannot be persisted"
+                .to_owned(),
+        });
+    }
     connection.execute(
         "INSERT INTO deployments (item_id, agent_id, scope, project_id, state, mode, \
              target_path, link_target, store_hash, target_hash, baseline_hash, \

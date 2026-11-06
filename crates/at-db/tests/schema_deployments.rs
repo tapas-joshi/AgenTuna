@@ -105,7 +105,7 @@ fn stored_modes_take_the_at_fs_values_and_reject_the_at_model_wire_name() {
 }
 
 #[test]
-fn every_state_and_sync_label_wire_name_is_accepted() {
+fn schema_v4_accepts_only_the_original_persisted_sync_labels() {
     let database = open_with(ALL_VERSIONS);
     let connection = database.connection();
 
@@ -118,7 +118,15 @@ fn every_state_and_sync_label_wire_name_is_accepted() {
             None,
         );
     }
-    for (index, label) in SyncLabel::ALL.iter().enumerate() {
+    for (index, label) in [
+        SyncLabel::InSync,
+        SyncLabel::ProjectOnly,
+        SyncLabel::LibraryNewer,
+        SyncLabel::ProjectNewer,
+    ]
+    .iter()
+    .enumerate()
+    {
         let item = insert_item(connection, &format!("label-{index}"));
         connection
             .execute(

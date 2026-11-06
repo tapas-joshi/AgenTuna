@@ -17,6 +17,7 @@
 //! under `.state/store.lock`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use crate::error::EngineError;
@@ -57,6 +58,20 @@ pub enum TombstoneError {
 pub trait TombstoneSource: Send + Sync {
     /// Every tombstone of `scope`, in manifest order.
     fn disabled(&self, scope: Scope) -> Result<Vec<DisabledEntry>, TombstoneError>;
+
+    /// Metadata for the manifest containing tombstones in `scope`, when known.
+    fn metadata(&self, _scope: Scope) -> Option<TombstoneMetadata> {
+        None
+    }
+}
+
+/// Source metadata associated with a scope's tombstone manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TombstoneMetadata {
+    /// Human-readable reason supplied by the caller, when available.
+    pub reason: Option<String>,
+    /// Path of the `store.json` containing the tombstone, when available.
+    pub path: Option<std::path::PathBuf>,
 }
 
 /// In-memory [`TombstoneSource`] for tests and callers without a store on disk.
@@ -115,6 +130,7 @@ impl TombstoneSource for MemoryTombstones {
 #[derive(Debug, Default)]
 pub struct ManifestTombstones {
     scopes: BTreeMap<Scope, Vec<DisabledEntry>>,
+    metadata: BTreeMap<Scope, TombstoneMetadata>,
 }
 
 impl ManifestTombstones {
@@ -135,6 +151,18 @@ impl ManifestTombstones {
     /// Adds `manifest`'s tombstones for `scope`, replacing any earlier entries.
     pub fn insert_manifest(&mut self, scope: Scope, manifest: &StoreManifest) -> &mut Self {
         self.scopes.insert(scope, manifest.disabled().to_vec());
+        self.metadata.remove(&scope);
+        self
+    }
+    /// Associates caller-provided reason and source path with a manifest's tombstones.
+    pub fn insert_manifest_metadata(
+        &mut self,
+        scope: Scope,
+        reason: Option<String>,
+        path: Option<PathBuf>,
+    ) -> &mut Self {
+        self.metadata
+            .insert(scope, TombstoneMetadata { reason, path });
         self
     }
 
@@ -145,6 +173,7 @@ impl ManifestTombstones {
         entries: impl IntoIterator<Item = DisabledEntry>,
     ) -> &mut Self {
         self.scopes.insert(scope, entries.into_iter().collect());
+        self.metadata.remove(&scope);
         self
     }
 }
@@ -152,6 +181,9 @@ impl ManifestTombstones {
 impl TombstoneSource for ManifestTombstones {
     fn disabled(&self, scope: Scope) -> Result<Vec<DisabledEntry>, TombstoneError> {
         Ok(self.scopes.get(&scope).cloned().unwrap_or_default())
+    }
+    fn metadata(&self, scope: Scope) -> Option<TombstoneMetadata> {
+        self.metadata.get(&scope).cloned()
     }
 }
 

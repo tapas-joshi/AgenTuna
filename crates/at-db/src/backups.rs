@@ -110,6 +110,67 @@ impl<'a> NewBackup<'a> {
 const BACKUP_COLUMNS: &str = "id, operation_id, original_path, backup_path, content_hash, size, created_at, \
      pinned, expires_at, restore_count";
 
+/// Filters for listing operation backups.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BackupQuery<'a> {
+    /// Match this original-path prefix (literal, not a SQL pattern).
+    pub path_prefix: Option<&'a str>,
+    /// Inclusive lower creation bound.
+    pub from: Option<SystemTime>,
+    /// Exclusive upper creation bound.
+    pub to: Option<SystemTime>,
+    /// Restrict to one operation.
+    pub operation_id: Option<&'a str>,
+    /// Maximum rows, clamped to 1..=10,000; `None` returns all matches.
+    pub limit: Option<usize>,
+}
+
+/// Lists backup catalogue rows using optional path, date and operation filters.
+///
+/// Results are newest-first and include operation id, original path, timestamp and size.
+///
+/// # Errors
+/// [`DbError`] when the query fails.
+pub fn list_backups(
+    connection: &Connection,
+    query: BackupQuery<'_>,
+) -> Result<Vec<Backup>, DbError> {
+    let prefix = query
+        .path_prefix
+        .map(|value| format!("{}%", escape_like(value)));
+    let from = query.from.map(unix_seconds);
+    let to = query.to.map(unix_seconds);
+    let limit = query
+        .limit
+        .map(|value| i64::try_from(value.clamp(1, 10_000)).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    let mut statement = connection.prepare(&format!(
+        "SELECT {BACKUP_COLUMNS} FROM backups \
+         WHERE (?1 IS NULL OR original_path LIKE ?1 ESCAPE '\\') \
+           AND (?2 IS NULL OR created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', ?2, 'unixepoch')) \
+           AND (?3 IS NULL OR created_at < strftime('%Y-%m-%dT%H:%M:%fZ', ?3, 'unixepoch')) \
+           AND (?4 IS NULL OR operation_id = ?4) \
+         ORDER BY created_at DESC, id DESC LIMIT ?5"
+    ))?;
+    let rows = statement
+        .query_map(
+            params![prefix, from, to, query.operation_id, limit],
+            backup_from_row,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
 /// Records one backup in the catalogue and returns its id.
 ///
 /// The bytes themselves are written by the caller (at-fs/TC-014); this row is
@@ -386,5 +447,35 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn listing_filters_path_prefix_literally_and_by_operation() {
+        use super::{BackupQuery, NewBackup, list_backups, record_backup};
+
+        let database = crate::Database::open_in_memory().expect("database opens");
+        let connection = database.connection();
+        let hash = "a".repeat(64);
+        for (id, path, operation) in [
+            ("bkp_1", "/skills/100%/one", "op-one"),
+            ("bkp_2", "/skills/100x/two", "op-two"),
+        ] {
+            let backup_path = format!("/backups/{id}");
+            let backup = NewBackup::new(path, &backup_path)
+                .with_operation(operation)
+                .with_content(Some(&hash), Some(1));
+            record_backup(connection, &backup).expect("backup records");
+        }
+        let listed = list_backups(
+            connection,
+            BackupQuery {
+                path_prefix: Some("/skills/100%"),
+                operation_id: Some("op-one"),
+                ..BackupQuery::default()
+            },
+        )
+        .expect("backups list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].original_path.as_deref(), Some("/skills/100%/one"));
+        assert_eq!(listed[0].size, Some(1));
     }
 }

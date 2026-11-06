@@ -28,6 +28,9 @@ serde_json.workspace = true
 time = { workspace = true, features = ["macros"] }
 sha2.workspace = true
 libc.workspace = true
+fs4.workspace = true
+at-db.workspace = true
+rusqlite.workspace = true
 rustix = { workspace = true, features = ["process"] }
 env-lock = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
@@ -39,8 +42,6 @@ tempfile.workspace = true
 at-store.workspace = true
 # Self dev-dependency so integration tests see `at_fs::failpoint` (same pattern as at-migrate).
 at-fs = { path = ".", features = ["faults"] }
-# The fault-injection suite asserts the operations log sees failed, never succeeded, rows.
-at-db.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true

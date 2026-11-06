@@ -13,6 +13,8 @@ compile_error!("at-fs currently supports Unix platforms only");
 
 pub mod atomic;
 pub mod backup;
+/// Journaled, rollback-capable multi-file changes.
+pub mod changeset;
 pub mod concurrency;
 pub mod deploy;
 pub mod diff;
@@ -39,7 +41,7 @@ pub mod watch;
 pub use at_model::LinkMode;
 pub use atomic::{BackupPolicy, WriteMode, WriteOutcome, WriteRequest, apply};
 pub use backup::BackupError::BackupFailed;
-pub use backup::{BackupError, BackupFiles, BackupMeta, BackupSidecar};
+pub use backup::{BackupError, BackupFiles, BackupMeta, BackupSidecar, operation_backup_dir};
 pub use concurrency::ExpectedState;
 pub use deploy::{
     COPY_MANIFEST_FILE, COPY_MANIFEST_VERSION, CopyManifest, CopyManifestEntry, CopyOutcome,

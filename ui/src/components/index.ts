@@ -158,3 +158,5 @@ export type {
   SelectionModifiers,
   SelectionResult,
 } from "./table";
+export { ScopeSwitcher } from "./scope_switcher/ScopeSwitcher";
+export type { ScopeSelected, ScopeSwitcherProps } from "./scope_switcher/ScopeSwitcher";

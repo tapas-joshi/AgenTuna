@@ -56,6 +56,10 @@ pub struct BackupMeta {
     pub scope: Option<Scope>,
     /// Path of the original relative to its store root, when known.
     pub relpath: Option<String>,
+    /// Operation owning the backup, when known.
+    pub operation_id: Option<String>,
+    /// Unix permission bits of the original, when known.
+    pub mode: Option<u32>,
 }
 
 /// JSON sidecar written next to each backup blob.
@@ -74,6 +78,12 @@ pub struct BackupSidecar {
     pub scope: Option<Scope>,
     /// Path relative to the store root, when known.
     pub relpath: Option<String>,
+    /// Owning operation, when this is an operation backup.
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    /// Original Unix permission bits, when known.
+    #[serde(default)]
+    pub mode: Option<u32>,
 }
 
 /// The files that make up one backup.
@@ -164,6 +174,8 @@ pub fn copy_into(
         captured_at,
         scope: meta.scope,
         relpath: meta.relpath.clone(),
+        operation_id: meta.operation_id.clone(),
+        mode: meta.mode,
     };
     let json = serde_json::to_vec_pretty(&sidecar_body).map_err(|e| BackupError::Corrupt {
         path: original.to_path_buf(),
@@ -227,4 +239,35 @@ pub fn verify(blob: &Path, expected_hash: &str) -> Result<BackupSidecar, BackupE
         return Err(corrupt("size differs from sidecar"));
     }
     Ok(sidecar)
+}
+
+/// Builds the operation folder `backups/<utc-timestamp>-<operation-id>`.
+///
+/// # Errors
+/// [`BackupError::Corrupt`] when `operation_id` is empty or contains path syntax.
+pub fn operation_backup_dir(
+    backups_root: &Path,
+    created_at: OffsetDateTime,
+    operation_id: &str,
+) -> Result<PathBuf, BackupError> {
+    if operation_id.is_empty()
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(BackupError::Corrupt {
+            path: backups_root.to_path_buf(),
+            reason: "invalid operation id".to_owned(),
+        });
+    }
+    let timestamp = format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        created_at.year(),
+        u8::from(created_at.month()),
+        created_at.day(),
+        created_at.hour(),
+        created_at.minute(),
+        created_at.second(),
+    );
+    Ok(backups_root.join(format!("{timestamp}-{operation_id}")))
 }

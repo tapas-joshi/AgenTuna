@@ -20,7 +20,8 @@ use at_mcp::session::{
     DEFAULT_STARTUP, LaunchConsent, PACKAGE_RUNNER_STARTUP, SessionErrorKind, ShutdownStep,
     StdioClient, StdioLaunch, StdioSession, TimeoutPolicy,
 };
-use at_model::{EnvValue, SecretRef};
+use at_mcp::{HttpClient, McpErrorKind, test_connection};
+use at_model::{EnvValue, McpServer, McpServerId, McpTransport, NetworkPolicy, Scope, SecretRef};
 use at_secrets::{KeychainId, MemoryStore, SecretStore, SecretString};
 use rustix::process::{Pid, test_kill_process, test_kill_process_group};
 use tempfile::TempDir;
@@ -662,4 +663,155 @@ async fn the_shipped_budget_fails_a_slow_server_at_twenty_seconds() {
     assert_eq!(error.kind(), SessionErrorKind::StartupTimeout);
     assert!(elapsed >= Duration::from_secs(19), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(30), "{elapsed:?}");
+}
+
+/// TM-017: the public test-connection API lists and sorts the fixture's tools.
+#[tokio::test]
+async fn test_connection_api_requires_consent_and_lists_all_tools() {
+    use std::hash::{Hash, Hasher};
+
+    let sandbox = TempDir::new().expect("sandbox");
+    let agent_config = sandbox.path().join("agent-config.json");
+    fs::write(&agent_config, br#"{"servers":{"keep":true}}"#).expect("fixture config");
+    let config_hash = |path: &Path| {
+        let bytes = fs::read(path).expect("read config fixture");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    };
+    let hash_before = config_hash(&agent_config);
+    let server = McpServer {
+        id: McpServerId::new(),
+        display_name: "fixture".to_owned(),
+        description: None,
+        transport: McpTransport::Stdio {
+            command: fake_server().display().to_string(),
+            args: vec![
+                "--tools".to_owned(),
+                "26".to_owned(),
+                "--page-size".to_owned(),
+                "5".to_owned(),
+            ],
+            cwd: Some(sandbox.path().to_path_buf()),
+            env: BTreeMap::new(),
+        },
+        scope: Scope::User,
+        extra: BTreeMap::new(),
+    };
+    let stdio = client_with(Arc::new(MemoryStore::new()), Some(fast_policy()));
+    let http = HttpClient::new(
+        Arc::new(NetworkPolicy::default()),
+        Arc::new(MemoryStore::new()),
+    );
+    let cancel = CancellationToken::new();
+
+    let without_consent = test_connection(&server, &stdio, &http, None, &cancel).await;
+    assert!(!without_consent.ok);
+    assert_eq!(
+        without_consent.error.as_ref().map(|error| error.kind()),
+        Some(&McpErrorKind::ConsentRequired)
+    );
+
+    let launch = StdioLaunch::from_server(&server).expect("stdio launch");
+    let result = test_connection(
+        &server,
+        &stdio,
+        &http,
+        Some(&LaunchConsent::user_approved(&launch)),
+        &cancel,
+    )
+    .await;
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.server_name, "at-mcp-fake-server");
+    assert_eq!(result.server_version.as_deref(), Some("0.1.0"));
+    assert_eq!(result.tools_count, 26);
+    assert!(result.latency_ms > 0);
+    assert_eq!(
+        result.tools.first().map(|tool| tool.name.as_str()),
+        Some("tool-000")
+    );
+    assert_eq!(
+        result.tools.last().map(|tool| tool.name.as_str()),
+        Some("tool-025")
+    );
+    assert!(result.error.is_none());
+    assert_eq!(config_hash(&agent_config), hash_before);
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let cancelled_at = Instant::now();
+    let cancelled_result = test_connection(
+        &server,
+        &stdio,
+        &http,
+        Some(&LaunchConsent::user_approved(&launch)),
+        &cancelled,
+    )
+    .await;
+    assert_eq!(
+        cancelled_result.error.as_ref().map(|error| error.kind()),
+        Some(&McpErrorKind::Cancelled)
+    );
+    assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+    assert_eq!(config_hash(&agent_config), hash_before);
+}
+
+/// Cancelling the public test API during initialize reaps its child before returning.
+#[tokio::test]
+async fn test_connection_api_cancellation_reaps_in_flight_child() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_path = temp.path().join("server-report.txt");
+    let server = McpServer {
+        id: McpServerId::new(),
+        display_name: "slow fixture".to_owned(),
+        description: None,
+        transport: McpTransport::Stdio {
+            command: fake_server().display().to_string(),
+            args: vec![
+                "--report".to_owned(),
+                path_arg(&report_path),
+                "--init-delay-ms".to_owned(),
+                "5000".to_owned(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        scope: Scope::User,
+        extra: BTreeMap::new(),
+    };
+    let stdio = client_with(Arc::new(MemoryStore::new()), Some(fast_policy()));
+    let http = HttpClient::new(
+        Arc::new(NetworkPolicy::default()),
+        Arc::new(MemoryStore::new()),
+    );
+    let launch = StdioLaunch::from_server(&server).expect("stdio launch");
+    let consent = LaunchConsent::user_approved(&launch);
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        test_connection(&server, &stdio, &http, Some(&consent), &task_cancel).await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !report_path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture started");
+    let report = read_report(&report_path);
+    let pid = report["pid"].parse::<u32>().expect("fixture PID");
+    let cancelled_at = Instant::now();
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("test_connection returned within one second")
+        .expect("task joined");
+
+    assert_eq!(
+        result.error.as_ref().map(|error| error.kind()),
+        Some(&McpErrorKind::Cancelled)
+    );
+    assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+    assert!(!process_exists(pid), "cancelled test left a child process");
 }

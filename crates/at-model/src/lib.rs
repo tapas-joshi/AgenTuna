@@ -21,7 +21,7 @@ pub use change_set::{
     ChangeSet, ChangeSetError, ContentHash, DeployMode, ExpectedState, FileOp, OPERATION_KINDS,
     OperationKind,
 };
-pub use deployment::{Deployment, ItemState, LinkMode, SyncLabel};
+pub use deployment::{Deployment, DeploymentState, ItemState, LinkMode, SyncLabel};
 pub use error::{ErrorKind, ErrorReport, REDACTION_MASK, Remedy, SecretRedactor};
 pub use item::{ItemId, ItemIdError, ItemKind};
 pub use lock::Lock;

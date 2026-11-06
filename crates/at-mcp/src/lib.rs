@@ -5,6 +5,10 @@ pub mod oauth;
 pub mod path;
 pub mod policy;
 pub mod session;
+pub mod test_connection;
+pub mod tls;
+pub use test_connection::{McpError, McpErrorKind, TestResult, test_connection};
+pub use tls::ensure_crypto_provider;
 
 pub use http::{
     HTTP_INITIALIZE_TIMEOUT, HTTP_TOOL_LIMIT, HTTP_TOOL_PAGE_TIMEOUT, HttpClient, HttpError,

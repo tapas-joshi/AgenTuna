@@ -21,6 +21,7 @@ pub mod drift;
 mod error;
 pub mod health;
 pub mod locks;
+pub mod mcp_index;
 pub mod migrations;
 pub mod native;
 pub mod ops;
@@ -34,6 +35,7 @@ pub mod retention;
 pub mod secret_refs;
 pub mod settings;
 pub mod shared;
+pub mod skills_index;
 pub mod sources;
 pub mod versions;
 

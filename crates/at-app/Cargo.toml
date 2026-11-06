@@ -21,6 +21,7 @@ workspace = true
 tauri-build.workspace = true
 
 [dependencies]
+at-mcp.workspace = true
 at-model.workspace = true
 at-fs.workspace = true
 at-store.workspace = true
@@ -35,6 +36,10 @@ thiserror.workspace = true
 uuid.workspace = true
 rustix.workspace = true
 ts-rs.workspace = true
+ed25519-dalek.workspace = true
+url.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
 time.workspace = true
 
 [dev-dependencies]

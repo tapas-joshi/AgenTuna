@@ -1306,6 +1306,8 @@ impl StoreManifest {
             backup_meta: BackupMeta {
                 scope: Some(layout.scope()),
                 relpath: Some(MANIFEST_FILE.to_owned()),
+                operation_id: None,
+                mode: None,
             },
             guard: None,
         };

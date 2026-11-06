@@ -291,6 +291,8 @@ impl McpStore {
             backup_meta: BackupMeta {
                 scope: Some(layout.scope()),
                 relpath: Some(MCP_FILE.to_owned()),
+                operation_id: None,
+                mode: None,
             },
             guard: None,
         };

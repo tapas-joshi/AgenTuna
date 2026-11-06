@@ -167,7 +167,7 @@ pub struct ShadowedBy {
     pub path: PathBuf,
 }
 
-/// An item that was disabled by a tombstone in one scope (TA-003).
+/// An item disabled by a tombstone in one scope (TA-003).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisabledHere {
     /// Identity shared across scopes.
@@ -180,6 +180,10 @@ pub struct DisabledHere {
     pub agents: DisabledAgents,
     /// The definition that is disabled.
     pub definition: Definition,
+    /// Caller-supplied explanation; manifests do not currently persist one.
+    pub reason: Option<String>,
+    /// Path of the store manifest, when the source provides it.
+    pub tombstone_path: Option<PathBuf>,
 }
 
 /// Everything one resolution pass produced.
@@ -370,6 +374,7 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
         for scope in participating_scopes {
             match source.disabled(scope) {
                 Ok(entries) => {
+                    let metadata = source.metadata(scope);
                     for entry in entries {
                         let Some((logical_id, &position)) = winners.iter().find(|(_, pos)| {
                             candidates[**pos].definition.item_id == Some(entry.item_id)
@@ -401,6 +406,8 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
                             scope,
                             agents: entry.agents.clone(),
                             definition: candidate.definition.clone(),
+                            reason: metadata.as_ref().and_then(|value| value.reason.clone()),
+                            tombstone_path: metadata.as_ref().and_then(|value| value.path.clone()),
                         });
 
                         if applies_to_agent {
