@@ -450,6 +450,7 @@ pub fn project_sync_apply(
             },
         )?
     };
+    state.record_writes(&cached.change_set, &cached.target_root);
     at_db::deployments::update_project_sync_baseline(
         database.connection(),
         &cached.item_id,

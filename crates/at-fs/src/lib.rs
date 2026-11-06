@@ -16,7 +16,8 @@ pub mod backup;
 /// Journaled, rollback-capable multi-file changes.
 pub use changeset::{
     ApplyContext, ApplyOutcome, ApplyRoots, ChangeSetApplyError, DbOperationRecorder,
-    OperationRecorder, apply as apply_changeset, apply_with_roots,
+    OperationRecorder, RollbackHandle, apply as apply_changeset, apply_with_roots,
+    apply_with_roots_reversible, commit_reversible, hash_node, rollback_committed,
 };
 pub mod changeset;
 pub mod concurrency;

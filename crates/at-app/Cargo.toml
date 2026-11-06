@@ -22,6 +22,7 @@ tauri-build.workspace = true
 
 [dependencies]
 at-mcp.workspace = true
+at-migrate.workspace = true
 at-model.workspace = true
 at-fs.workspace = true
 at-store.workspace = true

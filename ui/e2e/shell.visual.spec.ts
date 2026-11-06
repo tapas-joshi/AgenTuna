@@ -14,7 +14,7 @@ test("every routed screen has a meaningful page heading", async ({ page }) => {
   for (const [label, heading] of routes) {
     await page.getByRole("button", { name: label, exact: true }).click();
     await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
-    await expect(page.locator("main")).toContainText(heading);
+    await expect(page.locator("#shell-main")).toContainText(heading);
     await expect(page.locator("body")).toHaveScreenshot(`shell-${label.toLowerCase().replaceAll(" ", "-").replaceAll("&", "-")}.png`, {
       animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.001,
     });
@@ -46,7 +46,9 @@ test("MCP detail, MCP form and migration routes render meaningful states", async
   await search.fill("Import native items");
   await expect(palette.getByRole("option", { name: /Import native items/ })).toBeVisible();
   await palette.getByRole("option", { name: /Import native items/ }).click();
-  await expect(page.getByRole("heading", { name: "Nothing to migrate" })).toBeVisible();
+  await page.getByRole("button", { name: "Rescan" }).click();
+  await expect(page.getByText("3 found · 0 selected")).toBeVisible();
+  await expect(page.getByText("Visual migration skill")).toBeVisible();
 });
 
 test("Keychain secrets and add-skill routes render real screen content", async ({ page }) => {

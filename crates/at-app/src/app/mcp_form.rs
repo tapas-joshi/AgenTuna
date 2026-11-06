@@ -458,10 +458,10 @@ pub fn mcp_save(
             backup_folder: &cached.backup_folder,
             recorder: &mut recorder,
         };
-        Some(
-            at_fs::changeset::apply_with_roots(store, &mut context, &roots)
-                .map_err(CommandError::from)?,
-        )
+        let outcome = at_fs::changeset::apply_with_roots(store, &mut context, &roots)
+            .map_err(CommandError::from)?;
+        state.record_writes(store, &cached.store_root);
+        Some(outcome)
     } else {
         None
     };
@@ -499,10 +499,12 @@ pub fn mcp_save(
                         )
                     },
                 )?;
+                state.record_writes(rollback, &cached.store_root);
             }
             return Err(CommandError::from(error));
         }
     };
+    state.record_writes(&native, &cached.store_root);
     let operation_id = store_outcome
         .map(|outcome| outcome.operation_id)
         .unwrap_or(native_outcome.operation_id);

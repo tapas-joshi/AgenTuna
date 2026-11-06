@@ -100,12 +100,6 @@ pub enum SkillAgentPlanError {
         /// Agent that is not managed.
         agent: AgentId,
     },
-    /// Copy-mode directory removal needs the pending restorable at-fs ChangeSet operation.
-    #[error("copy-mode skill directory removal is not yet supported at {path}")]
-    UnsupportedCopyRemoval {
-        /// Deployment directory.
-        path: PathBuf,
-    },
     /// The common deployment planner refused the request.
     #[error(transparent)]
     Deployment(#[from] DeployPlanError),
@@ -171,11 +165,6 @@ pub fn plan_skill_agent_change(
             path: deployment_request.destination,
         });
     }
-    if deployment_request.mode == LinkMode::Copy {
-        return Err(SkillAgentPlanError::UnsupportedCopyRemoval {
-            path: deployment_request.destination,
-        });
-    }
     let change_set = request
         .disable_change_set
         .ok_or(SkillAgentPlanError::MissingDisablePlan)?;
@@ -221,4 +210,61 @@ pub fn plan_skill_agent_change(
         no_op: false,
         removal,
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use at_model::{ExpectedState, OperationKind, Scope};
+
+    #[test]
+    fn copy_mode_disable_accepts_a_reviewed_directory_delete() {
+        let agent = AgentId::ClaudeCode;
+        let item_id = at_model::ItemId::new();
+        let destination = PathBuf::from("/tmp/agentuna-test/skills/example");
+        let change_set = ChangeSet {
+            id: "operation".to_owned(),
+            preview_id: "preview".to_owned(),
+            operation_kind: OperationKind::parse("deploy").expect("known operation"),
+            scope: Some(Scope::User),
+            project_id: None,
+            summary: "Disable skill".to_owned(),
+            ops: vec![FileOp::Delete {
+                path: destination.clone(),
+                expected: ExpectedState::hash("0".repeat(64)).expect("valid digest"),
+            }],
+            created_at_unix_seconds: 0,
+        };
+        let request = SkillAgentPlanRequest {
+            intent: SetSkillAgentEnabled {
+                item_id,
+                scope: Scope::User,
+                agent: agent.clone(),
+                enabled: false,
+            },
+            deployment: PlanRequest {
+                item_id: at_model::ItemId::new(),
+                scope: Scope::User,
+                agent: agent.clone(),
+                store_root: PathBuf::from("/tmp/agentuna-test/store"),
+                source: PathBuf::from("/tmp/agentuna-test/store/skills/example"),
+                destination: destination.clone(),
+                mode: LinkMode::Copy,
+                link_supported: false,
+                managed: true,
+                destination_managed: true,
+                shared_agents: Vec::new(),
+                project_id: None,
+                summary: "Disable skill".to_owned(),
+            },
+            agent_installed: true,
+            lock_reason: None,
+            already_enabled: true,
+            disable_change_set: Some(change_set),
+        };
+
+        let plan = plan_skill_agent_change(request).expect("copy deployment removal is supported");
+
+        assert_eq!(plan.mode_used, Some(LinkMode::Copy));
+        assert_eq!(plan.removal.expect("owned deployment").target, destination);
+    }
 }

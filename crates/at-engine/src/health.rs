@@ -50,7 +50,22 @@ pub fn line(
     home: &Path,
     copy_fallback: bool,
 ) -> Result<HealthLine, HealthError> {
-    let connection = database.connection();
+    line_with_connection(database.connection(), agent_id, home, copy_fallback)
+}
+
+/// Computes an agent health summary over a caller-owned read connection.
+///
+/// This is useful for commands that must inspect the index without opening a
+/// migration-capable [`Database`] handle.
+///
+/// # Errors
+/// Returns [`HealthError::Database`] if an agent, path or deployment query fails.
+pub fn line_with_connection(
+    connection: &rusqlite::Connection,
+    agent_id: &AgentId,
+    home: &Path,
+    copy_fallback: bool,
+) -> Result<HealthLine, HealthError> {
     let agents = at_db::agents::list_agents_on_mac(connection)?;
     let agent = agents.iter().find(|agent| &agent.id == agent_id);
     let paths = at_db::agents::list_agent_paths(connection, agent_id)?;

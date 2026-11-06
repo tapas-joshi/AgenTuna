@@ -45,8 +45,9 @@ describe("PreferencesScreen", () => {
     ipc.reply = command => {
       if (command === "settings_load") return Promise.resolve(settings);
       if (command === "network_policy") return Promise.resolve(policy);
-      if (command === "logs_tail") return Promise.resolve(emptyLogs);
       if (command === "app_paths") return Promise.resolve(paths);
+      if (command === "logs_tail") return Promise.resolve(emptyLogs);
+      if (command === "remote_backup_settings") return Promise.resolve({ device_name: "workstation", repo_url: null, branch: null, last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: false });
       return Promise.reject("read-only settings database");
     };
     render(<PreferencesScreen />);
@@ -55,6 +56,19 @@ describe("PreferencesScreen", () => {
     expect(await screen.findByText("read-only settings database")).toBeTruthy();
     expect(control.getAttribute("aria-checked")).toBe("false");
     expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThan(0);
+  });
+  test("remote backup clears the token field after saving and never loads token contents", async () => {
+    const remote = { device_name: "workstation", repo_url: "https://github.com/acme/backup.git", branch: "main", last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: false };
+    ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : command === "remote_backup_settings" || command === "remote_backup_configure" ? remote : paths);
+    render(<PreferencesScreen />);
+    const token = await screen.findByLabelText("GitHub token") as HTMLInputElement;
+    fireEvent.change(token, { target: { value: "ghp-secret-sentinel" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save remote backup settings" }));
+    expect(await screen.findByText("Last backup: Never")).toBeTruthy();
+    expect(token.value).toBe("");
+    const call = ipc.calls.find(item => item.command === "remote_backup_configure");
+    expect(call?.args).toEqual({ deviceName: "workstation", repoUrl: "https://github.com/acme/backup.git", token: "ghp-secret-sentinel" });
+    expect(screen.queryByText("ghp-secret-sentinel")).toBeNull();
   });
 });
   test("populated Preferences and embedded Logs have no axe violations", async () => {

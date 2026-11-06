@@ -319,6 +319,29 @@ impl AppPaths {
         self.home.as_deref()
     }
 
+    /// Returns equivalent resolved paths with `project_root` selected.
+    ///
+    /// Existing User and Global overrides are preserved. Project paths are resolved through
+    /// the same central path policy as [`Self::resolve`].
+    ///
+    /// # Errors
+    /// Returns [`PathError`] when the home or selected project root is unavailable.
+    pub fn for_project(&self, project_root: &Path) -> Result<Self, PathError> {
+        let home = self
+            .home
+            .clone()
+            .map_or(HomeSource::Unavailable, HomeSource::Injected);
+        Self::resolve(&PathEnvironment {
+            home,
+            overrides: PathOverrides {
+                user_store: Some(self.user_store.clone()),
+                global_store: Some(self.global_store.clone()),
+                ..PathOverrides::default()
+            },
+            project_root: Some(project_root.to_path_buf()),
+        })
+    }
+
     /// Support directory holding the database, logs, backups and cache.
     #[must_use]
     pub fn support_dir(&self) -> &Path {

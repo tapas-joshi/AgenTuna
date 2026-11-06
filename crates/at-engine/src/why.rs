@@ -1,10 +1,12 @@
 //! Explain the scope decision for one item without touching disk.
 
 use at_model::{AgentId, ItemId, Scope};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use ts_rs::TS;
 
 /// State of an item at one scope for the requested agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[non_exhaustive]
 pub enum StepStatus {
     /// No definition or tombstone exists at this scope.
@@ -34,22 +36,26 @@ pub enum StepStatus {
 }
 
 /// Parsed-document location supplied by an adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct DocumentLocation {
     /// File containing the entry.
+    #[ts(type = "string")]
     pub path: PathBuf,
     /// Byte range of the parsed entry, if known.
+    #[ts(type = "number[] | null")]
     pub byte_span: Option<std::ops::Range<usize>>,
     /// 1-based line from the adapter parser.
     pub line: Option<usize>,
     /// Agent-specific rendered destination.
+    #[ts(type = "string | null")]
     pub rendering_path: Option<PathBuf>,
 }
 
 /// One ordered scope explanation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct TraceStep {
     /// Scope represented.
+    #[ts(type = "string")]
     pub scope: Scope,
     /// State at the scope.
     pub status: StepStatus,
@@ -60,7 +66,7 @@ pub struct TraceStep {
 }
 
 /// Final effective on/off state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Verdict {
     /// Whether the item is enabled for the selected agent.
     pub on: bool,
@@ -69,13 +75,16 @@ pub struct Verdict {
 }
 
 /// Complete trace in Global, User, Project, Local order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct WhyTrace {
     /// Traced item.
+    #[ts(type = "string")]
     pub item_id: ItemId,
     /// Scope active in the caller.
+    #[ts(type = "string")]
     pub active_scope: Scope,
     /// Agent being explained.
+    #[ts(type = "string")]
     pub agent: AgentId,
     /// Ordered rows for all four scopes.
     pub steps: Vec<TraceStep>,

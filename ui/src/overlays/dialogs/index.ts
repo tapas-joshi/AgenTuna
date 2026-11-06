@@ -28,6 +28,7 @@ export {
   modalConfirmed,
   modalValue,
 } from "./types";
+export { WhyTraceDialog } from "./WhyTraceDialog";
 export type {
   ModalCancelled,
   ModalConfirmed,

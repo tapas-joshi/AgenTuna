@@ -5,7 +5,7 @@ test("skill source updates require explicit check, review, and apply", async ({ 
     const mocks = (window as typeof window & { __AT_TEST_MOCKS__: { commandOverrides: Record<string, unknown> } }).__AT_TEST_MOCKS__;
     mocks.commandOverrides.skill_detail_load = {
       item_id: "itm_visual_skill", name: "Code Review", slug: "code-review", scope: "user",
-      path: "/fixtures/user/skills/code-review", markdown: "# Code Review\n\nA deterministic visual fixture.",
+      path: "/sandbox/user/skills/code-review", markdown: "# Code Review\n\nA deterministic visual fixture.",
       description: "Review code changes.", hash: "fixture-hash", updated_at: "2026-11-06T10:00:00Z",
       source: "git", mode: "copy", shadowed_by: null, shadow_chain: ["user"], deployments: [], history: [],
       editable: true, missing: false, update_available: true, source_commit_sha: "installed-sha",

@@ -22,7 +22,13 @@ use crate::registry::{Registry, RegistryError};
 /// `adopt`, `drift`, `backups`, `sync`, `remote` -> TC-030, TC-031; `agents`,
 /// `effective`, `why`, `overview`, `rules` -> TA-070, TA-071.
 pub fn production_registry() -> Result<Registry, RegistryError> {
-    Registry::try_new(vec![Box::new(crate::runtime::ConfigGroup)])
+    Registry::try_new(vec![
+        Box::new(crate::runtime::ConfigGroup),
+        Box::new(crate::mcp::McpGroup),
+        Box::new(crate::agents::AgentsGroup),
+        Box::new(crate::effective::EffectiveGroup),
+        Box::new(crate::why::WhyGroup),
+    ])
 }
 
 /// Runs the CLI for the current process and returns its exit status.
@@ -217,6 +223,18 @@ fn report_parse_error(error: &clap::Error, argv: &[OsString], stdio: &mut Stdio<
         let _ = stdio.out.write_all(text.as_bytes());
         return code;
     }
+    if is_mcp_secret_set(argv) {
+        let failure = CliError::new(
+            ErrorCode::Usage,
+            "secret values must be supplied on stdin, never as arguments",
+            "pipe the value to `agentuna mcp secret set <NAME>`",
+        );
+        write_diagnostic(&failure, stdio);
+        if json {
+            emit_json_error("mcp secret set", &failure, stdio);
+        }
+        return exit_code::USAGE;
+    }
 
     let _ = stdio.err.write_all(text.as_bytes());
     if json {
@@ -230,6 +248,14 @@ fn report_parse_error(error: &clap::Error, argv: &[OsString], stdio: &mut Stdio<
         emit_json_error(&guess_command(argv), &failure, stdio);
     }
     code
+}
+
+fn is_mcp_secret_set(argv: &[OsString]) -> bool {
+    argv.windows(3).any(|window| {
+        window[0].to_str() == Some("mcp")
+            && window[1].to_str() == Some("secret")
+            && window[2].to_str() == Some("set")
+    })
 }
 
 /// The noun a help or version request names, for the JSON envelope.

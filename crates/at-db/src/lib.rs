@@ -20,6 +20,7 @@ pub mod deployments;
 pub mod drift;
 mod error;
 pub mod health;
+pub mod items;
 pub mod locks;
 pub mod mcp_index;
 pub mod migrations;

@@ -94,6 +94,127 @@ pub struct SkillImportCandidatesView {
     /// Whether a ZIP validation failure prevented candidate listing.
     pub error: Option<String>,
 }
+/// One source store shown by the library import picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillLibrarySourceView {
+    /// Opaque source identifier, stable for this local catalog snapshot.
+    pub id: String,
+    /// Human-readable source label.
+    pub label: String,
+    /// Source category (`scope` or `project`).
+    pub kind: String,
+    /// Number of importable skills.
+    pub count: usize,
+    /// Last-used project time, when known.
+    pub last_used_at: Option<String>,
+}
+
+/// One skill offered by a source store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillLibrarySkillView {
+    /// Opaque source-skill identifier accepted by the catalog-bound wizard.
+    pub id: String,
+    /// Source label.
+    pub source_label: String,
+    /// Source-store identifier for source filtering.
+    pub source_id: String,
+    /// Original skill package path.
+    pub path: String,
+    /// Parsed name, if valid.
+    pub name: Option<String>,
+    /// Parsed description, if valid.
+    pub description: Option<String>,
+    /// Reason an invalid skill cannot be selected.
+    pub error: Option<String>,
+    /// Why the destination name is unavailable, if it clashes.
+    pub clash_reason: Option<String>,
+}
+
+/// Read-only source and skill inventory for the library wizard step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillLibraryCatalogView {
+    /// Other non-empty scope stores and registered projects.
+    pub sources: Vec<SkillLibrarySourceView>,
+    /// Skills offered by those sources.
+    pub skills: Vec<SkillLibrarySkillView>,
+    /// Target scope summary shown beside the Copy/Link selector.
+    pub target_scope: String,
+}
+
+/// Loads a read-only library catalog for a destination scope.
+#[tauri::command]
+pub fn skill_library_catalog(
+    state: State<'_, AppState>,
+    scope: String,
+    project_id: Option<String>,
+) -> Result<SkillLibraryCatalogView, CommandError> {
+    use std::str::FromStr;
+
+    let scope = Scope::from_str(&scope)
+        .map_err(|_| CommandError::invalid_argument("scope", "choose a supported scope"))?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let project = project_root(database.connection(), project_id.as_deref(), scope)?;
+    let paths = resolve_process_paths(project.as_deref())
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let (sources, skills) = at_engine::skill_import::enumerate_registered_library(
+        database.connection(),
+        paths.global_store(),
+        paths.user_store(),
+        scope,
+        project_id.as_deref(),
+        project.as_deref(),
+    )
+    .map_err(|_| CommandError::unavailable("the local skill library could not be read"))?;
+    let layout = StoreLayout::for_scope(&paths, scope)
+        .map_err(|_| CommandError::unavailable("the target skill store is unavailable"))?;
+    let sources = sources
+        .into_iter()
+        .map(|source| SkillLibrarySourceView {
+            id: source.path.to_string_lossy().into_owned(),
+            label: source.label,
+            kind: match source.kind {
+                at_engine::skill_import::LibrarySourceKind::Scope => "scope".to_owned(),
+                at_engine::skill_import::LibrarySourceKind::Project => "project".to_owned(),
+                _ => "unknown".to_owned(),
+            },
+            count: source.count,
+            last_used_at: source.last_used_at,
+        })
+        .collect();
+    let skills = skills
+        .into_iter()
+        .map(|skill| {
+            let clash_reason = skill.name.as_deref().and_then(|name| {
+                at_engine::skill_templates::slugify(name)
+                    .ok()
+                    .and_then(|slug| at_store::layout::Slug::parse(&slug).ok())
+                    .filter(|slug| layout.skill_dir(slug).exists())
+                    .map(|_| {
+                        "A skill with this name already exists in the target scope.".to_owned()
+                    })
+            });
+            let id = skill.path.to_string_lossy().into_owned();
+            SkillLibrarySkillView {
+                id,
+                source_label: skill.source_label,
+                source_id: skill.source_root.to_string_lossy().into_owned(),
+                path: skill.path.to_string_lossy().into_owned(),
+                name: skill.name,
+                description: skill.description,
+                error: skill.error,
+                clash_reason,
+            }
+        })
+        .collect();
+    Ok(SkillLibraryCatalogView {
+        sources,
+        skills,
+        target_scope: scope.to_string(),
+    })
+}
 
 /// Scans a user-selected folder or ZIP without modifying its contents.
 #[tauri::command]
@@ -473,11 +594,15 @@ pub fn skill_add_preview(
     })?;
     let package = resolve_skill_package(
         source,
-        &request.wizard,
-        &paths,
-        project_root.as_deref(),
-        database.connection(),
-        &network,
+        SkillPackageContext {
+            wizard: &request.wizard,
+            paths: &paths,
+            project_root: project_root.as_deref(),
+            target_scope: scope,
+            target_project_id: request.project_id.as_deref(),
+            connection: database.connection(),
+            network: &network,
+        },
     )?;
     let env = AgentEnvironment {
         home: paths
@@ -649,6 +774,7 @@ pub fn skill_add_apply(
             ),
             other => CommandError::from(other),
         })?;
+    state.record_writes(&cached.plan.change_set, &cached.layout_root);
     let mut staged = false;
     let mut staged_paths = Vec::new();
     let mut stage_error = None;
@@ -710,14 +836,29 @@ fn project_root(
     }
 }
 
+struct SkillPackageContext<'a> {
+    wizard: &'a AddSkillWizard,
+    paths: &'a at_store::paths::AppPaths,
+    project_root: Option<&'a Path>,
+    target_scope: Scope,
+    target_project_id: Option<&'a str>,
+    connection: &'a rusqlite::Connection,
+    network: &'a NetworkState,
+}
+
 fn resolve_skill_package(
     source: &SourceKind,
-    wizard: &AddSkillWizard,
-    paths: &at_store::paths::AppPaths,
-    project_root: Option<&Path>,
-    connection: &rusqlite::Connection,
-    network: &NetworkState,
+    context: SkillPackageContext<'_>,
 ) -> Result<SkillPackage, CommandError> {
+    let SkillPackageContext {
+        wizard,
+        paths,
+        project_root,
+        target_scope,
+        target_project_id,
+        connection,
+        network,
+    } = context;
     match source {
         SourceKind::New => {
             let template = wizard.details.template.as_deref().unwrap_or("blank");
@@ -772,10 +913,31 @@ fn resolve_skill_package(
             let id = wizard.details.library_selection.as_deref().ok_or_else(|| {
                 CommandError::invalid_argument("library_selection", "choose a library skill")
             })?;
+            let (_, candidates) = at_engine::skill_import::enumerate_registered_library(
+                connection,
+                paths.global_store(),
+                paths.user_store(),
+                target_scope,
+                target_project_id,
+                project_root,
+            )
+            .map_err(|_| CommandError::unavailable("the local skill library could not be read"))?;
+            if let Some(candidate) = candidates
+                .iter()
+                .find(|candidate| candidate.path.to_string_lossy() == id)
+            {
+                return SkillPackage::read(&candidate.path)
+                    .map(|loaded| loaded.package)
+                    .map_err(|_| {
+                        CommandError::unavailable(
+                            "the library skill package changed or is unreadable",
+                        )
+                    });
+            }
             let parsed = id.parse::<at_model::ItemId>().map_err(|_| {
                 CommandError::invalid_argument(
                     "library_selection",
-                    "the selected skill id is invalid",
+                    "the selected skill is no longer available",
                 )
             })?;
             let item = at_db::shared::items_by_ids(connection, std::slice::from_ref(&parsed))
@@ -1006,7 +1168,7 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn existing_authorized_ancestor(path: &Path) -> Result<PathBuf, CommandError> {
+pub(super) fn existing_authorized_ancestor(path: &Path) -> Result<PathBuf, CommandError> {
     if !path.is_absolute() {
         return Err(CommandError::unavailable(
             "an agent skill path is not absolute and cannot be authorized",

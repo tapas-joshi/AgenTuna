@@ -90,6 +90,20 @@ pub enum DbError {
         /// Why the value is invalid.
         reason: String,
     },
+    /// An item id was not found for a repository mutation.
+    #[error("item {item_id} was not found")]
+    ItemNotFound {
+        /// Missing stable identity.
+        item_id: at_model::ItemId,
+    },
+    /// Re-homing would duplicate a canonical item in the target scope.
+    #[error("item slug `{slug}` already exists in scope `{scope}`")]
+    DuplicateItemIdentity {
+        /// Scope receiving the item.
+        scope: at_model::Scope,
+        /// Existing canonical slug.
+        slug: String,
+    },
     /// A stored value is not one this binary knows.
     #[error(transparent)]
     UnknownValue(#[from] at_model::ParseWireError),

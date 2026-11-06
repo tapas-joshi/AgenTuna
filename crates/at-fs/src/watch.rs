@@ -326,7 +326,12 @@ impl RecentWrites {
     }
 
     /// Records a write that is happening now.
+    ///
+    /// Existing paths are canonicalized so this registry uses the same spelling as platform
+    /// watcher events (notably macOS paths under `/private/var`).
     pub fn record(&self, path: impl Into<PathBuf>, after_hash: impl Into<String>) {
+        let path = path.into();
+        let path = fs::canonicalize(&path).unwrap_or(path);
         self.record_at(path, after_hash, Instant::now());
     }
 

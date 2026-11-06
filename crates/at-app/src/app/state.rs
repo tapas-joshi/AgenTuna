@@ -1,13 +1,33 @@
 //! Managed application state shared by Tauri commands.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use at_db::Database;
+use at_fs::RecentWrites;
 
 use super::bridge::JobBridge;
 use super::cli_install::CliInstaller;
 use super::config::AppConfig;
 use super::instance::InstanceState;
+
+/// Failure to load cached scope snapshots for an application query.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScopeCacheError {
+    /// Resolved application paths were not attached to the state.
+    #[error("application paths are unavailable")]
+    PathsUnavailable,
+    /// Resolving the selected project paths failed.
+    #[error(transparent)]
+    Paths(#[from] at_store::paths::PathError),
+    /// A store-level scope load failed.
+    #[error(transparent)]
+    Loader(#[from] at_engine::loader::LoadError),
+    /// The in-process scope cache mutex was poisoned.
+    #[error("scope snapshot cache is unavailable")]
+    CachePoisoned,
+}
 
 /// Process-wide services shared by every Tauri command.
 pub struct AppState {
@@ -16,9 +36,12 @@ pub struct AppState {
     config: Option<Arc<AppConfig>>,
     instance: Option<Arc<InstanceState>>,
     database: Option<Arc<Mutex<Database>>>,
+    recent_writes: Arc<RecentWrites>,
     logging: Option<at_store::logging::Logging>,
     recovery: Option<Arc<super::recovery::RecoveryService>>,
     recovery_outcome: Option<super::recovery::RecoveryOutcome>,
+    paths: Option<at_store::paths::AppPaths>,
+    scope_cache: Mutex<Option<(Option<PathBuf>, at_engine::loader::LoadedScopes)>>,
 }
 
 impl AppState {
@@ -31,9 +54,12 @@ impl AppState {
             config: None,
             instance: None,
             database: None,
+            recent_writes: Arc::new(RecentWrites::new()),
             logging: None,
             recovery: None,
             recovery_outcome: None,
+            paths: None,
+            scope_cache: Mutex::new(None),
         }
     }
 
@@ -57,6 +83,89 @@ impl AppState {
         self
     }
 
+    /// Attaches the resolved, injectable filesystem roots used by read-only engine queries.
+    #[must_use]
+    pub fn with_paths(mut self, paths: at_store::paths::AppPaths) -> Self {
+        self.paths = Some(paths);
+        self
+    }
+    /// The resolved application paths, absent in tests that do not configure stores.
+    #[must_use]
+    pub fn paths(&self) -> Option<&at_store::paths::AppPaths> {
+        self.paths.as_ref()
+    }
+
+    /// Loads or reuses scope snapshots for the selected project.
+    ///
+    /// # Errors
+    /// Returns a typed error if paths are unavailable, path resolution fails, the cache is
+    /// poisoned, or a store-level load fails.
+    pub fn load_scope_snapshots(
+        &self,
+        active_project: Option<&Path>,
+    ) -> Result<at_engine::loader::LoadedScopes, ScopeCacheError> {
+        let base = self
+            .paths
+            .as_ref()
+            .ok_or(ScopeCacheError::PathsUnavailable)?;
+        let paths = match active_project {
+            Some(root) => base.for_project(root).map_err(ScopeCacheError::Paths)?,
+            None => base.clone(),
+        };
+        let key = active_project.map(Path::to_path_buf);
+        let mut cache = self
+            .scope_cache
+            .lock()
+            .map_err(|_| ScopeCacheError::CachePoisoned)?;
+        if let Some((cached_key, scopes)) = cache.as_ref()
+            && cached_key == &key
+        {
+            return Ok(scopes.clone());
+        }
+        let scopes = at_engine::loader::load_scope_snapshots(&paths, active_project)
+            .map_err(ScopeCacheError::Loader)?;
+        *cache = Some((key, scopes.clone()));
+        Ok(scopes)
+    }
+
+    /// Invalidates cached scope snapshots after a store refresh or write.
+    pub fn invalidate_scope_cache(&self) {
+        if let Ok(mut cache) = self.scope_cache.lock() {
+            *cache = None;
+        }
+    }
+
+    /// Shared registry used to suppress watcher events caused by AgenTuna's own writes.
+    #[must_use]
+    pub fn recent_writes(&self) -> Arc<RecentWrites> {
+        Arc::clone(&self.recent_writes)
+    }
+
+    /// Records successful writes from an applied ChangeSet for filesystem-event suppression.
+    pub fn record_writes(&self, set: &at_model::ChangeSet, store_root: &Path) {
+        for operation in &set.ops {
+            let Some(path) = operation.destination() else {
+                continue;
+            };
+            let destination = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                store_root.join(path)
+            };
+            let hash = match operation {
+                at_model::FileOp::Write { bytes, .. } => at_fs::sha256_hex(bytes),
+                at_model::FileOp::Delete { .. } | at_model::FileOp::Mkdir { .. } => continue,
+                _ => {
+                    let Ok(bytes) = std::fs::read(&destination) else {
+                        continue;
+                    };
+                    at_fs::sha256_hex(&bytes)
+                }
+            };
+            self.recent_writes.record(destination, hash);
+        }
+        self.invalidate_scope_cache();
+    }
     /// Locks the shared database for a typed command operation.
     ///
     /// # Errors
@@ -131,5 +240,127 @@ impl AppState {
     #[must_use]
     pub fn instance(&self) -> Option<&InstanceState> {
         self.instance.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use at_fs::{WatchConfig, WatchEvent, WatchRoot, WatchRootKind, WatchService};
+    use at_model::{ChangeSet, ExpectedState, FileOp, OperationKind};
+
+    use super::AppState;
+    use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
+
+    struct NullSink;
+
+    impl EventSink for NullSink {
+        fn emit(&self, _event: JobEvent) {}
+    }
+
+    #[test]
+    fn app_writes_are_suppressed_but_external_writes_are_reported() {
+        let temp = tempfile::tempdir().expect("temp");
+        // Watcher events use canonical paths (macOS temp dirs live under /private/var).
+        let root = std::fs::canonicalize(temp.path())
+            .expect("canonical temp")
+            .join("agent");
+        std::fs::create_dir_all(&root).expect("root");
+        let state = AppState::new(
+            Arc::new(JobBridge::new(
+                Arc::new(NullSink),
+                Arc::new(TracingOperationsLog),
+            )),
+            None,
+        );
+        let file = root.join("settings.json");
+        std::fs::write(&file, b"before").expect("seed");
+        let service = WatchService::new(
+            WatchConfig::new([WatchRoot::dir(&root, WatchRootKind::SkillsDir)])
+                .with_debounce(Duration::from_millis(50))
+                .with_registry(state.recent_writes()),
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        service.start().expect("start");
+
+        let app_bytes = b"app write".to_vec();
+        std::fs::write(&file, &app_bytes).expect("app write");
+        let change_set = ChangeSet {
+            id: "test".to_owned(),
+            preview_id: "test-preview".to_owned(),
+            operation_kind: OperationKind::parse("edit_skill").expect("operation"),
+            scope: None,
+            project_id: None,
+            summary: "test".to_owned(),
+            ops: vec![FileOp::Write {
+                path: PathBuf::from("settings.json"),
+                bytes: app_bytes,
+                expected: ExpectedState::absent(),
+                follow_symlink: false,
+                backup: true,
+            }],
+            created_at_unix_seconds: 0,
+        };
+        state.record_writes(&change_set, &root);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while state.recent_writes().suppressed_count() == 0 && Instant::now() < deadline {
+            let _ = service.next_event(Duration::from_millis(50));
+        }
+        assert_eq!(state.recent_writes().suppressed_count(), 1);
+
+        std::fs::write(&file, b"external write").expect("external write");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut external_batch = false;
+        while Instant::now() < deadline {
+            if matches!(
+                service.next_event(Duration::from_millis(100)),
+                Some(WatchEvent::Batch(batch)) if batch.contains(&file)
+            ) {
+                external_batch = true;
+                break;
+            }
+        }
+        assert!(external_batch, "external write should reach the watcher");
+        service.stop().expect("stop");
+    }
+
+    #[test]
+    fn scope_snapshot_cache_uses_injected_home_and_project_paths() {
+        let home = at_fs::testkit::TestHome::new().expect("temporary home");
+        let project = home.project("repo").expect("temporary project");
+        std::fs::create_dir_all(project.root().join(".git")).expect("git directory");
+        let paths = at_store::paths::AppPaths::resolve(
+            &at_store::paths::PathEnvironment::default()
+                .with_home(home.home())
+                .with_project_root(project.root()),
+        )
+        .expect("injected app paths");
+        let state = AppState::new(
+            Arc::new(JobBridge::new(
+                Arc::new(NullSink),
+                Arc::new(TracingOperationsLog),
+            )),
+            None,
+        )
+        .with_paths(paths);
+        let loaded = state
+            .load_scope_snapshots(Some(project.root()))
+            .expect("load injected stores");
+        assert_eq!(loaded.layers.len(), 4);
+        assert!(
+            loaded
+                .layers
+                .iter()
+                .all(|layer| layer.definitions.is_empty())
+        );
+        state.invalidate_scope_cache();
+        let refreshed = state
+            .load_scope_snapshots(Some(project.root()))
+            .expect("reload injected stores");
+        assert_eq!(refreshed.layers.len(), 4);
     }
 }

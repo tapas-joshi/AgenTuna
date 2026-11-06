@@ -12,3 +12,4 @@ export { MenuMnemonicContext } from "./menu-context";
 export { AddMenu, ADD_ACTION_IDS } from "./AddMenu";
 export type { AddActionId, AddMenuAction, AddMenuProps } from "./AddMenu";
 export type { MnemonicRegistry } from "./menu-context";
+export { McpServerActions } from "./McpServerActions";

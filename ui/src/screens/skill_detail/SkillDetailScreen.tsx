@@ -14,6 +14,7 @@ import { useAppSnapshot, useAppState } from "../../state/context";
 import { ProjectSyncPanel } from "../overview/OverviewScreen";
 import { applySkillEdit, applySkillUpdate, checkSkillSource, compareSkillCopies, compareSkillVersion, ignoreSkillUpdate, loadSkillDetail, previewSkillEdit, previewSkillUpdate, revealSkill, setSkillAutoUpdate } from "./commands";
 import { publishRefusedOverwrite } from "../../overlays/dialogs/overwrite-commands";
+import { Modal } from "../../overlays/dialogs/Modal";
 
 function detailId(screenState: Readonly<Record<string, unknown>>): string | null {
   const value = screenState["detail:itemId"];
@@ -152,7 +153,21 @@ function SkillDetailContent({ detail, onRefresh }: { readonly detail: SkillDetai
         {compareError && <p role="alert" className="mb-0 mt-8 text-12 text-danger">{compareError}</p>}
       </section>
     )}
-    {comparison && <section className="rounded-10 border border-border bg-raised p-16"><div className="mb-12 flex items-center justify-between"><div><h2 className="m-0 text-14 font-semibold text-text">Compare copies</h2><p className="mb-0 mt-4 text-12 text-text-secondary">{comparison.shadow.scope} compared with winning {comparison.winner.scope}{comparison.identical ? " · identical copies" : ""}</p></div><Button onClick={() => setComparison(null)}>Close</Button></div><DiffViewer diff={comparison.diff} displayPath="SKILL.md" /></section>}
+    <Modal
+      open={comparison !== null}
+      title="Compare copies"
+      description={comparison ? `${comparison.shadow.scope} compared with winning ${comparison.winner.scope}${comparison.identical ? " · identical copies" : ""}` : undefined}
+      onOpenChange={(open) => { if (!open) setComparison(null); }}
+      footer={<Button onClick={() => setComparison(null)}>Close</Button>}
+    >
+      {comparison && (
+        <div className="grid gap-12 md:grid-cols-2">
+          <div><h3 className="m-0 text-12">{comparison.winner.scope} · winner</h3><code className="break-all text-11">{comparison.winner.hash}</code></div>
+          <div><h3 className="m-0 text-12">{comparison.shadow.scope} · shadow</h3><code className="break-all text-11">{comparison.shadow.hash}</code></div>
+          <div className="md:col-span-2"><DiffViewer diff={comparison.diff} displayPath="SKILL.md" /></div>
+        </div>
+      )}
+    </Modal>
     <div className="grid gap-16 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)]">
       <section className="min-h-[420px] overflow-hidden rounded-10 border border-border bg-raised" aria-label="Skill document">
         <div className="flex items-center justify-between border-b border-border px-16 py-12"><div><h2 className="m-0 text-14 font-semibold text-text">SKILL.md</h2><p className="mb-0 mt-4 text-11 text-text-muted">{detail.description ?? "No description"}</p></div>{editing && dirty && <span className="text-12 text-warning">Unsaved changes</span>}</div>

@@ -14,6 +14,7 @@ import type { WizardStep } from "../../generated/WizardStep";
 import type { SkillAddApplyResultView } from "../../generated/SkillAddApplyResultView";
 import type { SkillAddPreviewRequest } from "../../generated/SkillAddPreviewRequest";
 import type { SkillAddPreviewView } from "../../generated/SkillAddPreviewView";
+import type { SkillLibraryCatalogView } from "../../generated/SkillLibraryCatalogView";
 
 const VALIDATION_MESSAGE = {
   source_required: "Choose a skill source.",
@@ -58,6 +59,28 @@ export function AddSkillWizard({ onClose, projectId = null }: { readonly onClose
   const [templatePreview, setTemplatePreview] = useState<{ slug: string | null; markdown: string; name_error: string | null; description_error: string | null } | null>(null);
   const [importCandidates, setImportCandidates] = useState<SkillImportCandidateView[]>([]);
   const [candidateError, setCandidateError] = useState<string | null>(null);
+  const [libraryCatalog, setLibraryCatalog] = useState<SkillLibraryCatalogView | null>(null);
+  const [librarySourceId, setLibrarySourceId] = useState("");
+  const [libraryCatalogError, setLibraryCatalogError] = useState<string | null>(null);
+  useEffect(() => {
+    if (wizard.step !== "details" || wizard.source !== "library") return;
+    let current = true;
+    setLibraryCatalog(null);
+    setLibraryCatalogError(null);
+    void invoke<SkillLibraryCatalogView>("skill_library_catalog", {
+      scope: wizard.scope ?? "user",
+      projectId,
+    }).then((catalog) => {
+      if (!current) return;
+      setLibraryCatalog(catalog);
+      setLibrarySourceId((previous) => catalog.sources.some((source) => source.id === previous) ? previous : catalog.sources[0]?.id ?? "");
+    }).catch((reason: unknown) => {
+      if (!current) return;
+      const value = reason as { message?: unknown } | null;
+      setLibraryCatalogError(typeof value?.message === "string" ? value.message : "The skill library could not be read.");
+    });
+    return () => { current = false; };
+  }, [wizard.step, wizard.source, wizard.scope, projectId]);
   const [marketplacePolicy, setMarketplacePolicy] = useState<NetworkPolicyView | null>(null);
   const [marketplaceQuery, setMarketplaceQuery] = useState("");
   const [marketplaceResults, setMarketplaceResults] = useState<MarketplaceSearchView | null>(null);
@@ -292,7 +315,34 @@ export function AddSkillWizard({ onClose, projectId = null }: { readonly onClose
       {wizard.source === "new" && <section aria-label="Skill template" className="grid grid-cols-1 gap-8 sm:grid-cols-3">{([{ id: "blank", title: "Blank", note: "A clean starting point" }, { id: "checklist", title: "Checklist", note: "A sequence of checks" }, { id: "workflow", title: "Workflow", note: "Inputs, outputs and steps" }] as const).map(({ id, title, note }) => <button key={id} type="button" role="radio" aria-checked={wizard.details.template === id} onClick={() => setDetails({ template: id })} className={`rounded-8 border p-12 text-left ${wizard.details.template === id ? "border-accent bg-accent/10" : "border-border bg-surface"}`}><span className="block text-14 font-semibold text-text">{title}</span><span className="mt-4 block text-12 text-muted">{note}</span></button>)}</section>}
       {wizard.source === "git" && <><label className="flex flex-col gap-5 text-13 text-text">Repository URL<input aria-label="Repository URL" value={wizard.details.repo_url} onChange={(event) => setDetails({ repo_url: event.target.value, fetched_repo_selection: null })} placeholder="https://host/owner/repository.git" className="rounded-8 border border-border bg-surface px-10 py-8" /></label><label className="flex flex-col gap-5 text-13 text-text">Branch, tag or commit (optional)<input value={wizard.details.repo_reference} onChange={(event) => setDetails({ repo_reference: event.target.value })} className="rounded-8 border border-border bg-surface px-10 py-8" /></label><label className="flex flex-col gap-5 text-13 text-text">Selected skill in repository<input aria-label="Repository skill selection" value={wizard.details.fetched_repo_selection ?? ""} onChange={(event) => setDetails({ fetched_repo_selection: event.target.value || null })} placeholder="Repository subpath" className="rounded-8 border border-border bg-surface px-10 py-8" /></label></>}
       {wizard.source === "git" && <section aria-label="Fetched repository skills" className="grid gap-10"><button type="button" disabled={busy || !wizard.details.repo_url.trim()} onClick={() => void fetchGitCandidates()} className="w-fit rounded-8 bg-accent px-12 py-8 text-13 text-on-accent">{busy ? "Fetching…" : "Fetch skills"}</button>{candidateError && <p role="alert" className="m-0 text-13 text-danger">{candidateError}</p>}{importCandidates.map((candidate) => <label key={candidate.id} className="flex items-start gap-8 rounded-8 border border-border p-10 text-13 text-text"><input type="radio" name="git-skill-candidate" disabled={!candidate.name} checked={wizard.details.fetched_repo_selection === candidate.id} onChange={() => { setDetails({ fetched_repo_selection: candidate.id }); if (candidate.name) void send({ type: "set_name", payload: candidate.name }); }} /><span className="grid gap-4"><strong>{candidate.name ?? "Invalid skill"}</strong><span className="text-12 text-muted">{candidate.error ?? candidate.description}</span>{candidate.markdown && <pre aria-label={`${candidate.name ?? "Skill"} SKILL.md preview`} className="max-h-160 overflow-auto whitespace-pre-wrap rounded-6 bg-canvas p-8 text-11">{candidate.markdown}</pre>}</span></label>)}</section>}
-      {wizard.source === "library" && <label className="flex flex-col gap-5 text-13 text-text">Library skill<input aria-label="Library skill" value={wizard.details.library_selection ?? ""} onChange={(event) => setDetails({ library_selection: event.target.value || null })} placeholder="Choose a skill" className="rounded-8 border border-border bg-surface px-10 py-8" /></label>}
+      {wizard.source === "library" && <section aria-label="Library import" className="grid gap-12 rounded-10 border border-border p-12">
+        {libraryCatalogError && <p role="alert" className="m-0 text-13 text-danger">{libraryCatalogError}</p>}
+        {!libraryCatalog && !libraryCatalogError && <p role="status" className="m-0 text-13 text-muted">Loading skills from other scopes and projects…</p>}
+        {libraryCatalog && libraryCatalog.sources.length === 0 && <div role="status" className="grid gap-8 text-13 text-muted"><p className="m-0">No other skill sources are available.</p><button type="button" onClick={() => void send({ type: "select_source", payload: "git" })} className="w-fit rounded-8 border border-border px-12 py-8 text-13 text-text">Import from Git instead</button></div>}
+        {libraryCatalog && libraryCatalog.sources.length > 0 && <>
+          <label className="flex flex-col gap-5 text-13 text-text">Source
+            <select aria-label="Library source" value={librarySourceId} onChange={(event) => setLibrarySourceId(event.target.value)} className="rounded-8 border border-border bg-surface px-10 py-8">
+              {libraryCatalog.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.count} skills{source.last_used_at ? ` · last used ${new Date(source.last_used_at).toLocaleDateString()}` : ""}</option>)}
+            </select>
+          </label>
+          <p className="m-0 text-12 text-muted">Target scope: {libraryCatalog.target_scope}</p>
+          <ul aria-label="Skills in selected source" className="m-0 grid gap-8 p-0">
+            {libraryCatalog.skills.filter((skill) => skill.source_id === librarySourceId).map((skill) => {
+              const disabledReason = skill.error ?? skill.clash_reason;
+              return <li key={skill.id} className={`list-none rounded-8 border p-10 ${wizard.details.library_selection === skill.id ? "border-accent bg-accent/10" : "border-border"}`}>
+                <label className="flex items-start gap-8 text-13 text-text">
+                  <input type="radio" name="library-skill" disabled={Boolean(disabledReason)} checked={wizard.details.library_selection === skill.id} onChange={() => { setDetails({ library_selection: skill.id }); if (skill.name) void send({ type: "set_name", payload: skill.name }); }} />
+                  <span className="grid gap-3"><span className="font-medium">{skill.name ?? "Invalid skill"}</span><span className="break-all text-11 text-muted">{skill.path}</span>{skill.description && <span className="text-12 text-muted">{skill.description}</span>}{disabledReason && <span className="text-12 text-danger">{disabledReason}</span>}</span>
+                </label>
+              </li>;
+            })}
+          </ul>
+          <section aria-label="Selected library skills" className="rounded-8 bg-surface px-10 py-8 text-12 text-muted">
+            <strong className="font-medium text-text">Selected</strong>
+            {wizard.details.library_selection ? libraryCatalog.skills.filter((skill) => skill.id === wizard.details.library_selection).map((skill) => <span key={skill.id} className="ml-6">{skill.name ?? skill.id} · {skill.source_label}</span>) : <span className="ml-6">No skill selected</span>}
+          </section>
+        </>}
+      </section>}
       {wizard.source === "marketplace" && <div className="grid gap-10 rounded-8 border border-border bg-surface p-12"><p role="status" className="m-0 text-13 text-muted">{marketplacePolicy ? marketplacePolicy.marketplace_enabled ? "Marketplace search is enabled. Search runs only after you press Search." : marketplacePolicy.offline ? "Offline policy is active; cached marketplace results may be available." : "Marketplace browsing is unavailable because network policy disables it." : "Checking marketplace network policy…"}</p>{marketplacePolicy && (marketplacePolicy.marketplace_enabled || marketplacePolicy.offline) && <div className="flex gap-8"><input aria-label="Search marketplace" value={marketplaceQuery} onChange={(event) => setMarketplaceQuery(event.target.value)} placeholder="Search skills.sh" className="min-w-0 flex-1 rounded-8 border border-border bg-surface px-10 py-8" /><button type="button" disabled={busy || !marketplaceQuery.trim()} onClick={() => void searchMarketplace(false)} className="rounded-8 bg-accent px-12 py-8 text-13 text-on-accent">Search</button><button type="button" disabled={busy || !marketplaceQuery.trim()} onClick={() => void searchMarketplace(true)} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Refresh</button></div>}{marketplaceError && <p role="alert" className="m-0 text-13 text-danger">{marketplaceError}</p>}{marketplaceResults && <><p className="m-0 text-12 text-muted">{marketplaceResults.provenance}{marketplaceResults.offline ? " · cached/offline" : ""}{marketplaceResults.stale ? " · stale" : ""}</p>{marketplaceResults.results.map((result) => <button key={result.id} type="button" aria-pressed={wizard.details.marketplace_id === result.id} onClick={() => { setDetails({ marketplace_id: result.id, repo_url: result.source }); void send({ type: "set_name", payload: result.name }); }} className={`grid gap-4 rounded-8 border p-10 text-left ${wizard.details.marketplace_id === result.id ? "border-accent bg-accent/10" : "border-border"}`}><span className="text-14 font-semibold text-text">{result.name}</span><span className="text-12 text-muted">{result.author} · {result.installs.toLocaleString()} installs</span><span className="text-12 text-muted">{result.description}</span></button>)}</>}</div>}
       {wizard.source === "folder" && <div className="flex items-end gap-8"><label className="flex flex-1 flex-col gap-5 text-13 text-text">Folder path<input aria-label="Folder path" value={wizard.details.folder_path} onChange={(event) => setDetails({ folder_path: event.target.value, folder_selection: null })} placeholder="Choose a folder" className="rounded-8 border border-border bg-surface px-10 py-8" /></label><button type="button" disabled={busy} onClick={() => void chooseImportPath("folder")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Browse…</button><button type="button" disabled={busy || !wizard.details.folder_path} onClick={() => void scanLocalImport("folder")} className="rounded-8 bg-accent px-12 py-8 text-13 text-on-accent">{busy ? "Scanning…" : "Scan folder"}</button></div>}
       {wizard.source === "zip" && <div className="flex items-end gap-8"><label className="flex flex-1 flex-col gap-5 text-13 text-text">ZIP archive path<input aria-label="ZIP path" value={wizard.details.zip_path} onChange={(event) => setDetails({ zip_path: event.target.value, zip_selection: null })} placeholder="Choose a .zip file" className="rounded-8 border border-border bg-surface px-10 py-8" /></label><button type="button" disabled={busy} onClick={() => void chooseImportPath("zip")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Browse…</button><button type="button" disabled={busy || !wizard.details.zip_path} onClick={() => void scanLocalImport("zip")} className="rounded-8 bg-accent px-12 py-8 text-13 text-on-accent">{busy ? "Scanning…" : "Scan ZIP"}</button></div>}

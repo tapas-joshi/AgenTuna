@@ -10,7 +10,8 @@ use at_store::manifest::{hash_bytes, hash_mcp_entry, hash_skill_folder};
 use serde_json::Value;
 
 /// Ownership relationship to the AgenTuna store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Ownership {
     /// Native content hashes to the corresponding AgenTuna item.
@@ -22,7 +23,8 @@ pub enum Ownership {
 }
 
 /// Scan processing status for one result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ParseStatus {
     /// Content was successfully read and identified.
@@ -32,7 +34,7 @@ pub enum ParseStatus {
 }
 
 /// A discovered native item or per-item discovery error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScanItem {
     /// Kind of discovered entry.
     pub kind: ItemKind,
@@ -57,7 +59,7 @@ pub struct ScanItem {
 }
 
 /// Read-only results of one native scan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScanReport {
     /// All discovered items and item errors, stable-sorted by path/kind/name.
     pub items: Vec<ScanItem>,

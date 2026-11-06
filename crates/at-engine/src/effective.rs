@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use at_model::{AgentId, ItemId, ItemKind, ItemState, LogicalId, Scope, ScopeSnapshot};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::locks::{LockMark, LockStore};
 use crate::resolve::{ResolveDiagnostic, ResolveInput, resolve};
@@ -43,17 +44,21 @@ pub struct EffectiveQuery<'a> {
 }
 
 /// One item's effective configuration and per-agent load state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct EffectiveItem {
     /// Stable logical identity.
+    #[ts(type = "string")]
     pub logical_id: LogicalId,
     /// AgenTuna item id when the winning definition is managed.
+    #[ts(type = "string | null")]
     pub item_id: Option<ItemId>,
     /// Item kind.
+    #[ts(type = "string")]
     pub kind: ItemKind,
     /// Display name from the winning definition.
     pub name: String,
     /// Scope that supplied the winning definition.
+    #[ts(type = "string")]
     pub winner_scope: Scope,
     /// Path from which the winning definition was loaded.
     pub source_path: PathBuf,
@@ -66,18 +71,20 @@ pub struct EffectiveItem {
 }
 
 /// One agent's effective load state for an item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct EffectiveAgentState {
     /// Agent identity.
+    #[ts(type = "string")]
     pub agent: AgentId,
     /// State recorded by the adapter observation, or `Off` when not loaded.
+    #[ts(type = "string")]
     pub state: ItemState,
     /// Whether the item is loaded by this agent.
     pub loads: bool,
 }
 
 /// Lock metadata shown with an effective item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct EffectiveLock {
     /// Opaque lock row identity.
     pub id: String,
@@ -86,20 +93,25 @@ pub struct EffectiveLock {
 }
 
 /// A disabled item entry and the tombstone's known provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct EffectiveDisabled {
     /// Disabled logical identity.
+    #[ts(type = "string")]
     pub logical_id: LogicalId,
     /// Item id named by the tombstone.
+    #[ts(type = "string")]
     pub item_id: ItemId,
     /// Item kind.
+    #[ts(type = "string")]
     pub kind: ItemKind,
     /// Display name of the disabled definition.
     pub name: String,
     /// Scope that recorded the tombstone.
+    #[ts(type = "string")]
     pub scope: Scope,
     /// Agent the tombstone applies to in this result; `None` for an unfiltered query
     /// when no installed agents are available.
+    #[ts(type = "string | null")]
     pub agent: Option<AgentId>,
     /// Caller-supplied explanation, absent when not stored/provided.
     pub reason: Option<String>,
@@ -108,7 +120,7 @@ pub struct EffectiveDisabled {
 }
 
 /// Effective configuration rows and tombstones for the requested scope/agent/kind.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct EffectiveConfig {
     /// Resolved effective items, sorted by kind then display name.
     pub items: Vec<EffectiveItem>,
@@ -119,11 +131,12 @@ pub struct EffectiveConfig {
 }
 
 /// Resolution warning retained in the effective-config payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct EffectiveDiagnostic {
     /// A stable diagnostic kind.
     pub kind: String,
     /// Scope for a scope-specific warning.
+    #[ts(type = "string | null")]
     pub scope: Option<Scope>,
     /// Redacted source error text when provided by the resolver.
     pub message: String,

@@ -265,32 +265,35 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
                 agent: None,
                 scope: item.scope,
             });
-            for agent in &item.agents {
-                let action = if request.strategy == MigrationStrategy::LeaveAndWatch {
-                    MigrationAction::RecordWatched
-                } else if request.copy_agents.contains(agent) {
-                    MigrationAction::WriteCopy
+            let action = if request.strategy == MigrationStrategy::LeaveAndWatch {
+                MigrationAction::RecordWatched
+            } else if !item.agents.is_empty()
+                && item
+                    .agents
+                    .iter()
+                    .all(|agent| request.copy_agents.contains(agent))
+            {
+                MigrationAction::WriteCopy
+            } else {
+                MigrationAction::WriteLink
+            };
+            let watched = action == MigrationAction::RecordWatched;
+            steps.push(PlanStep {
+                seq: 0,
+                action,
+                source: Some(if watched {
+                    item.path.clone()
                 } else {
-                    MigrationAction::WriteLink
-                };
-                let watched = action == MigrationAction::RecordWatched;
-                steps.push(PlanStep {
-                    seq: 0,
-                    action,
-                    source: Some(if watched {
-                        item.path.clone()
-                    } else {
-                        store_path.clone()
-                    }),
-                    destination: (!watched).then(|| item.path.clone()),
-                    expected_source_hash: Some(digest.clone()),
-                    expected_destination_hash: None,
-                    backup_path: None,
-                    bytes,
-                    agent: Some(agent.clone()),
-                    scope: item.scope,
-                });
-            }
+                    store_path.clone()
+                }),
+                destination: (!watched).then(|| item.path.clone()),
+                expected_source_hash: Some(digest.clone()),
+                expected_destination_hash: None,
+                backup_path: None,
+                bytes,
+                agent: item.agents.iter().next().cloned(),
+                scope: item.scope,
+            });
             items += 1;
         }
     }

@@ -13,12 +13,14 @@ import { AppStateProvider } from "./state/context";
 import { Shell } from "./shell";
 import { SHELL_SECTION_LABEL, sectionForRoute } from "./shell/routes";
 
-import { PreferencesScreen } from "./screens/preferences/PreferencesScreen";
+import { EffectiveScreen } from "./screens/effective/EffectiveScreen";
+import { MigrateScanScreen } from "./screens/migrate/MigrateScanScreen";
 import { AppOverlays } from "./overlays/AppOverlays";
 import { OverviewScreen } from "./screens/overview/OverviewScreen";
 import { AddSkillWizard } from "./screens/add_skill/AddSkillWizard";
 import { SecretInventoryScreen } from "./screens/secrets/SecretInventoryScreen";
 import { SkillDetailScreen } from "./screens/skill_detail/SkillDetailScreen";
+import { PreferencesScreen } from "./screens/preferences/PreferencesScreen";
 import { AddMcpServerForm } from "./screens/mcp_form";
 import type { AddMcpServerDraft } from "./screens/mcp_form";
 import type { McpChangeSetPreviewView } from "./generated/McpChangeSetPreviewView";
@@ -63,6 +65,8 @@ function RouteBody({
   if (route === "skill-detail") return <SkillDetailScreen />;
   if (route === "add-skill") return <AddSkillWizard onClose={onClose} projectId={projectId} />;
   if (route === "secrets") return <SecretInventoryScreen />;
+  if (route === "effective") return <EffectiveScreen />;
+  if (route === "migrate") return <MigrateScanScreen />;
   if (route === "settings") return <PreferencesScreen />;
   if (route === "mcp-form") return <AddMcpServerForm
     onCancel={onClose}

@@ -144,6 +144,7 @@ pub fn plan_change_for_repo(
             .map_err(|error| ChangeForRepoError::Locked(error.to_string()))?;
     }
 
+    let is_disable = matches!(&intent, ChangeForRepoIntent::DisableInRepo { .. });
     let (path, before, after, write_scope, projected_layers, projected_project, projected_local) =
         match intent {
             ChangeForRepoIntent::DisableInRepo { scope } => {
@@ -225,6 +226,17 @@ pub fn plan_change_for_repo(
                 .into());
             }
         };
+    let mut projected_layers = projected_layers;
+    if is_disable
+        && !projected_layers
+            .iter()
+            .any(|layer| layer.scope == write_scope)
+    {
+        projected_layers.push(ScopeSnapshot {
+            scope: write_scope,
+            definitions: Vec::new(),
+        });
+    }
 
     let mut manifests = request.inherited_manifests.to_vec();
     manifests.retain(|(scope, _)| !matches!(scope, Scope::Project | Scope::Local));
@@ -401,6 +413,9 @@ mod tests {
         )
         .expect("plan");
         let set = plan.change_set.expect("changeset");
+        assert_eq!(plan.winner_scope, None);
+        assert_eq!(plan.shadowed_scope, None);
+        assert_eq!(plan.shadowed_scopes, Vec::new());
         assert_eq!(set.ops.len(), 1);
         assert_eq!(
             set.ops[0].destination(),
@@ -483,6 +498,15 @@ mod tests {
         locked_request.locks = Some(&locks);
         assert!(matches!(
             plan_change_for_repo(ChangeForRepoIntent::OverrideInProject, &locked_request),
+            Err(ChangeForRepoError::Locked(reason)) if reason.contains("admin policy")
+        ));
+        assert!(matches!(
+            plan_change_for_repo(
+                ChangeForRepoIntent::DisableInRepo {
+                    scope: Scope::Project
+                },
+                &locked_request
+            ),
             Err(ChangeForRepoError::Locked(reason)) if reason.contains("admin policy")
         ));
     }

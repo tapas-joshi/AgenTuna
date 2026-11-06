@@ -42,7 +42,7 @@ pub fn find_executable(path_value: Option<&str>, name: &str) -> Option<PathBuf> 
     let paths = path_value?;
     std::env::split_paths(paths)
         .map(|directory| directory.join(name))
-        .find(|candidate| std::fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file()))
+        .find(|candidate| is_executable_file(candidate))
 }
 
 /// Runs an executable with explicit arguments, bounded output, and a deadline.
@@ -144,7 +144,21 @@ pub fn primary_skill_root(
 /// Whether a path is a regular executable file.
 #[must_use]
 pub fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -156,6 +170,15 @@ mod tests {
         let bin = root.path().join("agent-cli");
         std::fs::write(&bin, b"fixture").expect("write fixture executable");
         let path = std::env::join_paths([root.path()]).expect("join injected path");
+        #[cfg(unix)]
+        assert_eq!(find_executable(path.to_str(), "agent-cli"), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&bin).expect("metadata").permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&bin, permissions).expect("set executable bit");
+        }
         assert_eq!(find_executable(path.to_str(), "agent-cli"), Some(bin));
         assert_eq!(find_executable(Some(""), "agent-cli"), None);
     }

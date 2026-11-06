@@ -383,6 +383,8 @@ pub struct LibraryStore {
     pub path: PathBuf,
     /// Source scope. `None` identifies a registered project store.
     pub scope: Option<at_model::Scope>,
+    /// Last-used timestamp for a registered project, if known.
+    pub last_used_at: Option<String>,
 }
 
 /// Source category for a library picker row.
@@ -406,6 +408,8 @@ pub struct LibrarySource {
     pub kind: LibrarySourceKind,
     /// Number of discoverable skills in this source.
     pub count: usize,
+    /// Last-used timestamp for a registered project, if known.
+    pub last_used_at: Option<String>,
 }
 
 /// A skill offered by a library source, including parse failures.
@@ -413,6 +417,8 @@ pub struct LibrarySource {
 pub struct LibrarySkill {
     /// Source label.
     pub source_label: String,
+    /// Root store that owns this candidate.
+    pub source_root: PathBuf,
     /// Skill folder.
     pub path: PathBuf,
     /// Parsed skill name, when valid.
@@ -561,9 +567,11 @@ pub fn enumerate_library(
             path: store.path.clone(),
             kind,
             count: candidates.len(),
+            last_used_at: store.last_used_at.clone(),
         });
         skills.extend(candidates.into_iter().map(|candidate| LibrarySkill {
             source_label: store.label.clone(),
+            source_root: store.path.clone(),
             path: store.path.join("skills").join(candidate.subpath),
             name: candidate.name,
             description: candidate.description,
@@ -730,6 +738,7 @@ pub fn enumerate_registered_library(
                 label: label.to_owned(),
                 path: path.to_path_buf(),
                 scope: Some(scope),
+                last_used_at: None,
             });
         }
     }
@@ -742,6 +751,7 @@ pub fn enumerate_registered_library(
                 label: "Local".to_owned(),
                 path: local_layout.root().to_path_buf(),
                 scope: Some(at_model::Scope::Local),
+                last_used_at: None,
             });
         }
     }
@@ -756,6 +766,7 @@ pub fn enumerate_registered_library(
             label: project.name,
             path: layout.root().to_path_buf(),
             scope: None,
+            last_used_at: project.last_used_at,
         });
     }
     enumerate_library(&stores, Path::new("")).map_err(LibraryCatalogError::Folder)
@@ -790,11 +801,13 @@ mod tests {
                     label: "Global".into(),
                     path: source.root().to_path_buf(),
                     scope: Some(at_model::Scope::Global),
+                    last_used_at: None,
                 },
                 LibraryStore {
                     label: "Current".into(),
                     path: current.root().to_path_buf(),
                     scope: Some(at_model::Scope::User),
+                    last_used_at: None,
                 },
             ],
             current.root(),

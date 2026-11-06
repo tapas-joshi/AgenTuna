@@ -93,6 +93,12 @@ fn generated_command_and_flag_reference_matches_production_registry() {
     let skill = fs::read_to_string(skill_path()).expect("read the checked-in skill");
     let generated = extract_generated_section(&skill);
     let (paths, flags) = generated_command_reference();
+    for required in ["agents list", "agents inspect", "effective", "why"] {
+        assert!(
+            paths.iter().any(|path| path == required),
+            "production tree is missing TA-070 command `{required}`"
+        );
+    }
     for path in paths {
         let rendered = if path.is_empty() {
             "agentuna --help".to_owned()

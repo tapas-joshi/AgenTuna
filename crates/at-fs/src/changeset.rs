@@ -266,6 +266,23 @@ pub struct ApplyOutcome {
     pub operation_id: String,
     /// Number of operations applied.
     pub completed: usize,
+    /// Single-use rollback token when the reversible apply API was selected.
+    pub rollback_handle: Option<RollbackHandle>,
+}
+
+/// In-memory token for reversing a completed ChangeSet in the same process.
+///
+/// The token retains reviewed pre-state and delete backups. Dropping it commits the applied
+/// operation permanently; it is not a durable undo record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackHandle {
+    set: ChangeSet,
+    root: PathBuf,
+    journal_path: PathBuf,
+    done: Vec<CompletedOperation>,
+    paths: Vec<PathBuf>,
+    entries: Vec<JournalEntry>,
+    created_dirs: Vec<PathBuf>,
 }
 
 /// ChangeSet application failures.
@@ -318,7 +335,23 @@ pub fn apply(
     set: &ChangeSet,
     context: &mut ApplyContext<'_>,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, None)
+    apply_inner(set, context, None, None, false)
+}
+
+/// Applies a ChangeSet with ownership checks for destructive operations on native paths.
+///
+/// The supplied guard is checked during preflight and immediately before each absolute-path
+/// `Delete` or `Move` source is moved. Relative paths remain store-owned operations.
+///
+/// # Errors
+/// Returns the same errors as [`apply`], including [`FsError::RefusedOverwrite`] for an
+/// unowned native target.
+pub fn apply_with_ownership_guard(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    guard: &dyn crate::guard::OverwriteGuard,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(set, context, None, Some(guard), false)
 }
 
 /// Applies a ChangeSet that may include absolute paths beneath explicitly authorized roots.
@@ -334,13 +367,88 @@ pub fn apply_with_roots(
     context: &mut ApplyContext<'_>,
     roots: &ApplyRoots,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, Some(roots))
+    apply_inner(set, context, Some(roots), None, false)
+}
+/// Applies a reviewed ChangeSet while retaining a single-use in-process rollback token.
+///
+/// This is for multi-phase engine operations that must reverse a completed first phase when a
+/// later phase fails. The token is not durable and must be consumed or dropped before shutdown.
+///
+/// # Errors
+/// Returns the same validation, stale-state, IO, journal, or history errors as
+/// [`apply_with_roots`].
+pub fn apply_with_roots_reversible(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    roots: &ApplyRoots,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(set, context, Some(roots), None, true)
+}
+
+/// Reverses a completed reversible ChangeSet, refusing to overwrite later external edits.
+///
+/// # Errors
+/// Returns [`ChangeSetApplyError::Apply`] when the reviewed result has changed or restoration
+/// fails, and a journal error when its lock or journal cannot be maintained.
+pub fn rollback_committed(handle: RollbackHandle) -> Result<(), ChangeSetApplyError> {
+    let lock_dir = handle.root.join(".state/locks");
+    fs::create_dir_all(&lock_dir)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_dir.join("store.lock"))
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    FileExt::try_lock(&lock_file)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    rollback(
+        &handle.set,
+        &handle.root,
+        &handle.done,
+        &handle.paths,
+        &handle.entries,
+        &handle.created_dirs,
+    )
+    .map_err(|cause| ChangeSetApplyError::Apply {
+        cause,
+        rollback: "phase rollback failed".to_owned(),
+    })?;
+    fs::remove_file(&handle.journal_path)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    Ok(())
+}
+/// Commits a reversible apply by removing its in-process journal and discarding rollback state.
+///
+/// The operation's normal backup files remain available through the operation history.
+///
+/// # Errors
+/// Returns a journal error if the retained journal cannot be removed.
+pub fn commit_reversible(handle: RollbackHandle) -> Result<(), ChangeSetApplyError> {
+    fs::remove_file(&handle.journal_path)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))
+}
+
+/// Applies a ChangeSet under authorized roots and with ownership checks for destructive paths.
+///
+/// # Errors
+/// Returns [`ChangeSetApplyError::OutsideAuthorizedRoots`] for an escaping absolute path and
+/// [`FsError::RefusedOverwrite`] for an unowned destructive target.
+pub fn apply_with_roots_and_guard(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    roots: &ApplyRoots,
+    guard: &dyn crate::guard::OverwriteGuard,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(set, context, Some(roots), Some(guard), false)
 }
 
 fn apply_inner(
     set: &ChangeSet,
     context: &mut ApplyContext<'_>,
     authorized_roots: Option<&ApplyRoots>,
+    ownership_guard: Option<&dyn crate::guard::OverwriteGuard>,
+    reversible: bool,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
     set.validate()?;
     let mut paths = Vec::with_capacity(set.ops.len());
@@ -407,6 +515,18 @@ fn apply_inner(
     created_dirs.dedup();
     for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
         validate_expected(op, path, root)?;
+    }
+    if let Some(guard) = ownership_guard {
+        for op in &set.ops {
+            let destructive_path = match op {
+                FileOp::Delete { path, .. } if path.is_absolute() => Some(path),
+                FileOp::Move { from, .. } if from.is_absolute() => Some(from),
+                _ => None,
+            };
+            if let Some(path) = destructive_path {
+                guard.check(path, false)?;
+            }
+        }
     }
 
     let lock_dir = context.store_root.join(".state/locks");
@@ -477,6 +597,7 @@ fn apply_inner(
                 operation_id: &operation_id,
                 store_root: context.store_root,
                 backup_root: &backup_folder,
+                ownership_guard,
             },
         ) {
             Ok(path) => path,
@@ -554,11 +675,24 @@ fn apply_inner(
         .recorder
         .finish(&operation_id, true, false)
         .map_err(ChangeSetApplyError::History)?;
-    fs::remove_file(&journal_path)
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    if !reversible {
+        fs::remove_file(&journal_path)
+            .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    }
+    let completed = done.len();
+    let rollback_handle = reversible.then(|| RollbackHandle {
+        set: set.clone(),
+        root: context.store_root.to_path_buf(),
+        journal_path,
+        done,
+        paths,
+        entries: journal.entries,
+        created_dirs,
+    });
     Ok(ApplyOutcome {
         operation_id,
-        completed: done.len(),
+        completed,
+        rollback_handle,
     })
 }
 
@@ -567,6 +701,7 @@ struct ExecuteContext<'a> {
     operation_id: &'a str,
     store_root: &'a Path,
     backup_root: &'a Path,
+    ownership_guard: Option<&'a dyn crate::guard::OverwriteGuard>,
 }
 
 fn execute_op(
@@ -628,6 +763,13 @@ fn execute_op(
                     deleted.display()
                 ));
             }
+            if path.is_absolute()
+                && let Some(guard) = context.ownership_guard
+            {
+                guard
+                    .check(path, false)
+                    .map_err(|error| error.to_string())?;
+            }
             fs::rename(path, &deleted).map_err(|error| error.to_string())?;
             Ok(Some(deleted))
         }
@@ -679,6 +821,13 @@ fn execute_op(
         }
         FileOp::Move { from, expected, .. } => {
             let source = resolve_path(context.store_root, from)?;
+            if from.is_absolute()
+                && let Some(guard) = context.ownership_guard
+            {
+                guard
+                    .check(&source, false)
+                    .map_err(|error| error.to_string())?;
+            }
             let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
             let actual = node_expected(&source)?;
             if !same_expected(&wanted, &actual) || !expected_absent(path) {
@@ -752,9 +901,13 @@ fn translate_expected(
     match expected {
         at_model::ExpectedState::Absent => Ok(ExpectedState::Absent),
         at_model::ExpectedState::Hash { hash } => Ok(ExpectedState::Hash(hash.to_string())),
-        at_model::ExpectedState::HashAndMtime { hash, .. } => {
-            Ok(ExpectedState::Hash(hash.to_string()))
-        }
+        at_model::ExpectedState::HashAndMtime {
+            hash,
+            mtime_unix_seconds,
+        } => Ok(ExpectedState::HashAndMtime {
+            hash: hash.to_string(),
+            mtime: std::time::UNIX_EPOCH + std::time::Duration::from_secs(*mtime_unix_seconds),
+        }),
         _ => Err(ChangeSetApplyError::UnsafePath(PathBuf::new())),
     }
 }
@@ -815,6 +968,17 @@ fn expected_matches(path: &Path, expected: &at_model::ExpectedState) -> bool {
         return false;
     };
     matches!(node_expected(path), Ok(actual) if same_expected(&wanted, &actual))
+}
+
+/// Hashes a filesystem node using the same representation as ChangeSet preflight.
+///
+/// Files hash their bytes, symlinks hash their target text and directories hash their
+/// sorted recursive entries. Missing paths return `Ok(None)`.
+///
+/// # Errors
+/// Returns an IO error when the path cannot be inspected or read.
+pub fn hash_node(path: &Path) -> Result<Option<String>, std::io::Error> {
+    node_hash(path).map_err(std::io::Error::other)
 }
 fn node_expected(path: &Path) -> Result<ExpectedState, String> {
     match node_hash(path)? {
@@ -897,6 +1061,7 @@ fn copy_node(source: &Path, destination: &Path) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CompletedOperation {
     index: usize,
     prior: Option<Vec<u8>>,
@@ -1149,7 +1314,179 @@ mod tests {
             "{result:?}"
         );
     }
+    struct FailAtChangeSetOp {
+        current: AtomicUsize,
+        fail_at: usize,
+    }
+    impl FailInjector for FailAtChangeSetOp {
+        fn fault(&self, point: FaultPoint, _: &Path) -> Option<Fault> {
+            (point == FaultPoint::ChangeSetOperation
+                && self.current.fetch_add(1, Ordering::SeqCst) == self.fail_at)
+                .then_some(Fault::Fail(libc::EIO))
+        }
+    }
 
+    #[test]
+    fn directory_move_delete_and_write_failures_restore_original_trees() {
+        for fail_at in 1..=2 {
+            let sandbox = TempDir::new().expect("tempdir");
+            let root = sandbox.path().join("store");
+            let moved = root.join("move-source");
+            let deleted = root.join("delete-source");
+            fs::create_dir_all(moved.join("nested")).expect("move source");
+            fs::create_dir_all(deleted.join("nested")).expect("delete source");
+            fs::write(moved.join("nested/file"), b"move bytes").expect("move bytes");
+            fs::write(deleted.join("nested/file"), b"delete bytes").expect("delete bytes");
+            fs::write(root.join("write-target"), b"before write").expect("write target");
+            let before_move = node_hash(&moved).expect("move hash").expect("move exists");
+            let before_delete = node_hash(&deleted)
+                .expect("delete hash")
+                .expect("delete exists");
+            let set = changeset(vec![
+                FileOp::Move {
+                    from: PathBuf::from("move-source"),
+                    to: PathBuf::from("move-destination"),
+                    expected: ModelExpected::hash(before_move.clone()).expect("move expected hash"),
+                },
+                FileOp::Delete {
+                    path: PathBuf::from("delete-source"),
+                    expected: ModelExpected::hash(before_delete.clone())
+                        .expect("delete expected hash"),
+                },
+                FileOp::Write {
+                    path: PathBuf::from("write-target"),
+                    bytes: b"after write".to_vec(),
+                    expected: ModelExpected::hash(sha256_hex(b"before write"))
+                        .expect("write expected hash"),
+                    follow_symlink: false,
+                    backup: false,
+                },
+            ]);
+            let backup_root = root.join("backups");
+            let mut recorder = Recorder::default();
+            let mut context = ApplyContext {
+                store_root: &root,
+                backup_folder: &backup_root,
+                recorder: &mut recorder,
+            };
+            let injector = Arc::new(FailAtChangeSetOp {
+                current: AtomicUsize::new(0),
+                fail_at,
+            });
+            let result = crate::failpoint::with_injector(injector, || apply(&set, &mut context));
+            assert!(matches!(result, Err(ChangeSetApplyError::Apply { .. })));
+            assert_eq!(
+                node_hash(&moved).expect("post move hash").as_deref(),
+                Some(before_move.as_str())
+            );
+            assert_eq!(
+                node_hash(&deleted).expect("post delete hash").as_deref(),
+                Some(before_delete.as_str())
+            );
+            assert_eq!(
+                fs::read(root.join("write-target")).expect("restored write"),
+                b"before write"
+            );
+            assert!(!root.join("move-destination").exists());
+            assert!(!backup_root.join("op-1.deleted").exists());
+            assert!(
+                !fs::read_dir(&root)
+                    .expect("store listing")
+                    .filter_map(Result::ok)
+                    .any(|entry| entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("agentuna-move-stage"))
+            );
+        }
+    }
+    #[derive(Debug)]
+    struct RejectNativeDirectory;
+    impl crate::guard::OverwriteGuard for RejectNativeDirectory {
+        fn check(&self, path: &Path, _: bool) -> Result<(), crate::FsError> {
+            Err(crate::FsError::RefusedOverwrite {
+                path: path.to_path_buf(),
+                kind: crate::guard::TargetKind::Dir,
+                existing_hash: None,
+                remedies: crate::guard::REMEDIES.to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn directory_delete_requires_ownership_guard_before_mutation() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let native = sandbox.path().join("native");
+        fs::create_dir_all(native.join("nested")).expect("native directory");
+        fs::write(native.join("nested/item"), b"native bytes").expect("native file");
+        fs::create_dir_all(&root).expect("store");
+        let expected = node_hash(&native)
+            .expect("directory hash")
+            .expect("directory exists");
+        let set = changeset(vec![FileOp::Delete {
+            path: native.clone(),
+            expected: ModelExpected::hash(expected).expect("valid hash"),
+        }]);
+        let roots = ApplyRoots::new([sandbox.path().to_path_buf()]).expect("authorized root");
+        let backup_root = root.join("backups");
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backup_root,
+            recorder: &mut recorder,
+        };
+
+        let result = apply_with_roots_and_guard(&set, &mut context, &roots, &RejectNativeDirectory);
+
+        assert!(matches!(
+            result,
+            Err(ChangeSetApplyError::Fs(
+                crate::FsError::RefusedOverwrite { .. }
+            ))
+        ));
+        assert_eq!(
+            fs::read(native.join("nested/item")).expect("native file remains"),
+            b"native bytes"
+        );
+        assert_eq!(recorder.starts, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_deployment_symlink_never_deletes_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(&root).expect("store");
+        let target = root.join("canonical");
+        let deployment = root.join("deployment");
+        fs::write(&target, b"canonical bytes").expect("target");
+        symlink(&target, &deployment).expect("deployment link");
+        let link_hash = node_hash(&deployment)
+            .expect("link hash")
+            .expect("link exists");
+        let set = changeset(vec![FileOp::Delete {
+            path: PathBuf::from("deployment"),
+            expected: ModelExpected::hash(link_hash).expect("valid link hash"),
+        }]);
+        let backup_root = root.join("backups");
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backup_root,
+            recorder: &mut recorder,
+        };
+
+        apply(&set, &mut context).expect("delete symlink deployment");
+
+        assert!(fs::symlink_metadata(&deployment).is_err());
+        assert_eq!(
+            fs::read(&target).expect("canonical target"),
+            b"canonical bytes"
+        );
+    }
     #[test]
     fn symlink_failure_rolls_back_created_link() {
         let sandbox = TempDir::new().expect("tempdir");
@@ -1218,5 +1555,60 @@ mod tests {
             },
         );
         assert!(fs::symlink_metadata(root.join("created")).is_err());
+    }
+
+    #[test]
+    fn reversible_apply_restores_the_pre_apply_file_tree() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(&root).expect("store");
+        fs::write(root.join("item.txt"), b"before").expect("seed file");
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("item.txt"),
+            bytes: b"after".to_vec(),
+            expected: ModelExpected::hash(sha256_hex(b"before")).expect("valid hash"),
+            follow_symlink: false,
+            backup: true,
+        }]);
+        let roots = ApplyRoots::new([root.clone()]).expect("authorized root");
+        let backup_root = root.join("backups");
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backup_root,
+            recorder: &mut recorder,
+        };
+
+        let applied =
+            apply_with_roots_reversible(&set, &mut context, &roots).expect("reversible apply");
+        assert_eq!(fs::read(root.join("item.txt")).expect("after"), b"after");
+        let handle = applied.rollback_handle.expect("rollback token");
+        rollback_committed(handle).expect("rollback");
+        assert_eq!(
+            fs::read(root.join("item.txt")).expect("restored"),
+            b"before"
+        );
+    }
+
+    #[test]
+    fn public_node_hash_matches_change_set_preflight_for_files_and_directories() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path();
+        fs::create_dir_all(root.join("directory")).expect("directory");
+        fs::write(root.join("directory/file"), b"content").expect("file");
+
+        assert_eq!(
+            hash_node(&root.join("directory/file")).expect("file hash"),
+            Some(sha256_hex(b"content"))
+        );
+        assert!(
+            hash_node(&root.join("directory"))
+                .expect("directory hash")
+                .is_some()
+        );
+        assert_eq!(
+            hash_node(&root.join("missing")).expect("missing path"),
+            None
+        );
     }
 }

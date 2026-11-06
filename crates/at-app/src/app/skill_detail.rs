@@ -792,6 +792,7 @@ pub fn skill_edit_apply(
         recorder: &mut recorder,
     };
     let outcome = at_fs::changeset::apply(&change_set, &mut context).map_err(CommandError::from)?;
+    state.record_writes(&change_set, store_root);
     let updated = at_store::skill_package::SkillPackage::read(&source)
         .map_err(|_| CommandError::internal("the saved skill package could not be re-read"))?;
     let relative_text = relative.to_string_lossy().into_owned();

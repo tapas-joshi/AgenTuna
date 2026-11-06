@@ -243,4 +243,38 @@ mod tests {
         };
         assert!(detect_conflicts(&report).conflicts.is_empty());
     }
+    #[test]
+    fn keep_both_names_avoids_store_and_agent_collisions_deterministically() {
+        let agent_suffix = format!(
+            "rule-{}",
+            AgentId::ClaudeCode
+                .to_string()
+                .to_lowercase()
+                .replace('_', "-")
+        );
+        assert_eq!(
+            keep_both_names(
+                "rule",
+                &AgentId::ClaudeCode,
+                &BTreeSet::from(["rule-2".to_owned()])
+            ),
+            Some((agent_suffix.clone(), "rule-3".to_owned()))
+        );
+        assert_eq!(
+            keep_both_names(
+                "rule",
+                &AgentId::ClaudeCode,
+                &BTreeSet::from([agent_suffix.clone()])
+            ),
+            None
+        );
+        assert_eq!(
+            keep_both_names(
+                "rule",
+                &AgentId::ClaudeCode,
+                &BTreeSet::from([agent_suffix, "rule-2".to_owned()])
+            ),
+            None
+        );
+    }
 }
