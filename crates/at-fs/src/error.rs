@@ -198,6 +198,15 @@ pub enum FsError {
 }
 
 impl FsError {
+    /// Whether this error represents a failed backup attempt.
+    #[must_use]
+    pub fn is_backup_failed(&self) -> bool {
+        matches!(
+            self,
+            Self::Backup(crate::backup::BackupError::BackupFailed { .. })
+        )
+    }
+
     /// One actionable sentence for a UI toast or CLI hint; `None` when retrying cannot help.
     ///
     /// The text states what to do and whether anything was written. It never contains a secret.

@@ -35,13 +35,14 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use at_fs::{ExpectedState, MAX_FILE_BYTES, WriteRequest, apply, sha256_hex};
-use at_model::{Definition, ItemKind, Scope, ScopeSnapshot};
+use at_model::{AgentId, Definition, ItemKind, Scope, ScopeSnapshot};
 use at_store::layout::Slug;
 use at_store::local_store::LocalStorePaths;
 use at_store::paths::STORE_DIR_NAME;
 
 use crate::locks::LockStore;
 use crate::resolve::{ResolveInput, ResolvedSet, resolve};
+use crate::tombstones::TombstoneSource;
 
 /// Line added to the project `.gitignore` so Local content is never committed.
 pub const LOCAL_IGNORE_LINE: &str = ".agentuna/local/";
@@ -340,13 +341,35 @@ pub fn resolve_with_local_and_locks(
     local: &LocalLayer,
     locks: &dyn LockStore,
 ) -> LocalResolution {
-    resolve_layers(base, local, Some(locks))
+    resolve_layers_full(base, local, Some(locks), None, None)
+}
+
+/// Resolves Global/User/Project layers together with Local, locks, tombstones and optional agent filter (TA-003).
+#[must_use]
+pub fn resolve_with_local_and_tombstones(
+    base: &[ScopeSnapshot],
+    local: &LocalLayer,
+    locks: Option<&dyn LockStore>,
+    tombstones: Option<&dyn TombstoneSource>,
+    agent: Option<&AgentId>,
+) -> LocalResolution {
+    resolve_layers_full(base, local, locks, tombstones, agent)
 }
 
 fn resolve_layers(
     base: &[ScopeSnapshot],
     local: &LocalLayer,
     locks: Option<&dyn LockStore>,
+) -> LocalResolution {
+    resolve_layers_full(base, local, locks, None, None)
+}
+
+fn resolve_layers_full(
+    base: &[ScopeSnapshot],
+    local: &LocalLayer,
+    locks: Option<&dyn LockStore>,
+    tombstones: Option<&dyn TombstoneSource>,
+    agent: Option<&AgentId>,
 ) -> LocalResolution {
     let mut layers: Vec<ScopeSnapshot> = base
         .iter()
@@ -356,10 +379,16 @@ fn resolve_layers(
     if let Some(snapshot) = local.snapshot() {
         layers.push(snapshot);
     }
-    let input = match locks {
-        Some(locks) => ResolveInput::new(&layers).with_locks(locks),
-        None => ResolveInput::new(&layers),
-    };
+    let mut input = ResolveInput::new(&layers);
+    if let Some(locks) = locks {
+        input = input.with_locks(locks);
+    }
+    if let Some(tombstones) = tombstones {
+        input = input.with_tombstones(tombstones);
+    }
+    if let Some(agent) = agent {
+        input = input.for_agent(agent);
+    }
     LocalResolution {
         resolved: resolve(input),
         local: local.status(),

@@ -58,6 +58,7 @@ tauri = { version = "2.12", default-features = false, features = ["wry", "compre
 tauri-build = "2.7"
 ts-rs = "12"
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 rusqlite = { version = "0.41", features = ["bundled"] }
 toml_edit = "0.25"
 jsonc-parser = "0.34"
@@ -70,19 +71,32 @@ keyring = "4.2"
 keyring-core = "1.0"
 zeroize = "1.9"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-panic = "0.1"
 rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 directories = "6.0"
 clap = { version = "4.6", features = ["derive"] }
 clap_complete = "4.6"
-rmcp = { version = "3.9", default-features = false, features = ["client", "transport-async-rw"] }
-tokio-util = "0.7"
+rmcp = { version = "3.9", default-features = false, features = [
+    "client",
+    "transport-async-rw",
+    "auth",
+    "transport-streamable-http-client-reqwest",
+] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+webbrowser = "1.0"
+http = "1"
+async-trait = "0.1"
+serde_json = { version = "1.0", features = ["raw_value"] }
+oauth2 = { version = "5.0", default-features = false }
 signal-hook = "0.3"
 
 # Common utilities
 unicode-normalization = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["raw_value"] }
 thiserror = "2.0"
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.11", features = ["v7", "serde"] }

@@ -6,6 +6,8 @@
 //! overwrites silently: the caller states what it expects to find, and a mismatch is an
 //! error that writes nothing.
 
+#![allow(clippy::disallowed_methods)] // at-fs is the canonical safe write pipeline implementation and legitimately calls std::fs primitives.
+
 #[cfg(not(unix))]
 compile_error!("at-fs currently supports Unix platforms only");
 
@@ -15,6 +17,11 @@ pub mod concurrency;
 pub mod deploy;
 pub mod diff;
 mod error;
+/// Test-only fault injection. Compiled only with the `faults` or `testkit` cargo feature, or in test builds.
+#[cfg(any(test, feature = "testkit", feature = "faults"))]
+pub mod failpoint;
+#[cfg(not(any(test, feature = "testkit", feature = "faults")))]
+pub(crate) mod failpoint;
 pub mod guard;
 mod hash;
 pub mod platform;
@@ -31,15 +38,16 @@ pub mod watch;
 /// Deployment mode, re-exported so callers of [`deploy()`] need no extra import.
 pub use at_model::LinkMode;
 pub use atomic::{BackupPolicy, WriteMode, WriteOutcome, WriteRequest, apply};
-pub use backup::{BackupError, BackupMeta, BackupSidecar};
+pub use backup::BackupError::BackupFailed;
+pub use backup::{BackupError, BackupFiles, BackupMeta, BackupSidecar};
 pub use concurrency::ExpectedState;
 pub use deploy::{
     COPY_MANIFEST_FILE, COPY_MANIFEST_VERSION, CopyManifest, CopyManifestEntry, CopyOutcome,
     DeployOutcome, DeployRequest, LinkOutcome, RemoveOutcome, RemoveRequest, RemovedDeployment,
-    copy_dir, deploy, link_dir, remove_deployment,
+    copy_dir, deploy, install_dir_tree, link_dir, remove_deployment,
 };
 #[doc(hidden)]
-pub use deploy::{DeployFs, SystemFs, deploy_with};
+pub use deploy::{DeployFs, SystemFs, deploy_with, install_dir_tree_with};
 pub use error::FsError;
 pub use guard::{
     Classification, DeploymentLookup, MoveAsideOutcome, OverwriteGuard, OwnershipContext,

@@ -84,12 +84,16 @@ impl Sandbox {
     }
 
     /// Environment variables that make a spawned `agentuna` use this sandbox.
+    ///
+    /// `HOME` is included so `~/Projects` and any other home-relative root
+    /// resolve inside the sandbox instead of the developer's real home.
     #[must_use]
-    pub fn vars(&self) -> [(&'static str, PathBuf); 3] {
+    pub fn vars(&self) -> [(&'static str, PathBuf); 4] {
         [
             ("AGENTUNA_HOME", self.support()),
             ("AGENTUNA_USER_STORE", self.user_store()),
             ("AGENTUNA_GLOBAL_STORE", self.global_store()),
+            ("HOME", self.path("home")),
         ]
     }
 }

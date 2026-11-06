@@ -14,6 +14,7 @@ pub mod recovery;
 pub mod settings;
 pub mod state;
 
+use at_store::config::LogLevel;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,17 +30,40 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Builds and runs the Tauri application until the last window closes.
 pub fn run() -> tauri::Result<()> {
-    init_logging();
-
     let paths = match paths::resolve_process_paths(None) {
         Ok(paths) => paths,
         Err(error) => {
-            tracing::error!(%error, "cannot resolve the AgenTuna paths; the app cannot start");
+            // Logging is not installed yet (its directory lives under the support dir we
+            // just failed to resolve); stderr is the only channel left.
+            eprintln!("agentuna: cannot resolve the AgenTuna paths; the app cannot start: {error}");
             return Ok(());
         }
     };
     if let Err(error) = paths.create_dirs() {
-        tracing::warn!(%error, "some AgenTuna directories could not be created");
+        eprintln!("agentuna: some AgenTuna directories could not be created: {error}");
+    }
+
+    // Install logging before the config load so its warnings land in the file; the
+    // settings `log_level` is applied through the reload handle right after. The initial
+    // filter uses `info` (or `RUST_LOG`); the reload applies the configured level within
+    // the same startup, well under the one-second budget.
+    let logging_options = at_store::logging::LoggingOptions::for_paths(&paths, LogLevel::Info);
+    let guard = match at_store::logging::init(&logging_options) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("agentuna: logging initialization failed: {error}");
+            return Ok(());
+        }
+    };
+    let logging = guard.logging().clone();
+
+    let config = Arc::new(config::AppConfig::load(&paths, Vec::new()));
+    let settings_level = config_level(&config);
+    if settings_level != LogLevel::Info {
+        // `set_level` is a no-op when RUST_LOG owns the filter.
+        if let Err(error) = logging.set_level(settings_level) {
+            tracing::warn!(%error, "could not apply the configured log level");
+        }
     }
     let primary = match instance::begin(&paths) {
         instance::Startup::Primary(primary) => primary,
@@ -71,10 +95,10 @@ pub fn run() -> tauri::Result<()> {
         Ok(_) => {}
         Err(error) => tracing::warn!(%error, "could not write the session marker"),
     }
-    let config = Arc::new(config::AppConfig::load(&paths, Vec::new()));
     let instance_state = Arc::new(primary.into_state());
     let setup_instance = Arc::clone(&instance_state);
     let setup_config = Arc::clone(&config);
+    let setup_logging = logging.clone();
 
     let builder = tauri::Builder::default().setup(move |app| {
         let focus_handle = app.handle().clone();
@@ -98,7 +122,8 @@ pub fn run() -> tauri::Result<()> {
         app.manage(
             AppState::new(bridge, cli)
                 .with_config(setup_config)
-                .with_instance(instance_state),
+                .with_instance(instance_state)
+                .with_logging(setup_logging),
         );
         // One process-wide policy: nothing reaches the network without its permission.
         app.manage(NetworkState::default());
@@ -169,8 +194,16 @@ fn focus_main_window(handle: &tauri::AppHandle) {
     }
 }
 
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .try_init();
+/// Reads `[advanced] log_level` out of the effective config report.
+///
+/// The report stores the level as its lowercase name (`"info"`); anything unexpected falls
+/// back to [`LogLevel::Info`] rather than failing startup.
+fn config_level(config: &config::AppConfig) -> LogLevel {
+    config
+        .report()
+        .advanced
+        .get("log_level")
+        .and_then(|value| value.value.as_str())
+        .and_then(LogLevel::parse)
+        .unwrap_or(LogLevel::Info)
 }

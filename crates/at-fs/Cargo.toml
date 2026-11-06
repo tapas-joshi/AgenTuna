@@ -13,6 +13,9 @@ workspace = true
 default = []
 # Shared test fixtures (`at_fs::testkit`). Never enabled by production crates.
 testkit = ["dep:env-lock", "dep:tempfile"]
+# Test-only fault injection (`at_fs::failpoint`). Never enabled by production crates;
+# compiled out of release builds entirely.
+faults = []
 
 [dependencies]
 at-model.workspace = true
@@ -34,6 +37,10 @@ tempfile.workspace = true
 # Dev-only cycle: at-store depends on at-fs, so this is the only direction a fixture can see
 # `AppPaths` from. `at_fs::testkit` itself never names at-store.
 at-store.workspace = true
+# Self dev-dependency so integration tests see `at_fs::failpoint` (same pattern as at-migrate).
+at-fs = { path = ".", features = ["faults"] }
+# The fault-injection suite asserts the operations log sees failed, never succeeded, rows.
+at-db.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true

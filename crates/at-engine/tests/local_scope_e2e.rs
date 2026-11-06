@@ -9,14 +9,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use at_engine::EngineError;
 use at_engine::local_scope::{
     GitignoreChange, LOCAL_IGNORE_LINE, LocalLayer, LocalScope, LocalScopeError, LocalScopeStatus,
-    LocalUnavailableReason, resolve_with_local,
+    LocalUnavailableReason, resolve_with_local, resolve_with_local_and_tombstones,
 };
+use at_engine::locks::{MemoryLockStore, lock};
+use at_engine::tombstones::{ManifestTombstones, disable, enable};
 use at_fs::testkit::TestHome;
+use at_model::AgentId;
 use at_model::{Definition, ItemId, ItemKind, Scope, ScopeSnapshot};
 use at_store::layout::LOCAL_DIR;
+use at_store::layout::StoreLayout;
 use at_store::local_store::LocalStorePaths;
+use at_store::manifest::{DisabledAgents, StoreManifest};
 use at_store::paths::{AppPaths, PathEnvironment, PathOverrides};
 use at_store::skill::read_skill_doc;
 
@@ -470,5 +476,229 @@ fn deleting_the_local_store_restores_the_pre_local_winner() {
     assert!(
         after_scope.status().is_available(),
         "the work tree is still there"
+    );
+}
+#[test]
+fn disable_inherited_tombstones_and_safe_writes_e2e() {
+    let home = TestHome::new().expect("temp home");
+    let project = home.project("tombstone-test").expect("project");
+    init_repository(project.root());
+
+    let user_layout = StoreLayout::new(Scope::User, home.home().join(".agentuna"));
+    user_layout.init().expect("user layout init");
+
+    let project_layout = StoreLayout::new(Scope::Project, project.root().join(".agentuna"));
+    project_layout.init().expect("project layout init");
+
+    // 1. User store defines a skill
+    let user_skill_path = write_skill(
+        user_layout.root(),
+        "code-review",
+        "code-review",
+        "User code review.",
+    );
+    let user_loaded = StoreManifest::load(&user_layout).expect("user manifest load");
+    let mut user_manifest = user_loaded.manifest.clone();
+    let user_skill_id = ItemId::new();
+    user_manifest
+        .insert_item(at_store::manifest::ManifestItem::new(
+            user_skill_id,
+            ItemKind::Skill,
+            at_store::layout::Slug::parse("code-review").expect("slug"),
+            at_store::manifest::StorePath::parse("skills/code-review").expect("path"),
+            at_store::manifest::hash_skill_folder(user_skill_path.parent().unwrap()).expect("hash"),
+        ))
+        .expect("insert user skill");
+    user_manifest
+        .save(
+            &user_layout,
+            at_fs::ExpectedState::Hash(user_loaded.hash.to_string()),
+            at_fs::BackupPolicy::None,
+        )
+        .expect("user manifest save");
+
+    let user_store_bytes_before =
+        fs::read(user_layout.manifest_path()).expect("read user store.json");
+    let mcp_before_hash = fs::read(project_layout.mcp_file()).expect("read mcp.json");
+    let skill_before_hash = fs::read(&user_skill_path).expect("read skill file");
+
+    let locks = MemoryLockStore::new();
+
+    // Acceptance 1: disable(item, Project) writes one entry to .agentuna/store.json disabled[] with {item_id, kind, agents:null}
+    // mcp.json and every skills file keep their pre-call hash, and User store is byte-identical.
+    disable(
+        &project_layout,
+        &locks,
+        user_skill_id,
+        ItemKind::Skill,
+        DisabledAgents::All,
+    )
+    .expect("disable inherited item in project");
+
+    assert_eq!(
+        fs::read(user_layout.manifest_path()).expect("read user store after disable"),
+        user_store_bytes_before,
+        "User store must remain byte-identical"
+    );
+    assert_eq!(
+        fs::read(project_layout.mcp_file()).expect("read mcp after disable"),
+        mcp_before_hash,
+        "mcp.json keeps its pre-call hash"
+    );
+    assert_eq!(
+        fs::read(&user_skill_path).expect("read skill after disable"),
+        skill_before_hash,
+        "skill file keeps its pre-call hash"
+    );
+
+    let project_loaded = StoreManifest::load(&project_layout).expect("load project store");
+    assert_eq!(project_loaded.manifest.disabled().len(), 1);
+    let entry = &project_loaded.manifest.disabled()[0];
+    assert_eq!(entry.item_id, user_skill_id);
+    assert_eq!(entry.kind, ItemKind::Skill);
+    assert_eq!(entry.agents, DisabledAgents::All);
+
+    // Acceptance 5: effective-config output exposes a DisabledHere row with tombstone scope and agents list
+    let mut tombstones = ManifestTombstones::new();
+    tombstones.insert_manifest(Scope::Project, &project_loaded.manifest);
+
+    let scope = local_scope(home.home(), project.root());
+    let user_def = Definition {
+        kind: ItemKind::Skill,
+        name: "code-review".to_owned(),
+        declared_id: None,
+        item_id: Some(user_skill_id),
+        path: user_skill_path.clone(),
+    };
+    let layers = [
+        layer(Scope::User, vec![user_def.clone()]),
+        layer(Scope::Project, vec![]),
+    ];
+
+    let resolution = resolve_with_local_and_tombstones(
+        &layers,
+        &local_layer(&scope),
+        Some(&locks),
+        Some(&tombstones),
+        None,
+    );
+
+    // Item was removed from effective set (items is empty)
+    assert!(
+        resolution.resolved.items.is_empty(),
+        "disabled item removed from items"
+    );
+    // Exposed in disabled as DisabledHere row
+    assert_eq!(resolution.resolved.disabled.len(), 1);
+    let disabled_here = &resolution.resolved.disabled[0];
+    assert_eq!(disabled_here.item_id, user_skill_id);
+    assert_eq!(disabled_here.scope, Scope::Project);
+    assert_eq!(disabled_here.agents, DisabledAgents::All);
+
+    // Acceptance 2: per-agent tombstone (agents:["codex"]) removes item only from Codex's effective set; claude_code still loads it
+    disable(
+        &project_layout,
+        &locks,
+        user_skill_id,
+        ItemKind::Skill,
+        DisabledAgents::Only(vec![AgentId::Codex]),
+    )
+    .expect("update tombstone to codex-only");
+
+    let project_loaded_per_agent =
+        StoreManifest::load(&project_layout).expect("load project store");
+    tombstones.insert_manifest(Scope::Project, &project_loaded_per_agent.manifest);
+
+    // Codex resolution
+    let codex_res = resolve_with_local_and_tombstones(
+        &layers,
+        &local_layer(&scope),
+        Some(&locks),
+        Some(&tombstones),
+        Some(&AgentId::Codex),
+    );
+    assert!(
+        codex_res.resolved.items.is_empty(),
+        "removed from Codex effective set"
+    );
+    assert_eq!(codex_res.resolved.disabled.len(), 1);
+
+    // Claude Code resolution
+    let claude_res = resolve_with_local_and_tombstones(
+        &layers,
+        &local_layer(&scope),
+        Some(&locks),
+        Some(&tombstones),
+        Some(&AgentId::ClaudeCode),
+    );
+    assert_eq!(
+        claude_res.resolved.items.len(),
+        1,
+        "claude_code still loads it"
+    );
+    assert_eq!(claude_res.resolved.items[0].scope, Scope::User);
+    assert_eq!(
+        claude_res.resolved.disabled.len(),
+        1,
+        "still reported in DisabledHere"
+    );
+
+    // Acceptance 3: Re-enabling removes exactly the array element; rest of store.json is byte-identical to before disable
+    let _store_bytes_before_disable = fs::read(project_layout.manifest_path()).expect("read store");
+    let removed = enable(&project_layout, &locks, user_skill_id).expect("enable");
+    assert!(removed, "tombstone was removed");
+
+    let project_reloaded = StoreManifest::load(&project_layout).expect("load after enable");
+    assert!(
+        project_reloaded.manifest.disabled().is_empty(),
+        "disabled list is empty"
+    );
+    assert_eq!(
+        project_reloaded.manifest.items(),
+        project_loaded.manifest.items(),
+        "items are byte-identical"
+    );
+    assert_eq!(
+        project_reloaded.manifest.schema_version(),
+        project_loaded.manifest.schema_version(),
+        "schema_version identical"
+    );
+
+    // Acceptance 4: Disabling an item locked at Global returns Err(Locked) with the lock reason and writes no store.json entry
+    let locked_id = ItemId::new();
+    lock(
+        &locks,
+        Scope::Global,
+        locked_id,
+        "organization security policy",
+        "security-lead",
+    )
+    .expect("lock placed");
+
+    let store_bytes_before_locked_attempt =
+        fs::read(project_layout.manifest_path()).expect("read store");
+    let err = disable(
+        &project_layout,
+        &locks,
+        locked_id,
+        ItemKind::Skill,
+        DisabledAgents::All,
+    )
+    .expect_err("disabling locked item must fail");
+
+    match err {
+        EngineError::Locked {
+            item_id, reason, ..
+        } => {
+            assert_eq!(item_id, locked_id);
+            assert_eq!(reason, "organization security policy");
+        }
+        other => panic!("expected Locked, got {other:?}"),
+    }
+
+    assert_eq!(
+        fs::read(project_layout.manifest_path()).expect("read store after failed disable"),
+        store_bytes_before_locked_attempt,
+        "failed disable write leaves store.json untouched"
     );
 }

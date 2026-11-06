@@ -1016,6 +1016,61 @@ impl StoreManifest {
         *self = next;
         Ok(())
     }
+    /// Disables an inherited item that was defined in an ancestor scope.
+    ///
+    /// If the item exists in this scope's `items`, its kind must match.
+    ///
+    /// # Errors
+    /// [`FieldProblem::KindMismatch`] when `item_id` exists in `items` with a different
+    /// kind, [`FieldProblem::MissingItem`] on Global scope when `item_id` is absent from
+    /// `items`, or [`FieldProblem::EmptyAgents`] / [`FieldProblem::DuplicateAgent`].
+    pub fn disable_inherited(
+        &mut self,
+        item_id: ItemId,
+        kind: ItemKind,
+        agents: DisabledAgents,
+    ) -> Result<(), FieldError> {
+        let mut next = self.clone();
+        if let Some(item) = next.items.iter().find(|item| item.id == item_id)
+            && item.kind != kind
+        {
+            return Err(field(
+                "kind",
+                FieldProblem::KindMismatch {
+                    expected: item.kind,
+                    found: kind,
+                },
+            ));
+        }
+        let entry = DisabledEntry {
+            item_id,
+            kind,
+            agents: match agents {
+                DisabledAgents::All => DisabledAgents::All,
+                DisabledAgents::Only(mut list) => {
+                    list.sort();
+                    DisabledAgents::Only(list)
+                }
+            },
+        };
+        if let Some(existing) = next
+            .disabled
+            .iter_mut()
+            .find(|existing| existing.item_id == item_id)
+        {
+            if *existing == entry {
+                return Ok(());
+            }
+            *existing = entry;
+        } else {
+            next.disabled.push(entry);
+        }
+        next.sort_disabled();
+        next.validate()?;
+        next.touch();
+        *self = next;
+        Ok(())
+    }
 
     /// Removes the tombstone for `item_id`. Returns whether one was present.
     pub fn enable(&mut self, item_id: ItemId) -> bool {
@@ -1095,20 +1150,21 @@ impl StoreManifest {
         let mut seen: BTreeSet<ItemId> = BTreeSet::new();
         for (index, entry) in self.disabled.iter().enumerate() {
             let prefix = format!("disabled[{index}]");
-            let Some(kind) = by_id.get(&entry.item_id) else {
+            if let Some(kind) = by_id.get(&entry.item_id) {
+                if *kind != entry.kind {
+                    return Err(field(
+                        format!("{prefix}.kind"),
+                        FieldProblem::KindMismatch {
+                            expected: *kind,
+                            found: entry.kind,
+                        },
+                    ));
+                }
+            } else if self.scope == Scope::Global {
                 return Err(field(
                     format!("{prefix}.item_id"),
                     FieldProblem::MissingItem {
                         item_id: entry.item_id.to_string(),
-                    },
-                ));
-            };
-            if *kind != entry.kind {
-                return Err(field(
-                    format!("{prefix}.kind"),
-                    FieldProblem::KindMismatch {
-                        expected: *kind,
-                        found: entry.kind,
                     },
                 ));
             }

@@ -1,0 +1,67 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": {
+          "locked_by": "platform-lead",
+          "reason": "policy pin",
+          "scope": "global"
+        },
+        "locked": true,
+        "name": "code-review",
+        "path": "<global>/skills/code-review/SKILL.md",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "lock-global-dominates-tombstone",
+  "locks": [
+    {
+      "kind": "skill",
+      "locked_by": "platform-lead",
+      "reason": "policy pin",
+      "target": "code-review"
+    }
+  ],
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "description": "Global review.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "project"
+    }
+  ],
+  "title": "A Global lock dominates a Project tombstone",
+  "tombstones": [
+    {
+      "kind": "skill",
+      "scope": "project",
+      "target": "code-review"
+    }
+  ]
+}

@@ -94,6 +94,17 @@ impl AuthorizedGitCall {
             _seal: (),
         }
     }
+
+    /// A token minted by [`crate::remote::run_remote_git`] after the policy allowed the call;
+    /// carries the already-authorized action and host plus the argv.
+    pub(crate) fn for_remote(action: NetworkAction, host: NetworkHost, args: &[&str]) -> Self {
+        Self {
+            action,
+            host,
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            _seal: (),
+        }
+    }
 }
 
 /// Result of one git invocation.
@@ -150,6 +161,9 @@ pub enum GitError {
     /// The command outlived its deadline and was killed.
     #[error("git did not finish within {0:?}")]
     TimedOut(Duration),
+    /// The command was cancelled by the caller.
+    #[error("git command was cancelled")]
+    Cancelled,
 }
 
 impl GitError {

@@ -1,0 +1,54 @@
+{
+  "agent": "codex",
+  "expect": {
+    "diagnostics": [],
+    "disabled": [
+      {
+        "agents": [
+          "codex"
+        ],
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "scope": "project"
+      }
+    ],
+    "gitignore": null,
+    "items": [],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "tombstone-per-agent-codex-only",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "User review skill.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "project"
+    }
+  ],
+  "title": "A per-agent tombstone for codex removes the item from Codex's effective set",
+  "tombstones": [
+    {
+      "agents": [
+        "codex"
+      ],
+      "kind": "skill",
+      "scope": "project",
+      "target": "code-review"
+    }
+  ]
+}

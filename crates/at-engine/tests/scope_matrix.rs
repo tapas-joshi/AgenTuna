@@ -21,9 +21,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use at_engine::local_scope::{
-    GitignoreChange, LocalLayer, LocalResolution, LocalScope, resolve_with_local_and_locks,
-};
+use at_engine::local_scope::{GitignoreChange, LocalLayer, LocalResolution, LocalScope};
 use at_engine::locks::{LockRecord, LockStore, LockStoreError, MemoryLockStore, lock};
 use at_engine::resolve::ResolveDiagnostic;
 use at_fs::testkit::TestHome;
@@ -65,7 +63,22 @@ struct Case {
     locks: Vec<LockSpec>,
     #[serde(default)]
     lock_store: LockStoreKind,
+    #[serde(default)]
+    tombstones: Vec<TombstoneSpec>,
+    #[serde(default)]
+    agent: Option<String>,
     expect: Value,
+}
+
+/// A tombstone to record in one scope's store.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TombstoneSpec {
+    scope: LayerName,
+    kind: KindName,
+    target: String,
+    #[serde(default)]
+    agents: Option<Vec<String>>,
 }
 
 /// What kind of project the fixture creates.
@@ -480,6 +493,25 @@ fn find_locked_definition<'a>(definitions: &'a [Definition], spec: &LockSpec) ->
             )
         })
 }
+fn find_tombstone_definition<'a>(
+    definitions: &'a [Definition],
+    spec: &TombstoneSpec,
+) -> &'a Definition {
+    let kind = spec.kind.kind();
+    definitions
+        .iter()
+        .find(|definition| {
+            definition.kind == kind
+                && (definition.declared_id.as_deref() == Some(spec.target.as_str())
+                    || definition.name == spec.target)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "tombstone target `{}` of kind {:?} is not defined by this case",
+                spec.target, kind
+            )
+        })
+}
 
 fn run_case(case: &Case) -> CaseRun {
     let home = TestHome::new().expect("temporary home");
@@ -595,9 +627,59 @@ fn run_case(case: &Case) -> CaseRun {
             .expect("place fixture lock");
         }
     }
+    let tombstones = at_engine::tombstones::MemoryTombstones::new();
+    let mut has_tombstones = false;
+    if !case.tombstones.is_empty() {
+        has_tombstones = true;
+        let mut all: Vec<Definition> = layers
+            .iter()
+            .flat_map(|layer| layer.definitions.iter().cloned())
+            .collect();
+        all.extend(local_layer.definitions().iter().cloned());
+
+        for spec in &case.tombstones {
+            let def = find_tombstone_definition(&all, spec);
+            let item_id = def.item_id.expect("loaded definitions carry an id");
+            let agents = match &spec.agents {
+                None => at_store::manifest::DisabledAgents::All,
+                Some(list) => {
+                    let parsed: Vec<at_model::AgentId> = list
+                        .iter()
+                        .map(|name| name.parse().expect("valid agent id in tombstone spec"))
+                        .collect();
+                    at_store::manifest::DisabledAgents::Only(parsed)
+                }
+            };
+            tombstones
+                .add(
+                    spec.scope.scope(),
+                    at_store::manifest::DisabledEntry {
+                        item_id,
+                        kind: spec.kind.kind(),
+                        agents,
+                    },
+                )
+                .expect("add tombstone");
+        }
+    }
+
+    let agent = case
+        .agent
+        .as_deref()
+        .map(|s| s.parse().expect("valid agent in case"));
 
     skipped.sort_by(|left, right| left.path.cmp(&right.path));
-    let resolution = resolve_with_local_and_locks(&layers, &local_layer, store);
+    let resolution = at_engine::local_scope::resolve_with_local_and_tombstones(
+        &layers,
+        &local_layer,
+        Some(store),
+        if has_tombstones {
+            Some(&tombstones)
+        } else {
+            None
+        },
+        agent.as_ref(),
+    );
 
     CaseRun {
         _home: home,
@@ -731,14 +813,40 @@ fn expected_json(run: &CaseRun) -> Value {
         GitignoreChange::Unchanged => "unchanged",
         _ => "unknown",
     });
-    json!({
+    let mut root = json!({
         "items": items,
         "shadowed": shadowed,
         "diagnostics": diagnostics,
         "skipped": skipped,
         "local": local,
         "gitignore": gitignore,
-    })
+    });
+    if !run.resolution.resolved.disabled.is_empty() {
+        let disabled: Vec<Value> = run
+            .resolution
+            .resolved
+            .disabled
+            .iter()
+            .map(|entry| {
+                json!({
+                    "kind": serde_json::to_value(entry.logical_id.kind).expect("kind serializes"),
+                    "key": serde_json::to_value(&entry.logical_id.key).expect("key serializes"),
+                    "name": entry.definition.name,
+                    "scope": scope_json(entry.scope),
+                    "agents": match &entry.agents {
+                        at_store::manifest::DisabledAgents::All => Value::Null,
+                        at_store::manifest::DisabledAgents::Only(list) => {
+                            let mut names: Vec<String> = list.iter().map(|a| a.to_string()).collect();
+                            names.sort();
+                            json!(names)
+                        }
+                    },
+                })
+            })
+            .collect();
+        root["disabled"] = json!(disabled);
+    }
+    root
 }
 
 // ---------------------------------------------------------------------------------------------

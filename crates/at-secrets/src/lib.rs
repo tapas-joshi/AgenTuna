@@ -15,6 +15,7 @@ pub mod memory;
 pub mod name;
 pub mod redact;
 pub mod refs;
+pub mod remote_backup;
 pub mod secret;
 pub mod store;
 pub mod var_ref;
@@ -25,6 +26,10 @@ pub use memory::MemoryStore;
 pub use name::{KEYCHAIN_SERVICE, KeychainId, SecretName};
 pub use redact::Redactor;
 pub use refs::{SecretReference, SecretRefs, delete_with_refs};
+pub use remote_backup::{
+    REMOTE_BACKUP_ACCOUNT, REMOTE_BACKUP_SERVICE, TokenRejection, delete_token, read_token,
+    remote_backup_id, save_token, token_exists, validate_token,
+};
 pub use secret::SecretString;
 pub use store::SecretStore;
 pub use var_ref::{ImportOutcome, Imported, RefError, RefWarning, VarTemplate, import_value};

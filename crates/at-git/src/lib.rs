@@ -6,6 +6,7 @@
 
 pub mod local;
 pub mod policy;
+pub mod remote;
 
 pub use local::{
     IgnoreRule, LOCAL_GIT_TIMEOUT, LocalGitCall, LocalGitError, LocalGitRunner,
@@ -15,4 +16,11 @@ pub use local::{
 pub use policy::{
     AuthorizedGitCall, GIT_NETWORK_TIMEOUT, GitError, GitOutput, GitReport, GitRunner,
     MAX_GIT_OUTPUT_BYTES, NetworkGitCall, ProcessGitRunner, run_network_git,
+};
+pub use remote::{
+    GitAuth, MAX_REMOTE_DIAGNOSTIC_CHARS, ProcessRemoteGitRunner, REMOTE_GIT_TIMEOUT,
+    RemoteContext, RemoteError, RemoteGitCall, RemoteGitRunner, RemoteHead, commit_local,
+    current_branch, has_changes, init_repo, looks_like_auth_failure, looks_like_non_fast_forward,
+    looks_like_offline, remote_diagnostic, remote_git, rev_parse_head, run_remote_git,
+    set_remote_url, stage_all, validate_repo_url,
 };

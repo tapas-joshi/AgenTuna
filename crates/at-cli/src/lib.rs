@@ -26,6 +26,7 @@ pub mod doctor;
 pub mod error;
 pub mod globals;
 pub mod output;
+mod projects;
 pub mod registry;
 mod run;
 pub mod runtime;
