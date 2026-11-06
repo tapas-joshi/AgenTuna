@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AdoptApplyView } from "../../generated/AdoptApplyView";
+import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
 import type { OverwriteMoveAsideView } from "../../generated/OverwriteMoveAsideView";
-import type { OverwriteRemedyResult } from "./OverwriteRefusalDialog";
+import type { AdoptHandling, OverwriteRemedyResult } from "./OverwriteRefusalDialog";
 
 /** Invokes the backend's path-guarded at-fs move-aside command. */
 export async function moveRefusedItemAside(path: string): Promise<OverwriteRemedyResult> {
@@ -9,6 +11,24 @@ export async function moveRefusedItemAside(path: string): Promise<OverwriteRemed
     summary: "The unmanaged item was moved aside without replacing its contents.",
     movedTo: result.moved_to,
   };
+}
+
+/** Reviews adopting the refused native item; the backend refuses a stale scan. */
+export async function previewAdoption(
+  path: string,
+  expectedHash: string | null,
+  handling: AdoptHandling,
+): Promise<AdoptPreviewView> {
+  return invoke<AdoptPreviewView>("adopt_preview", { path, expectedHash, handling });
+}
+
+/** Adopts the refused native item into the store as one reviewed, undoable operation. */
+export async function applyAdoption(
+  path: string,
+  expectedHash: string | null,
+  handling: AdoptHandling,
+): Promise<AdoptApplyView> {
+  return invoke<AdoptApplyView>("adopt_apply", { path, expectedHash, handling });
 }
 
 /** Publishes only structured RefusedOverwrite failures for the global dialog host. */

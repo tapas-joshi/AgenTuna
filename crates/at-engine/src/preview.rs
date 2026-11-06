@@ -130,6 +130,82 @@ pub enum PreviewError {
 ///
 /// # Errors
 /// Returns `Invalid`, `UnsafePath`, or `Io` for invalid plans and unreadable targets.
+/// Rewrites a ChangeSet whose destinations are absolute so preview can run from one root.
+///
+/// The common ancestor of every destination becomes the root, and each operation path becomes
+/// relative to it. Callers use this to review a plan that touches the canonical store and several
+/// agent documents in one preview.
+///
+/// # Errors
+/// Returns [`PreviewError::UnsafePath`] for a relative or non-normal destination, and
+/// [`PreviewError::UnsafePath`] when the destinations share no usable ancestor.
+pub fn relative_to_common_root(set: &ChangeSet) -> Result<(ChangeSet, PathBuf), PreviewError> {
+    set.validate()?;
+    let mut destinations = Vec::with_capacity(set.ops.len());
+    for op in &set.ops {
+        let path = op
+            .destination()
+            .ok_or_else(|| PreviewError::UnsafePath(PathBuf::new()))?;
+        if !path.is_absolute()
+            || path.components().any(|part| {
+                matches!(
+                    part,
+                    Component::CurDir | Component::ParentDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(PreviewError::UnsafePath(path.to_path_buf()));
+        }
+        destinations.push(path.to_path_buf());
+    }
+    let mut root = destinations
+        .first()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| PreviewError::UnsafePath(PathBuf::new()))?
+        .to_path_buf();
+    for path in &destinations {
+        while !path.starts_with(&root) {
+            if !root.pop() {
+                return Err(PreviewError::UnsafePath(path.clone()));
+            }
+        }
+    }
+    let mut relative = set.clone();
+    for op in &mut relative.ops {
+        let destination = op
+            .destination()
+            .ok_or_else(|| PreviewError::UnsafePath(PathBuf::new()))?
+            .to_path_buf();
+        let stripped = destination
+            .strip_prefix(&root)
+            .map_err(|_| PreviewError::UnsafePath(destination.clone()))?;
+        if stripped
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(PreviewError::UnsafePath(destination.clone()));
+        }
+        let stripped = stripped.to_path_buf();
+        match op {
+            at_model::FileOp::Write { path, .. }
+            | at_model::FileOp::Delete { path, .. }
+            | at_model::FileOp::Mkdir { path, .. } => *path = stripped,
+            at_model::FileOp::Symlink { link_path, .. } => *link_path = stripped,
+            at_model::FileOp::Copy { dest, .. } => *dest = stripped,
+            at_model::FileOp::Move { to, .. } => *to = stripped,
+            // FileOp is non-exhaustive; a future operation without a destination cannot be
+            // previewed from a common root.
+            _ => return Err(PreviewError::UnsafePath(destination)),
+        }
+    }
+    Ok((relative, root))
+}
+
+/// Reads the current filesystem state into a content-bound preview.
+///
+/// # Errors
+/// Returns [`PreviewError`] when the set is invalid, a path escapes `root`, or a file cannot be
+/// read.
 pub fn preview(set: &ChangeSet, root: &Path) -> Result<Preview, PreviewError> {
     set.validate()?;
     let mut files = Vec::with_capacity(set.ops.len());

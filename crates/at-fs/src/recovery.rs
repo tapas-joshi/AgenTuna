@@ -714,6 +714,14 @@ fn classify_recovery_op(
             ObservedNode::File(hash) if hash == entry.after_hash => RecoveryState::After,
             _ => RecoveryState::Diverged,
         },
+        FileOp::CopyTree { .. } => match node {
+            ObservedNode::Missing if before.is_none() => RecoveryState::Before,
+            ObservedNode::Directory { hash, .. } if hash == entry.after_hash => {
+                RecoveryState::After
+            }
+            ObservedNode::File(hash) if hash == entry.after_hash => RecoveryState::After,
+            _ => RecoveryState::Diverged,
+        },
         FileOp::Move { from, expected, .. } => {
             let Some(source) = resolve_store_path(store_root, from) else {
                 return Ok(RecoveryState::Diverged);
@@ -1010,6 +1018,15 @@ fn rollback_recovery_op(
                         reason: "copy deployment changed during recovery".to_owned(),
                     });
                 }
+                fs::remove_dir_all(&entry.path).map_err(|error| io_error(&entry.path, error))
+            } else {
+                fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))
+            }
+        }
+        FileOp::CopyTree { .. } => {
+            let metadata =
+                fs::symlink_metadata(&entry.path).map_err(|error| io_error(&entry.path, error))?;
+            if metadata.is_dir() {
                 fs::remove_dir_all(&entry.path).map_err(|error| io_error(&entry.path, error))
             } else {
                 fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))

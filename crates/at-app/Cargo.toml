@@ -47,6 +47,7 @@ time.workspace = true
 at-git.workspace = true
 at-adapters.workspace = true
 at-secrets.workspace = true
+similar.workspace = true
 tokio-util.workspace = true
 zip.workspace = true
 rusqlite.workspace = true

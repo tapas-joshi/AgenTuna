@@ -65,6 +65,37 @@ pub struct WhyTraceView {
     pub load_diagnostics: Vec<at_engine::loader::LoadDiagnostic>,
 }
 
+/// Request to place or update a Global lock.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct ItemLockRequest {
+    /// Stable AgenTuna item identity.
+    pub item_id: String,
+    /// Active scope, which must be Global.
+    pub scope: String,
+    /// Required human-readable lock reason.
+    pub reason: String,
+}
+
+/// Lock state returned after a Global lock command.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct ItemLockView {
+    /// Whether the item is locked after the command.
+    pub locked: bool,
+    /// Reason shown to blocked lower-scope actions.
+    pub reason: String,
+}
+/// Request to remove an existing Global lock.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct ItemUnlockRequest {
+    /// Stable AgenTuna item identity.
+    pub item_id: String,
+    /// Active scope, which must be Global.
+    pub scope: String,
+}
+
 /// Queries effective configuration through the shared engine projection.
 #[tauri::command]
 pub fn effective_query(
@@ -136,6 +167,101 @@ pub fn effective_query(
         disabled_here: result.disabled_here,
         diagnostics: result.diagnostics,
         load_diagnostics: loaded.diagnostics,
+    })
+}
+
+/// Places a Global lock and returns its reason for the updated row presentation.
+#[tauri::command]
+pub fn effective_lock(
+    state: State<'_, AppState>,
+    request: ItemLockRequest,
+) -> Result<ItemLockView, CommandError> {
+    let scope = parse_scope(&request.scope)?;
+    if scope != Scope::Global {
+        return Err(CommandError::invalid_argument(
+            "scope",
+            "locks are available only at Global scope",
+        ));
+    }
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.chars().count() > 200 {
+        return Err(CommandError::invalid_argument(
+            "reason",
+            "enter a reason between 1 and 200 characters",
+        ));
+    }
+    let item_id = ItemId::from_str(&request.item_id)
+        .map_err(|_| CommandError::invalid_argument("item_id", "expected a valid item id"))?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    if at_db::shared::items_by_ids(database.connection(), &[item_id])
+        .map_err(|error| CommandError::internal(format!("cannot inspect item: {error}")))?
+        .is_empty()
+    {
+        return Err(CommandError::invalid_argument(
+            "item_id",
+            "item is not indexed",
+        ));
+    }
+    let settings = at_db::settings::load(database.connection())
+        .map_err(|error| CommandError::internal(format!("cannot read path settings: {error}")))?;
+    let mut paths = state
+        .paths()
+        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?
+        .clone();
+    paths.apply_settings_global_store(settings.global_store_path());
+    let writable = at_fs::privilege::GlobalStoreStatus::probe(paths.global_store());
+    if !writable.is_available() {
+        return Err(CommandError::new(
+            CommandErrorCode::Unavailable,
+            writable
+                .reason()
+                .unwrap_or("Global store is read-only")
+                .to_owned(),
+        ));
+    }
+    let store = load_locks(&state)?;
+    let record = at_engine::locks::lock(&store, Scope::Global, item_id, reason, "desktop")
+        .map_err(|error| CommandError::invalid_argument("lock", &error.to_string()))?;
+    at_db::locks::upsert_lock(
+        database.connection(),
+        &at_db::locks::LockSpec {
+            item_id: &item_id,
+            scope: Scope::Global,
+            reason: Some(&record.lock.reason),
+            locked_by: Some(&record.lock.locked_by),
+        },
+    )
+    .map_err(|error| CommandError::internal(format!("cannot persist lock: {error}")))?;
+    Ok(ItemLockView {
+        locked: true,
+        reason: record.lock.reason,
+    })
+}
+
+/// Removes a Global lock and returns its previous reason for the completion toast.
+#[tauri::command]
+pub fn effective_unlock(
+    state: State<'_, AppState>,
+    request: ItemUnlockRequest,
+) -> Result<ItemLockView, CommandError> {
+    let scope = parse_scope(&request.scope)?;
+    if scope != Scope::Global {
+        return Err(CommandError::invalid_argument(
+            "scope",
+            "locks are available only at Global scope",
+        ));
+    }
+    let item_id = ItemId::from_str(&request.item_id)
+        .map_err(|_| CommandError::invalid_argument("item_id", "expected a valid item id"))?;
+    let store = load_locks(&state)?;
+    let removed = at_engine::locks::unlock(&store, Scope::Global, item_id)
+        .map_err(|error| CommandError::invalid_argument("unlock", &error.to_string()))?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    at_db::locks::remove_lock(database.connection(), &item_id, Scope::Global)
+        .map_err(|error| CommandError::internal(format!("cannot remove lock: {error}")))?;
+    Ok(ItemLockView {
+        locked: false,
+        reason: removed.lock.reason,
     })
 }
 
@@ -330,4 +456,53 @@ fn parse_kind(value: &str) -> Result<ItemKind, CommandError> {
 
 fn parse_agent(value: &str) -> Result<AgentId, CommandError> {
     AgentId::from_str(value).map_err(|_| CommandError::invalid_argument("agent", "unknown agent"))
+}
+
+/// Indexed item counts per kind, used for the Effective config tab labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct EffectiveCountsView {
+    /// Indexed skills across every scope.
+    pub skills: i32,
+    /// Indexed MCP servers across every scope.
+    pub mcp_servers: i32,
+    /// Indexed instruction files across every scope.
+    pub rules: i32,
+}
+
+/// Counts indexed items per kind without resolving them.
+#[tauri::command]
+pub fn effective_counts(
+    state: tauri::State<'_, super::state::AppState>,
+) -> Result<EffectiveCountsView, super::commands::CommandError> {
+    let database = state
+        .database()
+        .map_err(super::commands::CommandError::unavailable)?;
+    let mut statement = database
+        .connection()
+        .prepare("SELECT kind, COUNT(*) FROM items GROUP BY kind")
+        .map_err(|_| super::commands::CommandError::internal("could not count indexed items"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| super::commands::CommandError::internal("could not count indexed items"))?;
+    let mut counts = EffectiveCountsView {
+        skills: 0,
+        mcp_servers: 0,
+        rules: 0,
+    };
+    for row in rows {
+        let (kind, count) = row.map_err(|_| {
+            super::commands::CommandError::internal("could not count indexed items")
+        })?;
+        let count = i32::try_from(count).unwrap_or(i32::MAX);
+        match kind.as_str() {
+            "skill" => counts.skills = count,
+            "mcp_server" => counts.mcp_servers = count,
+            "rule" => counts.rules = count,
+            _ => {}
+        }
+    }
+    Ok(counts)
 }

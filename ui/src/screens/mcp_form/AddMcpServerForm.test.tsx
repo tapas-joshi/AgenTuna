@@ -39,7 +39,7 @@ describe("AddMcpServerForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
     await waitFor(() => expect(onPlan).toHaveBeenCalledTimes(1));
     expect(onSave).not.toHaveBeenCalled();
-    expect(screen.getByText("Files that will change")).toBeTruthy();
+    expect(await screen.findByText("Files that will change")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onSave).toHaveBeenCalledWith("preview-1", ["Codex"]));
     expect(onPlan.mock.calls[0]?.[0]).toMatchObject({ name: "Search", command: "npx", url: "https://example.invalid/mcp" });

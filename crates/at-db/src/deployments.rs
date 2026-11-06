@@ -302,6 +302,111 @@ pub fn list_deployments_for_item(
     Ok(rows)
 }
 
+/// Item ids of every deployment row one operation wrote, sorted and deduplicated.
+///
+/// An operation that migrated or adopted items stamps its id on each row it writes, so this
+/// is how undo finds the metadata that must disappear with the files.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+pub fn operation_item_ids(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT item_id FROM deployments WHERE operation_id = ?1 ORDER BY item_id",
+    )?;
+    let rows = statement
+        .query_map([operation_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Deletes every deployment row one operation wrote and returns how many were removed.
+///
+/// # Errors
+///
+/// [`DbError`] when the delete fails.
+pub fn delete_for_operation(connection: &Connection, operation_id: &str) -> Result<usize, DbError> {
+    let deleted = connection.execute(
+        "DELETE FROM deployments WHERE operation_id = ?1",
+        [operation_id],
+    )?;
+    Ok(deleted)
+}
+
+/// How many deployment rows still reference `item_id`.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+pub fn count_for_item(connection: &Connection, item_id: &ItemId) -> Result<i64, DbError> {
+    let count = connection.query_row(
+        "SELECT COUNT(*) FROM deployments WHERE item_id = ?1",
+        [item_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Per-agent deployment counts split by item kind for the Agents screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemKindCounts {
+    /// Deployments of skills whose state is not `native`.
+    pub managed_skills: i64,
+    /// Deployments of MCP servers whose state is not `native`.
+    pub managed_servers: i64,
+    /// Skill rows AgenTuna does not manage (`native`).
+    pub native_skills: i64,
+    /// MCP server rows AgenTuna does not manage (`native`).
+    pub native_servers: i64,
+}
+
+/// Counts managed and native deployments for one agent, split by item kind.
+///
+/// An unknown agent returns zero counts rather than an error.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+pub fn item_kind_counts(
+    connection: &Connection,
+    agent_id: &AgentId,
+) -> Result<ItemKindCounts, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT i.kind, \
+                SUM(d.state != 'native'), \
+                SUM(d.state = 'native') \
+           FROM deployments d JOIN items i ON i.id = d.item_id \
+          WHERE d.agent_id = ?1 AND i.kind IN ('skill', 'mcp_server') \
+          GROUP BY i.kind",
+    )?;
+    let mut counts = ItemKindCounts::default();
+    let rows = statement.query_map(params![agent_id.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+        ))
+    })?;
+    for row in rows {
+        let (kind, managed, native) = row?;
+        match kind.as_str() {
+            "skill" => {
+                counts.managed_skills = managed;
+                counts.native_skills = native;
+            }
+            "mcp_server" => {
+                counts.managed_servers = managed;
+                counts.native_servers = native;
+            }
+            _ => {}
+        }
+    }
+    Ok(counts)
+}
+
 /// Every deployment row for one agent, across items and scopes.
 ///
 /// # Errors

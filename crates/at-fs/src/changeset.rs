@@ -91,7 +91,9 @@ impl OperationRecorder for DbOperationRecorder<'_> {
         };
         let path_text = path.to_string_lossy().into_owned();
         let backup_id = if let Some(blob) = backup_path {
-            let size = fs::metadata(blob).map_err(|error| error.to_string())?.len();
+            let size = fs::symlink_metadata(blob)
+                .map_err(|error| error.to_string())?
+                .len();
             let expires = (OffsetDateTime::now_utc()
                 + time::Duration::days(i64::from(self.backup_retention_days)))
             .format(&time::format_description::well_known::Rfc3339)
@@ -513,8 +515,23 @@ fn apply_inner(
     }
     created_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     created_dirs.dedup();
-    for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
-        validate_expected(op, path, root)?;
+    for (index, ((op, path), root)) in set.ops.iter().zip(&paths).zip(&path_roots).enumerate() {
+        let replaced_by_prior_move = matches!(op, FileOp::Symlink { .. })
+            && set.ops[..index].iter().any(|prior| {
+                matches!(prior, FileOp::Move { from, .. }
+                    if op.destination().is_some_and(|destination| from == destination)
+                        || context.store_root.join(from) == *path)
+                    || matches!(prior, FileOp::Delete { path: deleted, .. }
+                        if Some(deleted.as_path()) == op.destination())
+            })
+            || matches!(
+                op,
+                FileOp::Copy { .. } | FileOp::CopyTree { .. } | FileOp::Move { .. }
+            ) && set.ops[..index].iter().any(|prior| {
+                matches!(prior, FileOp::Delete { path: deleted, .. }
+                    if Some(deleted.as_path()) == op.destination())
+            });
+        validate_expected(op, path, root, replaced_by_prior_move)?;
     }
     if let Some(guard) = ownership_guard {
         for op in &set.ops {
@@ -613,7 +630,10 @@ fn apply_inner(
                         entries: &journal.entries,
                         created_dirs: &created_dirs,
                     },
-                    cause,
+                    format!(
+                        "ChangeSet operation {index} at `{}` failed: {cause}",
+                        path.display()
+                    ),
                 );
             }
         };
@@ -775,12 +795,17 @@ fn execute_op(
         }
         FileOp::Symlink { target, mode, .. } => {
             let source = resolve_path(context.store_root, target)?;
-            let link_mode = match mode {
-                at_model::DeployMode::Link => at_model::LinkMode::Link,
-                at_model::DeployMode::Copy => at_model::LinkMode::Copy,
+            let request = match mode {
+                at_model::DeployMode::Link => {
+                    crate::deploy::DeployRequest::new(&source, path, at_model::LinkMode::Link)
+                        .with_copy_fallback()
+                }
+                at_model::DeployMode::Copy => {
+                    crate::deploy::DeployRequest::new(&source, path, at_model::LinkMode::Copy)
+                }
                 _ => return Err("unsupported link mode".to_owned()),
             };
-            crate::deploy::link_dir(&source, path, link_mode).map_err(|error| error.to_string())?;
+            crate::deploy::deploy(&request).map_err(|error| error.to_string())?;
             Ok(None)
         }
         FileOp::Copy {
@@ -801,6 +826,18 @@ fn execute_op(
                     .map(|_| None)
                     .map_err(|error| error.to_string())
             }
+        }
+        FileOp::CopyTree {
+            source, expected, ..
+        } => {
+            let source = resolve_path(context.store_root, source)?;
+            let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
+            if wanted != ExpectedState::Absent {
+                return Err("copy-tree destination replacement is not supported".to_owned());
+            }
+            // Plain content: no copy manifest, so the destination hashes as the source does.
+            copy_node(&source, path)?;
+            Ok(None)
         }
         FileOp::Mkdir { mode, parents, .. } => {
             if path.is_absolute() {
@@ -849,7 +886,13 @@ fn execute_op(
                     fs::rename(&stage, path).map_err(|error| error.to_string())?;
                     remove_node(&source)?;
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    return Err(format!(
+                        "cannot move `{}` to `{}`: {error}",
+                        source.display(),
+                        path.display()
+                    ));
+                }
             }
             Ok(None)
         }
@@ -925,6 +968,7 @@ fn validate_expected(
     op: &FileOp,
     path: &Path,
     store_root: &Path,
+    replaced_by_prior_move: bool,
 ) -> Result<(), ChangeSetApplyError> {
     let mut parent = path.parent();
     while let Some(current) = parent {
@@ -937,19 +981,26 @@ fn validate_expected(
         parent = current.parent();
     }
     let valid = match op {
-        FileOp::Write { expected, .. }
-        | FileOp::Delete { expected, .. }
-        | FileOp::Copy { expected, .. } => expected_matches(path, expected),
+        FileOp::Write { expected, .. } | FileOp::Delete { expected, .. } => {
+            expected_matches(path, expected)
+        }
+        // A Copy that replaces a just-deleted destination is the undo pipeline re-creating a
+        // backed-up tree; the Delete immediately before it removed what was there.
+        FileOp::Copy { expected, .. } | FileOp::CopyTree { expected, .. } => {
+            expected_matches(path, expected)
+                || (replaced_by_prior_move && matches!(expected, at_model::ExpectedState::Absent))
+        }
         FileOp::Symlink { target, .. } => {
-            expected_absent(path)
-                && resolve_path(store_root, target).is_ok_and(|target| target.exists())
+            (expected_absent(path) || replaced_by_prior_move)
+                && (resolve_path(store_root, target).is_ok_and(|target| target.exists())
+                    || replaced_by_prior_move)
         }
         FileOp::Mkdir { parents, .. } => {
             expected_absent(path) && (*parents || path.parent().is_some_and(Path::is_dir))
         }
         FileOp::Move { from, expected, .. } => {
             let source = store_root.join(from);
-            expected_matches(&source, expected) && expected_absent(path)
+            expected_matches(&source, expected) && (expected_absent(path) || replaced_by_prior_move)
         }
         _ => false,
     };
@@ -1518,6 +1569,69 @@ mod tests {
             },
         );
         assert!(fs::symlink_metadata(root.join("copy")).is_err());
+        assert_eq!(
+            fs::read(root.join("source/file.txt")).expect("source"),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn copy_tree_writes_plain_content_without_a_deploy_manifest() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(root.join("source/nested")).expect("source");
+        fs::write(root.join("source/SKILL.md"), b"canonical").expect("skill doc");
+        fs::write(root.join("source/nested/helper.txt"), b"helper").expect("nested file");
+        let set = changeset(vec![FileOp::CopyTree {
+            source: PathBuf::from("source"),
+            dest: PathBuf::from("item"),
+            expected: ModelExpected::Absent,
+        }]);
+        let backup_root = root.join("backups");
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backup_root,
+            recorder: &mut recorder,
+        };
+
+        apply(&set, &mut context).expect("copy tree");
+
+        assert_eq!(
+            fs::read(root.join("item/SKILL.md")).expect("skill doc"),
+            b"canonical"
+        );
+        assert_eq!(
+            fs::read(root.join("item/nested/helper.txt")).expect("nested file"),
+            b"helper"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("item").join(crate::deploy::COPY_MANIFEST_FILE))
+                .is_err(),
+            "a store item carries no deployment manifest"
+        );
+        assert_eq!(
+            hash_node(&root.join("item")).expect("item hash"),
+            hash_node(&root.join("source")).expect("source hash"),
+            "the copy hashes exactly as the source does"
+        );
+    }
+
+    #[test]
+    fn copy_tree_failure_rolls_back_the_whole_tree() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(root.join("source")).expect("source");
+        fs::write(root.join("source/file.txt"), b"source").expect("source file");
+        fail_after_one_operation(
+            &root,
+            FileOp::CopyTree {
+                source: PathBuf::from("source"),
+                dest: PathBuf::from("item"),
+                expected: ModelExpected::Absent,
+            },
+        );
+        assert!(fs::symlink_metadata(root.join("item")).is_err());
         assert_eq!(
             fs::read(root.join("source/file.txt")).expect("source"),
             b"source"

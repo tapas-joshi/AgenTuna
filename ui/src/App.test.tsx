@@ -54,6 +54,7 @@ test("native Preferences menu action is handed to the UI dispatcher", async () =
     cmd === "app_info" ? { name: "AgenTuna", version: "0.1.0" } :
     cmd === "projects_list" ? [] :
     cmd === "settings_load" ? { schema_version: 1, values: {} } :
+    cmd === "overview_load" ? { scopes: [], attention: [], attention_total: 0, changes: [], user_path: "/sandbox/user", global_path: "/sandbox/global", global_writable: false, global_reason: null } :
     cmd === "remote_backup_settings" ? { device_name: "Visual workstation", repo_url: null, branch: null, last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: false } :
     null,
   );

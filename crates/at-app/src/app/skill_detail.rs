@@ -634,6 +634,91 @@ pub async fn skill_reveal(state: State<'_, AppState>, item_id: String) -> Result
         .await
         .map_err(|_| CommandError::internal("file manager task failed"))?
 }
+/// Reveals a managed item in the system file manager after validating its registered path.
+#[tauri::command]
+pub async fn reveal_item(state: State<'_, AppState>, item_id: String) -> Result<(), CommandError> {
+    let id = item_id
+        .parse::<at_model::ItemId>()
+        .map_err(|_| CommandError::invalid_argument("item_id", "invalid item identity"))?;
+    let path = {
+        let database = state.database().map_err(CommandError::unavailable)?;
+        let item = at_db::shared::items_by_ids(database.connection(), std::slice::from_ref(&id))
+            .map_err(|_| CommandError::internal("could not query item path"))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                CommandError::new(CommandErrorCode::NotFound, "The item is no longer indexed.")
+            })?;
+        let source = item.source_path.ok_or_else(|| {
+            CommandError::new(CommandErrorCode::NotFound, "The item path is unavailable.")
+        })?;
+        let project_root = item
+            .project_id
+            .as_deref()
+            .map(|project_id| {
+                at_db::projects::find_project_by_id(database.connection(), project_id)
+                    .map_err(|_| CommandError::internal("could not query the owning project"))?
+                    .map(|project| std::path::PathBuf::from(project.path))
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            CommandErrorCode::NotFound,
+                            "The owning project is no longer registered.",
+                        )
+                    })
+            })
+            .transpose()?;
+        let paths = super::paths::resolve_process_paths(project_root.as_deref()).map_err(|_| {
+            CommandError::unavailable("authorized application roots are unavailable")
+        })?;
+        let mut roots = vec![
+            paths.support_dir().to_path_buf(),
+            paths.user_store().to_path_buf(),
+            paths.global_store().to_path_buf(),
+        ];
+        if let Some(home) = paths.home_dir() {
+            roots.push(home.to_path_buf());
+        }
+        if let Some(project) = project_root {
+            roots.push(project);
+        }
+        if let Some(project_store) = paths.project_store() {
+            roots.push(project_store.to_path_buf());
+        }
+        authorized_existing_path(&std::path::PathBuf::from(source), &roots)?
+    };
+    tauri::async_runtime::spawn_blocking(move || reveal_skill_path(&path))
+        .await
+        .map_err(|_| CommandError::internal("file manager task failed"))?
+}
+
+fn authorized_existing_path(
+    path: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, CommandError> {
+    if !path.is_absolute() {
+        return Err(CommandError::invalid_argument(
+            "item_id",
+            "registered item path is not absolute",
+        ));
+    }
+    let canonical_path = path.canonicalize().map_err(|_| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "The item path no longer exists.",
+        )
+    })?;
+    let permitted = roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical_path.starts_with(root));
+    if !permitted {
+        return Err(CommandError::invalid_argument(
+            "item_id",
+            "registered item path is outside authorized roots",
+        ));
+    }
+    Ok(canonical_path)
+}
 
 fn reveal_skill_path(path: &std::path::Path) -> Result<(), CommandError> {
     #[cfg(target_os = "macos")]
@@ -868,4 +953,39 @@ fn package_path(item: &at_db::shared::ItemRow) -> Result<std::path::PathBuf, Com
                 "The skill package path is unavailable.",
             )
         })
+}
+
+#[cfg(test)]
+mod reveal_item_tests {
+    use super::authorized_existing_path;
+
+    #[test]
+    fn authorized_item_reveal_requires_component_containment() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("authorized");
+        std::fs::create_dir(&root).expect("authorized root");
+        let item = root.join("item.json");
+        std::fs::write(&item, "content").expect("item");
+        assert_eq!(
+            authorized_existing_path(&item, std::slice::from_ref(&root)).expect("authorized"),
+            item.canonicalize().expect("canonical item")
+        );
+
+        let outside = temp.path().join("outside.json");
+        std::fs::write(&outside, "content").expect("outside item");
+        assert!(authorized_existing_path(&outside, std::slice::from_ref(&root)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_item_reveal_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("authorized");
+        std::fs::create_dir(&root).expect("authorized root");
+        let outside = temp.path().join("outside.json");
+        std::fs::write(&outside, "content").expect("outside item");
+        let link = root.join("linked.json");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        assert!(authorized_existing_path(&link, &[root]).is_err());
+    }
 }

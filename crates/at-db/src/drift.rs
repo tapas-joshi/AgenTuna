@@ -9,6 +9,18 @@
 //!
 //! This module issues no DDL: every statement is a query or row change against
 //! the schema TF-014 created.
+//!
+//! ## Why the classification is not stored
+//!
+//! `drift_events` has no `kind` column and migrations v1..v9 are frozen, so the
+//! `Drifted`/`LinkReplacedByFile`/`LinkRemoved`/`FileDeleted`/
+//! `StoreFileEditedWhileLinked`/`Unreadable` classification stays on the
+//! engine's `DriftNotice` and reaches the UI through the `agentuna:drift-detected`
+//! event. Encoding it into `path`, `expected_hash` or `backup_id` would corrupt
+//! values those columns are compared on; a resolution row is not a
+//! classification. A future migration may add the column; until then the row
+//! records identity, scope, path, both hashes and the detection time, which is
+//! what the drift screen lists.
 
 use at_model::{AgentId, Scope};
 use rusqlite::{Connection, OptionalExtension, Row, params};

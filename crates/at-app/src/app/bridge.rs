@@ -171,6 +171,11 @@ pub enum JobError {
         /// Failure text.
         message: String,
     },
+    /// A remote-backup action failed with a typed remedy.
+    RemoteBackup {
+        /// Secret-free failure details for the remote-backup screen.
+        failure: super::remote_backup::actions::RemoteBackupFailure,
+    },
 }
 
 impl JobError {
@@ -179,6 +184,7 @@ impl JobError {
     pub fn message(&self) -> &str {
         match self {
             Self::Panic { message } | Self::Failed { message } => message,
+            Self::RemoteBackup { failure } => &failure.message,
         }
     }
 }
@@ -376,10 +382,11 @@ pub enum BridgeError {
     NotStarted,
 }
 
-/// Cooperative cancellation token shared by the handle and the job runner.
+/// Cooperative cancellation token shared by the job handle, runner and cancellable child work.
 #[derive(Debug, Clone)]
 pub struct CancelToken {
     sender: watch::Sender<bool>,
+    flag: Arc<AtomicBool>,
 }
 
 impl CancelToken {
@@ -387,20 +394,28 @@ impl CancelToken {
     #[must_use]
     pub fn new() -> Self {
         let (sender, _receiver) = watch::channel(false);
-        Self { sender }
+        Self {
+            sender,
+            flag: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Requests cancellation and wakes the runner.
     pub fn cancel(&self) {
-        // `send` refuses when no receiver exists; the store must still flip so that a
-        // runner which subscribes later observes the cancellation.
+        self.flag.store(true, Ordering::Release);
         self.sender.send_replace(true);
     }
 
     /// True once [`CancelToken::cancel`] has been called.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        *self.sender.borrow()
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// Shared flag for a subprocess runner that must kill its child on cancellation.
+    #[must_use]
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.flag)
     }
 
     /// Resolves when the token is cancelled.
@@ -466,7 +481,7 @@ type BoxFuture = Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'sta
 /// Description of one unit of background work.
 pub struct JobSpec {
     name: String,
-    work: Box<dyn FnOnce(ProgressSender) -> BoxFuture + Send + 'static>,
+    work: Box<dyn FnOnce(ProgressSender, CancelToken) -> BoxFuture + Send + 'static>,
 }
 
 impl JobSpec {
@@ -476,9 +491,18 @@ impl JobSpec {
         W: FnOnce(ProgressSender) -> F + Send + 'static,
         F: Future<Output = Result<(), JobError>> + Send + 'static,
     {
+        Self::new_cancellable(name, move |progress, _cancel| work(progress))
+    }
+
+    /// Creates a job whose long-running child work can observe cancellation.
+    pub fn new_cancellable<W, F>(name: impl Into<String>, work: W) -> Self
+    where
+        W: FnOnce(ProgressSender, CancelToken) -> F + Send + 'static,
+        F: Future<Output = Result<(), JobError>> + Send + 'static,
+    {
         Self {
             name: name.into(),
-            work: Box::new(move |progress| Box::pin(work(progress))),
+            work: Box::new(move |progress, cancel| Box::pin(work(progress, cancel))),
         }
     }
 
@@ -688,7 +712,7 @@ impl JobBridge {
             id: id.clone(),
             name: name.clone(),
             token: token.clone(),
-            work: (spec.work)(progress.clone()),
+            work: (spec.work)(progress.clone(), token.clone()),
             tx,
         };
         // The job span gives panics (via the tracing_panic hook, which runs inside the

@@ -278,6 +278,92 @@ impl LockOverview {
     }
 }
 
+/// Creates or updates a Global lock in the shared SQLite index.
+///
+/// # Errors
+/// Returns the same scope/store errors as [`lock`], including database failures as lock-store errors.
+pub fn lock_in_database(
+    paths: &at_store::paths::AppPaths,
+    active_scope: Scope,
+    item_id: ItemId,
+    reason: &str,
+    locked_by: &str,
+) -> Result<LockRecord, EngineError> {
+    let database = at_db::Database::open_file(paths.db_path())
+        .map_err(|error| lock_db_error(error.to_string()))?;
+    let store = database_lock_store(database.connection())?;
+    if at_db::shared::items_by_ids(database.connection(), &[item_id])
+        .map_err(|error| lock_db_error(error.to_string()))?
+        .is_empty()
+    {
+        return Err(lock_db_error(format!("item {item_id} does not exist")));
+    }
+    let record = lock(&store, active_scope, item_id, reason, locked_by)?;
+    at_db::locks::upsert_lock(
+        database.connection(),
+        &at_db::locks::LockSpec {
+            item_id: &item_id,
+            scope: Scope::Global,
+            reason: Some(&record.lock.reason),
+            locked_by: Some(&record.lock.locked_by),
+        },
+    )
+    .map_err(|error| lock_db_error(error.to_string()))?;
+    Ok(record)
+}
+
+/// Removes a Global lock from the shared SQLite index.
+///
+/// # Errors
+/// Returns the same scope/store errors as [`unlock`], including database failures as lock-store errors.
+pub fn unlock_in_database(
+    paths: &at_store::paths::AppPaths,
+    active_scope: Scope,
+    item_id: ItemId,
+) -> Result<LockRecord, EngineError> {
+    let database = at_db::Database::open_file(paths.db_path())
+        .map_err(|error| lock_db_error(error.to_string()))?;
+    let store = database_lock_store(database.connection())?;
+    let record = unlock(&store, active_scope, item_id)?;
+    at_db::locks::remove_lock(database.connection(), &item_id, Scope::Global)
+        .map_err(|error| lock_db_error(error.to_string()))?;
+    Ok(record)
+}
+
+fn database_lock_store(connection: &rusqlite::Connection) -> Result<MemoryLockStore, EngineError> {
+    let rows =
+        at_db::locks::list_locks(connection).map_err(|error| lock_db_error(error.to_string()))?;
+    let store = MemoryLockStore::new();
+    for row in rows {
+        let locked_at = time::OffsetDateTime::parse(
+            &row.locked_at,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map_err(|error| lock_db_error(error.to_string()))?;
+        store.put(LockRecord {
+            id: LockId::new(),
+            lock: Lock {
+                scope: row.scope,
+                item_id: row.item_id,
+                reason: row
+                    .reason
+                    .ok_or_else(|| lock_db_error("stored lock reason is missing"))?,
+                locked_by: row
+                    .locked_by
+                    .ok_or_else(|| lock_db_error("stored lock owner is missing"))?,
+                locked_at,
+            },
+        })?;
+    }
+    Ok(store)
+}
+
+fn lock_db_error(message: impl Into<String>) -> EngineError {
+    EngineError::LockStore(LockStoreError::Backend {
+        message: message.into(),
+    })
+}
+
 /// Creates or replaces the lock on `item_id`.
 ///
 /// Only [`Scope::Global`] may lock; any other active scope returns

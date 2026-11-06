@@ -111,6 +111,8 @@ agentuna mcp add --help
 agentuna mcp edit --help
 agentuna mcp remove --help
 agentuna mcp test --help
+agentuna mcp enable --help
+agentuna mcp disable --help
 agentuna mcp secret --help
 agentuna mcp secret list --help
 agentuna mcp secret set --help
@@ -120,7 +122,15 @@ agentuna agents list --help
 agentuna agents inspect --help
 agentuna effective --help
 agentuna why --help
+agentuna effective lock --help
+agentuna effective unlock --help
+agentuna overview --help
+agentuna rules --help
+agentuna rules list --help
+agentuna rules show --help
+agentuna rules save --help
+agentuna rules new --help
 ```
 
-Flags present in this command tree: `--agent`, `--depth`, `--dry-run`, `--fix`, `--flag`, `--force`, `--help`, `--json`, `--kind`, `--no-color`, `--project`, `--read-only`, `--scope`, `--verbose`, `--version`, `--yes`.
+Flags present in this command tree: `--agent`, `--depth`, `--dry-run`, `--fix`, `--flag`, `--force`, `--help`, `--json`, `--kind`, `--no-color`, `--project`, `--read-only`, `--reason`, `--scope`, `--stdin`, `--type`, `--verbose`, `--version`, `--yes`.
 <!-- END GENERATED COMMAND TREE -->

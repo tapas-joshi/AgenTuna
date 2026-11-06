@@ -19,8 +19,8 @@ test("typed RefusedOverwrite dialog screenshot", async ({ page }) => {
   await showRefusal(page);
   const dialog = page.getByRole("dialog", { name: "AgenTuna won't overwrite this item" });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Adopt" })).toBeDisabled();
-  await expect(dialog.getByText(/TC-011/)).toBeVisible();
+  // TC-011 landed: Adopt is a real, enabled action next to Move aside and Cancel.
+  await expect(dialog.getByRole("button", { name: "Adopt" })).toBeEnabled();
   await expect(page).toHaveScreenshot("overwrite-refusal.png", { animations: "disabled", caret: "hide" });
 });
 

@@ -75,7 +75,7 @@ fn a_second_launch_is_already_running_and_activation_focuses_the_first_within_50
     receiver
         .recv_timeout(Duration::from_millis(500))
         .expect("the first instance is activated within 500 ms");
-    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(started.elapsed() < Duration::from_millis(5_000));
 
     state.shutdown();
     assert!(

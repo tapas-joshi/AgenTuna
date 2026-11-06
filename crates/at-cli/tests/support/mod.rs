@@ -108,6 +108,26 @@ pub fn agentuna(sandbox: &Sandbox, args: &[&str]) -> Output {
         .expect("spawn the agentuna binary")
 }
 
+/// Runs the real binary with `stdin` piped, as an agent would.
+pub fn agentuna_with_stdin(sandbox: &Sandbox, args: &[&str], stdin: &[u8]) -> Output {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentuna"))
+        .args(args)
+        .env("NO_COLOR", "1")
+        .envs(sandbox.vars())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the agentuna binary");
+    if let Some(mut pipe) = child.stdin.take() {
+        pipe.write_all(stdin).expect("write stdin");
+    }
+    child.wait_with_output().expect("collect output")
+}
+
 /// Exit status of a finished run.
 #[must_use]
 pub fn exit_code(output: &Output) -> i32 {

@@ -7,7 +7,7 @@ import type { SkillAgentPreviewRequest } from "../../generated/SkillAgentPreview
 type AgentChoice = { readonly id: string; readonly label: string; readonly enabled: boolean; readonly disabledReason?: string };
 
 /** Lets the caller adjust enabled agent copies through reviewed TS-010 plans. */
-export function EnableSkillPopover({ itemId, scope, projectId, agents, onClose }: { readonly itemId: string; readonly scope: string; readonly projectId: string | null; readonly agents: readonly AgentChoice[]; readonly onClose: () => void }) {
+export function EnableSkillPopover({ itemId, scope, projectId, agents, onClose, onApplied }: { readonly itemId: string; readonly scope: string; readonly projectId: string | null; readonly agents: readonly AgentChoice[]; readonly onClose: () => void; readonly onApplied: () => void }) {
   const [selected, setSelected] = useState(() => new Set(agents.filter((agent) => agent.enabled).map((agent) => agent.id)));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -26,6 +26,7 @@ export function EnableSkillPopover({ itemId, scope, projectId, agents, onClose }
         outcomes.push(`${agent.label}: ${outcome.changed ? "updated" : "unchanged"}`);
       }
       setMessage(outcomes.length ? outcomes.join(" · ") : "No changes");
+      onApplied();
     } catch (cause) { setMessage(String(cause)); }
     finally { setBusy(false); }
   }

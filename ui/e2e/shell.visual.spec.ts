@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
 
 test("every routed screen has a meaningful page heading", async ({ page }) => {
   const routes = [
-    ["Overview", "Overview"], ["Skills", "Skills"], ["MCP Servers", "MCP Servers"],
+    ["Overview", "Overview"], ["Skills", "Presets"], ["MCP Servers", "MCP Servers"],
     ["Instructions", "Instructions"], ["Agents", "Agents"], ["Effective config", "Effective config"],
     ["Sync & drift", "Sync & drift"],
   ] as const;
@@ -46,7 +46,6 @@ test("MCP detail, MCP form and migration routes render meaningful states", async
   await search.fill("Import native items");
   await expect(palette.getByRole("option", { name: /Import native items/ })).toBeVisible();
   await palette.getByRole("option", { name: /Import native items/ }).click();
-  await page.getByRole("button", { name: "Rescan" }).click();
   await expect(page.getByText("3 found · 0 selected")).toBeVisible();
   await expect(page.getByText("Visual migration skill")).toBeVisible();
 });

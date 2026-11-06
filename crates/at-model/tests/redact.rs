@@ -509,10 +509,10 @@ fn ten_megabytes_of_log_text_redacts_quickly() {
     );
     assert!(redacted.len() < text.len());
 
-    // The contract is 50 ms in a release build (~20 ms measured). A debug build is
-    // about four times slower, so the same shape of test keeps headroom there.
+    // The contract is 50 ms in a release build (~20 ms measured). A debug build on a loaded CI
+    // runner is far slower, so debug keeps generous headroom; the release budget is the contract.
     let budget = if cfg!(debug_assertions) {
-        Duration::from_millis(400)
+        Duration::from_millis(2_000)
     } else {
         Duration::from_millis(50)
     };

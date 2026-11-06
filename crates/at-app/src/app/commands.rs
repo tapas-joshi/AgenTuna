@@ -314,6 +314,7 @@ fn mcp_test_result_view(result: at_mcp::TestResult) -> McpTestResultView {
 }
 
 use super::state::AppState;
+// Placeholder
 
 /// Static application identity shown in the shell.
 #[derive(Debug, Clone, Serialize, TS)]
@@ -348,6 +349,8 @@ pub enum CommandErrorCode {
     RefusedOverwrite,
     /// A reviewed plan conflicts with newer or divergent state.
     Conflict,
+    /// A Global lock blocks the requested change.
+    Locked,
 }
 
 /// Structured details for an unmanaged target refused by `at-fs`.

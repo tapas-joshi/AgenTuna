@@ -45,6 +45,13 @@ pub enum FaultPoint {
     DeployCopyWrite,
     /// Immediately before an individual ChangeSet operation executes.
     ChangeSetOperation,
+    /// After a directory backup was staged and verified, before the restore re-reads the
+    /// live target tree. `path` is the restore target directory; an injector may modify a
+    /// file inside it to simulate a concurrent external writer.
+    RestoreRecheck,
+    /// Immediately before the verified staging tree is renamed onto the restore target.
+    /// `path` is the target directory.
+    RestoreInstall,
 }
 
 /// What an injector does when its point is hit. Test and `faults`/`testkit` features only.

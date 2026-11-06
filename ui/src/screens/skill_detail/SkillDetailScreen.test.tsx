@@ -79,4 +79,29 @@ describe("SkillDetailScreen", () => {
     await waitFor(() => expect(screen.queryByText("Update available")).toBeNull());
     expect(screen.getByTitle("Source status is unknown or offline; no update badge is shown.")).toBeTruthy();
   });
+
+  test("mounts the reviewed per-agent enable flow from skill detail", async () => {
+    ipc.reply = (command) => Promise.resolve(
+      command === "skill_detail_load" ? detail :
+      command === "agents_list" ? [{ id: "codex", name: "Codex", installed: true, version: "1.0.0", managed: true, paths: [], health: "healthy", link_mode: "link" }] :
+      command === "skill_agent_preview" ? { preview_id: "preview_skill_agent", enabled: false, mode: "link", paths: ["/sandbox/.agents/skills/review-checklist"], coupled_agents: ["omp"], warnings: [], no_op: false } :
+      command === "skill_agent_apply" ? { operation_id: "op_skill_agent", enabled: false, changed: true } :
+      undefined,
+    );
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+
+    await screen.findAllByText("Review checklist");
+    screen.getByRole("button", { name: "Manage agents" }).click();
+    const dialog = await screen.findByRole("dialog", { name: "Enable for agents" });
+    const checkbox = dialog.querySelector('input[type="checkbox"]');
+    expect(checkbox).toBeTruthy();
+    (checkbox as HTMLInputElement).click();
+    screen.getByRole("button", { name: "Apply" }).click();
+
+    await waitFor(() => expect(ipc.calls.some((call) => call.command === "skill_agent_apply")).toBe(true));
+    expect(ipc.calls.find((call) => call.command === "skill_agent_preview")?.args).toEqual({
+      request: { item_id: "itm_fake", scope: "user", agent_id: "codex", enabled: false, project_id: null },
+    });
+    expect(ipc.calls.find((call) => call.command === "skill_agent_apply")?.args).toEqual({ previewId: "preview_skill_agent" });
+  });
 });

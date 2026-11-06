@@ -9,7 +9,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::scan::{ParseStatus, ScanItem, ScanReport};
 
 /// A native copy participating in a conflict.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConflictCopy {
     /// Agent that reads this copy.
     pub agent: AgentId,
@@ -24,7 +24,7 @@ pub struct ConflictCopy {
 }
 
 /// Suggested action after comparison.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ProposedResolution {
     /// Keep the first copy; only formatting differs.
@@ -34,7 +34,7 @@ pub enum ProposedResolution {
 }
 
 /// One group of conflicting copies for a normalized item name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conflict {
     /// Item kind.
     pub kind: ItemKind,
@@ -51,7 +51,7 @@ pub struct Conflict {
 }
 
 /// All substantive conflicts and formatting-only groups discovered in one scan.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConflictSet {
     /// Groups containing two or more distinct copies.
     pub conflicts: Vec<Conflict>,
@@ -117,6 +117,12 @@ pub fn detect_conflicts(scan: &ScanReport) -> ConflictSet {
                 copies[1].path.display(),
                 name
             )
+        } else if kind == ItemKind::Skill {
+            format!(
+                "--- {}\\n+++ {}\\n skill tree content differs\\n",
+                copies[0].path.display(),
+                copies[1].path.display()
+            )
         } else {
             text_diff(&copies[0], &copies[1])
         };
@@ -138,6 +144,11 @@ pub fn detect_conflicts(scan: &ScanReport) -> ConflictSet {
 }
 
 /// Picks two non-colliding names for KeepBoth, or returns `None` if targets are exhausted.
+///
+/// The first name is `<name>-<agent>`; the second is `<name>-2`. Either gains a numeric suffix
+/// when it already exists, so a store collision, an agent collision or both still resolve:
+/// with `rule-2` taken the second name becomes `rule-3`, and with `rule-claude-code` taken the
+/// first becomes `rule-claude-code-2`.
 #[must_use]
 pub fn keep_both_names(
     name: &str,
@@ -149,13 +160,27 @@ pub fn keep_both_names(
         name,
         agent.to_string().to_lowercase().replace('_', "-")
     );
-    if !valid_name(&agent_name) || existing.contains(&agent_name) {
-        return None;
+    let first = unique_name(&agent_name, existing)?;
+    let mut taken = existing.clone();
+    taken.insert(first.clone());
+    let second = unique_name_with_start(name, 2, &taken)?;
+    Some((first, second))
+}
+
+/// Returns `base` when free, otherwise the first free `<base>-<n>` (`n` from 2).
+fn unique_name(base: &str, existing: &BTreeSet<String>) -> Option<String> {
+    if valid_name(base) && !existing.contains(base) {
+        return Some(base.to_owned());
     }
-    for suffix in 2..=9999 {
-        let second = format!("{name}-{suffix}");
-        if valid_name(&second) && second != agent_name && !existing.contains(&second) {
-            return Some((agent_name, second));
+    unique_name_with_start(base, 2, existing)
+}
+
+/// Returns the first free `<base>-<n>` with `n` starting at `start`.
+fn unique_name_with_start(base: &str, start: usize, existing: &BTreeSet<String>) -> Option<String> {
+    for suffix in start..=9999 {
+        let candidate = format!("{base}-{suffix}");
+        if valid_name(&candidate) && !existing.contains(&candidate) {
+            return Some(candidate);
         }
     }
     None
@@ -244,7 +269,7 @@ mod tests {
         assert!(detect_conflicts(&report).conflicts.is_empty());
     }
     #[test]
-    fn keep_both_names_avoids_store_and_agent_collisions_deterministically() {
+    fn keep_both_names_resolves_store_agent_and_combined_collisions() {
         let agent_suffix = format!(
             "rule-{}",
             AgentId::ClaudeCode
@@ -253,6 +278,11 @@ mod tests {
                 .replace('_', "-")
         );
         assert_eq!(
+            keep_both_names("rule", &AgentId::ClaudeCode, &BTreeSet::new()),
+            Some((agent_suffix.clone(), "rule-2".to_owned()))
+        );
+        // Store collision: `rule-2` is taken, so the second name moves to `rule-3`.
+        assert_eq!(
             keep_both_names(
                 "rule",
                 &AgentId::ClaudeCode,
@@ -260,21 +290,23 @@ mod tests {
             ),
             Some((agent_suffix.clone(), "rule-3".to_owned()))
         );
+        // Agent collision: the agent-suffixed name is taken, so it gains its own suffix.
         assert_eq!(
             keep_both_names(
                 "rule",
                 &AgentId::ClaudeCode,
                 &BTreeSet::from([agent_suffix.clone()])
             ),
-            None
+            Some((format!("{agent_suffix}-2"), "rule-2".to_owned()))
         );
+        // Both: the agent name gains `-2` and the numeric name moves to `rule-3`.
         assert_eq!(
             keep_both_names(
                 "rule",
                 &AgentId::ClaudeCode,
-                &BTreeSet::from([agent_suffix, "rule-2".to_owned()])
+                &BTreeSet::from([agent_suffix.clone(), "rule-2".to_owned()])
             ),
-            None
+            Some((format!("{agent_suffix}-2"), "rule-3".to_owned()))
         );
     }
 }
