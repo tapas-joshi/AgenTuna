@@ -1,0 +1,72 @@
+/*
+ * Popover surfaces (TU-004).
+ *
+ * Positioning is Radix/floating-ui's job: the panel flips and shifts to stay
+ * inside the window gutter, re-measures when the anchor scrolls or the window
+ * resizes, and exposes the space still available as custom properties. The
+ * rules below cap the panel at that space so a long list inside a popover
+ * scrolls instead of overflowing the viewport.
+ *
+ * Colour, spacing and type come from theme tokens only.
+ */
+
+.at-popover {
+  --at-popover-gutter: var(--at-space-8);
+
+  box-sizing: border-box;
+  min-inline-size: 220px;
+  max-inline-size: min(
+    480px,
+    var(--radix-popover-content-available-width, calc(100vw - 2 * var(--at-popover-gutter)))
+  );
+  max-block-size: var(
+    --radix-popover-content-available-height,
+    calc(100vh - 2 * var(--at-popover-gutter))
+  );
+  overflow-y: auto;
+  padding: var(--at-space-8);
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-radius: var(--at-radius-10);
+  background: var(--at-color-raised);
+  color: var(--at-color-text);
+  box-shadow: 0 var(--at-space-8) var(--at-space-24)
+    color-mix(in srgb, var(--at-color-sidebar) 72%, transparent);
+  font-family: var(--at-font-ui);
+  font-size: var(--at-text-13);
+  line-height: 1.45;
+  animation: at-popover-in 120ms ease-out;
+}
+
+.at-popover__section {
+  padding: var(--at-space-8) var(--at-space-8) var(--at-space-4);
+  color: var(--at-color-text-muted);
+  font-size: var(--at-text-11);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.at-popover__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--at-space-8);
+  margin: var(--at-space-8) calc(-1 * var(--at-space-8)) calc(-1 * var(--at-space-8));
+  padding: var(--at-space-8) var(--at-space-12);
+  border-block-start: var(--at-hairline, 1px) solid var(--at-color-border);
+  color: var(--at-color-text-muted);
+  font-size: var(--at-text-12);
+}
+
+@keyframes at-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-1 * var(--at-space-4)));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .at-popover {
+    animation: none;
+  }
+}

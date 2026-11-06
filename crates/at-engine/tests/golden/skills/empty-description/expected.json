@@ -1,0 +1,9 @@
+{
+  "id": "empty-description",
+  "parse": {
+    "error": {
+      "variant": "EmptyDescription"
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,9 @@
+{
+  "id": "missing-name",
+  "parse": {
+    "error": {
+      "variant": "MissingName"
+    }
+  },
+  "schema_version": 1
+}

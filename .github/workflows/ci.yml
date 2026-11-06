@@ -9,50 +9,134 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   rust:
-    runs-on: macos-latest
+    name: rust (macos-14)
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      RUST_BACKTRACE: "1"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-      - name: Generated TypeScript types are committed
-        run: git diff --exit-code -- ui/src/generated
 
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustup default "$channel"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+          key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: ui/package.json
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: ui/pnpm-lock.yaml
-      - run: pnpm --dir ui install --frozen-lockfile
-      - run: pnpm --dir ui test
-      - run: pnpm --dir ui build
 
-  supply-chain:
+      - name: Build the UI the Tauri app embeds
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui build
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: |
+          mkdir -p target/ci-logs
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee target/ci-logs/test.log
+
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Build the release app
+        run: cargo build --release -p at-app
+
+      - name: Generated TypeScript types are committed
+        run: git diff --exit-code -- ui/src/generated
+
+      - name: Upload test logs and golden diffs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-failure-logs
+          path: |
+            target/ci-logs/
+            target/golden-diffs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Run UI tests
+        run: pnpm --dir ui test
+
+      - name: Build the UI
+        run: pnpm --dir ui build
+
+  supply-chain:
+    name: supply chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo registry and installed binaries
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: cargo-deny-${{ hashFiles('deny.toml') }}
+
       - name: cargo-deny
         run: |
           cargo install cargo-deny --locked

@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Uses \"quotes\": even more carefully.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: quoted-description\n-description: \"Uses \\\"quotes\\\": carefully.\"\n+description: \"Uses \\\"quotes\\\": even more carefully.\"\n ---\n \n # Quoted\n"
+  },
+  "id": "quoted-description",
+  "parse": {
+    "ok": {
+      "body": "\n# Quoted\n",
+      "body_span": [
+        76,
+        86
+      ],
+      "description": "Uses \"quotes\": carefully.",
+      "description_span": [
+        41,
+        71
+      ],
+      "frontmatter": "name: quoted-description\ndescription: \"Uses \\\"quotes\\\": carefully.\"\n",
+      "frontmatter_span": [
+        4,
+        72
+      ],
+      "name": "quoted-description",
+      "raw_len": 86,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

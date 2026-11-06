@@ -1,0 +1,70 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "code-review",
+        "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "user"
+          },
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<home>/.agentuna/skills/code-review-alt/SKILL.md",
+        "scope": "user",
+        "shadowed_by": {
+          "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+          "scope": "user"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "duplicate-skill-in-one-layer",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "First.",
+          "name": "code-review",
+          "slug": "code-review"
+        },
+        {
+          "description": "Second.",
+          "name": "code-review",
+          "slug": "code-review-alt"
+        }
+      ]
+    }
+  ],
+  "title": "Two skills declaring one name in one scope resolve to the first folder"
+}

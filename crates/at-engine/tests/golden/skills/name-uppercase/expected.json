@@ -1,0 +1,10 @@
+{
+  "id": "name-uppercase",
+  "parse": {
+    "error": {
+      "name": "My-Skill",
+      "variant": "NameUppercase"
+    }
+  },
+  "schema_version": 1
+}

@@ -24,6 +24,7 @@ tauri-build.workspace = true
 at-model.workspace = true
 at-fs.workspace = true
 at-store.workspace = true
+at-db.workspace = true
 tauri.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -39,3 +40,5 @@ time.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
+# TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
+at-fs = { workspace = true, features = ["testkit"] }

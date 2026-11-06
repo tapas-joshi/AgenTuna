@@ -1,0 +1,40 @@
+{
+  "edit": {
+    "description": "Uses Windows line endings and a new description.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\r\n name: crlf-skill\r\n-description: Uses Windows line endings.\r\n+description: Uses Windows line endings and a new description.\r\n license: MIT\r\n ---\r\n \r\n"
+  },
+  "id": "crlf",
+  "parse": {
+    "ok": {
+      "body": "\r\n# CRLF\r\n",
+      "body_span": [
+        83,
+        93
+      ],
+      "description": "Uses Windows line endings.",
+      "description_span": [
+        35,
+        62
+      ],
+      "frontmatter": "name: crlf-skill\r\ndescription: Uses Windows line endings.\r\nlicense: MIT\r\n",
+      "frontmatter_span": [
+        5,
+        78
+      ],
+      "name": "crlf-skill",
+      "raw_len": 93,
+      "unknown_keys": [
+        {
+          "key": "license",
+          "raw": "license: MIT",
+          "span": [
+            64,
+            76
+          ]
+        }
+      ],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

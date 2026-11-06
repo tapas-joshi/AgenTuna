@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "local-tool": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "local-tool-mcp"
+      ],
+      "env": {
+        "TOOL_HOME": "/tmp/tool",
+        "API_KEY": "${API_KEY}"
+      },
+      "enabled": true,
+      "timeout": 20000,
+      "instructions": false
+    }
+  },
+  "disabledServers": [
+    "legacy"
+  ]
+}

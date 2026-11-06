@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
+import type { ColumnDef } from "@tanstack/react-table";
 import { Badge } from "./badge";
 import { Button } from "./button";
 import { Checkbox } from "./checkbox";
@@ -9,6 +10,10 @@ import { RadioCardGroup } from "./radio-card";
 import { SegmentedControl } from "./segmented-control";
 import { ITEM_STATUSES } from "./status";
 import { StatusDot } from "./status-dot";
+import { agentColumns } from "./table/agent-columns";
+import type { DataTableFeatures } from "./table/features";
+import { DataTable } from "./table/table";
+import type { AgentCellState, AgentDescriptor } from "./table/types";
 import { Toggle } from "./toggle";
 
 /**
@@ -61,6 +66,107 @@ const RADIO_CARDS = [
 ] as const;
 
 type Placement = (typeof RADIO_CARDS)[number]["value"];
+
+interface GallerySkill {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly states: Readonly<Record<string, AgentCellState>>;
+  readonly dimmed?: boolean;
+  readonly tooltip?: string;
+}
+
+const GALLERY_AGENTS: readonly AgentDescriptor[] = [
+  { id: "claude-code", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "omp", label: "omp" },
+];
+
+const LINKED: AgentCellState = { kind: "linked" };
+const OFF: AgentCellState = { kind: "off" };
+const NONE: AgentCellState = { kind: "none" };
+const LOCKED: AgentCellState = { kind: "locked", lockedBy: "Global" };
+const SHADOWED: AgentCellState = { kind: "shadowed", shadowedBy: "Project" };
+const native = (path: string, sharedWith?: readonly string[]): AgentCellState => ({
+  kind: "native",
+  path,
+  readOnly: true,
+  sharedWith,
+});
+
+const GALLERY_SKILLS: readonly GallerySkill[] = [
+  {
+    id: "tdd",
+    name: "tdd",
+    description: "Red-green-refactor, test-first",
+    states: { "claude-code": LINKED, codex: LINKED, omp: LINKED },
+  },
+  {
+    id: "code-review",
+    name: "code-review",
+    description: "Review PRs against team standards",
+    states: { "claude-code": LOCKED, codex: LOCKED, omp: LOCKED },
+  },
+  {
+    id: "ui-ux-pro-max",
+    name: "ui-ux-pro-max",
+    description: "UI/UX design intelligence",
+    states: { "claude-code": LINKED, codex: OFF, omp: LINKED },
+  },
+  {
+    id: "pdf-extract",
+    name: "pdf-extract",
+    description: "Pull tables out of PDFs",
+    states: { "claude-code": native(".claude/skills/pdf-extract"), codex: NONE, omp: NONE },
+  },
+  {
+    id: "release-notes",
+    name: "release-notes",
+    description: "Draft release notes from git log",
+    states: {
+      "claude-code": native(".claude/skills/release-notes"),
+      codex: native(".agents/skills/release-notes", ["omp"]),
+      omp: NONE,
+    },
+  },
+  {
+    id: "review-sql",
+    name: "review-sql",
+    description: "Review SQL migrations",
+    states: {
+      "claude-code": NONE,
+      codex: native("~/.agents/skills/review-sql"),
+      omp: native("~/.omp/agent/skills/review-sql"),
+    },
+  },
+  {
+    id: "tdd-shadowed",
+    name: "tdd",
+    description: "User copy, not loaded in this repo",
+    dimmed: true,
+    tooltip: "Shadowed by Project · .agentuna/skills/tdd",
+    states: { "claude-code": SHADOWED, codex: SHADOWED, omp: SHADOWED },
+  },
+];
+
+const GALLERY_COLUMNS: ReadonlyArray<ColumnDef<DataTableFeatures, GallerySkill>> = [
+  {
+    accessorKey: "name",
+    header: "Name",
+    size: 320,
+    meta: { grow: true },
+    cell: ({ row }) => (
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate font-mono text-13 text-text">{row.original.name}</span>
+        <span className="truncate text-11 text-text-muted">{row.original.description}</span>
+      </span>
+    ),
+  },
+  ...agentColumns<GallerySkill>({
+    agents: GALLERY_AGENTS,
+    getState: (row, agent) => row.states[agent.id] ?? NONE,
+  }),
+];
 
 /** Renders every widget, variant and state that ships in the library. */
 export function ComponentGallery() {
@@ -247,6 +353,44 @@ export function ComponentGallery() {
             <StatusDot key={status} status={status} />
           ))}
         </Row>
+      </Section>
+
+      <Section title="Table">
+        <DataTable<GallerySkill>
+          ariaLabel="Skills"
+          data={GALLERY_SKILLS}
+          columns={GALLERY_COLUMNS}
+          getRowId={(skill) => skill.id}
+          getRowLabel={(skill) => skill.name}
+          viewportHeight={512}
+          rowTone={(skill) => (skill.dimmed === true ? "dimmed" : "default")}
+          rowTooltip={(skill) => skill.tooltip}
+          getColumnSpan={(skill, columnId) =>
+            skill.id === "release-notes" && columnId === "agent:codex" ? 2 : 1
+          }
+        />
+        <div className="grid grid-cols-2 gap-12">
+          <DataTable<GallerySkill>
+            ariaLabel="Empty skills"
+            data={[]}
+            columns={GALLERY_COLUMNS}
+            getRowId={(skill) => skill.id}
+            getRowLabel={(skill) => skill.name}
+            viewportHeight={240}
+            emptyTitle="No skills in this project"
+            emptyBody="Import an existing skill or create one from scratch."
+            emptyAction={{ label: "Add skill", onClick: () => undefined }}
+          />
+          <DataTable<GallerySkill>
+            ariaLabel="Loading skills"
+            data={[]}
+            columns={GALLERY_COLUMNS}
+            getRowId={(skill) => skill.id}
+            getRowLabel={(skill) => skill.name}
+            viewportHeight={240}
+            loading
+          />
+        </div>
       </Section>
     </main>
   );

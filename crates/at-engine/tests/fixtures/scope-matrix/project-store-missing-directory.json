@@ -1,0 +1,71 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "alpha",
+        "path": "<home>/.agentuna/skills/alpha/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "name": "alpha",
+        "path": "<global>/skills/alpha/SKILL.md",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<home>/.agentuna/skills/alpha/SKILL.md",
+          "scope": "user"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "project-store-missing-directory",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "slug": "alpha"
+        }
+      ]
+    },
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "slug": "alpha"
+        }
+      ]
+    }
+  ],
+  "title": "Resolution works when the Project store directory does not exist"
+}

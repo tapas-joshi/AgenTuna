@@ -9,6 +9,19 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Fixtures and the round-trip harness (`at_migrate::testkit`). Never enabled by production
+# crates: it builds real agent folders inside a temporary home.
+testkit = ["dep:at-fs", "at-fs/testkit", "dep:at-store"]
+
 [dependencies]
 at-model.workspace = true
 thiserror.workspace = true
+at-fs = { workspace = true, optional = true }
+at-store = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Dev-only cycle: the crate under test needs its own `testkit` feature during `cargo test`.
+at-migrate = { path = ".", features = ["testkit"] }
+at-fs = { workspace = true, features = ["testkit"] }

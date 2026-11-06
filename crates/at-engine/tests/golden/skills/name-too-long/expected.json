@@ -1,0 +1,12 @@
+{
+  "id": "name-too-long",
+  "parse": {
+    "error": {
+      "len": 65,
+      "limit": 64,
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "variant": "NameTooLong"
+    }
+  },
+  "schema_version": 1
+}

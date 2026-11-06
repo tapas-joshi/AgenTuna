@@ -1,0 +1,10 @@
+{
+  "id": "name-leading-hyphen",
+  "parse": {
+    "error": {
+      "name": "-my-skill",
+      "variant": "NameLeadingHyphen"
+    }
+  },
+  "schema_version": 1
+}

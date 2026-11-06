@@ -1,0 +1,10 @@
+{
+  "id": "name-whitespace",
+  "parse": {
+    "error": {
+      "name": "my skill",
+      "variant": "NameWhitespace"
+    }
+  },
+  "schema_version": 1
+}

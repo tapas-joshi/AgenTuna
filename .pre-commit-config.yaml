@@ -1,0 +1,11 @@
+# Local hooks run before every commit: pre-commit install
+#
+# actionlint validates .github/workflows with the same version the CI workflows are
+# reviewed against; it is the only hook, because formatting, lints and tests belong to
+# CI (TF-033) and are too slow for a commit hook.
+repos:
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        files: ^\.github/workflows/

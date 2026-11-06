@@ -1,0 +1,40 @@
+{
+  "edit": {
+    "description": "Demonstrates a rewritten argument hint description.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: argument-hint\n-description: Demonstrates an argument hint.\n+description: Demonstrates a rewritten argument hint description.\n argument-hint: \"[issue-number]\"\n ---\n \n"
+  },
+  "id": "argument-hint",
+  "parse": {
+    "ok": {
+      "body": "\n# Argument hint\n",
+      "body_span": [
+        104,
+        121
+      ],
+      "description": "Demonstrates an argument hint.",
+      "description_span": [
+        36,
+        67
+      ],
+      "frontmatter": "name: argument-hint\ndescription: Demonstrates an argument hint.\nargument-hint: \"[issue-number]\"\n",
+      "frontmatter_span": [
+        4,
+        100
+      ],
+      "name": "argument-hint",
+      "raw_len": 121,
+      "unknown_keys": [
+        {
+          "key": "argument-hint",
+          "raw": "argument-hint: \"[issue-number]\"",
+          "span": [
+            68,
+            99
+          ]
+        }
+      ],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

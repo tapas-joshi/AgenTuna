@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Uses a name of the maximum length, rewritten.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n-description: Uses a name of exactly the maximum length.\n+description: Uses a name of the maximum length, rewritten.\n ---\n \n # Limit\n"
+  },
+  "id": "name-at-limit",
+  "parse": {
+    "ok": {
+      "body": "\n# Limit\n",
+      "body_span": [
+        135,
+        144
+      ],
+      "description": "Uses a name of exactly the maximum length.",
+      "description_span": [
+        87,
+        130
+      ],
+      "frontmatter": "name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndescription: Uses a name of exactly the maximum length.\n",
+      "frontmatter_span": [
+        4,
+        131
+      ],
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "raw_len": 144,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,10 @@
+{
+  "id": "invalid-utf8",
+  "parse": {
+    "error": {
+      "valid_up_to": 13,
+      "variant": "InvalidUtf8"
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,71 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "house-style"
+        },
+        "kind": "rule",
+        "lock": null,
+        "locked": false,
+        "name": "house-style",
+        "path": "<project>/.agentuna/rules/house-style.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "user"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "house-style"
+        },
+        "kind": "rule",
+        "name": "house-style",
+        "path": "<home>/.agentuna/rules/house-style.md",
+        "scope": "user",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/rules/house-style.md",
+          "scope": "project"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "rule-precedence-project-over-user",
+  "schema_version": 1,
+  "stores": [
+    {
+      "rules": [
+        {
+          "slug": "house-style"
+        }
+      ],
+      "scope": "user"
+    },
+    {
+      "rules": [
+        {
+          "slug": "house-style"
+        }
+      ],
+      "scope": "project"
+    }
+  ],
+  "title": "Project rules shadow User rules with the same name"
+}

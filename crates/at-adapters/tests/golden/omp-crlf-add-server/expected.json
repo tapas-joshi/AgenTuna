@@ -1,0 +1,17 @@
+{
+  "$schema": "https://example.test/mcp-schema.json",
+  "mcpServers": {
+    "quiet": {
+      "command": "quiet-mcp",
+      "args": [
+        "--once"
+      ],
+      "enabled": false
+    },
+    "crlf": {
+      "type": "http",
+      "url": "https://mcp.example.test/crlf",
+      "enabled": true
+    }
+  }
+}

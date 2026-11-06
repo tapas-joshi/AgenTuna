@@ -22,6 +22,7 @@ describe("component gallery", () => {
       "Segmented control",
       "Radio card",
       "Status dot",
+      "Table",
     ]) {
       expect(screen.getByRole("heading", { level: 2, name: title })).toBeTruthy();
     }

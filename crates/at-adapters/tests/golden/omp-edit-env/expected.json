@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "local-tool": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "local-tool-mcp"
+      ],
+      "env": {
+        "API_KEY": "${API_KEY}",
+        "TOOL_HOME": "/tmp/tool-v2"
+      },
+      "enabled": true,
+      "timeout": 20000,
+      "instructions": false
+    },
+    "remote-tool": {
+      "type": "http",
+      "url": "https://mcp.example.test/mcp",
+      "headers": {
+        "Authorization": "${REMOTE_TOKEN}"
+      },
+      "enabled": false,
+      "auth": {
+        "type": "apikey",
+        "credentialId": "cred_123"
+      }
+    }
+  },
+  "disabledServers": [
+    "legacy"
+  ]
+}

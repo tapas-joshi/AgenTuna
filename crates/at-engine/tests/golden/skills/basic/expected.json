@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Explains two things carefully.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: basic-skill\n-description: Explains one thing well.\n+description: Explains two things carefully.\n ---\n \n # Basic skill\n"
+  },
+  "id": "basic",
+  "parse": {
+    "ok": {
+      "body": "\n# Basic skill\n\nBody text.\n",
+      "body_span": [
+        64,
+        91
+      ],
+      "description": "Explains one thing well.",
+      "description_span": [
+        34,
+        59
+      ],
+      "frontmatter": "name: basic-skill\ndescription: Explains one thing well.\n",
+      "frontmatter_span": [
+        4,
+        60
+      ],
+      "name": "basic-skill",
+      "raw_len": 91,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

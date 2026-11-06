@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Starts with a byte order mark and a new description.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ﻿---\n name: bom-skill\n-description: Starts with a byte order mark.\n+description: Starts with a byte order mark and a new description.\n ---\n \n # BOM\n"
+  },
+  "id": "bom",
+  "parse": {
+    "ok": {
+      "body": "\n# BOM\n",
+      "body_span": [
+        71,
+        78
+      ],
+      "description": "Starts with a byte order mark.",
+      "description_span": [
+        35,
+        66
+      ],
+      "frontmatter": "name: bom-skill\ndescription: Starts with a byte order mark.\n",
+      "frontmatter_span": [
+        7,
+        67
+      ],
+      "name": "bom-skill",
+      "raw_len": 78,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

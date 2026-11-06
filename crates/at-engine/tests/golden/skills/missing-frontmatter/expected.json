@@ -1,0 +1,9 @@
+{
+  "id": "missing-frontmatter",
+  "parse": {
+    "error": {
+      "variant": "MissingFrontmatter"
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,154 @@
+/*
+ * Menu and tooltip surfaces (TU-004).
+ *
+ * A menu is a compact raised panel of 28px rows. The highlighted row gets both
+ * a filled background and a token-coloured outline, so keyboard navigation is
+ * visible without relying on colour alone. Disabled rows keep pointer events
+ * (the reason tooltip needs hover) but relax their text to the muted token.
+ */
+
+.at-menu {
+  box-sizing: border-box;
+  min-inline-size: 220px;
+  max-inline-size: min(360px, calc(100vw - var(--at-space-16)));
+  max-block-size: var(
+    --radix-dropdown-menu-content-available-height,
+    calc(100vh - var(--at-space-32))
+  );
+  overflow-y: auto;
+  padding: var(--at-space-4);
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-radius: var(--at-radius-10);
+  background: var(--at-color-raised);
+  color: var(--at-color-text);
+  box-shadow: 0 var(--at-space-8) var(--at-space-24)
+    color-mix(in srgb, var(--at-color-sidebar) 72%, transparent);
+  font-family: var(--at-font-ui);
+  font-size: var(--at-text-13);
+  line-height: 1.4;
+  animation: at-menu-in 100ms ease-out;
+}
+
+.at-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--at-space-8);
+  min-block-size: 28px;
+  padding: var(--at-space-4) var(--at-space-8);
+  border-radius: var(--at-radius-6);
+  color: var(--at-color-text);
+  cursor: default;
+  outline: none;
+  user-select: none;
+}
+
+.at-menu__item[data-highlighted] {
+  background: var(--at-color-overlay);
+  outline: 2px solid var(--at-color-focus);
+  outline-offset: -2px;
+}
+
+.at-menu__item[data-disabled] {
+  color: var(--at-color-text-muted);
+  cursor: not-allowed;
+}
+
+.at-menu__item[data-tone="danger"] {
+  color: var(--at-color-danger);
+}
+
+.at-menu__item[data-tone="danger"][data-highlighted] {
+  background: color-mix(in srgb, var(--at-color-danger) 14%, transparent);
+}
+
+.at-menu__label {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+/* Mnemonic letter: underline is the accelerator cue, not decoration. */
+.at-menu__label u {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.at-menu__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--at-color-text-secondary);
+}
+
+.at-menu__shortcut {
+  flex: 0 0 auto;
+  color: var(--at-color-text-muted);
+  font-family: var(--at-font-mono);
+  font-size: var(--at-text-11);
+}
+
+.at-menu__heading {
+  padding: var(--at-space-8) var(--at-space-8) var(--at-space-4);
+  color: var(--at-color-text-muted);
+  font-size: var(--at-text-11);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.at-menu__separator {
+  block-size: var(--at-hairline, 1px);
+  margin: var(--at-space-4) 0;
+  background: var(--at-color-border);
+}
+
+/*
+ * Visually hidden, still announced: a disabled row explains itself to screen
+ * readers, which cannot hover the tooltip.
+ */
+.at-menu__reason-text {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.at-menu__reason {
+  max-inline-size: 280px;
+  padding: var(--at-space-8) var(--at-space-12);
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-radius: var(--at-radius-6);
+  background: var(--at-color-overlay);
+  color: var(--at-color-text);
+  box-shadow: 0 var(--at-space-4) var(--at-space-16)
+    color-mix(in srgb, var(--at-color-sidebar) 72%, transparent);
+  font-family: var(--at-font-ui);
+  font-size: var(--at-text-12);
+  line-height: 1.4;
+  animation: at-overlay-fade-in 100ms ease-out;
+}
+
+@keyframes at-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-1 * var(--at-space-4)));
+  }
+}
+
+@keyframes at-overlay-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .at-menu,
+  .at-menu__reason {
+    animation: none;
+  }
+}

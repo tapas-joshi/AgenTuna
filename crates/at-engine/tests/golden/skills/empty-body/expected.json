@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Has no body at all.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,4 +1,4 @@\n ---\n name: empty-body\n-description: Has no body.\n+description: Has no body at all.\n ---\n"
+  },
+  "id": "empty-body",
+  "parse": {
+    "ok": {
+      "body": "",
+      "body_span": [
+        51,
+        51
+      ],
+      "description": "Has no body.",
+      "description_span": [
+        33,
+        46
+      ],
+      "frontmatter": "name: empty-body\ndescription: Has no body.\n",
+      "frontmatter_span": [
+        4,
+        47
+      ],
+      "name": "empty-body",
+      "raw_len": 51,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

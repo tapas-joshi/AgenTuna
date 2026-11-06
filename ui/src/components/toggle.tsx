@@ -7,7 +7,7 @@ import { cn } from "./cn";
 export type ToggleSize = "sm" | "md";
 
 /** Where the visible label sits relative to the switch. */
-export type ToggleLabelPlacement = "inline" | "below";
+export type ToggleLabelPlacement = "inline" | "below" | "hidden";
 
 const TRACK_CLASSES: Readonly<Record<ToggleSize, string>> = {
   sm: "h-16 w-24 p-2",
@@ -68,7 +68,7 @@ export function Toggle({
     <span
       className={cn(
         "inline-flex gap-8",
-        labelPlacement === "inline" ? "items-center" : "flex-col items-start",
+        labelPlacement === "below" ? "flex-col items-start" : "items-center",
         className,
       )}
     >
@@ -88,7 +88,12 @@ export function Toggle({
       <label
         id={labelId}
         htmlFor={controlId}
-        className={cn("cursor-pointer text-text-secondary select-none", size === "sm" ? "text-11" : "text-13", disabled && "cursor-not-allowed opacity-50")}
+        className={cn(
+          "cursor-pointer text-text-secondary select-none",
+          size === "sm" ? "text-11" : "text-13",
+          disabled && "cursor-not-allowed opacity-50",
+          labelPlacement === "hidden" && "sr-only",
+        )}
       >
         {label}
       </label>

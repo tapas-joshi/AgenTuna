@@ -1,0 +1,11 @@
+# Synthetic Codex config with CRLF line endings.
+# Every value is invented; this is not a real user configuration.
+
+model = "gpt-5-codex"
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@0.0.0"]
+
+[mcp_servers.shuttle]
+url = "https://mcp.example.com/mcp"

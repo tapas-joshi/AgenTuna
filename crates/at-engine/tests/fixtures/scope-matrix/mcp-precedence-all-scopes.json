@@ -1,0 +1,131 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": "created",
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-github"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "gh-local",
+        "path": "<project>/.agentuna/local/mcp.json",
+        "scope": "local",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "project"
+          },
+          {
+            "outcome": "shadowed",
+            "scope": "user"
+          },
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "local"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Declared": "srv-github"
+        },
+        "kind": "mcp_server",
+        "name": "gh",
+        "path": "<project>/.agentuna/mcp.json",
+        "scope": "project",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/local/mcp.json",
+          "scope": "local"
+        }
+      },
+      {
+        "blocked": false,
+        "key": {
+          "Declared": "srv-github"
+        },
+        "kind": "mcp_server",
+        "name": "github",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/local/mcp.json",
+          "scope": "local"
+        }
+      },
+      {
+        "blocked": false,
+        "key": {
+          "Declared": "srv-github"
+        },
+        "kind": "mcp_server",
+        "name": "github",
+        "path": "<home>/.agentuna/mcp.json",
+        "scope": "user",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/local/mcp.json",
+          "scope": "local"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "mcp-precedence-all-scopes",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "gh",
+          "id": "srv-github",
+          "slug": "github"
+        }
+      ],
+      "scope": "global"
+    },
+    {
+      "mcp": [
+        {
+          "command": "gh-user",
+          "id": "srv-github",
+          "slug": "github"
+        }
+      ],
+      "scope": "user"
+    },
+    {
+      "mcp": [
+        {
+          "command": "gh-project",
+          "id": "srv-github",
+          "slug": "gh"
+        }
+      ],
+      "scope": "project"
+    },
+    {
+      "mcp": [
+        {
+          "command": "gh-local",
+          "id": "srv-github",
+          "slug": "gh-local"
+        }
+      ],
+      "scope": "local"
+    }
+  ],
+  "title": "The same MCP id in four scopes resolves to the Local definition"
+}

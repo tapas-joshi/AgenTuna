@@ -1,0 +1,73 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "shared"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "shared",
+        "path": "<project>/.agentuna/mcp.json",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "shared"
+        },
+        "kind": "mcp_server",
+        "name": "shared",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/mcp.json",
+          "scope": "project"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "mcp-name-fallback-merges",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "global-cmd",
+          "slug": "shared"
+        }
+      ],
+      "scope": "global"
+    },
+    {
+      "mcp": [
+        {
+          "command": "project-cmd",
+          "slug": "shared"
+        }
+      ],
+      "scope": "project"
+    }
+  ],
+  "title": "Servers without a declared id merge by name"
+}

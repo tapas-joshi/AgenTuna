@@ -351,6 +351,50 @@ pub struct CodexConfigFile {
     doc: DocumentMut,
     expected: ExpectedState,
     dirty: bool,
+    newline: Newline,
+}
+
+/// Line ending of a config document.
+///
+/// `toml_edit` renders newly inserted tables with LF. A file whose every newline is CRLF is
+/// parsed with LF and rendered back with CRLF, so an edit never mixes line endings and a
+/// load-without-edit still round-trips byte-identically. A file with mixed endings is left as
+/// the parser sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Newline {
+    Lf,
+    Crlf,
+}
+
+impl Newline {
+    /// CRLF only when the document has at least one CRLF and no bare LF anywhere.
+    fn of(text: &str) -> Self {
+        let mut saw_crlf = false;
+        for (index, _) in text.match_indices('\n') {
+            if index > 0 && text.as_bytes()[index - 1] == b'\r' {
+                saw_crlf = true;
+            } else {
+                return Self::Lf;
+            }
+        }
+        if saw_crlf { Self::Crlf } else { Self::Lf }
+    }
+
+    /// Parses `text`, normalising CRLF first when the document uses it.
+    fn parse(self, text: &str) -> Result<DocumentMut, toml_edit::TomlError> {
+        match self {
+            Self::Lf => text.parse::<DocumentMut>(),
+            Self::Crlf => text.replace("\r\n", "\n").parse::<DocumentMut>(),
+        }
+    }
+
+    /// Rendered text in the document's own line endings.
+    fn rendered(self, text: String) -> String {
+        match self {
+            Self::Lf => text,
+            Self::Crlf => text.replace('\n', "\r\n"),
+        }
+    }
 }
 
 impl Default for CodexConfigFile {
@@ -367,6 +411,7 @@ impl CodexConfigFile {
             doc: DocumentMut::new(),
             expected: ExpectedState::Absent,
             dirty: false,
+            newline: Newline::Lf,
         }
     }
 
@@ -379,10 +424,12 @@ impl CodexConfigFile {
     /// # Errors
     /// [`CodexError::InvalidToml`] when the text is not valid TOML.
     pub fn parse(text: &str) -> Result<Self, CodexError> {
+        let newline = Newline::of(text);
         Ok(Self {
-            doc: text.parse::<DocumentMut>()?,
+            doc: newline.parse(text)?,
             expected: ExpectedState::Absent,
             dirty: false,
+            newline,
         })
     }
 
@@ -419,17 +466,19 @@ impl CodexConfigFile {
         let text = core::str::from_utf8(&bytes).map_err(|_| CodexError::NotUtf8 {
             path: path.to_path_buf(),
         })?;
+        let newline = Newline::of(text);
         Ok(Self {
-            doc: text.parse::<DocumentMut>()?,
+            doc: newline.parse(text)?,
             expected: ExpectedState::Hash(sha256_hex(&bytes)),
             dirty: false,
+            newline,
         })
     }
 
     /// The current document text. Equal to the source bytes while no edit was applied.
     #[must_use]
     pub fn text(&self) -> String {
-        self.doc.to_string()
+        self.newline.rendered(self.doc.to_string())
     }
 
     /// What the next [`Self::save`] requires the file to look like.

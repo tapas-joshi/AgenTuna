@@ -21,6 +21,8 @@ use at_fs::{WriteOutcome, WriteRequest};
 use at_model::Lock;
 use at_store::paths::{AppPaths, GlobalStoreSource};
 
+use super::bridge::OperationsLogError;
+
 /// Reads Global locks from the `locks` table.
 ///
 /// Implementations must query SQLite and must never read a lock file from the Global store.
@@ -82,10 +84,61 @@ impl GlobalOverview {
     }
 }
 
+/// One `operations` row for a write that landed inside the Global store.
+///
+/// The row is the audit trail of an elevated scope: it proves which files changed after the
+/// authorization prompt, and it is the only thing a read-only store must never produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalWriteOperation {
+    /// Global store root the write targeted.
+    pub root: PathBuf,
+    /// Files the operation wrote, in write order.
+    pub files: Vec<PathBuf>,
+}
+
+impl GlobalWriteOperation {
+    /// `operations.kind` recorded for this row.
+    pub const KIND: &'static str = "global_write";
+
+    /// `operations.status` recorded for this row.
+    pub const STATUS: &'static str = "succeeded";
+}
+
+/// Records the `operations` row of a Global write.
+///
+/// TF-009 (`at-db`) supplies the SQLite-backed implementation; [`TracingGlobalOperationLog`] is
+/// the default and keeps the row visible in the log until that wiring lands. A failed record never
+/// fails the write: the bytes are already in place, so the error is logged instead.
+pub trait GlobalOperationLog: Send + Sync {
+    /// Records one row.
+    ///
+    /// # Errors
+    /// [`OperationsLogError`] when the row cannot be written.
+    fn record(&self, operation: &GlobalWriteOperation) -> Result<(), OperationsLogError>;
+}
+
+/// Default [`GlobalOperationLog`]: one structured log record per write.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TracingGlobalOperationLog;
+
+impl GlobalOperationLog for TracingGlobalOperationLog {
+    fn record(&self, operation: &GlobalWriteOperation) -> Result<(), OperationsLogError> {
+        tracing::info!(
+            kind = GlobalWriteOperation::KIND,
+            status = GlobalWriteOperation::STATUS,
+            root = %operation.root.display(),
+            files = operation.files.len(),
+            "Global write recorded"
+        );
+        Ok(())
+    }
+}
+
 /// Shell-facing Global scope: path, status, guarded writes, one-shot elevation and locks.
 pub struct GlobalStoreService {
     paths: AppPaths,
     elevator: Arc<dyn Elevator>,
+    operation_log: Arc<dyn GlobalOperationLog>,
 }
 
 impl GlobalStoreService {
@@ -93,7 +146,18 @@ impl GlobalStoreService {
     /// recording [`Elevator`]; production uses [`Self::with_platform_elevator`].
     #[must_use]
     pub fn new(paths: AppPaths, elevator: Arc<dyn Elevator>) -> Self {
-        Self { paths, elevator }
+        Self {
+            paths,
+            elevator,
+            operation_log: Arc::new(TracingGlobalOperationLog),
+        }
+    }
+
+    /// Replaces the operation log, e.g. with the `at-db` implementation once TF-009 lands.
+    #[must_use]
+    pub fn with_operation_log(mut self, operation_log: Arc<dyn GlobalOperationLog>) -> Self {
+        self.operation_log = operation_log;
+        self
     }
 
     /// Builds the service with the operating system's consent-based elevator.
@@ -170,6 +234,16 @@ impl GlobalStoreService {
     /// staged, [`GlobalWriteError::OutsideStore`] for a foreign path, or the underlying
     /// [`at_fs::FsError`].
     pub fn write(&self, request: WriteRequest) -> Result<WriteOutcome, GlobalWriteError> {
-        GlobalStore::new(self.path()).write(request)
+        let path = request.path.clone();
+        let outcome = GlobalStore::new(self.path()).write(request)?;
+        // The bytes are in place; a failed audit row must not turn a successful write into an
+        // error, and the read-only gate above has already refused everything that did not land.
+        if let Err(error) = self.operation_log.record(&GlobalWriteOperation {
+            root: self.path().to_path_buf(),
+            files: vec![path],
+        }) {
+            tracing::warn!(%error, "could not record the Global write operation row");
+        }
+        Ok(outcome)
     }
 }

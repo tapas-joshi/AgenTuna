@@ -1,0 +1,139 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": "created",
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": {
+          "locked_by": "platform-team",
+          "reason": "organisation-wide review policy",
+          "scope": "global"
+        },
+        "locked": true,
+        "name": "code-review",
+        "path": "<global>/skills/code-review/SKILL.md",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "blocked_by_lock",
+            "scope": "local"
+          },
+          {
+            "outcome": "blocked_by_lock",
+            "scope": "project"
+          },
+          {
+            "outcome": "blocked_by_lock",
+            "scope": "user"
+          },
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": true,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "user",
+        "shadowed_by": {
+          "path": "<global>/skills/code-review/SKILL.md",
+          "scope": "global"
+        }
+      },
+      {
+        "blocked": true,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<project>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "project",
+        "shadowed_by": {
+          "path": "<global>/skills/code-review/SKILL.md",
+          "scope": "global"
+        }
+      },
+      {
+        "blocked": true,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<project>/.agentuna/local/skills/code-review/SKILL.md",
+        "scope": "local",
+        "shadowed_by": {
+          "path": "<global>/skills/code-review/SKILL.md",
+          "scope": "global"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "lock-global-pins-skill-over-local",
+  "locks": [
+    {
+      "kind": "skill",
+      "locked_by": "platform-team",
+      "reason": "organisation-wide review policy",
+      "target": "code-review"
+    }
+  ],
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "description": "Global.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "User.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "description": "Project.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "local",
+      "skills": [
+        {
+          "description": "Local.",
+          "slug": "code-review"
+        }
+      ]
+    }
+  ],
+  "title": "A Global lock pins the Global skill even though Local defines the same name"
+}

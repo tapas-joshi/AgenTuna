@@ -1,0 +1,70 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-dup"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "gh-one",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Declared": "srv-dup"
+        },
+        "kind": "mcp_server",
+        "name": "gh-two",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<global>/mcp.json",
+          "scope": "global"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "duplicate-mcp-id-in-one-layer",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "one",
+          "id": "srv-dup",
+          "slug": "gh-one"
+        },
+        {
+          "command": "two",
+          "id": "srv-dup",
+          "slug": "gh-two"
+        }
+      ],
+      "scope": "global"
+    }
+  ],
+  "title": "Two servers declaring one id in one scope resolve to the first slug"
+}

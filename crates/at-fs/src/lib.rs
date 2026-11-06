@@ -19,6 +19,7 @@ pub mod guard;
 mod hash;
 pub mod platform;
 pub mod privilege;
+pub mod recovery;
 pub mod remedies;
 pub mod strategy;
 pub mod symlink;

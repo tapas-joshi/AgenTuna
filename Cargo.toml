@@ -75,15 +75,19 @@ rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 directories = "6.0"
 clap = { version = "4.6", features = ["derive"] }
 clap_complete = "4.6"
+rmcp = { version = "3.9", default-features = false, features = ["client", "transport-async-rw"] }
+tokio-util = "0.7"
+signal-hook = "0.3"
 
 # Common utilities
 unicode-normalization = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 thiserror = "2.0"
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.11", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+ulid = "3.0"
 sha2 = "0.11"
 libc = "0.2"
 junction = "2.1"
