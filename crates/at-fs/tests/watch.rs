@@ -351,8 +351,8 @@ fn deleting_a_watched_store_yields_path_gone_and_resumes_when_it_returns() {
                 gone = true;
                 break;
             }
-            Some(_) => continue,
-            None => break,
+            // A quiet 100 ms slice is not the end: FSEvents can deliver late on a loaded machine.
+            Some(_) | None => continue,
         }
     }
     assert!(gone, "deleting the watched store yields PathGone");

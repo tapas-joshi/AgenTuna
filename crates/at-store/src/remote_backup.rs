@@ -1933,7 +1933,9 @@ mod sync_tests {
                 at_fs::BackupPolicy::None,
             )
             .expect("save manifest");
-        let database = at_db::Database::open_in_memory().expect("database");
+        let mut database = at_db::Database::open_in_memory().expect("database");
+        // The default device name comes from the host name, which CI runners may not make valid.
+        set_device_name(&mut database, Some("fixture")).expect("device name");
         save_remote_backup_state(
             database.connection(),
             &RemoteBackupState {
