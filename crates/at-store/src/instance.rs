@@ -712,6 +712,11 @@ fn read_record_at(path: &Path, attempts: u8) -> RecordState {
                 };
             }
         };
+        // A freshly created (or just-truncated) lock file is empty, not corrupt. Quarantining it
+        // would move a healthy new file aside on every start after a real quarantine.
+        if text.trim().is_empty() {
+            return RecordState::Missing;
+        }
         match serde_json::from_str::<InstanceRecord>(text.trim()) {
             Ok(record) => return RecordState::Valid(record),
             Err(error) => {
