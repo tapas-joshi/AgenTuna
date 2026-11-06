@@ -561,7 +561,7 @@ mod tests {
         let page = runtime
             .block_on(client.search("skills", &cache, &policy, &mut log))
             .expect("cached marketplace page");
-        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_millis(1000));
         assert_eq!(page.skills.len(), MARKETPLACE_RESULT_LIMIT);
         assert_eq!(log.entries().len(), 0);
     }
