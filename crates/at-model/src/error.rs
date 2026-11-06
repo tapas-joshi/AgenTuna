@@ -59,6 +59,8 @@ wire_enum! {
         UnsupportedPlatform => "E_UNSUPPORTED_PLATFORM",
         /// A network request failed.
         Network => "E_NETWORK",
+        /// The network policy refused the action before any connection was attempted.
+        NetworkDenied => "E_NETWORK_DENIED",
         /// Authentication or authorization failed.
         Auth => "E_AUTH",
         /// A required secret is missing from the credential store.
@@ -99,6 +101,7 @@ impl ErrorKind {
             Self::Locked => "Locked",
             Self::UnsupportedPlatform => "Unsupported platform",
             Self::Network => "Network error",
+            Self::NetworkDenied => "Network action blocked",
             Self::Auth => "Authentication failed",
             Self::SecretMissing => "Secret missing",
             Self::UpdateSignatureInvalid => "Invalid update signature",
@@ -132,6 +135,7 @@ impl ErrorKind {
             Self::InvalidFormat => &[RevealInFinder, CopyDetails],
             Self::Conflict => &[MoveAside, CopyDetails],
             Self::ConcurrentModification | Self::Locked | Self::Network => &[Retry, CopyDetails],
+            Self::NetworkDenied => &[OpenSettings, CopyDetails],
             Self::RefusedOverwrite => &[Adopt, MoveAside, Cancel],
             Self::UnsupportedPlatform => &[CopyDetails],
             Self::Auth => &[Reauthenticate, CopyDetails],
@@ -392,6 +396,9 @@ impl ErrorReport {
                 "This action is not available on this platform.".to_owned()
             }
             ErrorKind::Network => "Could not reach the network service.".to_owned(),
+            ErrorKind::NetworkDenied => {
+                "This network action is turned off in Settings, so nothing was sent.".to_owned()
+            }
             ErrorKind::Auth => "Authentication failed.".to_owned(),
             ErrorKind::SecretMissing => {
                 "A required secret is missing from the keychain.".to_owned()

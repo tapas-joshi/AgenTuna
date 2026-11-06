@@ -144,8 +144,8 @@ const dark: ThemeTokens = {
     26: "26px",
   },
   font: {
-    ui: '"Inter", "IBM Plex Sans", system-ui, -apple-system, sans-serif',
-    mono: '"Menlo", ui-monospace, "SFMono-Regular", monospace',
+    ui: '"Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif',
+    mono: '"JetBrains Mono", "Menlo", ui-monospace, "SFMono-Regular", monospace',
   },
 };
 

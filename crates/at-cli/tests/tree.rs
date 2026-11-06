@@ -249,6 +249,8 @@ fn version_subcommand_prints_name_and_version() {
 
 #[test]
 fn unimplemented_commands_fail_with_a_distinct_exit_code() {
+    // `doctor` left this list with TU-032: it now runs checks, so its sandboxed tests
+    // live in tests/doctor.rs where the real home is never touched.
     for args in [
         vec!["projects", "list"],
         vec!["projects", "add", "/tmp/agentuna-test"],
@@ -256,8 +258,6 @@ fn unimplemented_commands_fail_with_a_distinct_exit_code() {
         vec!["projects", "use", "demo"],
         vec!["scan"],
         vec!["scan", "--depth", "3"],
-        vec!["doctor"],
-        vec!["doctor", "--fix"],
     ] {
         let output = agentuna(&args);
         assert_eq!(

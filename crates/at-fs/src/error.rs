@@ -147,6 +147,148 @@ pub enum FsError {
         #[source]
         source: io::Error,
     },
+    /// The volume cannot hold the write (`ENOSPC`). Nothing was written.
+    #[error("{}: the disk is full", .path.display())]
+    NoSpaceLeft {
+        /// Path involved.
+        path: PathBuf,
+    },
+    /// The volume or user quota is exhausted (`EDQUOT`). Nothing was written.
+    #[error("{}: the disk quota is exhausted", .path.display())]
+    QuotaExceeded {
+        /// Path involved.
+        path: PathBuf,
+    },
+    /// A link would have to cross filesystems and the policy does not allow that.
+    #[error(
+        "{}: cannot link across volumes to {}",
+        .from.display(),
+        .to.display()
+    )]
+    CrossVolume {
+        /// Canonical store source.
+        from: PathBuf,
+        /// Deployment path that would receive the link.
+        to: PathBuf,
+    },
+    /// The deployment path is a symlink pointing somewhere other than the store item.
+    #[error("{}: existing symlink points to {}", .path.display(), .target.display())]
+    ForeignLink {
+        /// The deployment path.
+        path: PathBuf,
+        /// What the existing link resolves to.
+        target: PathBuf,
+    },
+    /// The requested operation does not exist on this platform.
+    #[error("{}: {reason}", .path.display())]
+    UnsupportedPlatform {
+        /// Path the operation was requested for.
+        path: PathBuf,
+        /// Why the platform cannot perform it.
+        reason: &'static str,
+    },
+    /// A cross-volume copy did not reproduce the source byte for byte.
+    #[error("{}: copy verification failed: {reason}", .path.display())]
+    CopyVerificationFailed {
+        /// Path that was copied.
+        path: PathBuf,
+        /// Why the verification failed.
+        reason: String,
+    },
+}
+
+impl FsError {
+    /// One actionable sentence for a UI toast or CLI hint; `None` when retrying cannot help.
+    ///
+    /// The text states what to do and whether anything was written. It never contains a secret.
+    #[must_use]
+    pub fn remediation(&self) -> Option<&'static str> {
+        match self {
+            Self::PermissionDenied { .. } => Some(
+                "Grant write access to this folder or choose a location you own; nothing was written.",
+            ),
+            Self::NoSpaceLeft { .. } => {
+                Some("Free disk space on this volume, then retry; nothing was written.")
+            }
+            Self::QuotaExceeded { .. } => {
+                Some("Raise the disk quota for this volume, then retry; nothing was written.")
+            }
+            Self::CrossVolume { .. } => Some(
+                "Enable copy fallback for this agent, or keep the store and agent folder on one volume.",
+            ),
+            Self::ForeignLink { .. } => Some(
+                "Move the existing link aside, adopt the item it points at, or cancel; nothing was written.",
+            ),
+            Self::RefusedOverwrite { .. } => {
+                Some("Adopt the existing item, move it aside, or cancel; nothing was written.")
+            }
+            Self::LinkUnsupported { .. } => {
+                Some("Choose copy mode for this agent; nothing was written.")
+            }
+            Self::UnsupportedPlatform { .. } => {
+                Some("This action is unavailable on this operating system.")
+            }
+            Self::ConcurrentModification { .. } => {
+                Some("Re-read the file and review the new change before writing again.")
+            }
+            Self::DeploymentNotOwned { .. } => {
+                Some("Only an AgenTuna-owned deployment can be removed; nothing was deleted.")
+            }
+            Self::Backup(_) => Some(
+                "The original was not replaced because its backup failed; check disk space and permissions.",
+            ),
+            Self::CopyVerificationFailed { .. } => Some(
+                "The copy did not match the source, so the original was left untouched; retry.",
+            ),
+            Self::SymlinkRefused { .. } => {
+                Some("Follow the symlink explicitly or choose another path.")
+            }
+            Self::DanglingSymlink { .. } => {
+                Some("Remove the dangling link or point it at an existing item.")
+            }
+            Self::InvalidPath { .. } => Some("Use an absolute path without `..` components."),
+            Self::TooLarge { .. } => {
+                Some("Choose a smaller file; AgenTuna refuses files above its size limit.")
+            }
+            Self::AlreadyExists { .. } => Some("Choose another name or remove the existing entry."),
+            Self::NotFound { .. } => Some("Refresh the view; the path no longer exists."),
+            Self::DestinationIsDirectory { .. } => {
+                Some("Choose a file path, or remove the directory first.")
+            }
+            Self::NotRegularFile { .. } => {
+                Some("Only regular files can be written; choose another path.")
+            }
+            Self::NoParent { .. } => Some("Use a path that has a parent directory."),
+            Self::InvalidManifest { .. } => {
+                Some("Re-deploy this item; the copy manifest is unusable and removal is refused.")
+            }
+            Self::CrossDeviceRename { .. } => {
+                Some("Keep the store and the target on one volume, or use copy mode.")
+            }
+            Self::Io { .. } => Some("Check the path and permissions, then retry."),
+        }
+    }
+
+    /// Maps an IO error on `path` to the most specific variant.
+    pub(crate) fn from_platform_io(path: &Path, source: io::Error) -> Self {
+        #[cfg(unix)]
+        {
+            let Some(code) = source.raw_os_error() else {
+                return Self::from_io(path, source);
+            };
+            if code == libc::ENOSPC {
+                return Self::NoSpaceLeft {
+                    path: path.to_path_buf(),
+                };
+            }
+            if code == libc::EDQUOT {
+                return Self::QuotaExceeded {
+                    path: path.to_path_buf(),
+                };
+            }
+        }
+        Self::from_io(path, source)
+    }
 }
 
 impl FsError {

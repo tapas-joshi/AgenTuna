@@ -12,3 +12,12 @@ workspace = true
 [dependencies]
 at-model.workspace = true
 thiserror.workspace = true
+at-fs.workspace = true
+jsonc-parser = { workspace = true, features = ["cst", "serde_json"] }
+serde_json.workspace = true
+url.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+similar.workspace = true

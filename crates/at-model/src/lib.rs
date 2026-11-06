@@ -8,6 +8,8 @@ pub mod error;
 pub mod item;
 pub mod lock;
 pub mod mcp;
+pub mod mcp_validate;
+pub mod network;
 pub mod preset;
 pub mod resolve;
 pub mod scope;
@@ -21,6 +23,15 @@ pub use lock::Lock;
 pub use mcp::{
     EnvValue, McpServer, McpServerDef, McpServerId, McpServerIdError, McpTransport, OAuthProfile,
     SecretRef,
+};
+pub use mcp_validate::{
+    CommandResolver, ExistingServer, FieldCode, FieldError, ServerCandidate, ShadowNotice,
+    Validation, ValidationContext, validate_server,
+};
+pub use network::{
+    BackgroundHealth, DenialReason, InvalidHost, NETWORK_EVENT_CAPACITY, NetworkAction,
+    NetworkActionState, NetworkActionStatus, NetworkDenied, NetworkEvent, NetworkEventLog,
+    NetworkHost, NetworkPolicy, NetworkTrigger,
 };
 pub use preset::{Preset, PresetMember};
 pub use resolve::{Definition, LogicalId, LogicalKey, ScopeSnapshot, normalized_name};

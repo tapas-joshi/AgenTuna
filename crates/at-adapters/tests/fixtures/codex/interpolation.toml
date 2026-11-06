@@ -1,0 +1,4 @@
+# Values that reference environment variables stay literal text in the file.
+[mcp_servers.github]
+command = "npx"
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}", STATIC = "1" }

@@ -13,10 +13,20 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+# TU-034: the CLI is a thin front end. Allowed first-party crates are the engine and
+# the IO crates that own every write; `time` is a value type required by the at-fs
+# repair API, not an IO crate. No rusqlite: the index is opened through at-db.
 [dependencies]
 at-model.workspace = true
+at-store.workspace = true
 at-engine.workspace = true
+at-db.workspace = true
+at-fs.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

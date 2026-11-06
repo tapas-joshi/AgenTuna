@@ -9,6 +9,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Shared test fixtures (`at_fs::testkit`). Never enabled by production crates.
+testkit = ["dep:env-lock", "dep:tempfile"]
+
 [dependencies]
 at-model.workspace = true
 notify.workspace = true
@@ -20,6 +25,15 @@ serde_json.workspace = true
 time = { workspace = true, features = ["macros"] }
 sha2.workspace = true
 libc.workspace = true
+rustix = { workspace = true, features = ["process"] }
+env-lock = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Dev-only cycle: at-store depends on at-fs, so this is the only direction a fixture can see
+# `AppPaths` from. `at_fs::testkit` itself never names at-store.
+at-store.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+junction.workspace = true

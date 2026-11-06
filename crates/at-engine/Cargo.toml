@@ -10,5 +10,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+at-fs.workspace = true
 at-model.workspace = true
+at-store.workspace = true
 thiserror.workspace = true
+time.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

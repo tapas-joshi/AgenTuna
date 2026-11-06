@@ -110,8 +110,8 @@
   --at-text-22: 22px;
   --at-text-26: 26px;
 
-  --at-font-ui: "Inter", "IBM Plex Sans", system-ui, -apple-system, sans-serif;
-  --at-font-mono: "Menlo", ui-monospace, "SFMono-Regular", monospace;
+  --at-font-ui: "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif;
+  --at-font-mono: "JetBrains Mono", "Menlo", ui-monospace, "SFMono-Regular", monospace;
 }
 
 /*

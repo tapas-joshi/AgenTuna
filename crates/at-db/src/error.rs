@@ -55,6 +55,18 @@ pub enum DbError {
         /// Journal mode SQLite kept instead.
         actual: String,
     },
+    /// A path could not be canonicalised on disk.
+    #[error("{path}: {source}", path = .path.display())]
+    PathUnresolved {
+        /// Path that could not be resolved.
+        path: PathBuf,
+        /// Operating-system error from `std::fs::canonicalize`.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A settings value could not be encoded as JSON.
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 impl From<rusqlite::Error> for DbError {

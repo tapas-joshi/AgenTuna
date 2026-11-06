@@ -11,9 +11,17 @@ workspace = true
 
 [dependencies]
 at-model.workspace = true
+at-fs.workspace = true
 directories.workspace = true
+fs4.workspace = true
 saphyr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

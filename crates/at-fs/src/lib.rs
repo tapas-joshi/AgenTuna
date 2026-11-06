@@ -17,7 +17,14 @@ pub mod diff;
 mod error;
 pub mod guard;
 mod hash;
+pub mod platform;
+pub mod privilege;
+pub mod remedies;
+pub mod strategy;
 pub mod symlink;
+/// Shared test fixtures. Compiled only with the `testkit` cargo feature.
+#[cfg(feature = "testkit")]
+pub mod testkit;
 pub mod watch;
 
 /// Deployment mode, re-exported so callers of [`deploy()`] need no extra import.
@@ -39,7 +46,34 @@ pub use guard::{
     move_aside,
 };
 pub use hash::sha256_hex;
+pub use platform::{
+    HostPlatform, LinkAttempt, LinkMade, LinkMethod, LinkRemoval, LinkRemovalRequest, LinkRequest,
+    LinkShape, LinkTargetKind, Linker, MODE_JUNCTION, RemovalOperation, StoredLinkMode,
+    SystemLinker, classify_link_shape, ensure_mode_supported, host_platform, link_attempt_order,
+    link_with_fallback, removal_operation, remove_link,
+};
+#[doc(hidden)]
+pub use remedies::MoveFs;
+/// TF-042's store move. Kept out of the root re-export because
+/// [`guard::move_aside`] already owns that name (TF-005's same-parent rename).
+pub use remedies::{
+    ADOPT_FLOW_ID, InverseMove, MoveAction, MoveAsideRequest, MoveDraft, MoveJournal,
+    MoveOperationId, MoveRecord, MoveStrategy, RefusalRemedies, RefusalRemedy, UndoMoveOutcome,
+    encode_path, undo_move,
+};
+#[doc(hidden)]
+pub use strategy::deploy_skill_with;
+pub use strategy::{
+    SkillDeployOutcome, SkillDeployRequest, SkillStrategy, SkillWarning, SystemVolumes,
+    VolumeLookup, deploy_skill, normalize_error, normalize_io, skill_mode,
+};
 pub use symlink::SymlinkWrite;
+pub use watch::{
+    DEFAULT_BURST_QUIET, DEFAULT_DEBOUNCE, DEFAULT_MAX_BATCH_PATHS, DEFAULT_QUEUE_CAPACITY,
+    DEFAULT_START_TIMEOUT, DEFAULT_STOP_TIMEOUT, DEFAULT_SUPPRESS_TTL, IgnoreRules, RecentWrites,
+    WatchBatch, WatchChange, WatchConfig, WatchError, WatchEvent, WatchRoot, WatchRootKind,
+    WatchService, WatchStats,
+};
 
 /// Largest file `at-fs` will read or write in one operation (64 MiB).
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;

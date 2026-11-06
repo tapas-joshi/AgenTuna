@@ -17,10 +17,11 @@ use crate::output::CommandOutput;
 /// only ever keys on the top-level noun.
 ///
 /// A group must not redeclare the global flags (`--json`, `--project`, `--scope`,
-/// `--yes`, `--verbose`, `--no-color`): they are propagated into every subcommand and
-/// read from [`GlobalArgs`]. Their argument ids (`json`, `project`, `scope`, `yes`,
-/// `verbose`, `no_color`) are reserved, so a positional such as a project target must
-/// use a different field name even when its value name is `PROJECT`.
+/// `--yes`, `--dry-run`, `--read-only`, `--verbose`, `--no-color`): they are
+/// propagated into every subcommand and read from [`GlobalArgs`]. Their argument ids
+/// (`json`, `project`, `scope`, `yes`, `dry_run`, `read_only`, `verbose`, `no_color`)
+/// are reserved, so a positional such as a project target must use a different field
+/// name even when its value name is `PROJECT`.
 pub trait CommandGroup: Send + Sync {
     /// The top-level noun typed on the command line, for example `skills`.
     fn name(&self) -> &'static str;

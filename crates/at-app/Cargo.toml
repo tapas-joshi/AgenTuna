@@ -22,6 +22,7 @@ tauri-build.workspace = true
 
 [dependencies]
 at-model.workspace = true
+at-fs.workspace = true
 at-store.workspace = true
 tauri.workspace = true
 tokio.workspace = true
@@ -33,6 +34,8 @@ thiserror.workspace = true
 uuid.workspace = true
 rustix.workspace = true
 ts-rs.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rustix = { workspace = true, features = ["process"] }

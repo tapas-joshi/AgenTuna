@@ -6,6 +6,7 @@ use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use clap::{ArgMatches, FromArgMatches};
+use serde_json::json;
 
 use crate::cli::Cli;
 use crate::error::{CliError, ErrorCode, exit_code};
@@ -16,12 +17,12 @@ use crate::registry::{Registry, RegistryError};
 /// The registry the shipped binary uses.
 ///
 /// Only groups whose implementation has landed are listed, so an unregistered noun is
-/// absent from `--help` instead of being a stub. Group owners: `skills` -> TS-041;
-/// `mcp` and nested `mcp secret` -> TM-027; `migrate`, `adopt`, `drift`, `backups`,
-/// `sync`, `remote` -> TC-030, TC-031; `agents`, `effective`, `why`, `overview`,
-/// `rules` -> TA-070, TA-071.
+/// absent from `--help` instead of being a stub. Group owners: `config` -> TF-028,
+/// TF-051; `skills` -> TS-041; `mcp` and nested `mcp secret` -> TM-027; `migrate`,
+/// `adopt`, `drift`, `backups`, `sync`, `remote` -> TC-030, TC-031; `agents`,
+/// `effective`, `why`, `overview`, `rules` -> TA-070, TA-071.
 pub fn production_registry() -> Result<Registry, RegistryError> {
-    Registry::try_new(Vec::new())
+    Registry::try_new(vec![Box::new(crate::runtime::ConfigGroup)])
 }
 
 /// Runs the CLI for the current process and returns its exit status.
@@ -40,15 +41,15 @@ pub fn run_from_env() -> ExitCode {
     let code = match production_registry() {
         Ok(registry) => run(&registry, &argv, &mut stdio),
         Err(error) => {
-            let _ = writeln!(stdio.err, "error: {error}");
-            let _ = writeln!(
-                stdio.err,
-                "hint: this is a bug in agentuna; please report the command you ran"
-            );
-            exit_code::INTERNAL
+            // A broken composition root is a CLI defect, not user input, but it still
+            // goes through the shared envelope so JSON consumers get one object.
+            let failure = CliError::internal(format!("the command registry is invalid: {error}"));
+            report_error("", &failure, flag_present(&argv, "--json"), &mut stdio)
         }
     };
-    ExitCode::from(u8::try_from(code).unwrap_or(1))
+    // Every documented code fits in a `u8`; the fallback keeps the promise that only
+    // documented codes are ever returned.
+    ExitCode::from(u8::try_from(code).unwrap_or(70))
 }
 
 /// Runs `argv` against `registry`, writing to `stdio`, and returns the process exit code.
@@ -89,14 +90,14 @@ pub fn run(registry: &Registry, argv: &[OsString], stdio: &mut Stdio<'_>) -> i32
 
     if let Some(group) = registry.get(noun) {
         return match group.dispatch(&globals, sub_matches) {
-            Ok(output) => report_ok(&path, &output, &globals, stdio),
+            Ok(output) => report_ok(&path, &output, globals.json, stdio),
             Err(failure) => report_error(&path, &failure, globals.json, stdio),
         };
     }
 
     match Cli::from_arg_matches(&matches) {
         Ok(cli) => match crate::builtin::dispatch(&cli, registry) {
-            Ok(output) => report_ok(&path, &output, &globals, stdio),
+            Ok(output) => report_ok(&path, &output, globals.json, stdio),
             Err(failure) => report_error(&path, &failure, globals.json, stdio),
         },
         Err(error) => {
@@ -120,13 +121,8 @@ fn command_path(matches: &ArgMatches) -> String {
     parts.join(" ")
 }
 
-fn report_ok(
-    path: &str,
-    output: &CommandOutput,
-    globals: &GlobalArgs,
-    stdio: &mut Stdio<'_>,
-) -> i32 {
-    let text = if globals.json {
+fn report_ok(path: &str, output: &CommandOutput, json: bool, stdio: &mut Stdio<'_>) -> i32 {
+    let text = if json {
         match serde_json::to_string(&envelope_ok(path, output)) {
             Ok(envelope) => envelope + "\n",
             Err(error) => {
@@ -146,8 +142,12 @@ fn report_ok(
 }
 
 /// Human mode has no envelope, so warnings are reported on stderr and stdout stays
-/// exactly the command's own text.
+/// exactly the command's own text. A report-style command whose rendering already
+/// lists them opts out with [`CommandOutput::reporting_warnings`].
 fn write_warnings(output: &CommandOutput, stdio: &mut Stdio<'_>) {
+    if output.warnings_in_report {
+        return;
+    }
     for warning in &output.warnings {
         let _ = match stdio.color {
             Color::Ansi => writeln!(
@@ -163,6 +163,10 @@ fn write_warnings(output: &CommandOutput, stdio: &mut Stdio<'_>) {
 fn report_error(path: &str, error: &CliError, json: bool, stdio: &mut Stdio<'_>) -> i32 {
     if json {
         emit_json_error(path, error, stdio);
+    } else if let Some(report) = error.report() {
+        // A report-style command such as `doctor` still shows its report to a human;
+        // only the summary and the hint go to stderr.
+        let _ = stdio.out.write_all(report.as_bytes());
     }
     write_diagnostic(error, stdio);
     error.exit_code()
@@ -192,18 +196,29 @@ fn write_diagnostic(error: &CliError, stdio: &mut Stdio<'_>) {
     }
 }
 
-/// Renders a clap parse result. Help and version exit 0 on stdout; usage errors exit 2
-/// on stderr, as the acceptance contract requires.
+/// Renders a clap parse result.
+///
+/// Help and version are documentation requests: exit 0 and text on stdout. In JSON
+/// mode they still produce exactly one object, with the text in `data.text`, so a
+/// machine consumer never sees a bare stream of prose. Usage errors exit 2 on stderr,
+/// as the acceptance contract requires.
 fn report_parse_error(error: &clap::Error, argv: &[OsString], stdio: &mut Stdio<'_>) -> i32 {
     let code = error.exit_code();
     let text = render_clap(error, stdio.color);
-    let _ = if code == exit_code::SUCCESS {
-        stdio.out.write_all(text.as_bytes())
-    } else {
-        stdio.err.write_all(text.as_bytes())
-    };
+    let json = flag_present(argv, "--json");
 
-    if code != exit_code::SUCCESS && flag_present(argv, "--json") {
+    if code == exit_code::SUCCESS {
+        if json {
+            let command = documentation_command(error, argv);
+            let output = CommandOutput::new(json!({ "text": text }), String::new());
+            return report_ok(&command, &output, true, stdio);
+        }
+        let _ = stdio.out.write_all(text.as_bytes());
+        return code;
+    }
+
+    let _ = stdio.err.write_all(text.as_bytes());
+    if json {
         let first = text.lines().next().unwrap_or("invalid invocation");
         let message = first.strip_prefix("error: ").unwrap_or(first).to_owned();
         let failure = CliError::new(
@@ -214,6 +229,19 @@ fn report_parse_error(error: &clap::Error, argv: &[OsString], stdio: &mut Stdio<
         emit_json_error(&guess_command(argv), &failure, stdio);
     }
     code
+}
+
+/// The noun a help or version request names, for the JSON envelope.
+fn documentation_command(error: &clap::Error, argv: &[OsString]) -> String {
+    let guessed = guess_command(argv);
+    if !guessed.is_empty() {
+        return guessed;
+    }
+    match error.kind() {
+        clap::error::ErrorKind::DisplayVersion => "version",
+        _ => "help",
+    }
+    .to_owned()
 }
 
 fn render_clap(error: &clap::Error, color: Color) -> String {

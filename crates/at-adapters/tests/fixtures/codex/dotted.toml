@@ -1,0 +1,3 @@
+# Synthetic config used to pin how server ids are quoted.
+[mcp_servers.plain]
+command = "one"

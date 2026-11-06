@@ -13,18 +13,29 @@
 //!   [`CliError`] and exit code 11; it never reports success it did not produce.
 //! - Only implemented groups are registered, so `--help` lists exactly what works
 //!   plus the commands this slice owns.
+//!
+//! The machine contract (TU-033) is the versioned envelope in [`output`], the error
+//! object in [`error::CliError`], and the published exit-code table in
+//! [`error::exit_code::TABLE`]. Every command group builds its output through
+//! [`CommandOutput`] and returns a [`CliError`]; the root maps them to the envelope
+//! and the exit status, so no group prints or exits on its own.
 
 mod builtin;
 pub mod cli;
+pub mod doctor;
 pub mod error;
 pub mod globals;
 pub mod output;
 pub mod registry;
 mod run;
+pub mod runtime;
 
 pub use cli::{Cli, CompletionShell, ProjectsCommand, RootCommand};
+pub use doctor::{Finding, Probes, Report, Severity};
 pub use error::{CliError, ErrorCode, exit_code};
 pub use globals::{GlobalArgs, ScopeArg};
-pub use output::{Color, CommandOutput, SCHEMA_VERSION, Stdio, Warning};
+pub use output::{
+    Color, CommandOutput, ENVELOPE_FIELDS, ERROR_FIELDS, SCHEMA_VERSION, Stdio, Warning,
+};
 pub use registry::{CommandGroup, Registry, RegistryError};
 pub use run::{production_registry, run, run_from_env};
