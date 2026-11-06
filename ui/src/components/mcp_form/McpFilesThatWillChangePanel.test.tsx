@@ -5,6 +5,7 @@ import { McpFilesThatWillChangePanel } from "./McpFilesThatWillChangePanel";
 afterEach(cleanup);
 
 const preview: McpChangeSetPreviewView = {
+  preview_id: "preview-1",
   change_set_id: "change-1",
   files: [
     { agent: "Claude Code", scope: "user", path: "~/.claude.json", additions: 4n, deletions: 2n, diff: "--- a/claude.json\n+++ b/claude.json\n@@ -1 +1 @@\n-old\n+new", selected: true, cannot_write_reason: null },

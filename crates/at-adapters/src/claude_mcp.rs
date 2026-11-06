@@ -73,6 +73,12 @@ pub enum ClaudeMcpError {
         /// Existing unmanaged server key.
         name: String,
     },
+    /// The requested server does not exist in this document.
+    #[error("Claude MCP server `{name}` does not exist")]
+    UnknownServer {
+        /// Missing server key.
+        name: String,
+    },
     /// Entry has a transport that this adapter does not model.
     #[error("Claude MCP entry `{name}` has unsupported transport `{kind}`")]
     UnsupportedTransport {
@@ -263,6 +269,28 @@ impl ClaudeMcpConfig {
             }
             servers.append(&server.name, entry_value(server));
         }
+        Ok(root.to_string())
+    }
+
+    /// Removes a modeled server while preserving all other JSONC bytes.
+    ///
+    /// # Errors
+    /// Returns [`ClaudeMcpError::UnknownServer`] when the server is absent, or
+    /// [`ClaudeMcpError::UnmanagedEntry`] when a same-name entry is not modeled.
+    pub fn remove(&self, name: &str) -> Result<String, ClaudeMcpError> {
+        let root = parse_root(&self.source)?;
+        let servers = server_object(&root, &self.scope)?;
+        let Some(entry) = servers.get(name) else {
+            return Err(ClaudeMcpError::UnknownServer {
+                name: name.to_owned(),
+            });
+        };
+        if !self.servers.contains_key(name) {
+            return Err(ClaudeMcpError::UnmanagedEntry {
+                name: name.to_owned(),
+            });
+        }
+        entry.remove();
         Ok(root.to_string())
     }
 

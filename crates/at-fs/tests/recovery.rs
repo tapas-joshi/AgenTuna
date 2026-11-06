@@ -30,6 +30,7 @@ fn journal(operation_id: &str, entries: Vec<JournalEntry>) -> PendingJournal {
         temp_files: Vec::new(),
         change_set: None,
         completed_ops: Vec::new(),
+        created_dirs: Vec::new(),
         committed: false,
     }
 }

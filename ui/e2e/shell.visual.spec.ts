@@ -38,8 +38,8 @@ test("MCP detail, MCP form and migration routes render meaningful states", async
   await expect(page.getByRole("heading", { name: "This server has no tools" })).toBeVisible();
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "Add MCP server" }).click();
-  await expect(page.getByRole("heading", { name: "MCP Servers", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "No servers to edit" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Add MCP server", exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Name" })).toBeVisible();
   await page.keyboard.press("Meta+k");
   const palette = page.getByRole("dialog", { name: "Command palette" });
   const search = palette.getByRole("combobox", { name: "Search commands" });
@@ -60,6 +60,6 @@ test("Keychain secrets and add-skill routes render real screen content", async (
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   await page.getByRole("button", { name: "Add to this repo" }).click();
   await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Where is the skill coming from?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Where does the skill come from?" })).toBeVisible();
   await expect(page).toHaveScreenshot("add-skill-source.png", { animations: "disabled", caret: "hide" });
 });

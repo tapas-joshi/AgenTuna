@@ -15,8 +15,9 @@ type Preferences = {
   link_modes: Record<string, "link" | "copy">;
   native_banner_hidden: Record<string, boolean>;
   marketplace_enabled: boolean;
+  auto_update_skills: boolean;
 };
-const DEFAULTS: Preferences = { health_interval_minutes: 5, background_health: "local", backup_retention_days: 30, default_link_mode: "link", link_modes: {}, native_banner_hidden: {}, marketplace_enabled: false };
+const DEFAULTS: Preferences = { health_interval_minutes: 5, background_health: "local", backup_retention_days: 30, default_link_mode: "link", link_modes: {}, native_banner_hidden: {}, marketplace_enabled: false, auto_update_skills: false };
 const ITEM_KINDS = ["skill", "mcp_server", "rule"] as const;
 
 function decodeDocument(document: SettingsDocument): Preferences {
@@ -34,6 +35,7 @@ function decodeDocument(document: SettingsDocument): Preferences {
     default_link_mode: values.default_link_mode === "copy" ? "copy" : DEFAULTS.default_link_mode,
     link_modes: linkModes, native_banner_hidden: banners,
     marketplace_enabled: values["network.marketplace_enabled"] === true,
+    auto_update_skills: values.auto_update_skills === true,
   };
 }
 
@@ -70,7 +72,7 @@ export function PreferencesScreen() {
     finally { setSaving(null); }
   };
   const reset = async () => {
-    const defaults: readonly [string, unknown][] = [["health_interval_minutes", 5], ["background_health", "local"], ["backup_retention_days", 30], ["default_link_mode", "link"], ["network.marketplace_enabled", false]];
+    const defaults: readonly [string, unknown][] = [["health_interval_minutes", 5], ["background_health", "local"], ["backup_retention_days", 30], ["default_link_mode", "link"], ["network.marketplace_enabled", false], ["auto_update_skills", false]];
     setSaving("reset"); setNotice(null); setFailure(null);
     try {
       for (const [key, next] of defaults) await invoke("settings_set", { key, value: next });
@@ -87,15 +89,16 @@ export function PreferencesScreen() {
   const select = (label: string, options: readonly { value: string; label: string }[], current: string, key: string, disabled = false) => <select aria-label={label} className="w-full rounded-6 border border-border bg-raised px-10 py-8 text-text" value={current} disabled={disabled || saving === key} onChange={event => { const option = options.find(item => item.value === event.target.value); if (option) void update(key, key === "health_interval_minutes" ? Number(option.value) : option.value); }}>{options.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select>;
   const modeOptions = [{ value: "link", label: "Link" }, { value: "copy", label: "Copy" }];
   return <div className="mx-auto max-w-[920px] space-y-16 p-24" data-testid="preferences-screen">
-    <header><h1 className="m-0 text-22 font-semibold text-text">Preferences</h1><p className="mt-6 text-13 text-secondary">Local settings. No automatic network call occurs.</p></header>
+    <header><h1 className="m-0 text-22 font-semibold text-text">Preferences</h1><p className="mt-6 text-13 text-secondary">Network checks require an explicit request or enabled automatic updates.</p></header>
     {failure && <div role="alert" className="rounded-6 border border-danger/40 bg-danger/10 p-12 text-13 text-danger">{failure} <Button variant="secondary" onClick={reload}>Retry</Button></div>}
     {fieldError && <p role="alert" className="m-0 text-13 text-danger">{fieldError}</p>}{notice && <div role="status" className="text-13 text-success">{notice}</div>}
     <section className="rounded-10 border border-border bg-surface p-16"><h2 className="m-0 text-15 font-semibold text-text">General</h2>
       {row("Default link mode", select("Default link mode", modeOptions, value.default_link_mode, "default_link_mode"))}
       {row("Per-agent link mode", <div className="flex gap-8"><input aria-label="Agent id" value={agentId} onChange={event => setAgentId(event.target.value)} placeholder="agent id" className="min-w-0 rounded-6 border border-border bg-raised px-8 py-6 text-text" />{select("Link mode for agent", modeOptions, value.link_modes[agentId] ?? value.default_link_mode, `link_mode.${agentId}`, agentId.trim() === "")}</div>, "Agent-specific mode overrides the default.")}
-      {row("Native item banners", <div className="flex flex-wrap gap-10">{ITEM_KINDS.map(kind => <label key={kind} className="flex items-center gap-6 text-12 text-text"><input type="checkbox" checked={value.native_banner_hidden[kind] ?? false} onChange={event => void update(`native_banner_hidden.${kind}`, event.target.checked)} />Hide {kind} banner</label>)}</div>, "Uncheck a kind to show its banner again.")}
+      {row("Native item banners", <div className="flex flex-wrap gap-10">{ITEM_KINDS.map(kind => <label key={kind} className="flex items-center gap-6 text-12 text-text"><input type="checkbox" checked={value.native_banner_hidden[kind] ?? false} onChange={event => void update(`native_banner_hidden.${kind}`, event.target.checked)} />Hide {kind === "skill" ? "Skills" : kind === "mcp_server" ? "MCP servers" : "Rules"} banner</label>)}</div>, "Uncheck a kind to show its banner again.")}
     </section>
     <section className="rounded-10 border border-border bg-surface p-16"><h2 className="m-0 text-15 font-semibold text-text">Health</h2>{row("Health interval", select("Health interval", [{ value: "0", label: "Off" }, { value: "5", label: "5 minutes" }, { value: "15", label: "15 minutes" }, { value: "60", label: "60 minutes" }], String(value.health_interval_minutes), "health_interval_minutes"))}{row("Background health", select("Background health", [{ value: "off", label: "Off" }, { value: "local", label: "Local" }, { value: "all", label: "All" }], value.background_health, "background_health"), "Local means tested stdio servers; HTTP requires All.")}</section>
+    <section className="rounded-10 border border-border bg-surface p-16"><h2 className="m-0 text-15 font-semibold text-text">Skill updates</h2>{row("Automatically check and update skills", <button type="button" role="switch" aria-checked={value.auto_update_skills} aria-label="Automatically update skills" disabled={saving === "auto_update_skills"} className="rounded-6 border border-border px-12 py-8 text-13 text-text" onClick={() => void update("auto_update_skills", !value.auto_update_skills)}>{value.auto_update_skills ? "On" : "Off"}</button>, "Off by default. Only skills configured to follow automatic updates are eligible.")}</section>
     <section className="rounded-10 border border-border bg-surface p-16"><h2 className="m-0 text-15 font-semibold text-text">Backups</h2>{row("Retention (days)", <input aria-label="Backup retention days" type="number" min={30} value={value.backup_retention_days} onChange={event => void update("backup_retention_days", Number(event.target.value))} className="w-full rounded-6 border border-border bg-raised px-10 py-8 text-text" />, "Minimum 30 days.")}</section>
     <section className="rounded-10 border border-border bg-surface p-16"><h2 className="m-0 text-15 font-semibold text-text">Network</h2>{row("Marketplace access", <button type="button" role="switch" aria-checked={value.marketplace_enabled} aria-label="Marketplace access" disabled={saving === "network.marketplace_enabled"} className="rounded-6 border border-border px-12 py-8 text-13 text-text" onClick={() => void update("network.marketplace_enabled", !value.marketplace_enabled)}>{value.marketplace_enabled ? "On" : "Off"}</button>)}{row("Network policy", <span className="text-13 text-secondary">{policy?.statement ?? "Policy unavailable"} {policy?.offline && <strong className="text-warning">Offline</strong>}</span>)}{policy && <div className="mt-12 space-y-8">{policy.actions.map(action => <div key={action.action} className="flex items-center justify-between gap-12 rounded-6 bg-raised px-12 py-8 text-13"><span>{action.label}</span><span className={action.state === "blocked" ? "text-warning" : "text-secondary"}>{action.state.replaceAll("_", " ")}{action.reason ? ` — ${action.reason}` : ""}</span></div>)}</div>}{policy?.events.length ? <section aria-label="Recent network events" className="mt-16"><h3 className="text-13 font-medium text-text">Recent network activity</h3>{policy.events.map((event, index) => <div key={`${event.at}-${event.action}-${index}`} className="flex justify-between gap-8 border-t border-border py-6 text-11 text-secondary"><span>{event.action} · {event.host ?? "host unavailable"}</span><span>{event.at} · {event.bytes} bytes</span></div>)}</section> : null}</section>
     <section className="rounded-10 border border-border bg-surface p-16"><h2 className="m-0 text-15 font-semibold text-text">Storage</h2>{row("Global store path", <code className="break-all text-12 text-secondary">{paths?.global_store ?? "Unavailable"}</code>)}</section>

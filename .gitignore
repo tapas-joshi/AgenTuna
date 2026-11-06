@@ -22,3 +22,7 @@ crates/at-app/gen/
 
 # third-party captures kept locally for research; cite URLs instead
 research/skillsmanager/
+
+# Playwright run output (baselines in ui/e2e/snapshots ARE committed)
+ui/test-results/
+ui/playwright-report/

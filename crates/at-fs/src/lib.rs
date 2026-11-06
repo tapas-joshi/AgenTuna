@@ -14,6 +14,10 @@ compile_error!("at-fs currently supports Unix platforms only");
 pub mod atomic;
 pub mod backup;
 /// Journaled, rollback-capable multi-file changes.
+pub use changeset::{
+    ApplyContext, ApplyOutcome, ApplyRoots, ChangeSetApplyError, DbOperationRecorder,
+    OperationRecorder, apply as apply_changeset, apply_with_roots,
+};
 pub mod changeset;
 pub mod concurrency;
 pub mod deploy;

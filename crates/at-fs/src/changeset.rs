@@ -1,5 +1,6 @@
 //! Journaled application of reviewed multi-file ChangeSets.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -141,6 +142,123 @@ pub struct ApplyContext<'a> {
     pub recorder: &'a mut dyn OperationRecorder,
 }
 
+/// Explicitly authorized external roots for native agent configuration writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyRoots {
+    roots: Vec<PathBuf>,
+}
+
+impl ApplyRoots {
+    /// Canonicalizes a non-empty list of existing directory roots.
+    ///
+    /// `/` is never accepted because it would authorize the entire filesystem.
+    ///
+    /// # Errors
+    /// Returns [`ChangeSetApplyError::InvalidAuthorizedRoot`] for a non-directory,
+    /// non-absolute, root-directory or uncanonicalizable path.
+    pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Result<Self, ChangeSetApplyError> {
+        let mut canonical = Vec::new();
+        for root in roots {
+            if !root.is_absolute() || root == Path::new("/") {
+                return Err(ChangeSetApplyError::InvalidAuthorizedRoot(root));
+            }
+            let root = fs::canonicalize(&root)
+                .map_err(|_| ChangeSetApplyError::InvalidAuthorizedRoot(root))?;
+            if root == Path::new("/") || !root.is_dir() {
+                return Err(ChangeSetApplyError::InvalidAuthorizedRoot(root));
+            }
+            if !canonical.contains(&root) {
+                canonical.push(root);
+            }
+        }
+        if canonical.is_empty() {
+            return Err(ChangeSetApplyError::InvalidAuthorizedRoot(PathBuf::new()));
+        }
+        canonical.sort();
+        Ok(Self { roots: canonical })
+    }
+
+    fn root_for(&self, path: &Path) -> Result<(&Path, PathBuf), ChangeSetApplyError> {
+        if !path.is_absolute()
+            || path.components().any(|part| {
+                matches!(
+                    part,
+                    Component::CurDir | Component::ParentDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                path.to_path_buf(),
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| ChangeSetApplyError::OutsideAuthorizedRoots(path.to_path_buf()))?;
+        let file_name = path
+            .file_name()
+            .filter(|_| matches!(path.components().next_back(), Some(Component::Normal(_))))
+            .ok_or_else(|| ChangeSetApplyError::OutsideAuthorizedRoots(path.to_path_buf()))?;
+        let mut ancestor = parent;
+        let mut missing = Vec::new();
+        loop {
+            match fs::symlink_metadata(ancestor) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let Some(name) = ancestor.file_name() else {
+                        return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                            path.to_path_buf(),
+                        ));
+                    };
+                    missing.push(name.to_os_string());
+                    ancestor = ancestor.parent().ok_or_else(|| {
+                        ChangeSetApplyError::OutsideAuthorizedRoots(path.to_path_buf())
+                    })?;
+                }
+                Err(_) => {
+                    return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                        path.to_path_buf(),
+                    ));
+                }
+            }
+        }
+        let ancestor_real = fs::canonicalize(ancestor)
+            .map_err(|_| ChangeSetApplyError::OutsideAuthorizedRoots(path.to_path_buf()))?;
+        let mut canonical_path = ancestor_real.clone();
+        for component in missing.iter().rev() {
+            if component == OsStr::new(".") || component == OsStr::new("..") {
+                return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                    path.to_path_buf(),
+                ));
+            }
+            canonical_path.push(component);
+        }
+        canonical_path.push(file_name);
+        let mut matched: Option<(&Path, PathBuf, usize)> = None;
+        for root in &self.roots {
+            if let Ok(relative) = canonical_path.strip_prefix(root)
+                && relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            {
+                let root_depth = root.components().count();
+                if matched
+                    .as_ref()
+                    .is_none_or(|(_, _, matched_depth)| root_depth > *matched_depth)
+                {
+                    matched = Some((root.as_path(), relative.to_path_buf(), root_depth));
+                }
+            }
+        }
+        let (root, relative, _) = matched
+            .ok_or_else(|| ChangeSetApplyError::OutsideAuthorizedRoots(path.to_path_buf()))?;
+        if !ancestor_real.starts_with(root) {
+            return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                path.to_path_buf(),
+            ));
+        }
+        Ok((root, relative))
+    }
+}
 /// Successful ChangeSet application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyOutcome {
@@ -160,6 +278,12 @@ pub enum ChangeSetApplyError {
     /// Path is unsafe or this implementation does not support the operation.
     #[error("unsafe or unsupported change-set path: {0}")]
     UnsafePath(PathBuf),
+    /// Path is not beneath any explicitly authorized external root.
+    #[error("path is outside authorized roots: {0}")]
+    OutsideAuthorizedRoots(PathBuf),
+    /// An explicit authorization root is invalid.
+    #[error("invalid authorized root: {0}")]
+    InvalidAuthorizedRoot(PathBuf),
     /// Reviewed path state is stale.
     #[error("stale change-set target: {0}")]
     Stale(PathBuf),
@@ -194,26 +318,95 @@ pub fn apply(
     set: &ChangeSet,
     context: &mut ApplyContext<'_>,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(set, context, None)
+}
+
+/// Applies a ChangeSet that may include absolute paths beneath explicitly authorized roots.
+///
+/// Relative operations retain the existing store-root behavior. Absolute destinations are
+/// accepted beneath any entry; when entries overlap, the most specific matching root is used.
+///
+/// # Errors
+/// Returns [`ChangeSetApplyError::OutsideAuthorizedRoots`] when a path escapes or crosses a
+/// symlink outside its authorized root; other failures match [`apply`].
+pub fn apply_with_roots(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    roots: &ApplyRoots,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(set, context, Some(roots))
+}
+
+fn apply_inner(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    authorized_roots: Option<&ApplyRoots>,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
     set.validate()?;
     let mut paths = Vec::with_capacity(set.ops.len());
+    let mut path_roots = Vec::with_capacity(set.ops.len());
+    let mut backup_relpaths = Vec::with_capacity(set.ops.len());
     for op in &set.ops {
-        if op.destination().is_none() {
-            return Err(ChangeSetApplyError::UnsafePath(PathBuf::new()));
-        }
-        let relative = op
+        let destination = op
             .destination()
             .ok_or_else(|| ChangeSetApplyError::UnsafePath(PathBuf::new()))?;
-        if relative.as_os_str().is_empty()
-            || relative
+        if destination.as_os_str().is_empty() {
+            return Err(ChangeSetApplyError::UnsafePath(destination.to_path_buf()));
+        }
+        if destination.is_absolute() {
+            let roots = authorized_roots
+                .ok_or_else(|| ChangeSetApplyError::UnsafePath(destination.to_path_buf()))?;
+            let (root, relative) = roots.root_for(destination)?;
+            paths.push(root.join(&relative));
+            path_roots.push(root.to_path_buf());
+            backup_relpaths.push(relative);
+        } else {
+            if destination
                 .components()
                 .any(|part| !matches!(part, Component::Normal(_)))
-        {
-            return Err(ChangeSetApplyError::UnsafePath(relative.to_path_buf()));
+            {
+                return Err(ChangeSetApplyError::UnsafePath(destination.to_path_buf()));
+            }
+            paths.push(context.store_root.join(destination));
+            path_roots.push(context.store_root.to_path_buf());
+            backup_relpaths.push(destination.to_path_buf());
         }
-        paths.push(context.store_root.join(relative));
     }
-    for (op, path) in set.ops.iter().zip(&paths) {
-        validate_expected(op, path, context.store_root)?;
+    let mut created_dirs = Vec::new();
+    if authorized_roots.is_some() {
+        for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
+            if !op.destination().is_some_and(Path::is_absolute) {
+                continue;
+            }
+            let mut parent = path.parent();
+            while let Some(directory) = parent {
+                if directory == root {
+                    break;
+                }
+                match fs::symlink_metadata(directory) {
+                    Ok(metadata) if metadata.is_dir() => break,
+                    Ok(_) => {
+                        return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                            op.destination().map(Path::to_path_buf).unwrap_or_default(),
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        created_dirs.push(directory.to_path_buf());
+                        parent = directory.parent();
+                    }
+                    Err(_) => {
+                        return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                            op.destination().map(Path::to_path_buf).unwrap_or_default(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    created_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    created_dirs.dedup();
+    for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
+        validate_expected(op, path, root)?;
     }
 
     let lock_dir = context.store_root.join(".state/locks");
@@ -260,21 +453,27 @@ pub fn apply(
         temp_files: Vec::new(),
         change_set: Some(set.clone()),
         completed_ops: Vec::new(),
+        created_dirs: created_dirs.clone(),
         committed: false,
     };
     let journal_path = write_journal(&journal_dir, &journal)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
     let mut done = Vec::with_capacity(set.ops.len());
-    for (index, (op, path)) in set.ops.iter().zip(&paths).enumerate() {
+    for (index, ((op, path), backup_relative)) in
+        set.ops.iter().zip(&paths).zip(&backup_relpaths).enumerate()
+    {
         let prior = fs::read(path).ok();
         let backup_path = match execute_op(
             op,
             path,
+            backup_relative,
             prior.as_deref(),
-            set,
-            &operation_id,
-            context.store_root,
-            &backup_folder,
+            &ExecuteContext {
+                set,
+                operation_id: &operation_id,
+                store_root: context.store_root,
+                backup_root: &backup_folder,
+            },
         ) {
             Ok(path) => path,
             Err(cause) => {
@@ -287,6 +486,7 @@ pub fn apply(
                         done: &done,
                         paths: &paths,
                         entries: &journal.entries,
+                        created_dirs: &created_dirs,
                     },
                     cause,
                 );
@@ -309,6 +509,7 @@ pub fn apply(
                     done: &done,
                     paths: &paths,
                     entries: &journal.entries,
+                    created_dirs: &created_dirs,
                 },
                 error.to_string(),
             );
@@ -329,6 +530,7 @@ pub fn apply(
                     done: &done,
                     paths: &paths,
                     entries: &journal.entries,
+                    created_dirs: &created_dirs,
                 },
                 error,
             );
@@ -349,17 +551,25 @@ pub fn apply(
     })
 }
 
+struct ExecuteContext<'a> {
+    set: &'a ChangeSet,
+    operation_id: &'a str,
+    store_root: &'a Path,
+    backup_root: &'a Path,
+}
+
 fn execute_op(
     op: &FileOp,
     path: &Path,
+    backup_relative: &Path,
     prior: Option<&[u8]>,
-    set: &ChangeSet,
-    operation_id: &str,
-    store_root: &Path,
-    backup_root: &Path,
+    context: &ExecuteContext<'_>,
 ) -> Result<Option<PathBuf>, String> {
     crate::failpoint::hit(crate::failpoint::FaultPoint::ChangeSetOperation, path)
         .map_err(|failure| failure.into_io().to_string())?;
+    if path.is_absolute() {
+        crate::guard::create_parents_if_target_absent(path).map_err(|error| error.to_string())?;
+    }
     match op {
         FileOp::Write {
             bytes,
@@ -379,13 +589,14 @@ fn execute_op(
             };
             request.follow_symlink = *follow_symlink;
             if *backup {
-                let relative = op
-                    .destination()
-                    .ok_or_else(|| "destination missing".to_owned())?;
-                request.backup =
-                    BackupPolicy::OperationFolder(backup_folder(backup_root, set.scope, relative)?);
+                request.backup = BackupPolicy::OperationFolder(backup_folder(
+                    context.backup_root,
+                    context.set.scope,
+                    backup_relative,
+                )?);
             }
-            request.backup_meta = backup_meta(set, operation_id, op, path);
+            request.backup_meta =
+                backup_meta(context.set, context.operation_id, path, backup_relative);
             apply_write(&request)
                 .map(|outcome| outcome.backup_path)
                 .map_err(|error| error.to_string())
@@ -400,15 +611,12 @@ fn execute_op(
             }
             let bytes =
                 prior.ok_or_else(|| format!("delete target is absent: {}", path.display()))?;
-            let relative = op
-                .destination()
-                .ok_or_else(|| "destination missing".to_owned())?;
-            let folder = backup_folder(backup_root, set.scope, relative)?;
+            let folder = backup_folder(context.backup_root, context.set.scope, backup_relative)?;
             let files = crate::backup::copy_into(
                 &folder,
                 path,
                 bytes,
-                &backup_meta(set, operation_id, op, path),
+                &backup_meta(context.set, context.operation_id, path, backup_relative),
                 OffsetDateTime::now_utc(),
             )
             .map_err(|error| error.to_string())?;
@@ -416,7 +624,7 @@ fn execute_op(
             Ok(Some(files.blob))
         }
         FileOp::Symlink { target, mode, .. } => {
-            let source = resolve_path(store_root, target)?;
+            let source = resolve_path(context.store_root, target)?;
             let link_mode = match mode {
                 at_model::DeployMode::Link => at_model::LinkMode::Link,
                 at_model::DeployMode::Copy => at_model::LinkMode::Copy,
@@ -428,7 +636,7 @@ fn execute_op(
         FileOp::Copy {
             source, expected, ..
         } => {
-            let source = resolve_path(store_root, source)?;
+            let source = resolve_path(context.store_root, source)?;
             let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
             if wanted != ExpectedState::Absent {
                 return Err("copy destination replacement is not supported".to_owned());
@@ -445,12 +653,15 @@ fn execute_op(
             }
         }
         FileOp::Mkdir { mode, parents, .. } => {
-            if *parents {
-                fs::create_dir_all(path)
+            if path.is_absolute() {
+                crate::guard::create_parents_if_target_absent(path)
+                    .map_err(|error| error.to_string())?;
+                fs::create_dir(path).map_err(|error| error.to_string())?;
+            } else if *parents {
+                fs::create_dir_all(path).map_err(|error| error.to_string())?;
             } else {
-                fs::create_dir(path)
+                fs::create_dir(path).map_err(|error| error.to_string())?;
             }
-            .map_err(|error| error.to_string())?;
             if let Some(mode) = mode {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(path, fs::Permissions::from_mode(*mode & 0o777))
@@ -459,7 +670,7 @@ fn execute_op(
             Ok(None)
         }
         FileOp::Move { from, expected, .. } => {
-            let source = resolve_path(store_root, from)?;
+            let source = resolve_path(context.store_root, from)?;
             let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
             let actual = fs::read(&source)
                 .map(|bytes| ExpectedState::Hash(sha256_hex(&bytes)))
@@ -487,12 +698,10 @@ fn resolve_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(root.join(path))
 }
 
-fn backup_meta(set: &ChangeSet, operation_id: &str, op: &FileOp, path: &Path) -> BackupMeta {
+fn backup_meta(set: &ChangeSet, operation_id: &str, path: &Path, relative: &Path) -> BackupMeta {
     BackupMeta {
         scope: set.scope,
-        relpath: op
-            .destination()
-            .map(|value| value.to_string_lossy().into_owned()),
+        relpath: Some(relative.to_string_lossy().into_owned()),
         operation_id: Some(operation_id.to_owned()),
         mode: fs::metadata(path)
             .ok()
@@ -600,6 +809,7 @@ fn rollback(
     done: &[(usize, Option<Vec<u8>>)],
     paths: &[PathBuf],
     entries: &[JournalEntry],
+    created_dirs: &[PathBuf],
 ) -> Result<(), String> {
     for (index, before) in done.iter().rev() {
         let path = paths
@@ -659,6 +869,13 @@ fn rollback(
             },
         }
     }
+    for directory in created_dirs {
+        match fs::remove_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
     Ok(())
 }
 
@@ -669,6 +886,7 @@ struct RollbackState<'a> {
     done: &'a [(usize, Option<Vec<u8>>)],
     paths: &'a [PathBuf],
     entries: &'a [JournalEntry],
+    created_dirs: &'a [PathBuf],
 }
 
 fn fail_rollback(
@@ -682,6 +900,7 @@ fn fail_rollback(
         state.done,
         state.paths,
         state.entries,
+        state.created_dirs,
     );
     let _ = context
         .recorder

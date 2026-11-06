@@ -262,7 +262,9 @@ version = "0.1.0"
 dependencies = [
  "at-fs",
  "at-model",
+ "at-secrets",
  "jsonc-parser",
+ "saphyr",
  "serde_json",
  "similar",
  "tempfile",
@@ -275,9 +277,11 @@ dependencies = [
 name = "at-app"
 version = "0.1.0"
 dependencies = [
+ "at-adapters",
  "at-db",
  "at-engine",
  "at-fs",
+ "at-git",
  "at-mcp",
  "at-model",
  "at-secrets",

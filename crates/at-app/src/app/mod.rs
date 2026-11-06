@@ -10,18 +10,21 @@ pub mod instance;
 pub mod jobs;
 pub mod linux;
 pub mod logs;
+pub mod mcp_form;
 pub mod menu;
 pub mod network;
 pub mod overview;
 pub mod overwrite;
 pub mod paths;
 pub mod privilege;
+pub mod project_sync;
 pub mod projects;
 pub mod recovery;
 pub mod secrets;
 pub mod settings;
 pub mod skill_detail;
 pub mod skill_wizard;
+pub mod source_updates;
 pub mod state;
 pub mod updater;
 pub mod window_state;
@@ -102,6 +105,10 @@ pub fn run() -> tauri::Result<()> {
             None
         }
     };
+    let setup_updates_opt_in = database
+        .as_ref()
+        .and_then(|database| at_db::settings::load(database.connection()).ok())
+        .is_some_and(|settings| settings.auto_update_skills);
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -167,8 +174,24 @@ pub fn run() -> tauri::Result<()> {
             // One process-wide policy: nothing reaches the network without its permission.
             let jobs = jobs::JobsControl::default();
             app.manage(jobs.clone());
-            let network = NetworkState::default();
+            let network = NetworkState::new(
+                at_model::network::NetworkPolicy::default()
+                    .with_updates_opt_in(setup_updates_opt_in),
+            );
             app.manage(network.clone());
+            if let Ok(update_database) = app.state::<AppState>().database_handle() {
+                let update_network = network.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let clock = source_updates::system_update_clock();
+                    if let Err(error) = source_updates::run_launch_auto_checks(
+                        &update_database,
+                        &update_network,
+                        &clock,
+                    ) {
+                        tracing::warn!(%error, "skill update launch check failed");
+                    }
+                });
+            }
             let event_sink = jobs::TauriHealthEventSink::new(app.handle().clone());
             if let Ok(database) = app.state::<AppState>().database_handle() {
                 let paths = setup_paths.clone();
@@ -212,11 +235,17 @@ pub fn run() -> tauri::Result<()> {
         commands::app_paths,
         commands::settings_set,
         overview::overview_load,
+        overview::overview_enable_global_writes,
         commands::recovery_sheet,
         commands::recovery_discard,
         commands::recovery_restore,
         commands::item_lookup,
         skill_detail::skill_detail_load,
+        skill_detail::skill_auto_update_set,
+        skill_detail::skill_update_ignore,
+        source_updates::skill_source_check,
+        source_updates::skill_update_preview,
+        source_updates::skill_update_apply,
         skill_detail::skill_compare_copies,
         skill_detail::skill_version_compare,
         skill_detail::skill_reveal,
@@ -233,17 +262,24 @@ pub fn run() -> tauri::Result<()> {
         projects::projects_add,
         projects::projects_choose_folder,
         projects::projects_scan,
+        project_sync::project_sync_status,
+        project_sync::project_sync_preview,
+        project_sync::project_sync_apply,
         network::network_policy,
         network::network_events,
         network::network_clear_events,
         network::network_set_offline,
+        mcp_form::mcp_plan_preview,
+        mcp_form::mcp_save,
         commands::mcp_test_connection,
         secrets::secrets_list,
         secrets::secrets_create,
         secrets::secrets_rotate,
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
-        skill_wizard::skill_wizard_transition
+        skill_wizard::skill_wizard_transition,
+        skill_wizard::skill_add_preview,
+        skill_wizard::skill_add_apply
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -260,8 +296,14 @@ pub fn run() -> tauri::Result<()> {
         commands::recovery_discard,
         commands::recovery_restore,
         overview::overview_load,
+        overview::overview_enable_global_writes,
         commands::item_lookup,
         skill_detail::skill_detail_load,
+        skill_detail::skill_auto_update_set,
+        skill_detail::skill_update_ignore,
+        source_updates::skill_source_check,
+        source_updates::skill_update_preview,
+        source_updates::skill_update_apply,
         skill_detail::skill_compare_copies,
         skill_detail::skill_version_compare,
         skill_detail::skill_reveal,
@@ -280,15 +322,22 @@ pub fn run() -> tauri::Result<()> {
         projects::projects_add,
         projects::projects_choose_folder,
         projects::projects_scan,
+        project_sync::project_sync_status,
+        project_sync::project_sync_preview,
+        project_sync::project_sync_apply,
         network::network_set_offline,
         config::config_report,
+        mcp_form::mcp_plan_preview,
+        mcp_form::mcp_save,
         commands::mcp_test_connection,
         secrets::secrets_list,
         secrets::secrets_create,
         secrets::secrets_rotate,
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
-        skill_wizard::skill_wizard_transition
+        skill_wizard::skill_wizard_transition,
+        skill_wizard::skill_add_preview,
+        skill_wizard::skill_add_apply
     ]);
 
     let exit_paths = paths.clone();

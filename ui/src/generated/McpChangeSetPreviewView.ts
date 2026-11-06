@@ -10,6 +10,10 @@ export type McpChangeSetPreviewView = {
  */
 change_set_id: string, 
 /**
+ * Content-bound identity of the reviewed files and current disk state.
+ */
+preview_id: string, 
+/**
  * Per-agent files and their exact proposed changes.
  */
 files: Array<McpFileChangeView>, };

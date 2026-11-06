@@ -55,6 +55,50 @@ pub struct AgentDetection {
     pub candidates: Vec<AgentPathCandidate>,
 }
 
+/// Detection result augmented with a version supplied by the launch-time probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDetectionWithVersion {
+    /// Presence and candidate paths.
+    pub presence: AgentDetection,
+    /// Parsed semantic version, when the probe supplied one.
+    pub version: Option<String>,
+}
+
+/// Parses the first `major.minor.patch` sequence in command output.
+#[must_use]
+pub fn parse_probe_version(output: &str) -> Option<String> {
+    let bytes = output.as_bytes();
+    for start in 0..bytes.len() {
+        let prefixed_v = start > 0
+            && matches!(bytes[start - 1], b'v' | b'V')
+            && (start == 1 || !bytes[start - 2].is_ascii_alphanumeric());
+        if !bytes[start].is_ascii_digit()
+            || start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'.')
+                && !prefixed_v
+        {
+            continue;
+        }
+        let mut end = start;
+        let mut separators = 0;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+            if bytes[end] == b'.' {
+                separators += 1;
+            }
+            end += 1;
+        }
+        if separators == 2
+            && bytes[start..end]
+                .split(|byte| *byte == b'.')
+                .all(|part| !part.is_empty() && part.iter().all(u8::is_ascii_digit))
+            && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric())
+        {
+            return Some(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+        }
+    }
+    None
+}
+
 /// Adapter-reported capabilities outside the delegated MCP format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCapabilities {
@@ -197,6 +241,26 @@ pub trait AgentAdapter: Send + Sync {
     fn probe_version(&self) -> Result<Option<String>, AgentError> {
         Ok(None)
     }
+    /// Detects an agent and attaches the semantic version parsed from an injected probe result.
+    ///
+    /// The probe is performed by the detection orchestrator; adapters never spawn a process.
+    #[must_use]
+    fn detect_with_version(
+        &self,
+        env: &AgentEnvironment,
+        probe_output: Option<&str>,
+    ) -> AgentDetectionWithVersion {
+        AgentDetectionWithVersion {
+            presence: self.detect(env),
+            version: probe_output.and_then(parse_probe_version),
+        }
+    }
+
+    /// Whether this adapter declares a supported native MCP configuration format.
+    #[must_use]
+    fn supports_mcp(&self) -> bool {
+        true
+    }
 
     /// Returns ordered path candidates for a kind and scope.
     fn paths(
@@ -216,6 +280,69 @@ pub trait AgentAdapter: Send + Sync {
     fn list_native(&self, env: &AgentEnvironment) -> Result<Vec<NativeItem>, AgentError> {
         let id = self.id();
         list_native_items(&id, None, |kind, scope| self.paths(kind, scope, env))
+    }
+    /// Lists native skill folders with parse and link diagnostics.
+    ///
+    /// This is a read-only view; it never adopts or modifies a discovered skill.
+    fn list_native_skills(
+        &self,
+        env: &AgentEnvironment,
+        store_roots: &[PathBuf],
+    ) -> Result<Vec<crate::native_skills::NativeSkill>, AgentError> {
+        crate::native_skills::list_native_skills(
+            &self.id(),
+            env,
+            store_roots,
+            self.paths(ItemKind::Skill, Scope::User, env)
+                .into_iter()
+                .chain(self.paths(ItemKind::Skill, Scope::Project, env)),
+        )
+    }
+
+    /// Plans Claude project-settings MCP enablement as a ChangeSet.
+    ///
+    /// Non-Claude adapters return `Unsupported`; no filesystem operation is performed here.
+    fn plan_settings_server_enabled(
+        &self,
+        _env: &AgentEnvironment,
+        _source: &str,
+        _server_name: &str,
+        _enabled: bool,
+        _created_at_unix_seconds: u64,
+    ) -> Result<at_model::ChangeSet, AgentError> {
+        Err(AgentError::Unsupported {
+            agent: self.id(),
+            kind: String::from("Claude project settings"),
+        })
+    }
+
+    /// Plans one Local skill deployment and its git-exclude update.
+    ///
+    /// Only Claude Code currently declares this operation; returned FileOps are applied by at-fs.
+    fn plan_local_skill(
+        &self,
+        _project: &Path,
+        _slug: &str,
+        _store_skill: &Path,
+        _exclude_contents: Option<&[u8]>,
+        _created_at_unix_seconds: u64,
+    ) -> Result<at_model::ChangeSet, AgentError> {
+        Err(AgentError::Unsupported {
+            agent: self.id(),
+            kind: String::from("Local skill deployment planning"),
+        })
+    }
+
+    /// Lists Codex project trust metadata without exposing other config values.
+    fn list_project_trust(
+        &self,
+        _config_path: &Path,
+        _source: &str,
+    ) -> Result<Vec<crate::codex_projects::CodexProjectTrust>, AgentError> {
+        Err(AgentError::Unsupported {
+            agent: self.id(),
+            kind: String::from("project trust metadata"),
+        })
     }
 
     /// Returns safe directory-creation operations for the requested surface.
@@ -692,19 +819,28 @@ pub struct AgentAdapterRegistry {
 }
 
 impl AgentAdapterRegistry {
-    /// Creates a registry and registers the four built-in agents and a generic custom adapter.
+    /// Creates a registry with all built-in agents and a generic custom adapter.
     #[must_use]
     pub fn register() -> Self {
         let registry = Self::default();
-        for id in [
-            AgentId::ClaudeCode,
-            AgentId::Codex,
-            AgentId::Omp,
-            AgentId::Cursor,
-        ] {
-            let adapter: Arc<dyn AgentAdapter> = Arc::new(BuiltinAdapter { id: id.clone() });
-            if let Ok(mut adapters) = registry.adapters.write() {
-                adapters.insert(id, adapter);
+        let adapters: [Arc<dyn AgentAdapter>; 4] = [
+            Arc::new(crate::claude_adapter::ClaudeAdapter),
+            Arc::new(crate::codex_adapter::CodexAdapter),
+            Arc::new(crate::omp_adapter::OmpAdapter),
+            Arc::new(crate::cursor_adapter::CursorAdapter),
+        ];
+        for adapter in adapters {
+            if let Ok(mut registered) = registry.adapters.write() {
+                registered.insert(adapter.id(), adapter);
+            }
+        }
+        let adapters: [Arc<dyn AgentAdapter>; 2] = [
+            Arc::new(crate::omp_adapter::OmpAdapter),
+            Arc::new(crate::cursor_adapter::CursorAdapter),
+        ];
+        for adapter in adapters {
+            if let Ok(mut registered) = registry.adapters.write() {
+                registered.insert(adapter.id(), adapter);
             }
         }
         let custom: Arc<dyn AgentAdapter> = Arc::new(GenericCustomAdapter);
@@ -755,6 +891,16 @@ impl AgentAdapterRegistry {
         Ok(())
     }
 
+    fn ensure_mcp_supported(&self, id: &AgentId) -> Result<(), AgentError> {
+        if self.get(id)?.is_some_and(|adapter| !adapter.supports_mcp()) {
+            return Err(AgentError::Unsupported {
+                agent: id.clone(),
+                kind: String::from("MCP configuration"),
+            });
+        }
+        Ok(())
+    }
+
     /// Reads an agent document, routing MCP through its registered TM adapter.
     ///
     /// # Errors
@@ -767,6 +913,7 @@ impl AgentAdapterRegistry {
         env: &AgentEnvironment,
     ) -> Result<AgentIoDocument, AgentError> {
         if kind == ItemKind::McpServer {
+            self.ensure_mcp_supported(id)?;
             let delegate = self
                 .mcp_delegates
                 .read()
@@ -796,6 +943,7 @@ impl AgentAdapterRegistry {
         deployment: &AgentDeployment,
     ) -> Result<Vec<u8>, AgentError> {
         if deployment.kind == ItemKind::McpServer {
+            self.ensure_mcp_supported(id)?;
             let delegate = self
                 .mcp_delegates
                 .read()
@@ -825,6 +973,7 @@ impl AgentAdapterRegistry {
         deployment: &AgentDeployment,
     ) -> Result<AgentIoDocument, AgentError> {
         if deployment.kind == ItemKind::McpServer {
+            self.ensure_mcp_supported(id)?;
             let delegate = self
                 .mcp_delegates
                 .read()
@@ -930,8 +1079,8 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
     }
 }
 
-struct BuiltinAdapter {
-    id: AgentId,
+pub(crate) struct BuiltinAdapter {
+    pub(crate) id: AgentId,
 }
 
 impl AgentAdapter for BuiltinAdapter {
@@ -948,14 +1097,34 @@ impl AgentAdapter for BuiltinAdapter {
     }
     fn detect(&self, env: &AgentEnvironment) -> AgentDetection {
         let candidates = self.paths(ItemKind::Skill, Scope::User, env);
-        let exists = candidates.iter().any(|candidate| candidate.path.exists());
+        let skills_exist = candidates.iter().any(|candidate| candidate.path.exists());
+        let config_root = match &self.id {
+            AgentId::ClaudeCode => env.home.join(".claude"),
+            AgentId::Codex => env.home.join(".codex"),
+            AgentId::Omp => env.home.join(".omp/agent"),
+            AgentId::Cursor => env.home.join(".cursor"),
+            AgentId::Custom(_) => env.home.join(".agentuna/custom"),
+        };
+        let configured = config_root.exists();
         AgentDetection {
-            state: if exists {
+            state: if skills_exist {
                 DetectionState::Installed
+            } else if configured {
+                DetectionState::ConfiguredOnly
             } else {
                 DetectionState::NotInstalled
             },
             candidates,
+        }
+    }
+    fn detect_with_version(
+        &self,
+        env: &AgentEnvironment,
+        probe_output: Option<&str>,
+    ) -> AgentDetectionWithVersion {
+        AgentDetectionWithVersion {
+            presence: self.detect(env),
+            version: probe_output.and_then(parse_probe_version),
         }
     }
     fn paths(
@@ -1011,7 +1180,7 @@ impl AgentAdapter for GenericCustomAdapter {
     }
 }
 
-fn builtin_paths(
+pub(crate) fn builtin_paths(
     id: &AgentId,
     kind: ItemKind,
     scope: Scope,
@@ -1331,6 +1500,23 @@ mod tests {
         fs::create_dir_all(home.path().join(".agents/skills")).expect("skills root");
         assert_eq!(codex.detect(&env).state, DetectionState::Installed);
         assert_eq!(codex.paths(ItemKind::Skill, Scope::User, &env).len(), 2);
+    }
+
+    #[test]
+    fn existing_claude_config_root_without_skills_is_configured_only() {
+        let home = tempdir().expect("home");
+        let env = AgentEnvironment {
+            home: home.path().to_path_buf(),
+            project: None,
+            variables: BTreeMap::new(),
+        };
+        let claude = AgentAdapterRegistry::register()
+            .get(&AgentId::ClaudeCode)
+            .expect("registry")
+            .expect("Claude adapter");
+        assert_eq!(claude.detect(&env).state, DetectionState::NotInstalled);
+        fs::create_dir_all(home.path().join(".claude")).expect("Claude config root");
+        assert_eq!(claude.detect(&env).state, DetectionState::ConfiguredOnly);
     }
 
     struct MockMcpDelegate(std::sync::atomic::AtomicUsize);
