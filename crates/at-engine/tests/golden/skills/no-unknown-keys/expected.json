@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Has only the two required keys, rewritten.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: minimal-skill\n-description: Has only the two required keys.\n+description: Has only the two required keys, rewritten.\n ---\n \n # Minimal\n"
+  },
+  "id": "no-unknown-keys",
+  "parse": {
+    "ok": {
+      "body": "\n# Minimal\n",
+      "body_span": [
+        73,
+        84
+      ],
+      "description": "Has only the two required keys.",
+      "description_span": [
+        36,
+        68
+      ],
+      "frontmatter": "name: minimal-skill\ndescription: Has only the two required keys.\n",
+      "frontmatter_span": [
+        4,
+        69
+      ],
+      "name": "minimal-skill",
+      "raw_len": 84,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

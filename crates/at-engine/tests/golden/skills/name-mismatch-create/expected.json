@@ -1,0 +1,11 @@
+{
+  "id": "name-mismatch-create",
+  "parse": {
+    "error": {
+      "folder": "different-folder",
+      "name": "declared-name",
+      "variant": "NameMismatch"
+    }
+  },
+  "schema_version": 1
+}

@@ -32,7 +32,7 @@ pub const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// How often the runner checks whether the child exited.
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Environment variable that stops git from asking for a password on a terminal it does not have.
 const GIT_TERMINAL_PROMPT_ENV: &str = "GIT_TERMINAL_PROMPT";
@@ -347,7 +347,7 @@ impl GitRunner for ProcessGitRunner {
 }
 
 /// Drains a pipe completely, keeping at most `limit` bytes so a chatty child cannot fill memory.
-fn read_bounded(mut pipe: impl Read, limit: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn read_bounded(mut pipe: impl Read, limit: usize) -> io::Result<Vec<u8>> {
     let mut kept = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
@@ -360,7 +360,7 @@ fn read_bounded(mut pipe: impl Read, limit: usize) -> io::Result<Vec<u8>> {
     }
 }
 
-fn join_reader(
+pub(crate) fn join_reader(
     handle: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
 ) -> Result<Vec<u8>, GitError> {
     let Some(handle) = handle else {

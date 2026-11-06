@@ -1,0 +1,10 @@
+{
+  "id": "name-double-hyphen",
+  "parse": {
+    "error": {
+      "name": "my--skill",
+      "variant": "NameDoubleHyphen"
+    }
+  },
+  "schema_version": 1
+}

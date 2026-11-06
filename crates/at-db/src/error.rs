@@ -67,6 +67,17 @@ pub enum DbError {
     /// A settings value could not be encoded as JSON.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// A caller passed a value the schema cannot store.
+    #[error("invalid {field}: {reason}")]
+    InvalidValue {
+        /// Field that rejected the value.
+        field: &'static str,
+        /// Why the value is invalid.
+        reason: String,
+    },
+    /// A stored value is not one this binary knows.
+    #[error(transparent)]
+    UnknownValue(#[from] at_model::ParseWireError),
 }
 
 impl From<rusqlite::Error> for DbError {

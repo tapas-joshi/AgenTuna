@@ -1,0 +1,56 @@
+{
+  "edit": {
+    "description": "Carries a rewritten description.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: licensed-skill\n-description: Carries license and metadata blocks.\n+description: Carries a rewritten description.\n license: MIT\n metadata:\n   author: example\n"
+  },
+  "id": "license-and-metadata",
+  "parse": {
+    "ok": {
+      "body": "\n# Licensed\n",
+      "body_span": [
+        162,
+        174
+      ],
+      "description": "Carries license and metadata blocks.",
+      "description_span": [
+        37,
+        74
+      ],
+      "frontmatter": "name: licensed-skill\ndescription: Carries license and metadata blocks.\nlicense: MIT\nmetadata:\n  author: example\n  version: \"1.0\"\nallowed-tools: Bash Read\n",
+      "frontmatter_span": [
+        4,
+        158
+      ],
+      "name": "licensed-skill",
+      "raw_len": 174,
+      "unknown_keys": [
+        {
+          "key": "license",
+          "raw": "license: MIT",
+          "span": [
+            75,
+            87
+          ]
+        },
+        {
+          "key": "metadata",
+          "raw": "metadata:\n  author: example\n  version: \"1.0\"",
+          "span": [
+            88,
+            132
+          ]
+        },
+        {
+          "key": "allowed-tools",
+          "raw": "allowed-tools: Bash Read",
+          "span": [
+            133,
+            157
+          ]
+        }
+      ],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

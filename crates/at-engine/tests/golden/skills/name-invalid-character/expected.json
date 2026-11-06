@@ -1,0 +1,11 @@
+{
+  "id": "name-invalid-character",
+  "parse": {
+    "error": {
+      "character": "_",
+      "name": "my_skill",
+      "variant": "NameInvalidCharacter"
+    }
+  },
+  "schema_version": 1
+}

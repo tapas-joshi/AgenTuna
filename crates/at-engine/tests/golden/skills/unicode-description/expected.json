@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Handles élèves and 🚀 too.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,6 +1,6 @@\n ---\n name: unicode-description\n-description: \"Handles cafés, 日本語 and 🎉 without breaking.\"\n+description: Handles élèves and 🚀 too.\n ---\n \n # Unicode\n"
+  },
+  "id": "unicode-description",
+  "parse": {
+    "ok": {
+      "body": "\n# Unicode\n",
+      "body_span": [
+        102,
+        113
+      ],
+      "description": "Handles cafés, 日本語 and 🎉 without breaking.",
+      "description_span": [
+        42,
+        97
+      ],
+      "frontmatter": "name: unicode-description\ndescription: \"Handles cafés, 日本語 and 🎉 without breaking.\"\n",
+      "frontmatter_span": [
+        4,
+        98
+      ],
+      "name": "unicode-description",
+      "raw_len": 113,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

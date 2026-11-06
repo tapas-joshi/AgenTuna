@@ -1,0 +1,89 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "review",
+        "path": "<home>/.agentuna/skills/review/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      },
+      {
+        "key": {
+          "Name": "review"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "review",
+        "path": "<home>/.agentuna/mcp.json",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      },
+      {
+        "key": {
+          "Name": "review"
+        },
+        "kind": "rule",
+        "lock": null,
+        "locked": false,
+        "name": "review",
+        "path": "<home>/.agentuna/rules/review.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "same-name-three-kinds",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "review-cli",
+          "slug": "review"
+        }
+      ],
+      "rules": [
+        {
+          "slug": "review"
+        }
+      ],
+      "scope": "user",
+      "skills": [
+        {
+          "slug": "review"
+        }
+      ]
+    }
+  ],
+  "title": "A skill, a rule and an MCP server with one name never merge with each other"
+}

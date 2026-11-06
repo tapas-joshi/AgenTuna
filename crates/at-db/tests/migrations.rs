@@ -406,6 +406,73 @@ fn migration_lists_must_start_at_v1_without_gaps() {
 }
 
 #[test]
+fn an_existing_v2_database_upgrades_through_every_numbered_migration() {
+    // The previous wave shipped v1 and v2 only: v7 and v9 were registered but
+    // dormant behind the v3..v6 gap, so a database on disk is at v2.
+    let dir = TempDir::new().expect("temp dir");
+    let path = database_path(&dir);
+    let v1_v2 = Migrations::new(&[
+        Migration::new(1, MIGRATION_V1_SQL),
+        Migration::new(2, MIGRATION_V2_SQL),
+    ])
+    .expect("v1+v2 is a valid list");
+
+    let database = Database::open_file_with(&path, v1_v2).expect("older database opens");
+    assert_eq!(database.schema_version().expect("version"), 2);
+    let before = database.applied_migrations().expect("read migrations");
+    drop(database);
+
+    let database = Database::open_file(&path).expect("upgrade to the shipped schema");
+    let after = database.applied_migrations().expect("read migrations");
+    assert_eq!(
+        after.iter().map(|row| row.version).collect::<Vec<_>>(),
+        contiguous_shipped_versions(),
+        "the gap filler runs before the migrations that were already registered"
+    );
+    assert_eq!(
+        database.schema_version().expect("version"),
+        *contiguous_shipped_versions().last().expect("v1 ships")
+    );
+    assert_eq!(
+        after[..2],
+        before[..],
+        "v1 and v2 keep their recorded hashes and timestamps"
+    );
+
+    let mut statement = database
+        .connection()
+        .prepare(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .expect("prepare table query");
+    let tables: Vec<String> = statement
+        .query_map([], |row| row.get(0))
+        .expect("run table query")
+        .collect::<Result<_, _>>()
+        .expect("table names are text");
+    for table in [
+        "items",
+        "item_versions",
+        "deployments",
+        "native_items",
+        "locks",
+        "drift_events",
+        "health_checks",
+        "sources",
+        "presets",
+        "preset_members",
+        "preset_applications",
+        "preset_application_members",
+    ] {
+        assert!(
+            tables.contains(&table.to_owned()),
+            "{table} is missing after the upgrade: {tables:?}"
+        );
+    }
+}
+
+#[test]
 fn shipped_migration_set_is_valid() {
     let migrations = Migrations::shipped().expect("shipped list is valid");
     assert_eq!(
@@ -415,6 +482,11 @@ fn shipped_migration_set_is_valid() {
             .collect::<Vec<_>>(),
         contiguous_shipped_versions(),
         "shipped applies the longest contiguous prefix"
+    );
+    assert_eq!(
+        SHIPPED_MIGRATIONS.len(),
+        contiguous_shipped_versions().len(),
+        "the registry has no gaps: every registered version applies"
     );
     assert_eq!(
         migrations.get(1).map(|migration| migration.sha256()),

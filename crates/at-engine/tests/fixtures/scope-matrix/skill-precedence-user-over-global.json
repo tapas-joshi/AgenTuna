@@ -1,0 +1,73 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "code-review",
+        "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<global>/skills/code-review/SKILL.md",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+          "scope": "user"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "skill-precedence-user-over-global",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "description": "Global.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "User.",
+          "slug": "code-review"
+        }
+      ]
+    }
+  ],
+  "title": "User outranks Global when Project and Local define nothing"
+}

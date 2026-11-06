@@ -1,0 +1,9 @@
+{
+  "id": "name-empty",
+  "parse": {
+    "error": {
+      "variant": "NameEmpty"
+    }
+  },
+  "schema_version": 1
+}

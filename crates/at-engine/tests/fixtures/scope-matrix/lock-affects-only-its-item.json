@@ -1,0 +1,124 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "lock": {
+          "locked_by": "platform-team",
+          "reason": "alpha is managed centrally",
+          "scope": "global"
+        },
+        "locked": true,
+        "name": "alpha",
+        "path": "<global>/skills/alpha/SKILL.md",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "blocked_by_lock",
+            "scope": "project"
+          },
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      },
+      {
+        "key": {
+          "Name": "beta"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "beta",
+        "path": "<project>/.agentuna/skills/beta/SKILL.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": true,
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "name": "alpha",
+        "path": "<project>/.agentuna/skills/alpha/SKILL.md",
+        "scope": "project",
+        "shadowed_by": {
+          "path": "<global>/skills/alpha/SKILL.md",
+          "scope": "global"
+        }
+      },
+      {
+        "blocked": false,
+        "key": {
+          "Name": "beta"
+        },
+        "kind": "skill",
+        "name": "beta",
+        "path": "<global>/skills/beta/SKILL.md",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/skills/beta/SKILL.md",
+          "scope": "project"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "lock-affects-only-its-item",
+  "locks": [
+    {
+      "kind": "skill",
+      "locked_by": "platform-team",
+      "reason": "alpha is managed centrally",
+      "target": "alpha"
+    }
+  ],
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "slug": "alpha"
+        },
+        {
+          "slug": "beta"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "slug": "alpha"
+        },
+        {
+          "slug": "beta"
+        }
+      ]
+    }
+  ],
+  "title": "A lock on one skill leaves other skills resolving by precedence"
+}

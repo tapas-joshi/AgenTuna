@@ -1,0 +1,60 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "empty-folder"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "empty-folder",
+        "path": "<project>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": [
+      {
+        "path": "<home>/.agentuna/skills/empty-folder/SKILL.md",
+        "reason": "skill_folder_without_skill_md"
+      }
+    ]
+  },
+  "id": "skill-folder-without-skill-md-is-skipped",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "omit": true,
+          "slug": "empty-folder"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "description": "Valid.",
+          "name": "empty-folder",
+          "slug": "code-review"
+        }
+      ]
+    }
+  ],
+  "title": "A skill folder with no SKILL.md is skipped"
+}

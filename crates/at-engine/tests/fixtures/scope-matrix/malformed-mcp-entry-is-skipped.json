@@ -1,0 +1,58 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "good"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "good",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": [
+      {
+        "path": "<home>/.agentuna/mcp.json",
+        "reason": "mcp_entry_missing_transport"
+      }
+    ]
+  },
+  "id": "malformed-mcp-entry-is-skipped",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "good-cli",
+          "slug": "good"
+        }
+      ],
+      "scope": "global"
+    },
+    {
+      "mcp": [
+        {
+          "slug": "bad"
+        }
+      ],
+      "scope": "user"
+    }
+  ],
+  "title": "An MCP entry without a command or url is skipped"
+}

@@ -52,7 +52,7 @@
 //! verbatim as [`EnvValue::Literal`]; writes render [`EnvValue::Secret`] as `${NAME}` and
 //! never a secret value.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -312,13 +312,16 @@ impl OmpMcpConfig {
         };
 
         let mut servers = Vec::new();
+        let mut seen = BTreeSet::new();
         if let Some(prop) = object.get(SERVERS_KEY) {
             let map = prop.object_value().ok_or(OmpMcpError::ServersNotObject)?;
             for entry in map.properties() {
                 let name = entry.decoded_name().ok_or(OmpMcpError::InvalidServerName {
                     name: String::from("<undecodable key>"),
                 })?;
-                if servers.iter().any(|server: &OmpServer| server.name == name) {
+                // A set keeps duplicate detection linear: a large document can hold thousands
+                // of servers, and the scan below used to be quadratic.
+                if !seen.insert(name.clone()) {
                     return Err(OmpMcpError::DuplicateServer { server: name });
                 }
                 let object = entry

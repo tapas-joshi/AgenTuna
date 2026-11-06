@@ -13,11 +13,16 @@
 //! error ([`DbError::MigrationChecksumMismatch`] / [`DbError::SchemaTooNew`])
 //! raised before the database is modified.
 
+pub mod agents;
 mod db;
 mod error;
 pub mod migrations;
+pub mod ops;
 pub mod projects;
 pub mod read_only;
+pub mod retention;
+pub mod secret_refs;
+pub mod settings;
 
 pub use db::Database;
 pub use error::DbError;

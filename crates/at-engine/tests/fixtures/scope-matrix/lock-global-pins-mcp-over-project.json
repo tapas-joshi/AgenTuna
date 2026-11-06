@@ -1,0 +1,87 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-gh"
+        },
+        "kind": "mcp_server",
+        "lock": {
+          "locked_by": "platform-team",
+          "reason": "credentials are provisioned centrally",
+          "scope": "global"
+        },
+        "locked": true,
+        "name": "github",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "blocked_by_lock",
+            "scope": "project"
+          },
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": true,
+        "key": {
+          "Declared": "srv-gh"
+        },
+        "kind": "mcp_server",
+        "name": "github",
+        "path": "<project>/.agentuna/mcp.json",
+        "scope": "project",
+        "shadowed_by": {
+          "path": "<global>/mcp.json",
+          "scope": "global"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "lock-global-pins-mcp-over-project",
+  "locks": [
+    {
+      "kind": "mcp_server",
+      "locked_by": "platform-team",
+      "reason": "credentials are provisioned centrally",
+      "target": "srv-gh"
+    }
+  ],
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "gh-global",
+          "id": "srv-gh",
+          "slug": "github"
+        }
+      ],
+      "scope": "global"
+    },
+    {
+      "mcp": [
+        {
+          "command": "gh-project",
+          "id": "srv-gh",
+          "slug": "github"
+        }
+      ],
+      "scope": "project"
+    }
+  ],
+  "title": "A Global lock pins an MCP server to its Global definition"
+}

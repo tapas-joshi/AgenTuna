@@ -1,0 +1,11 @@
+{
+  "id": "doc-too-large",
+  "parse": {
+    "error": {
+      "limit": 1048576,
+      "size": 1048577,
+      "variant": "DocTooLarge"
+    }
+  },
+  "schema_version": 1
+}

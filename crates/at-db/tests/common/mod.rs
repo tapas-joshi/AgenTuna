@@ -4,14 +4,25 @@
 //! helpers are expected in any single binary.
 #![allow(dead_code)]
 
-use at_db::migrations::{MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V7_SQL, MIGRATION_V9_SQL};
+use at_db::migrations::{
+    MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V3_SQL, MIGRATION_V4_SQL, MIGRATION_V5_SQL,
+    MIGRATION_V6_SQL, MIGRATION_V7_SQL, MIGRATION_V8_SQL, MIGRATION_V9_SQL,
+};
 use at_db::{Database, Migration, Migrations};
 use rusqlite::Connection;
 
+/// Every shipped migration version, in order.
+///
+/// Schema tests apply the full chain so cross-migration foreign keys (for
+/// example `items.source_id` -> `sources.id`, where `sources` is created three
+/// versions later) resolve exactly as they do in the app.
+pub const ALL_VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
+
 /// Open an in-memory database with the requested shipped versions.
 ///
-/// Versions may skip numbers: migrations v3..v6 and v8 belong to other stories
-/// and are not needed by these schema tests.
+/// Versions may skip numbers so a test can apply only the migrations a story
+/// needs; the full v1..v9 chain is available when one story reads tables
+/// created by another.
 pub fn open_with(versions: &[u32]) -> Database {
     let migrations: Vec<Migration> = versions
         .iter()
@@ -26,7 +37,12 @@ pub fn sql_for(version: u32) -> &'static str {
     match version {
         1 => MIGRATION_V1_SQL,
         2 => MIGRATION_V2_SQL,
+        3 => MIGRATION_V3_SQL,
+        4 => MIGRATION_V4_SQL,
+        5 => MIGRATION_V5_SQL,
+        6 => MIGRATION_V6_SQL,
         7 => MIGRATION_V7_SQL,
+        8 => MIGRATION_V8_SQL,
         9 => MIGRATION_V9_SQL,
         other => panic!("no test migration v{other}"),
     }

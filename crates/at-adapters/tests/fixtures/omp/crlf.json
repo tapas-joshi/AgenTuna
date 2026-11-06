@@ -1,0 +1,12 @@
+{
+  "$schema": "https://example.test/mcp-schema.json",
+  "mcpServers": {
+    "quiet": {
+      "command": "quiet-mcp",
+      "args": [
+        "--once"
+      ],
+      "enabled": false
+    }
+  }
+}

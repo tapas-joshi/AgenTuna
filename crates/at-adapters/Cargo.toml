@@ -21,3 +21,5 @@ toml_edit.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 similar.workspace = true
+# The golden harness (`tests/golden.rs`) seeds every case in a throwaway home.
+at-fs = { workspace = true, features = ["testkit"] }

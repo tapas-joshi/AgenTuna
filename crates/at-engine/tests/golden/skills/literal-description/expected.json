@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "A single rewritten line.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,8 +1,6 @@\n ---\n name: literal-description\n-description: |\n-  Line one of the description.\n-  Line two of the description.\n+description: A single rewritten line.\n ---\n \n # Literal\n"
+  },
+  "id": "literal-description",
+  "parse": {
+    "ok": {
+      "body": "\n# Literal\n",
+      "body_span": [
+        111,
+        122
+      ],
+      "description": "Line one of the description.\nLine two of the description.",
+      "description_span": [
+        42,
+        106
+      ],
+      "frontmatter": "name: literal-description\ndescription: |\n  Line one of the description.\n  Line two of the description.\n",
+      "frontmatter_span": [
+        4,
+        107
+      ],
+      "name": "literal-description",
+      "raw_len": 122,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

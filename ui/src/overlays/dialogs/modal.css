@@ -1,0 +1,111 @@
+/*
+ * Modal surfaces (TU-004).
+ *
+ * A modal is a fixed backdrop plus a centred panel. Focus trapping, scroll
+ * locking, Escape handling and focus restoration come from Radix Dialog; this
+ * file only supplies the visual contract, expressed through theme tokens.
+ *
+ * Layer order is injected as an inline z-index by `Modal`, so the stylesheet
+ * never needs a global "modal z-index" constant: a second modal opened over the
+ * first paints above it automatically.
+ */
+
+.at-modal__backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--at-color-sidebar) 76%, transparent);
+  animation: at-overlay-fade-in 120ms ease-out;
+}
+
+.at-modal {
+  position: fixed;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  inline-size: min(var(--at-modal-width, 560px), calc(100vw - var(--at-space-32)));
+  max-block-size: calc(100vh - var(--at-space-32));
+  overflow: hidden;
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-radius: var(--at-radius-10);
+  background: var(--at-color-surface);
+  color: var(--at-color-text);
+  box-shadow: 0 var(--at-space-16) var(--at-space-32)
+    color-mix(in srgb, var(--at-color-sidebar) 80%, transparent);
+  font-family: var(--at-font-ui);
+  font-size: var(--at-text-14);
+  line-height: 1.45;
+  animation: at-overlay-pop-in 120ms ease-out;
+}
+
+.at-modal[data-size="sm"] {
+  --at-modal-width: 420px;
+}
+
+.at-modal[data-size="md"] {
+  --at-modal-width: 560px;
+}
+
+.at-modal[data-size="lg"] {
+  --at-modal-width: 760px;
+}
+
+.at-modal__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--at-space-4);
+  padding: var(--at-space-24) var(--at-space-24) var(--at-space-16);
+}
+
+.at-modal__title {
+  margin: 0;
+  font-size: var(--at-text-22);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.at-modal__description {
+  margin: 0;
+  color: var(--at-color-text-secondary);
+  font-size: var(--at-text-13);
+}
+
+.at-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--at-space-16);
+  min-block-size: 0;
+  overflow-y: auto;
+  padding: 0 var(--at-space-24) var(--at-space-24);
+}
+
+.at-modal__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--at-space-8);
+  padding: var(--at-space-16) var(--at-space-24);
+  border-block-start: var(--at-hairline, 1px) solid var(--at-color-border);
+  background: var(--at-color-raised);
+}
+
+@keyframes at-overlay-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes at-overlay-pop-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + var(--at-space-8)));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .at-modal,
+  .at-modal__backdrop {
+    animation: none;
+  }
+}

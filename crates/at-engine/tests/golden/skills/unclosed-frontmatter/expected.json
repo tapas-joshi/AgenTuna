@@ -1,0 +1,9 @@
+{
+  "id": "unclosed-frontmatter",
+  "parse": {
+    "error": {
+      "variant": "UnclosedFrontmatter"
+    }
+  },
+  "schema_version": 1
+}

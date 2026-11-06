@@ -100,4 +100,24 @@ pub enum SecretsError {
         /// Whether the Keychain entry was restored by rollback.
         restored: bool,
     },
+
+    /// A reference points at a Keychain item that no longer exists.
+    ///
+    /// Callers must fail the operation instead of substituting an empty value:
+    /// a server that receives an empty credential looks configured but cannot
+    /// authenticate.
+    #[error(
+        "secret `{name}` is referenced but no Keychain item exists for it; re-add the value or remove the reference"
+    )]
+    MissingSecret {
+        /// Logical secret name.
+        name: String,
+    },
+
+    /// The `secret_refs` / `secret_ref_uses` repository failed.
+    #[error("secret reference store failed: {reason}")]
+    ReferenceStore {
+        /// Inventory failure description; never contains a secret value.
+        reason: String,
+    },
 }

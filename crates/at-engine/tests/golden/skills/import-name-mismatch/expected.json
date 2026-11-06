@@ -1,0 +1,30 @@
+{
+  "id": "import-name-mismatch",
+  "parse": {
+    "ok": {
+      "body": "\n# Import\n",
+      "body_span": [
+        84,
+        94
+      ],
+      "description": "Imported from a folder with another name.",
+      "description_span": [
+        37,
+        79
+      ],
+      "frontmatter": "name: different-name\ndescription: Imported from a folder with another name.\n",
+      "frontmatter_span": [
+        4,
+        80
+      ],
+      "name": "different-name",
+      "raw_len": 94,
+      "unknown_keys": [],
+      "warning": {
+        "folder": "actual-folder",
+        "name": "different-name"
+      }
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,12 @@
+{
+  "id": "invalid-yaml",
+  "parse": {
+    "error": {
+      "column": 14,
+      "line": 3,
+      "message": "while scanning a quoted scalar, found unexpected end of stream",
+      "variant": "InvalidFrontmatter"
+    }
+  },
+  "schema_version": 1
+}

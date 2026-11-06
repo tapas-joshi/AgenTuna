@@ -1,0 +1,56 @@
+{
+  "edit": {
+    "description": "A rewritten description for the key-order fixture.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,5 +1,5 @@\n ---\n-description: Description written before the name.\n+description: A rewritten description for the key-order fixture.\n name: key-order\n license: MIT\n metadata:\n"
+  },
+  "id": "key-order",
+  "parse": {
+    "ok": {
+      "body": "\n# Key order\n",
+      "body_span": [
+        138,
+        151
+      ],
+      "description": "Description written before the name.",
+      "description_span": [
+        16,
+        53
+      ],
+      "frontmatter": "description: Description written before the name.\nname: key-order\nlicense: MIT\nmetadata:\n  owner: example\nargument-hint: \"[path]\"\n",
+      "frontmatter_span": [
+        4,
+        134
+      ],
+      "name": "key-order",
+      "raw_len": 151,
+      "unknown_keys": [
+        {
+          "key": "license",
+          "raw": "license: MIT",
+          "span": [
+            70,
+            82
+          ]
+        },
+        {
+          "key": "metadata",
+          "raw": "metadata:\n  owner: example",
+          "span": [
+            83,
+            109
+          ]
+        },
+        {
+          "key": "argument-hint",
+          "raw": "argument-hint: \"[path]\"",
+          "span": [
+            110,
+            133
+          ]
+        }
+      ],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

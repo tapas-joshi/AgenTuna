@@ -1,0 +1,163 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": "created",
+    "items": [
+      {
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "alpha",
+        "path": "<project>/.agentuna/skills/alpha/SKILL.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "user"
+          },
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      },
+      {
+        "key": {
+          "Name": "beta"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "beta",
+        "path": "<project>/.agentuna/local/skills/beta/SKILL.md",
+        "scope": "local",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "project"
+          },
+          {
+            "outcome": "winner",
+            "scope": "local"
+          }
+        ]
+      },
+      {
+        "key": {
+          "Name": "zeta"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "zeta",
+        "path": "<global>/skills/zeta/SKILL.md",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "name": "alpha",
+        "path": "<global>/skills/alpha/SKILL.md",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/skills/alpha/SKILL.md",
+          "scope": "project"
+        }
+      },
+      {
+        "blocked": false,
+        "key": {
+          "Name": "alpha"
+        },
+        "kind": "skill",
+        "name": "alpha",
+        "path": "<home>/.agentuna/skills/alpha/SKILL.md",
+        "scope": "user",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/skills/alpha/SKILL.md",
+          "scope": "project"
+        }
+      },
+      {
+        "blocked": false,
+        "key": {
+          "Name": "beta"
+        },
+        "kind": "skill",
+        "name": "beta",
+        "path": "<project>/.agentuna/skills/beta/SKILL.md",
+        "scope": "project",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/local/skills/beta/SKILL.md",
+          "scope": "local"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "shadowed-ordering-multiple-items",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "slug": "alpha"
+        },
+        {
+          "slug": "zeta"
+        }
+      ]
+    },
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "slug": "alpha"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "slug": "alpha"
+        },
+        {
+          "slug": "beta"
+        }
+      ]
+    },
+    {
+      "scope": "local",
+      "skills": [
+        {
+          "slug": "beta"
+        }
+      ]
+    }
+  ],
+  "title": "Items and shadowed records keep the documented deterministic order"
+}

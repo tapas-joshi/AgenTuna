@@ -1,0 +1,19 @@
+{
+  // omp MCP document with comments, CRLF-free trivia and trailing commas.
+  "$schema": "https://example.test/mcp-schema.json",
+  /* The servers block is the part AgenTuna edits. */
+  "mcpServers": {
+    "alpha": {
+      "type": "stdio", // explicit transport, though stdio is the default
+      "command": "alpha-mcp",
+      "args": [
+        "--once",
+        "--verbose", // trailing comma on the next line
+      ],
+      "enabled": true, // keep this comment
+    },
+  },
+  "disabledServers": [
+    "legacy", // trailing comma keeps the array multiline
+  ],
+}

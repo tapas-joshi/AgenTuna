@@ -1,0 +1,9 @@
+{
+  "id": "frontmatter-not-mapping",
+  "parse": {
+    "error": {
+      "variant": "FrontmatterNotMapping"
+    }
+  },
+  "schema_version": 1
+}

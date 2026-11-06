@@ -1,0 +1,73 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-one"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "github",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      },
+      {
+        "key": {
+          "Declared": "srv-two"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "github",
+        "path": "<project>/.agentuna/mcp.json",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "mcp-distinct-ids-do-not-merge",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "gh",
+          "id": "srv-one",
+          "slug": "github"
+        }
+      ],
+      "scope": "global"
+    },
+    {
+      "mcp": [
+        {
+          "command": "gh2",
+          "id": "srv-two",
+          "slug": "github"
+        }
+      ],
+      "scope": "project"
+    }
+  ],
+  "title": "Servers with the same slug but different declared ids stay distinct"
+}

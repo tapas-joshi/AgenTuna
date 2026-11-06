@@ -1,0 +1,9 @@
+{
+  "id": "description-not-string",
+  "parse": {
+    "error": {
+      "variant": "DescriptionNotString"
+    }
+  },
+  "schema_version": 1
+}

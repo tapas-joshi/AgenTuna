@@ -28,8 +28,23 @@ pub const MIGRATION_V1_SQL: &str = include_str!("../migrations/0001_schema_versi
 pub const MIGRATION_V2_SQL: &str =
     include_str!("../migrations/0002_projects_agents_agent_paths.sql");
 
+/// SQL for migration v3: items and their content versions (TF-012).
+pub const MIGRATION_V3_SQL: &str = include_str!("../migrations/0003_items_item_versions.sql");
+
+/// SQL for migration v4: the deployment matrix (TF-013).
+pub const MIGRATION_V4_SQL: &str = include_str!("../migrations/0004_deployments.sql");
+
+/// SQL for migration v5: native items, locks and drift history (TF-014).
+pub const MIGRATION_V5_SQL: &str = include_str!("../migrations/0005_native_items_drift_locks.sql");
+
+/// SQL for migration v6: health-check history and sources (TF-015).
+pub const MIGRATION_V6_SQL: &str = include_str!("../migrations/0006_health_sources.sql");
+
 /// SQL for migration v7: operations, operation files and backups (TF-016).
 pub const MIGRATION_V7_SQL: &str = include_str!("../migrations/0007_operations_backups.sql");
+
+/// SQL for migration v8: presets and preset application history (TF-017).
+pub const MIGRATION_V8_SQL: &str = include_str!("../migrations/0008_presets.sql");
 
 /// SQL for migration v9: settings, secret references and remote backup state (TF-018).
 pub const MIGRATION_V9_SQL: &str =
@@ -48,7 +63,12 @@ pub(crate) const SCHEMA_VERSION_TABLE: &str = "schema_version";
 pub const SHIPPED_MIGRATIONS: &[Migration] = &[
     Migration::new(1, MIGRATION_V1_SQL),
     Migration::new(2, MIGRATION_V2_SQL),
+    Migration::new(3, MIGRATION_V3_SQL),
+    Migration::new(4, MIGRATION_V4_SQL),
+    Migration::new(5, MIGRATION_V5_SQL),
+    Migration::new(6, MIGRATION_V6_SQL),
     Migration::new(7, MIGRATION_V7_SQL),
+    Migration::new(8, MIGRATION_V8_SQL),
     Migration::new(9, MIGRATION_V9_SQL),
 ];
 

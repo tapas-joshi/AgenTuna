@@ -1,0 +1,34 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "empty-stores",
+  "schema_version": 1,
+  "stores": [
+    {
+      "absent": true,
+      "scope": "global"
+    },
+    {
+      "absent": true,
+      "scope": "user"
+    },
+    {
+      "absent": true,
+      "scope": "project"
+    },
+    {
+      "absent": true,
+      "scope": "local"
+    }
+  ],
+  "title": "Four empty stores resolve to an empty set"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "name-not-string",
+  "parse": {
+    "error": {
+      "variant": "NameNotString"
+    }
+  },
+  "schema_version": 1
+}

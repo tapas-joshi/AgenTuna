@@ -1,0 +1,31 @@
+{
+  "edit": {
+    "description": "Summarises the change in one paragraph.",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,8 +1,6 @@\n ---\n name: folded-description\n-description: >-\n-  Reviews a change and reports\n-  findings in one line.\n+description: Summarises the change in one paragraph.\n ---\n \n # Folded\n"
+  },
+  "id": "folded-description",
+  "parse": {
+    "ok": {
+      "body": "\n# Folded\n",
+      "body_span": [
+        104,
+        114
+      ],
+      "description": "Reviews a change and reports findings in one line.",
+      "description_span": [
+        41,
+        99
+      ],
+      "frontmatter": "name: folded-description\ndescription: >-\n  Reviews a change and reports\n  findings in one line.\n",
+      "frontmatter_span": [
+        4,
+        100
+      ],
+      "name": "folded-description",
+      "raw_len": 114,
+      "unknown_keys": [],
+      "warning": null
+    }
+  },
+  "schema_version": 1
+}

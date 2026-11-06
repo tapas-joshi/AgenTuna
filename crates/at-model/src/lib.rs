@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod mcp_validate;
 pub mod network;
 pub mod preset;
+pub mod redact;
 pub mod resolve;
 pub mod scope;
 pub mod skill;

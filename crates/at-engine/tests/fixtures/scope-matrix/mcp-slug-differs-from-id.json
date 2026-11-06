@@ -1,0 +1,75 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-gh"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "github",
+        "path": "<project>/.agentuna/mcp.json",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Declared": "srv-gh"
+        },
+        "kind": "mcp_server",
+        "name": "gh-cli",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/mcp.json",
+          "scope": "project"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "mcp-slug-differs-from-id",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "gh-global",
+          "id": "srv-gh",
+          "slug": "gh-cli"
+        }
+      ],
+      "scope": "global"
+    },
+    {
+      "mcp": [
+        {
+          "command": "gh-project",
+          "id": "srv-gh",
+          "slug": "github"
+        }
+      ],
+      "scope": "project"
+    }
+  ],
+  "title": "Servers merge by declared id regardless of the slug that holds them"
+}

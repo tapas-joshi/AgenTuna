@@ -40,6 +40,7 @@ use at_store::layout::Slug;
 use at_store::local_store::LocalStorePaths;
 use at_store::paths::STORE_DIR_NAME;
 
+use crate::locks::LockStore;
 use crate::resolve::{ResolveInput, ResolvedSet, resolve};
 
 /// Line added to the project `.gitignore` so Local content is never committed.
@@ -318,8 +319,35 @@ pub struct LocalResolution {
 /// availability gate can be applied. When the project is not a Git repository the Local
 /// layer is skipped and [`LocalResolution::local`] says so; the remaining layers resolve
 /// exactly as they would without Local.
+///
+/// This variant enforces no Global locks. A caller that has a lock source must use
+/// [`resolve_with_local_and_locks`] instead: a Local override may never win over a
+/// Global-locked definition.
 #[must_use]
 pub fn resolve_with_local(base: &[ScopeSnapshot], local: &LocalLayer) -> LocalResolution {
+    resolve_layers(base, local, None)
+}
+
+/// Resolves Global/User/Project layers together with the Local layer under Global locks.
+///
+/// Behaves like [`resolve_with_local`] and additionally attaches `locks` to the resolution,
+/// so a definition pinned by a lock wins its logical id even when a Local definition with
+/// the same identity exists. Every Local definition that loses to the lock is reported as
+/// blocked ([`crate::resolve::Shadowed::blocked`]) rather than merely shadowed.
+#[must_use]
+pub fn resolve_with_local_and_locks(
+    base: &[ScopeSnapshot],
+    local: &LocalLayer,
+    locks: &dyn LockStore,
+) -> LocalResolution {
+    resolve_layers(base, local, Some(locks))
+}
+
+fn resolve_layers(
+    base: &[ScopeSnapshot],
+    local: &LocalLayer,
+    locks: Option<&dyn LockStore>,
+) -> LocalResolution {
     let mut layers: Vec<ScopeSnapshot> = base
         .iter()
         .filter(|snapshot| snapshot.scope != Scope::Local)
@@ -328,8 +356,12 @@ pub fn resolve_with_local(base: &[ScopeSnapshot], local: &LocalLayer) -> LocalRe
     if let Some(snapshot) = local.snapshot() {
         layers.push(snapshot);
     }
+    let input = match locks {
+        Some(locks) => ResolveInput::new(&layers).with_locks(locks),
+        None => ResolveInput::new(&layers),
+    };
     LocalResolution {
-        resolved: resolve(ResolveInput::new(&layers)),
+        resolved: resolve(input),
         local: local.status(),
     }
 }

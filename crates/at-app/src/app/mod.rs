@@ -5,10 +5,13 @@ pub mod cli_install;
 pub mod commands;
 pub mod config;
 pub mod instance;
+pub mod linux;
 pub mod menu;
 pub mod network;
 pub mod paths;
 pub mod privilege;
+pub mod recovery;
+pub mod settings;
 pub mod state;
 
 use std::sync::Arc;
@@ -51,6 +54,23 @@ pub fn run() -> tauri::Result<()> {
             return Ok(());
         }
     };
+    // Record this session before anything else can crash: `clean_exit: false` in `session.json` is
+    // what makes the next start run recovery. This happens after the single-instance gate (only
+    // the primary instance owns the marker) and before the window exists, so recovery is always
+    // decided before the UI is interactive.
+    match recovery::SessionFile::new(paths.support_dir()).start() {
+        Ok(recovery::PreviousExit::Unclean(previous)) => tracing::warn!(
+            pid = previous.pid,
+            started_at = %previous.started_at,
+            "the previous session did not exit cleanly; startup recovery will run"
+        ),
+        Ok(recovery::PreviousExit::Running(previous)) => tracing::warn!(
+            pid = previous.pid,
+            "another live instance owns the session marker; recovery will not run"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not write the session marker"),
+    }
     let config = Arc::new(config::AppConfig::load(&paths, Vec::new()));
     let instance_state = Arc::new(primary.into_state());
     let setup_instance = Arc::clone(&instance_state);
@@ -115,11 +135,13 @@ pub fn run() -> tauri::Result<()> {
         config::config_report
     ]);
 
+    let exit_paths = paths.clone();
     let app = builder.build(tauri::generate_context!())?;
-    app.run(|handle, event| {
-        if matches!(event, tauri::RunEvent::Exit)
-            && let Some(state) = handle.try_state::<AppState>()
-        {
+    app.run(move |handle, event| {
+        if !matches!(event, tauri::RunEvent::Exit) {
+            return;
+        }
+        if let Some(state) = handle.try_state::<AppState>() {
             if let Some(instance) = state.instance() {
                 instance.shutdown();
             }
@@ -128,6 +150,11 @@ pub fn run() -> tauri::Result<()> {
                 interrupted = report.interrupted,
                 "job bridge stopped on app exit"
             );
+        }
+        // Last thing on the way out: anything that crashes before this point stays an unclean
+        // exit and is repaired on the next start.
+        if let Err(error) = recovery::SessionFile::new(exit_paths.support_dir()).mark_clean() {
+            tracing::warn!(%error, "could not mark the session as a clean exit");
         }
     });
     Ok(())

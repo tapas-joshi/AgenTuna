@@ -1,0 +1,60 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "broken"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "broken",
+        "path": "<project>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": [
+      {
+        "path": "<home>/.agentuna/skills/broken/SKILL.md",
+        "reason": "invalid_skill_document"
+      }
+    ]
+  },
+  "id": "malformed-skill-is-skipped",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "raw": "---\nname: [unclosed\n---\n# Broken\n",
+          "slug": "broken"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "description": "Valid.",
+          "name": "broken",
+          "slug": "code-review"
+        }
+      ]
+    }
+  ],
+  "title": "A SKILL.md with invalid YAML is skipped instead of aborting resolution"
+}

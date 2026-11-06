@@ -1,0 +1,85 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "code-review",
+        "path": "<project>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "global"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": "not_a_git_repository",
+      "status": "not_available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<global>/skills/code-review/SKILL.md",
+        "scope": "global",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/skills/code-review/SKILL.md",
+          "scope": "project"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "local-not-available-without-git",
+  "project": {
+    "git": false
+  },
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "global",
+      "skills": [
+        {
+          "description": "Global.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "description": "Project.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "local",
+      "skills": [
+        {
+          "description": "Local.",
+          "slug": "code-review"
+        }
+      ]
+    }
+  ],
+  "title": "A project outside a work tree skips the Local layer and reports why"
+}

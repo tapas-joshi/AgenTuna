@@ -1,0 +1,11 @@
+{
+  "id": "description-too-long",
+  "parse": {
+    "error": {
+      "len": 1025,
+      "limit": 1024,
+      "variant": "DescriptionTooLong"
+    }
+  },
+  "schema_version": 1
+}
