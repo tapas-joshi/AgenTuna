@@ -432,14 +432,28 @@ pub fn recover_journals(
             continue;
         }
 
-        // Resolve every required backup before touching any destination. A missing or invalid
-        // backup leaves the whole journal intact rather than rolling back only a suffix.
         for recovery in &mut plan {
             if recovery.state != RecoveryState::After {
                 continue;
             }
             let op = &change_set.ops[recovery.index];
             let entry = &journal.entries[recovery.index];
+            if matches!(op, FileOp::Delete { .. }) {
+                let Some(expected_hash) = entry.before_hash.as_deref() else {
+                    divergence = Some(format!(
+                        "original hash is unavailable for {}",
+                        entry.path.display()
+                    ));
+                    break;
+                };
+                if find_delete_backup(store_root, &journal.operation_id, expected_hash)?.is_none() {
+                    divergence = Some(format!(
+                        "verified delete backup is unavailable for {}",
+                        entry.path.display()
+                    ));
+                    break;
+                }
+            }
             if !needs_before_bytes(op, entry) {
                 continue;
             }
@@ -476,6 +490,7 @@ pub fn recover_journals(
                     &journal.entries[recovery.index],
                     recovery.before_bytes.as_deref(),
                     store_root,
+                    &journal.operation_id,
                 )?;
             }
         }
@@ -516,7 +531,7 @@ struct PlannedRecovery {
 enum ObservedNode {
     Missing,
     File(String),
-    Directory { empty: bool },
+    Directory { empty: bool, hash: String },
     Symlink,
     Other,
 }
@@ -609,15 +624,54 @@ fn observe_node(path: &Path) -> Result<ObservedNode, RecoveryError> {
     }
     if metadata.is_dir() {
         let mut entries = fs::read_dir(path).map_err(|error| io_error(path, error))?;
+        let empty = entries
+            .next()
+            .transpose()
+            .map_err(|error| io_error(path, error))?
+            .is_none();
         return Ok(ObservedNode::Directory {
-            empty: entries
-                .next()
-                .transpose()
-                .map_err(|error| io_error(path, error))?
-                .is_none(),
+            empty,
+            hash: tree_hash(path)?,
         });
     }
     Ok(ObservedNode::Other)
+}
+
+fn tree_hash(path: &Path) -> Result<String, RecoveryError> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| io_error(path, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io_error(path, error))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut bytes = Vec::new();
+    for entry in entries {
+        let name = entry.file_name();
+        bytes.extend_from_slice(name.as_encoded_bytes());
+        bytes.push(0);
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child).map_err(|error| io_error(&child, error))?;
+        let digest = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            tree_hash(&child)?
+        } else if metadata.file_type().is_symlink() {
+            sha256_hex(
+                fs::read_link(&child)
+                    .map_err(|error| io_error(&child, error))?
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            )
+        } else if metadata.is_file() {
+            let contents = fs::read(&child).map_err(|error| io_error(&child, error))?;
+            sha256_hex(&contents)
+        } else {
+            return Err(RecoveryError::MalformedJournal {
+                path: child,
+                reason: "unsupported directory entry".to_owned(),
+            });
+        };
+        bytes.extend_from_slice(digest.as_bytes());
+        bytes.push(0xff);
+    }
+    Ok(sha256_hex(&bytes))
 }
 
 fn classify_recovery_op(
@@ -643,6 +697,9 @@ fn classify_recovery_op(
         FileOp::Delete { .. } => match node {
             ObservedNode::Missing if before.is_some() => RecoveryState::After,
             ObservedNode::File(hash) if before == Some(hash.as_str()) => RecoveryState::Before,
+            ObservedNode::Directory { hash, .. } if before == Some(hash.as_str()) => {
+                RecoveryState::Before
+            }
             _ => RecoveryState::Diverged,
         },
         FileOp::Copy { source, .. } => match node {
@@ -669,7 +726,19 @@ fn classify_recovery_op(
                 {
                     RecoveryState::Before
                 }
-                (ObservedNode::File(hash), ObservedNode::Missing) if hash == entry.after_hash => {
+                (ObservedNode::Missing, ObservedNode::Directory { hash, .. })
+                    if before.is_none() && expected_hash == Some(hash.as_str()) =>
+                {
+                    RecoveryState::Before
+                }
+                (ObservedNode::File(hash), ObservedNode::Missing)
+                    if expected_hash == Some(hash.as_str()) =>
+                {
+                    RecoveryState::After
+                }
+                (ObservedNode::Directory { hash, .. }, ObservedNode::Missing)
+                    if expected_hash == Some(hash.as_str()) =>
+                {
                     RecoveryState::After
                 }
                 _ => RecoveryState::Diverged,
@@ -677,7 +746,7 @@ fn classify_recovery_op(
         }
         FileOp::Mkdir { .. } => match node {
             ObservedNode::Missing if before.is_none() => RecoveryState::Before,
-            ObservedNode::Directory { empty: true } => RecoveryState::After,
+            ObservedNode::Directory { empty: true, .. } => RecoveryState::After,
             _ => RecoveryState::Diverged,
         },
         FileOp::Symlink { target, mode, .. } => {
@@ -827,7 +896,45 @@ fn resolve_model_source(root: &Path, path: &Path) -> Option<PathBuf> {
 }
 
 fn needs_before_bytes(op: &FileOp, entry: &JournalEntry) -> bool {
-    entry.before_hash.is_some() && matches!(op, FileOp::Write { .. } | FileOp::Delete { .. })
+    entry.before_hash.is_some() && matches!(op, FileOp::Write { .. })
+}
+
+fn find_delete_backup(
+    store_root: &Path,
+    operation_id: &str,
+    expected_hash: &str,
+) -> Result<Option<PathBuf>, RecoveryError> {
+    let root = store_root.join("backups");
+    if !root.exists() {
+        return Ok(None);
+    }
+    let mut pending = vec![(root, 0usize)];
+    let mut matches = Vec::new();
+    let wanted_name = format!("{operation_id}.deleted");
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > 8 {
+            continue;
+        }
+        for entry in fs::read_dir(&directory).map_err(|error| io_error(&directory, error))? {
+            let entry = entry.map_err(|error| io_error(&directory, error))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if entry.file_name() == std::ffi::OsStr::new(&wanted_name) {
+                let observed = observe_node(&path)?;
+                if matches!(&observed, ObservedNode::File(hash) if hash == expected_hash)
+                    || matches!(&observed, ObservedNode::Directory { hash, .. } if hash == expected_hash)
+                {
+                    matches.push(path);
+                }
+            } else if metadata.is_dir() {
+                pending.push((path, depth + 1));
+            }
+        }
+    }
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
 }
 
 fn rollback_recovery_op(
@@ -835,6 +942,7 @@ fn rollback_recovery_op(
     entry: &JournalEntry,
     before_bytes: Option<&[u8]>,
     store_root: &Path,
+    operation_id: &str,
 ) -> Result<(), RecoveryError> {
     match op {
         FileOp::Write { .. } if entry.before_hash.is_none() => {
@@ -859,22 +967,31 @@ fn rollback_recovery_op(
             apply(&write).map(|_| ()).map_err(RecoveryError::from)
         }
         FileOp::Delete { .. } => {
-            let bytes = before_bytes.ok_or_else(|| RecoveryError::MalformedJournal {
-                path: entry.path.clone(),
-                reason: "recovery backup bytes were not loaded".to_owned(),
-            })?;
-            let write = WriteRequest {
-                path: entry.path.clone(),
-                new_bytes: bytes.to_vec(),
-                expected: ExpectedState::Absent,
-                backup: BackupPolicy::None,
-                follow_symlink: false,
-                mode: WriteMode::Create,
-                allow_empty_dir: false,
-                backup_meta: BackupMeta::default(),
-                guard: None,
-            };
-            apply(&write).map(|_| ()).map_err(RecoveryError::from)
+            let expected_hash =
+                entry
+                    .before_hash
+                    .as_deref()
+                    .ok_or_else(|| RecoveryError::MalformedJournal {
+                        path: entry.path.clone(),
+                        reason: "deleted path has no recorded before hash".to_owned(),
+                    })?;
+            let backup =
+                find_delete_backup(store_root, operation_id, expected_hash)?.ok_or_else(|| {
+                    RecoveryError::MalformedJournal {
+                        path: entry.path.clone(),
+                        reason: "verified delete backup is unavailable".to_owned(),
+                    }
+                })?;
+            if !matches!(observe_node(&entry.path)?, ObservedNode::Missing) {
+                return Err(io_error(
+                    &entry.path,
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "delete target changed during recovery",
+                    ),
+                ));
+            }
+            fs::rename(&backup, &entry.path).map_err(|error| io_error(&entry.path, error))
         }
         FileOp::Copy { source, .. } => {
             let metadata =
@@ -1685,5 +1802,59 @@ mod startup_recovery_tests {
             fs::read(destination.join("item.txt")).expect("preserve edit"),
             b"external edit"
         );
+    }
+    #[test]
+    fn directory_delete_recovery_renames_verified_tree_backup_back() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox.path().join("store");
+        let journal_dir = root.join(".state/journal");
+        let destination = root.join("native");
+        fs::create_dir_all(destination.join("nested")).expect("source tree");
+        fs::write(destination.join("nested/item.txt"), b"original tree").expect("source content");
+        let before_hash = super::tree_hash(&destination).expect("tree hash");
+        let backup = root.join("backups/op-dir/scope/native/op-dir-delete.deleted");
+        fs::create_dir_all(backup.parent().expect("backup parent")).expect("backup directory");
+        fs::rename(&destination, &backup)
+            .expect("simulate completed delete before journal progress");
+        let journal = PendingJournal {
+            journal_version: JOURNAL_VERSION,
+            operation_id: "op-dir-delete".to_owned(),
+            started_at: OffsetDateTime::now_utc(),
+            entries: vec![JournalEntry {
+                path: destination.clone(),
+                before_hash: Some(before_hash.clone()),
+                after_hash: String::new(),
+            }],
+            temp_files: Vec::new(),
+            change_set: Some(ChangeSet {
+                id: "set-dir-delete".to_owned(),
+                preview_id: "preview-dir-delete".to_owned(),
+                operation_kind: at_model::OperationKind::parse("delete").expect("known kind"),
+                scope: None,
+                project_id: None,
+                summary: "directory delete recovery".to_owned(),
+                ops: vec![FileOp::Delete {
+                    path: PathBuf::from("native"),
+                    expected: ModelExpectedState::Hash {
+                        hash: ContentHash::parse(&before_hash).expect("valid tree hash"),
+                    },
+                }],
+                created_at_unix_seconds: 0,
+            }),
+            completed_ops: vec![0],
+            created_dirs: Vec::new(),
+            committed: false,
+        };
+        write_journal(&journal_dir, &journal).expect("write pending journal");
+
+        let report = recover_journals(&journal_dir, &root, &mut Callbacks::default())
+            .expect("recover directory delete");
+
+        assert!(report.manual_review.is_empty(), "{report:?}");
+        assert_eq!(
+            fs::read(destination.join("nested/item.txt")).expect("restored file"),
+            b"original tree"
+        );
+        assert!(!backup.exists());
     }
 }

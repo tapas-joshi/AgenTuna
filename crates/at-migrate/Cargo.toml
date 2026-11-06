@@ -32,3 +32,4 @@ similar.workspace = true
 # Dev-only cycle: the crate under test needs its own `testkit` feature during `cargo test`.
 at-migrate = { path = ".", features = ["testkit"] }
 at-fs = { workspace = true, features = ["testkit"] }
+at-db.workspace = true

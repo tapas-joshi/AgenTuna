@@ -35,6 +35,7 @@ test("shows name and version returned by the app_info command", async () => {
     cmd === "projects_list" ? [] :
     cmd === "settings_load" ? { schema_version: 1, values: {} } :
     cmd === "recovery_sheet" ? null :
+    cmd === "remote_backup_settings" ? { device_name: "Visual workstation", repo_url: null, branch: null, last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: false } :
     { values: {} },
   );
   render(<App />);
@@ -53,6 +54,7 @@ test("native Preferences menu action is handed to the UI dispatcher", async () =
     cmd === "app_info" ? { name: "AgenTuna", version: "0.1.0" } :
     cmd === "projects_list" ? [] :
     cmd === "settings_load" ? { schema_version: 1, values: {} } :
+    cmd === "remote_backup_settings" ? { device_name: "Visual workstation", repo_url: null, branch: null, last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: false } :
     null,
   );
   render(<App />);

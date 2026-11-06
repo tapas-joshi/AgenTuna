@@ -4,14 +4,17 @@ pub mod bridge;
 pub mod cli_install;
 pub mod commands;
 pub mod config;
+pub mod detection;
 pub mod diagnostics;
 pub mod dialogs;
+pub mod effective;
 pub mod instance;
 pub mod jobs;
 pub mod linux;
 pub mod logs;
 pub mod mcp_form;
 pub mod menu;
+pub mod migrate;
 pub mod network;
 pub mod overview;
 pub mod overwrite;
@@ -20,8 +23,10 @@ pub mod privilege;
 pub mod project_sync;
 pub mod projects;
 pub mod recovery;
+pub mod remote_backup;
 pub mod secrets;
 pub mod settings;
+pub mod skill_agent;
 pub mod skill_detail;
 pub mod skill_wizard;
 pub mod source_updates;
@@ -142,7 +147,8 @@ pub fn run() -> tauri::Result<()> {
             let state = AppState::new(bridge, cli)
                 .with_config(setup_config)
                 .with_instance(instance_state)
-                .with_logging(setup_logging);
+                .with_logging(setup_logging)
+                .with_paths(setup_paths.clone());
             let state = match database {
                 Some(database) => state.with_database(database),
                 None => state,
@@ -168,6 +174,16 @@ pub fn run() -> tauri::Result<()> {
                 Err(_) => state,
             };
             app.manage(state);
+            if let Ok(database) = app.state::<AppState>().database_handle()
+                && let Err(error) = detection::start(
+                    app.handle().clone(),
+                    setup_paths.clone(),
+                    database,
+                    app.state::<AppState>().recent_writes(),
+                )
+            {
+                tracing::warn!(%error, "agent filesystem detection watcher unavailable");
+            }
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore_window(&window, app.state::<AppState>().inner());
             }
@@ -234,6 +250,11 @@ pub fn run() -> tauri::Result<()> {
         commands::settings_load,
         commands::app_paths,
         commands::settings_set,
+        remote_backup::remote_backup_settings,
+        remote_backup::remote_backup_configure,
+        effective::effective_query,
+        effective::why_trace,
+        migrate::migrate_scan,
         overview::overview_load,
         overview::overview_enable_global_writes,
         commands::recovery_sheet,
@@ -241,6 +262,8 @@ pub fn run() -> tauri::Result<()> {
         commands::recovery_restore,
         commands::item_lookup,
         skill_detail::skill_detail_load,
+        skill_agent::skill_agent_preview,
+        skill_agent::skill_agent_apply,
         skill_detail::skill_auto_update_set,
         skill_detail::skill_update_ignore,
         source_updates::skill_source_check,
@@ -282,7 +305,7 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_template_preview,
         skill_wizard::skill_import_choose_folder,
         skill_wizard::skill_import_choose_zip,
-        skill_wizard::skill_import_candidates,
+        skill_wizard::skill_library_catalog,
         skill_wizard::skill_import_git_candidates,
         skill_wizard::skill_marketplace_search,
         skill_wizard::skill_add_apply
@@ -297,7 +320,12 @@ pub fn run() -> tauri::Result<()> {
         commands::cli_uninstall,
         commands::app_paths,
         commands::settings_load,
+        effective::effective_query,
+        effective::why_trace,
+        migrate::migrate_scan,
         commands::settings_set,
+        remote_backup::remote_backup_settings,
+        remote_backup::remote_backup_configure,
         commands::recovery_sheet,
         commands::recovery_discard,
         commands::recovery_restore,
@@ -305,6 +333,8 @@ pub fn run() -> tauri::Result<()> {
         overview::overview_enable_global_writes,
         commands::item_lookup,
         skill_detail::skill_detail_load,
+        skill_agent::skill_agent_preview,
+        skill_agent::skill_agent_apply,
         skill_detail::skill_auto_update_set,
         skill_detail::skill_update_ignore,
         source_updates::skill_source_check,
@@ -347,6 +377,7 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_import_choose_folder,
         skill_wizard::skill_import_choose_zip,
         skill_wizard::skill_import_candidates,
+        skill_wizard::skill_library_catalog,
         skill_wizard::skill_marketplace_search,
         skill_wizard::skill_import_git_candidates,
         skill_wizard::skill_add_apply

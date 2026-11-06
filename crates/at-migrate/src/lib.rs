@@ -6,6 +6,8 @@ pub mod scan;
 /// Compare copies of the same native item and identify conflicts.
 pub mod conflicts;
 
+/// Apply reviewed migration plans and safely undo completed operations.
+pub mod apply;
 /// Build reviewed plans and exact dry-run rows.
 pub mod plan;
 

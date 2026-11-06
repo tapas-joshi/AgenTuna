@@ -378,6 +378,7 @@ pub fn skill_update_apply(
         ),
         other => CommandError::unavailable(other.to_string()),
     })?;
+    state.record_writes(&cached.plan.change_set, &cached.store_root);
     Ok(SkillUpdateApplyView {
         operation_id: result.operation_id,
         files_changed: cached.plan.change_set.ops.len(),

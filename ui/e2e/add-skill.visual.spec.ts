@@ -77,14 +77,14 @@ test("review previews exact paths and Done reflects the applied Git result", asy
   await page.getByRole("main", { name: "Add a skill" }).getByLabel("Scope").selectOption("project");
   await page.getByLabel("omp").check();
   await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByText("/fixtures/Projects/AgenTuna/.config-studio/skills/visual-skill", { exact: true })).toBeVisible();
+  await expect(page.getByText("/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill", { exact: true })).toBeVisible();
   await page.screenshot({ path: "test-results/add-skill-review.png", animations: "disabled" });
   await page.getByLabel("Stage these project-scope paths with Git").check();
   await page.getByRole("button", { name: "Import skill" }).click();
   await expect(page.getByRole("heading", { name: "Visual Skill is ready" })).toBeVisible();
   await expect(page.getByText("Operation: op_visual_skill_add")).toBeVisible();
   await expect(page.getByText(/Git staging: staged/)).toBeVisible();
-  await expect(page.getByRole("list", { name: "Written file paths" })).toContainText("/fixtures/Projects/AgenTuna/.config-studio/skills/visual-skill/SKILL.md");
-  await expect(page.getByRole("list", { name: "Actual deployments" })).toContainText("/fixtures/Projects/AgenTuna/.agents/skills/visual-skill");
+  await expect(page.getByRole("list", { name: "Written file paths" })).toContainText("/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill/SKILL.md");
+  await expect(page.getByRole("list", { name: "Actual deployments" })).toContainText("/sandbox/Projects/AgenTuna/.agents/skills/visual-skill");
   await page.screenshot({ path: "test-results/add-skill-done.png", animations: "disabled" });
 });

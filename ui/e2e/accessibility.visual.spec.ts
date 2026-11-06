@@ -3,7 +3,7 @@ import { expect, test } from "./support/tauri-mock";
 const project = {
   id: "prj_visual_fixture",
   name: "AgenTuna",
-  path: "/fixtures/Projects/AgenTuna",
+  path: "/sandbox/Projects/AgenTuna",
   last_used_at: "2026-11-06T10:00:00Z",
   skill_count: 5,
   server_count: 2,

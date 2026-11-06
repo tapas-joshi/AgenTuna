@@ -127,7 +127,7 @@ impl TombstoneSource for MemoryTombstones {
 ///
 /// Build it from the manifests of the scopes taking part in a resolution; scopes
 /// never inserted answer with an empty list.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ManifestTombstones {
     scopes: BTreeMap<Scope, Vec<DisabledEntry>>,
     metadata: BTreeMap<Scope, TombstoneMetadata>,

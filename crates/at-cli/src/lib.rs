@@ -20,16 +20,20 @@
 //! [`CommandOutput`] and returns a [`CliError`]; the root maps them to the envelope
 //! and the exit status, so no group prints or exits on its own.
 
+mod agents;
 mod builtin;
 pub mod cli;
 pub mod doctor;
+mod effective;
 pub mod error;
 pub mod globals;
+mod mcp;
 pub mod output;
 mod projects;
 pub mod registry;
 mod run;
 pub mod runtime;
+mod why;
 
 pub use cli::{Cli, CompletionShell, ProjectsCommand, RootCommand};
 pub use doctor::{Finding, Probes, Report, Severity};
