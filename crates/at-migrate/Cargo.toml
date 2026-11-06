@@ -16,6 +16,7 @@ default = []
 testkit = ["at-fs/testkit"]
 
 [dependencies]
+at-db.workspace = true
 at-model.workspace = true
 at-adapters.workspace = true
 at-fs.workspace = true
@@ -24,6 +25,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+rusqlite.workspace = true
+time.workspace = true
 toml_edit.workspace = true
 similar.workspace = true
  
@@ -32,4 +35,4 @@ similar.workspace = true
 # Dev-only cycle: the crate under test needs its own `testkit` feature during `cargo test`.
 at-migrate = { path = ".", features = ["testkit"] }
 at-fs = { workspace = true, features = ["testkit"] }
-at-db.workspace = true
+tempfile.workspace = true

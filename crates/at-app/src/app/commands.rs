@@ -314,6 +314,7 @@ fn mcp_test_result_view(result: at_mcp::TestResult) -> McpTestResultView {
 }
 
 use super::state::AppState;
+// Placeholder
 
 /// Static application identity shown in the shell.
 #[derive(Debug, Clone, Serialize, TS)]

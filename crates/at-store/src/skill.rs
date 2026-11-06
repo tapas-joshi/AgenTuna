@@ -282,14 +282,14 @@ fn parse_text(text: &str) -> Result<SkillDoc, SkillError> {
 
 /// Canonical bytes used only for skill content hashing.
 ///
-/// CRLF is normalized, and simple valid top-level frontmatter mappings are sorted by key. If
-/// comments or other formatting cannot be assigned to a mapping entry without loss, raw
-/// frontmatter order is retained.
+/// CRLF and trailing horizontal whitespace are normalized, and simple valid top-level
+/// frontmatter mappings are sorted by key. If comments or other formatting cannot be
+/// assigned to a mapping entry without loss, raw frontmatter order is retained.
 pub(crate) fn canonical_hash_bytes(bytes: &[u8]) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return bytes.to_vec();
     };
-    let normalized = text.replace("\r\n", "\n");
+    let normalized = normalize_hash_text(text);
     let Ok(document) = parse_text(&normalized) else {
         return normalized.into_bytes();
     };
@@ -318,6 +318,20 @@ pub(crate) fn canonical_hash_bytes(bytes: &[u8]) -> Vec<u8> {
     }
     canonical.push_str(&normalized[end..]);
     canonical.into_bytes()
+}
+
+fn normalize_hash_text(text: &str) -> String {
+    let line_endings_normalized = text.replace("\r\n", "\n");
+    let mut output = String::with_capacity(line_endings_normalized.len());
+    for line in line_endings_normalized.split_inclusive('\n') {
+        if let Some(content) = line.strip_suffix('\n') {
+            output.push_str(content.trim_end_matches([' ', '\t']));
+            output.push('\n');
+        } else {
+            output.push_str(line.trim_end_matches([' ', '\t']));
+        }
+    }
+    output
 }
 
 fn invalid_yaml(line: usize, column: usize, message: &str) -> SkillError {

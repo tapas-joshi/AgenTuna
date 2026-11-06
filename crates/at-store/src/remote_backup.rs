@@ -630,9 +630,10 @@ fn copy_tree(source: &Path, dest: &Path) -> Result<(), BackupError> {
     Ok(())
 }
 
-/// Counts per-sync conflict folders under `<store>/.state/remote-conflicts/<device>/`.
+/// Counts unresolved per-sync conflict folders under `<store>/.state/remote-conflicts/<device>/`.
 ///
-/// The count is derived by listing; it is never stored.
+/// A folder containing a regular `.agentuna-resolved` marker has been fully reviewed. The
+/// marker is written as part of the reviewed conflict-resolution ChangeSet.
 ///
 /// # Errors
 /// [`BackupError::Io`] when the state directory cannot be read.
@@ -677,15 +678,26 @@ pub fn remote_conflict_count(store: &StoreLayout) -> Result<usize, BackupError> 
                 path: device_dir.clone(),
                 source,
             })?;
-            if conflict
-                .file_type()
-                .map_err(|source| BackupError::Io {
-                    path: conflict.path(),
-                    source,
-                })?
-                .is_dir()
-            {
-                count += 1;
+            let conflict_path = conflict.path();
+            let conflict_type = conflict.file_type().map_err(|source| BackupError::Io {
+                path: conflict_path.clone(),
+                source,
+            })?;
+            if conflict_type.is_dir() {
+                let marker = conflict_path.join(".agentuna-resolved");
+                let resolved = match fs::symlink_metadata(&marker) {
+                    Ok(metadata) => metadata.is_file() && !metadata.file_type().is_symlink(),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                    Err(source) => {
+                        return Err(BackupError::Io {
+                            path: marker,
+                            source,
+                        });
+                    }
+                };
+                if !resolved {
+                    count += 1;
+                }
             }
         }
     }
@@ -1890,7 +1902,12 @@ mod sync_tests {
         fs::create_dir_all(conflict_root.join("laptop/first")).expect("first conflict");
         fs::create_dir_all(conflict_root.join("laptop/second")).expect("second conflict");
         fs::create_dir_all(conflict_root.join("desktop/third")).expect("third conflict");
-        assert_eq!(remote_conflict_count(&store).expect("count folders"), 3);
+        fs::write(
+            conflict_root.join("laptop/first/.agentuna-resolved"),
+            b"resolved\n",
+        )
+        .expect("resolved marker");
+        assert_eq!(remote_conflict_count(&store).expect("count folders"), 2);
     }
     #[test]
     fn restore_from_bare_remote_into_fresh_store_and_refuse_nonempty_target() {

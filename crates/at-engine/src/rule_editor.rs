@@ -219,7 +219,37 @@ pub fn save_rule(
     })
 }
 
+/// Resolves a new rule intent using the standard adapter registry and Claude Code's native path.
+///
+/// # Errors
+/// Returns the same errors as [`new_rule`] when the path is unsupported, occupied or read-only.
+pub fn new_registered_rule(
+    file_type: RuleFileType,
+    scope: Scope,
+    home: &Path,
+    project: Option<&Path>,
+    global_writable: bool,
+) -> Result<NewRuleIntent, RuleEditorError> {
+    let registry = AgentAdapterRegistry::register();
+    let env = AgentEnvironment {
+        home: home.to_path_buf(),
+        project: project.map(Path::to_path_buf),
+        variables: Default::default(),
+    };
+    new_rule(
+        file_type,
+        scope,
+        &AgentId::ClaudeCode,
+        &registry,
+        &env,
+        global_writable,
+    )
+}
+
 /// Resolves and plans a create-only native rule file using the selected adapter's verified path.
+///
+/// # Errors
+/// Returns an error when the path is unsupported, occupied or read-only.
 pub fn new_rule(
     file_type: RuleFileType,
     scope: Scope,
@@ -558,6 +588,68 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn applied_new_rule_has_one_trailing_newline_and_appears_in_next_scan() {
+        let temporary = tempfile::tempdir().expect("temporary project");
+        let project = temporary.path().join("project");
+        let store = temporary.path().join("store");
+        let backups = temporary.path().join("backups");
+        std::fs::create_dir_all(&project).expect("project directory");
+        std::fs::create_dir_all(&store).expect("store");
+        let env = AgentEnvironment {
+            home: temporary.path().join("home"),
+            project: Some(project.clone()),
+            variables: Default::default(),
+        };
+        let registry = AgentAdapterRegistry::register();
+        let intent = new_rule(
+            RuleFileType::ClaudeLocal,
+            Scope::Project,
+            &AgentId::ClaudeCode,
+            &registry,
+            &env,
+            true,
+        )
+        .expect("new rule intent");
+        let migrated = at_db::Database::open_in_memory().expect("migrated database");
+        let database = migrated.connection();
+        let item = ItemId::new();
+        database
+            .execute(
+                "INSERT INTO items (id, kind, scope, slug, name) \
+                 VALUES (?1, 'rule', 'project', 'claude-local', 'CLAUDE.local.md')",
+                [item.to_string()],
+            )
+            .expect("rule item row");
+        let mut recorder = CountingRecorder::default();
+        let mut context = at_fs::ApplyContext {
+            store_root: &store,
+            backup_folder: &backups,
+            recorder: &mut recorder,
+        };
+        let roots = at_fs::ApplyRoots::new([temporary.path().to_path_buf()]).expect("roots");
+
+        let (created, _) = apply_new_rule(
+            &intent,
+            &item,
+            database,
+            &mut context,
+            &roots,
+            &at_fs::RecentWrites::new(),
+        )
+        .expect("apply rule");
+        assert_eq!(
+            std::fs::read(&created.path).expect("read new rule"),
+            b"# CLAUDE.local.md\n"
+        );
+        let scan = crate::rules::scan(&registry, &env, &[AgentId::ClaudeCode], &[Scope::Project]);
+        assert!(
+            scan.sources
+                .iter()
+                .any(|source| source.path == created.path)
+        );
     }
 
     #[test]

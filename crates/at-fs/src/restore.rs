@@ -146,6 +146,185 @@ fn read_current(target: &Path) -> Result<Option<Vec<u8>>, RestoreError> {
     }
 }
 
+fn restore_tree(
+    request: RestoreRequest<'_>,
+    original: &str,
+    blob: &Path,
+    expected_hash: &str,
+) -> Result<RestoreOutcome, RestoreError> {
+    let target = target_path(request.store_root, original)?;
+    reject_symlink_parents(request.store_root, &target)?;
+    if crate::changeset::hash_node(blob)
+        .map_err(|error| io(blob, error))?
+        .as_deref()
+        != Some(expected_hash)
+    {
+        return Err(RestoreError::VerificationFailed);
+    }
+    let current_hash = crate::changeset::hash_node(&target).map_err(|error| io(&target, error))?;
+    if current_hash
+        .as_deref()
+        .is_some_and(|hash| hash != expected_hash)
+    {
+        let observed = current_hash
+            .as_deref()
+            .ok_or(RestoreError::StaleConfirmation)?;
+        let expected_token = token(request.backup_id, observed);
+        if request.confirmation != Some(expected_token.as_str()) {
+            return if request.confirmation.is_none() {
+                Ok(RestoreOutcome::ConfirmationRequired {
+                    token: expected_token,
+                    diff: "Directory contents differ; review before restoring.".to_owned(),
+                })
+            } else {
+                Err(RestoreError::StaleConfirmation)
+            };
+        }
+    } else if request.confirmation.is_some() {
+        return Err(RestoreError::StaleConfirmation);
+    }
+
+    let parent = target.parent().ok_or(RestoreError::OutsideRoot)?;
+    fs::create_dir_all(parent).map_err(|error| io(parent, error))?;
+    let operation = ops::begin(
+        request.connection,
+        &ops::NewOperation::new(ops::OperationKind::Restore, request.actor)
+            .with_summary("Restored directory backup"),
+    )?;
+    let operation_text = operation.to_string();
+    let operation_folder = backup::operation_backup_dir(
+        &request.store_root.join("backups"),
+        OffsetDateTime::now_utc(),
+        &operation_text,
+    )?;
+    fs::create_dir_all(&operation_folder).map_err(|error| io(&operation_folder, error))?;
+    let stage = parent.join(format!(".agentuna-restore-stage-{operation_text}"));
+    copy_tree(blob, &stage).map_err(|error| io(&stage, error))?;
+    if crate::changeset::hash_node(&stage)
+        .map_err(|error| io(&stage, error))?
+        .as_deref()
+        != Some(expected_hash)
+    {
+        remove_tree(&stage).map_err(|error| io(&stage, error))?;
+        return Err(RestoreError::VerificationFailed);
+    }
+
+    let before_hash = crate::changeset::hash_node(&target).map_err(|error| io(&target, error))?;
+    if before_hash != current_hash {
+        remove_tree(&stage).map_err(|error| io(&stage, error))?;
+        return Err(RestoreError::StaleConfirmation);
+    }
+    let mut current_backup_id = None;
+    if current_hash.is_some() {
+        let current_backup = operation_folder.join("current-tree");
+        fs::rename(&target, &current_backup).map_err(|error| io(&target, error))?;
+        let moved_hash = crate::changeset::hash_node(&current_backup)
+            .map_err(|error| io(&current_backup, error))?;
+        if moved_hash != current_hash {
+            fs::rename(&current_backup, &target).map_err(|error| io(&target, error))?;
+            remove_tree(&stage).map_err(|error| io(&stage, error))?;
+            return Err(RestoreError::StaleConfirmation);
+        }
+        let current_text = current_backup.to_string_lossy().into_owned();
+        let original_text = target.to_string_lossy().into_owned();
+        let current_digest = current_hash.as_deref().unwrap_or_default();
+        let size = fs::metadata(&current_backup)
+            .map_err(|error| io(&current_backup, error))?
+            .len();
+        let row = backups::NewBackup::new(&original_text, &current_text)
+            .with_operation(&operation_text)
+            .with_content(Some(current_digest), i64::try_from(size).ok());
+        current_backup_id = Some(backups::record_backup(request.connection, &row)?);
+    }
+    if let Err(error) = fs::rename(&stage, &target) {
+        if let Some(current_hash) = current_hash.as_ref() {
+            let current_backup = operation_folder.join("current-tree");
+            if crate::changeset::hash_node(&current_backup)
+                .ok()
+                .flatten()
+                .as_ref()
+                == Some(current_hash)
+            {
+                let _ = fs::rename(&current_backup, &target);
+            }
+        }
+        remove_tree(&stage).ok();
+        return Err(io(&target, error));
+    }
+    let after_hash = crate::changeset::hash_node(&target)
+        .map_err(|error| io(&target, error))?
+        .ok_or(RestoreError::VerificationFailed)?;
+    if after_hash != expected_hash {
+        return Err(RestoreError::VerificationFailed);
+    }
+    let path_text = target.to_string_lossy().into_owned();
+    let mut touched = ops::TouchedFile::new(
+        &path_text,
+        if current_hash.is_some() {
+            ops::FileAction::Modified
+        } else {
+            ops::FileAction::Created
+        },
+    )
+    .with_hashes(current_hash.as_deref(), Some(&after_hash));
+    touched.backup_id = current_backup_id.as_deref();
+    ops::attach_file(request.connection, &operation, &touched)?;
+    ops::finish(
+        request.connection,
+        &operation,
+        ops::OperationStatus::Succeeded,
+        None,
+    )?;
+    backups::mark_restored(request.connection, request.backup_id)?;
+    Ok(RestoreOutcome::Restored {
+        operation_id: operation_text,
+        target,
+    })
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        #[cfg(unix)]
+        {
+            return std::os::unix::fs::symlink(fs::read_link(source)?, destination);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory backup symlinks are unsupported",
+            ));
+        }
+    }
+    if metadata.is_dir() {
+        fs::create_dir(destination)?;
+        let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        fs::set_permissions(destination, metadata.permissions())
+    } else if metadata.is_file() {
+        fs::copy(source, destination)?;
+        fs::set_permissions(destination, metadata.permissions())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "directory backup contains a special file",
+        ))
+    }
+}
+
+fn remove_tree(path: &Path) -> Result<(), std::io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 /// Verifies and restores a catalogue backup, requiring confirmation before overwriting changed bytes.
 ///
 /// The token is bound to the selected backup and current target hash. The target is re-read before
@@ -170,6 +349,9 @@ pub fn restore_backup(request: RestoreRequest<'_>) -> Result<RestoreOutcome, Res
         .content_hash
         .as_deref()
         .ok_or_else(|| RestoreError::InvalidRow("missing content_hash".to_owned()))?;
+    if Path::new(blob).is_dir() {
+        return restore_tree(request, original, Path::new(blob), expected_hash);
+    }
     let sidecar = backup::verify(Path::new(blob), expected_hash)?;
     let bytes = fs::read(blob).map_err(|error| io(Path::new(blob), error))?;
     let target = target_path(request.store_root, original)?;

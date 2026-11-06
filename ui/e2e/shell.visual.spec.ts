@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
 
 test("every routed screen has a meaningful page heading", async ({ page }) => {
   const routes = [
-    ["Overview", "Overview"], ["Skills", "Skills"], ["MCP Servers", "MCP Servers"],
+    ["Overview", "Overview"], ["Skills", "Presets"], ["MCP Servers", "MCP Servers"],
     ["Instructions", "Instructions"], ["Agents", "Agents"], ["Effective config", "Effective config"],
     ["Sync & drift", "Sync & drift"],
   ] as const;

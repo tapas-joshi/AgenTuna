@@ -91,7 +91,9 @@ impl OperationRecorder for DbOperationRecorder<'_> {
         };
         let path_text = path.to_string_lossy().into_owned();
         let backup_id = if let Some(blob) = backup_path {
-            let size = fs::metadata(blob).map_err(|error| error.to_string())?.len();
+            let size = fs::symlink_metadata(blob)
+                .map_err(|error| error.to_string())?
+                .len();
             let expires = (OffsetDateTime::now_utc()
                 + time::Duration::days(i64::from(self.backup_retention_days)))
             .format(&time::format_description::well_known::Rfc3339)
@@ -513,8 +515,21 @@ fn apply_inner(
     }
     created_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     created_dirs.dedup();
-    for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
-        validate_expected(op, path, root)?;
+    for (index, ((op, path), root)) in set.ops.iter().zip(&paths).zip(&path_roots).enumerate() {
+        let replaced_by_prior_move = matches!(op, FileOp::Symlink { .. })
+            && set.ops[..index].iter().any(|prior| {
+                matches!(prior, FileOp::Move { from, .. }
+                    if op.destination().is_some_and(|destination| from == destination)
+                        || context.store_root.join(from) == *path)
+                    || matches!(prior, FileOp::Delete { path: deleted, .. }
+                        if Some(deleted.as_path()) == op.destination())
+            })
+            || matches!(op, FileOp::Move { .. })
+                && set.ops[..index].iter().any(|prior| {
+                    matches!(prior, FileOp::Delete { path: deleted, .. }
+                        if Some(deleted.as_path()) == op.destination())
+                });
+        validate_expected(op, path, root, replaced_by_prior_move)?;
     }
     if let Some(guard) = ownership_guard {
         for op in &set.ops {
@@ -613,7 +628,10 @@ fn apply_inner(
                         entries: &journal.entries,
                         created_dirs: &created_dirs,
                     },
-                    cause,
+                    format!(
+                        "ChangeSet operation {index} at `{}` failed: {cause}",
+                        path.display()
+                    ),
                 );
             }
         };
@@ -775,12 +793,17 @@ fn execute_op(
         }
         FileOp::Symlink { target, mode, .. } => {
             let source = resolve_path(context.store_root, target)?;
-            let link_mode = match mode {
-                at_model::DeployMode::Link => at_model::LinkMode::Link,
-                at_model::DeployMode::Copy => at_model::LinkMode::Copy,
+            let request = match mode {
+                at_model::DeployMode::Link => {
+                    crate::deploy::DeployRequest::new(&source, path, at_model::LinkMode::Link)
+                        .with_copy_fallback()
+                }
+                at_model::DeployMode::Copy => {
+                    crate::deploy::DeployRequest::new(&source, path, at_model::LinkMode::Copy)
+                }
                 _ => return Err("unsupported link mode".to_owned()),
             };
-            crate::deploy::link_dir(&source, path, link_mode).map_err(|error| error.to_string())?;
+            crate::deploy::deploy(&request).map_err(|error| error.to_string())?;
             Ok(None)
         }
         FileOp::Copy {
@@ -849,7 +872,13 @@ fn execute_op(
                     fs::rename(&stage, path).map_err(|error| error.to_string())?;
                     remove_node(&source)?;
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    return Err(format!(
+                        "cannot move `{}` to `{}`: {error}",
+                        source.display(),
+                        path.display()
+                    ));
+                }
             }
             Ok(None)
         }
@@ -925,6 +954,7 @@ fn validate_expected(
     op: &FileOp,
     path: &Path,
     store_root: &Path,
+    replaced_by_prior_move: bool,
 ) -> Result<(), ChangeSetApplyError> {
     let mut parent = path.parent();
     while let Some(current) = parent {
@@ -941,15 +971,16 @@ fn validate_expected(
         | FileOp::Delete { expected, .. }
         | FileOp::Copy { expected, .. } => expected_matches(path, expected),
         FileOp::Symlink { target, .. } => {
-            expected_absent(path)
-                && resolve_path(store_root, target).is_ok_and(|target| target.exists())
+            (expected_absent(path) || replaced_by_prior_move)
+                && (resolve_path(store_root, target).is_ok_and(|target| target.exists())
+                    || replaced_by_prior_move)
         }
         FileOp::Mkdir { parents, .. } => {
             expected_absent(path) && (*parents || path.parent().is_some_and(Path::is_dir))
         }
         FileOp::Move { from, expected, .. } => {
             let source = store_root.join(from);
-            expected_matches(&source, expected) && expected_absent(path)
+            expected_matches(&source, expected) && (expected_absent(path) || replaced_by_prior_move)
         }
         _ => false,
     };

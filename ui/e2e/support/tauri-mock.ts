@@ -10,11 +10,16 @@ export const test = base.extend({
       const project = { id: "prj_visual_fixture", name: "AgenTuna", path: "/sandbox/Projects/AgenTuna", last_used_at: "2026-11-06T10:00:00Z", skill_count: 5, server_count: 2 };
       projects.push(project);
       settings.values.last_project_id = project.id;
-      const mocks = { settings, projects, policyMode: "normal", commandOverrides: {} as Record<string, unknown> };
+      const mocks = { settings, projects, policyMode: "normal", commandOverrides: {} as Record<string, unknown>, calls: [] as string[] };
       Object.defineProperty(window, "__AT_TEST_MOCKS__", { value: mocks });
       const paths = { support_dir: "/sandbox/support", db_path: "/sandbox/support/index.sqlite", log_dir: "/sandbox/support/logs", backup_dir: "/sandbox/support/backups", cache_dir: "/sandbox/support/cache", user_store: "/sandbox/user", project_store: "/sandbox/Projects/AgenTuna/.config-studio", global_store: "/sandbox/global", global_store_source: "default" };
       const policy = { offline: false, marketplace_enabled: false, background_health: "local", updates_opt_in: false, statement: "No automatic network calls.", allowed_hosts: [], actions: [], events: [], capacity: 100 };
-      const emptyOverview = { scopes: [{ scope: "global", skills: 0, mcp: 0, rules: 0, locks: 0, last_edited: null, disabled: 0 }, { scope: "user", skills: 1, mcp: 0, rules: 0, locks: 0, last_edited: "2026-11-06T10:00:00Z", disabled: 0 }, { scope: "project", skills: 0, mcp: 1, rules: 0, locks: 0, last_edited: null, disabled: 0 }], attention: [], attention_total: 0, changes: [], user_path: "/sandbox/user", global_path: "/sandbox/global", global_writable: true, global_reason: null };
+      const remoteBackupSettings = { device_name: "Visual workstation", repo_url: "https://example.invalid/agentuna-backup.git", branch: "main", last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: true };
+      const remoteBackupStatus = { repo_url: remoteBackupSettings.repo_url, device_name: remoteBackupSettings.device_name, branch: "main", last_push_at: null, last_sync_at: null, last_commit: null, conflict_count: 1, offline: false, status: "idle", error_kind: null };
+      const remoteBackupConflicts = [{ id: "remote-device-20261106T100000Z", device_name: "travel-laptop", timestamp: "20261106T100000Z", files: [{ path: "skills/review-helper/SKILL.md", local_path: "/sandbox/user/skills/review-helper/SKILL.md", remote_path: "/sandbox/user/.state/remote-conflicts/travel-laptop/20261106T100000Z/skills/review-helper/SKILL.md", local_exists: true, remote_size: 142, local_size: 136 }] }];
+      const remoteBackupCommit = "a".repeat(40);
+      const remoteBackupCommits = [{ commit: remoteBackupCommit, committed_at: "2026-11-06T10:00:00Z", message: "Backup from travel-laptop" }];
+      const remoteBackupPreview = { preview_id: "preview-remote-conflict", summary: "Keep the remote copy of skills/review-helper/SKILL.md.", files: [{ path: "skills/review-helper/SKILL.md", action: "write", diff: "--- local\n+++ remote\n", before_hash: "1".repeat(64), after_hash: "2".repeat(64), backup_required: true }], archived_remote_path: null };
       const skill = {
         item_id: "itm_visual_skill", name: "Code Review", slug: "code-review", scope: "user",
         path: "/sandbox/user/skills/code-review",
@@ -35,12 +40,25 @@ export const test = base.extend({
         for (const callbackId of ids) callbacks.get(callbackId)?.({ event, id: 1, payload });
       } });
       const ipc = {
-        invoke: async (command: string, args?: { key?: string; value?: unknown; itemId?: string; path?: string; event?: unknown; handler?: number; wizard?: unknown; request?: unknown }) => {
+        invoke: async (command: string, args?: { key?: string; value?: unknown; itemId?: string; path?: string; event?: unknown; handler?: number; wizard?: unknown; request?: unknown; jobId?: string; commit?: string; confirmationToken?: string; groupId?: string; relativePath?: string; side?: string; resolution?: string; previewId?: string; confirmDeletions?: boolean }) => {
+          mocks.calls.push(command);
           if (Object.hasOwn(mocks.commandOverrides, command)) return mocks.commandOverrides[command];
           switch (command) {
             case "app_info": return { name: "AgenTuna", version: "0.1.0" };
             case "settings_load": return settings;
             case "settings_set": if (args?.key) settings.values[args.key] = args.value; return null;
+            case "instructions_list": return [{ item_id: "itm_visual_rule", scope: "project", path: "/sandbox/Projects/AgenTuna/AGENTS.md", managed: true, content: "# Repository guidance\n\nReview changes carefully.\n", hash: "c".repeat(64), agents: ["codex", "omp"] }];
+            case "instruction_save": return null;
+            case "agents_list": return [{ id: "claude_code", name: "Claude Code", installed: true, version: "1.2.0", managed: true, paths: ["/sandbox/home/.claude/skills"], health: "~/.claude/skills · 2 / 3 managed · 2 in sync", link_mode: "link" }];
+            case "agent_manage_set": return null;
+            case "agent_link_mode_set": return null;
+            case "presets_list": return [{ id: "preset_visual", name: "Code review", scope: "user", created_at: "2026-11-06T10:00:00Z", members: [], ratios: [{ target: "claude_code", enabled: 2, total: 3, complete: false }] }];
+            case "preset_create": return "preset_visual_new";
+            case "preset_rename": return null;
+            case "preset_delete": return null;
+            case "preset_member_set": return null;
+            case "preset_apply": return null;
+            case "migrate_conflicts": return { conflicts: [{ kind: "skill", name: "review-helper", copies: [{ agent: "claude_code", scope: "user", path: "/sandbox/home/.claude/skills/review-helper", raw_hash: "a".repeat(64), normalized_hash: "a".repeat(64) }, { agent: "codex", scope: "user", path: "/sandbox/home/.codex/skills/review-helper", raw_hash: "b".repeat(64), normalized_hash: "b".repeat(64) }], formatting_only: false, unified_diff: "--- A\n+++ B\n", proposed_resolution: "needs_choice" }] };
             case "projects_list": return mocks.projects;
             case "overview_load": return emptyOverview;
             case "recovery_sheet": return null;
@@ -58,17 +76,26 @@ export const test = base.extend({
             case "skill_detail_load": return skill;
             case "skill_compare_copies": return { winner: { scope: "project", markdown: "# Code Review\n\nProject copy.", hash: "1".repeat(64), deployments: ["claude_code"] }, shadow: { scope: "user", markdown: "# Code Review\n\nUser copy.", hash: "2".repeat(64), deployments: ["codex"] }, identical: false, diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,3 +1,3 @@\n # Code Review\n-User copy.\n+Project copy.\n" };
             case "skill_agent_preview": return { preview_id: "preview-enable-visual", enabled: Boolean((args?.request as { enabled?: unknown } | undefined)?.enabled), mode: "copy", paths: ["/sandbox/user/skills/code-review"], coupled_agents: [], warnings: [], no_op: false };
-            case "skill_agent_apply": return { operation_id: "op-enable-visual", changed: true, paths_written: ["/sandbox/user/skills/code-review"], backup_hint: null };
-            case "remote_backup_settings": return { device_name: "Visual workstation", repo_url: "https://example.invalid/agentuna-backup.git", branch: "main", last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: true };
-            case "remote_backup_configure": return { device_name: "Visual workstation", repo_url: "https://example.invalid/agentuna-backup.git", branch: "main", last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: true };
+            case "skill_agent_apply": return { operation_id: "op-enable-visual", enabled: true, changed: true };
+            case "remote_backup_settings": return remoteBackupSettings;
+            case "remote_backup_configure": return remoteBackupSettings;
+            case "status": return remoteBackupStatus;
+            case "backup_now": return "job_visual_remote_backup";
+            case "sync_now": return "job_visual_remote_sync";
+            case "restore_commits": return remoteBackupCommits;
+            case "restore_confirmation": return { confirmation_token: "one-use-visual-grant", device_name: remoteBackupSettings.device_name, repo_url: remoteBackupSettings.repo_url, commit: args?.commit ?? remoteBackupCommit };
+            case "restore": return "job_visual_remote_restore";
+            case "conflicts_list": return remoteBackupConflicts;
+            case "conflicts_reveal": return null;
+            case "conflicts_resolve_preview": return remoteBackupPreview;
+            case "conflicts_resolve_apply": return { operation_id: "op-remote-conflict-visual", files_changed: 1 };
             case "skill_library_catalog": return { sources: [], skills: [], target_scope: String(args?.scope ?? "user") };
             case "project_sync_status": return [];
             case "project_sync_preview": return { preview_id: "preview-sync-visual", item_id: "itm_visual_skill", name: "Code Review", direction: "push", files: [{ path: "/sandbox/user/skills/code-review/SKILL.md", action: "write", diff: "--- old\n+++ new\n", backup_required: true }], missing_source_paths: [] };
             case "project_sync_apply": return { operation_id: "op-sync-visual", files_changed: 1 };
             case "overview_enable_global_writes": emptyOverview.global_writable = true; return null;
+            case "reveal_item": return null;
             case "app_paths": return { support_dir: "/sandbox/support", db_path: "/sandbox/support/index.sqlite", log_dir: "/sandbox/support/logs", backup_dir: "/sandbox/support/backups", cache_dir: "/sandbox/support/cache", user_store: "/sandbox/user", project_store: "/sandbox/Projects/AgenTuna/.config-studio", global_store: "/sandbox/global", global_store_source: "default" };
-            case "remote_backup_push": return null;
-            case "remote_backup_pull": return null;
             case "skill_version_compare": return { item_id: skill.item_id, versions: [] };
             case "skill_edit_preview": return { preview_id: "preview-visual", expected_hash: skill.hash, diff: "", changed: false };
             case "skill_edit_apply": return { item_id: skill.item_id, updated_at: "2026-11-06T10:00:00Z" };
@@ -109,6 +136,11 @@ export const test = base.extend({
               }
               eventCallbacks.set(event, ids);
               return 1;
+            }
+            case "plugin:event|unlisten": {
+              const event = String(args?.event ?? "");
+              if (args?.handler !== undefined) eventCallbacks.get(event)?.delete(args.handler);
+              return null;
             }
             case "overwrite_move_aside": return { original: args?.path ?? "/sandbox/user/agents/skill", moved_to: "/sandbox/user/agents/skill.agentuna-backup-20261106T100000Z" };
             case "logs_tail": return { lines: [], truncated: false };

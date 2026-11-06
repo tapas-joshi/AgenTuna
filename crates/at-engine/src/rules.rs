@@ -319,7 +319,32 @@ pub fn compose(
     (composed, Vec::new())
 }
 
-/// Scans adapter-declared rule paths for the selected agents and scopes.
+/// Scans the supported adapters for the requested scope using injected roots.
+///
+/// # Examples
+/// ```no_run
+/// # use std::path::Path;
+/// # use at_model::Scope;
+/// let scan = at_engine::rules::scan_registered(Path::new("/home/user"), None, Scope::User);
+/// let _ = scan.sources;
+/// ```
+pub fn scan_registered(home: &Path, project: Option<&Path>, scope: Scope) -> RuleScan {
+    let registry = AgentAdapterRegistry::register();
+    let env = AgentEnvironment {
+        home: home.to_path_buf(),
+        project: project.map(Path::to_path_buf),
+        variables: Default::default(),
+    };
+    let agents = [
+        AgentId::ClaudeCode,
+        AgentId::Codex,
+        AgentId::Omp,
+        AgentId::Cursor,
+    ];
+    scan(&registry, &env, &agents, &[scope])
+}
+
+/// Scans adapter-declared rule paths for selected agents and scopes.
 ///
 /// Duplicate paths are merged into one source with all consuming agents. Results are stable
 /// regardless of adapter enumeration order.
@@ -526,6 +551,17 @@ mod tests {
             Err(ManagedBlockError::MalformedManagedBlock { line: 1, .. })
         ));
     }
+
+    #[test]
+    fn rendering_after_external_outside_edit_preserves_the_new_external_bytes() {
+        let path = Path::new("CLAUDE.md");
+        let existing = b"external header\n<!-- agentuna:begin -->\nold\n<!-- agentuna:end -->\nexternal footer\n";
+        let rendered = render_managed_block(path, Some(existing), b"updated").expect("render");
+        assert_eq!(
+            rendered,
+            b"external header\n<!-- agentuna:begin -->\nupdated\n<!-- agentuna:end -->\nexternal footer\n"
+        );
+    }
     #[test]
     fn paired_rule_plan_writes_identical_blocks_and_noops_when_current() {
         let root = tempfile::tempdir().expect("root");
@@ -604,6 +640,55 @@ mod tests {
             vec![Scope::Global, Scope::User, Scope::Project, Scope::Local]
         );
         assert!(composed[3].override_source);
+    }
+
+    #[test]
+    fn claude_and_codex_instruction_composition_has_stable_native_order() {
+        let rule = |scope, agent, name: &str| RuleSource {
+            scope,
+            agent_consumers: vec![agent],
+            path: PathBuf::from(name),
+            bytes: Vec::new(),
+            mtime: None,
+            sha256: String::new(),
+            managed: false,
+            link_target: None,
+        };
+        let scan = RuleScan {
+            sources: vec![
+                rule(Scope::Local, AgentId::ClaudeCode, "CLAUDE.local.md"),
+                rule(Scope::Project, AgentId::ClaudeCode, "CLAUDE.md"),
+                rule(Scope::User, AgentId::ClaudeCode, "CLAUDE.md"),
+                rule(Scope::Global, AgentId::ClaudeCode, "CLAUDE.md"),
+                rule(Scope::Project, AgentId::Codex, "AGENTS.md"),
+                rule(Scope::User, AgentId::Codex, "AGENTS.md"),
+                rule(Scope::User, AgentId::Codex, "CLAUDE.md"),
+            ],
+            diagnostics: Vec::new(),
+        };
+        let (claude, _) = compose(&AgentId::ClaudeCode, Scope::Project, &scan);
+        assert_eq!(
+            claude
+                .iter()
+                .map(|source| source.source.scope)
+                .collect::<Vec<_>>(),
+            vec![Scope::Global, Scope::User, Scope::Project, Scope::Local]
+        );
+        let (codex, _) = compose(&AgentId::Codex, Scope::Project, &scan);
+        assert_eq!(
+            codex
+                .iter()
+                .map(|source| source.source.scope)
+                .collect::<Vec<_>>(),
+            vec![Scope::User, Scope::Project]
+        );
+        assert!(codex.iter().all(|source| {
+            source
+                .source
+                .path
+                .file_name()
+                .is_some_and(|name| name == "AGENTS.md")
+        }));
     }
     #[test]
     fn discovers_project_rule_and_merges_consumers_deterministically() {

@@ -13,8 +13,10 @@
 //! This module issues no DDL: every statement is a query or row change against
 //! the schema TF-014 created.
 
-use at_model::{AgentId, ItemKind, Scope};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use std::collections::BTreeSet;
+
+use at_model::{AgentId, ItemId, ItemKind, Scope};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use ulid::Ulid;
 
 use crate::DbError;
@@ -135,6 +137,26 @@ impl<'a> NativeScanEntry<'a> {
     }
 }
 
+/// One native path to associate with an adopted canonical item.
+///
+/// `native_items.path` is the unique key, so provide one entry per distinct path. The existing
+/// schema stores one agent for each path.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeAdoptionPath<'a> {
+    /// Agent whose native folder contains this path.
+    pub agent_id: &'a AgentId,
+    /// Scope of the native folder.
+    pub scope: Scope,
+    /// What the item is.
+    pub kind: ItemKind,
+    /// Display name reported by the scan.
+    pub name: &'a str,
+    /// Native filesystem path; the row's natural key.
+    pub path: &'a str,
+    /// Content hash reported by the scan, when available.
+    pub content_hash: Option<&'a str>,
+}
+
 /// What one [`replace_scan`] call did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScanReplaceReport {
@@ -247,6 +269,68 @@ pub fn replace_scan(
 
     transaction.commit()?;
     Ok(report)
+}
+
+/// Creates or refreshes native rows for `paths` and associates them with `item_id`.
+///
+/// Each distinct path is inserted or updated as `adopted`; an existing row keeps its id and
+/// `first_seen_at`, while its scan metadata and `last_seen_at` are refreshed. Missing rows are
+/// created from the supplied scan metadata. All changes use the caller's transaction, allowing
+/// the caller to commit the canonical item and every native path/agent together.
+///
+/// # Errors
+///
+/// Returns [`DbError::InvalidValue`] if `paths` contains the same path more than once, or a
+/// SQLite error when a row cannot be written.
+pub fn adopt_paths(
+    transaction: &Transaction<'_>,
+    paths: &[NativeAdoptionPath<'_>],
+    item_id: &ItemId,
+) -> Result<usize, DbError> {
+    let mut seen_paths = BTreeSet::new();
+    for entry in paths {
+        if !seen_paths.insert(entry.path) {
+            return Err(DbError::InvalidValue {
+                field: "native_items.path",
+                reason: format!(
+                    "path `{}` appears more than once in one adoption",
+                    entry.path
+                ),
+            });
+        }
+    }
+
+    let item_id = item_id.to_string();
+    let mut statement = transaction.prepare(
+        "INSERT INTO native_items \
+             (id, agent_id, scope, kind, name, path, content_hash, adopted_item_id, status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'adopted') \
+         ON CONFLICT(path) DO UPDATE SET \
+             agent_id = excluded.agent_id, \
+             scope = excluded.scope, \
+             kind = excluded.kind, \
+             name = excluded.name, \
+             content_hash = excluded.content_hash, \
+             adopted_item_id = excluded.adopted_item_id, \
+             last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+             status = 'adopted'",
+    )?;
+    let mut adopted = 0;
+    for entry in paths {
+        let id = format!("nat_{}", Ulid::generate());
+        statement.execute(params![
+            id,
+            entry.agent_id.to_string(),
+            entry.scope.wire_name(),
+            entry.kind.wire_name(),
+            entry.name,
+            entry.path,
+            entry.content_hash,
+            item_id,
+        ])?;
+        adopted += 1;
+    }
+    Ok(adopted)
 }
 
 /// Every native row matching `filter`, ordered by agent, scope, kind, name.

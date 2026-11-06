@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { AgentCardView } from "../../generated/AgentCardView";
+import { EnableSkillPopover } from "../../overlays/popovers";
 import type { SkillCompareView } from "../../generated/SkillCompareView";
 import type { SkillVersionCompareView } from "../../generated/SkillVersionCompareView";
 import type { SkillDetailView } from "../../generated/SkillDetailView";
@@ -6,7 +9,6 @@ import type { SkillEditPreviewView } from "../../generated/SkillEditPreviewView"
 import type { SkillUpdatePreviewView } from "../../generated/SkillUpdatePreviewView";
 import { Button } from "../../components/button";
 import { DiffViewer } from "../../components/diff";
-import { Toggle } from "../../components/toggle";
 import { MarkdownEditor } from "../../components/editor";
 import { MarkdownPreview } from "../../components/editor/markdown-preview";
 import { AsyncBoundary, useAsyncResource } from "../../components/states";
@@ -52,6 +54,17 @@ function SkillDetailContent({ detail, onRefresh }: { readonly detail: SkillDetai
   const [saving, setSaving] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(detail.auto_update);
   const [sourceChecking, setSourceChecking] = useState(false);
+  const [agentChoices, setAgentChoices] = useState<AgentCardView[]>([]);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
+  const [enablePopoverOpen, setEnablePopoverOpen] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void invoke<AgentCardView[]>("agents_list").then(
+      (agents) => { if (active && Array.isArray(agents)) setAgentChoices(agents); },
+      () => { if (active) setAgentsError("Could not load agent availability."); },
+    );
+    return () => { active = false; };
+  }, []);
   const [updatePreview, setUpdatePreview] = useState<SkillUpdatePreviewView | null>(null);
   const [updateApplying, setUpdateApplying] = useState(false);
   const statusFromDetail = detail.source_remote_sha === null
@@ -178,7 +191,7 @@ function SkillDetailContent({ detail, onRefresh }: { readonly detail: SkillDetai
       <aside className="flex flex-col gap-16">
         <section className="rounded-10 border border-border bg-raised p-16"><h2 className="mb-12 mt-0 text-14 font-semibold text-text">Details</h2><dl className="m-0 grid gap-12 text-12"><Meta label="Source" value={detail.source ?? "Created in AgenTuna"}/><Meta label="Hash" value={detail.hash ?? "Unavailable"} mono/><Meta label="Updated" value={detail.updated_at}/><Meta label="Storage" value={detail.mode ?? "Managed copy"}/></dl></section>
         {detail.source && <section className="rounded-10 border border-border bg-raised p-16"><h2 className="mb-8 mt-0 text-14 font-semibold text-text">Automatic updates</h2><label className="flex items-center justify-between gap-12 text-12 text-text">Per-skill preference<select aria-label="Per-skill automatic updates" value={autoUpdate} onChange={(event) => { const value = event.target.value; if (value === "off" || value === "inherit" || value === "on") void changeAutoUpdate(value); }} className="rounded-6 border border-border bg-surface px-8 py-6 text-text"><option value="inherit">Follow Preferences</option><option value="on">Always on</option><option value="off">Off</option></select></label>{updateAvailable && <div className="mt-8 text-11 text-text-muted">Installed {detail.source_commit_sha ?? "unknown"} · Upstream {detail.source_remote_sha ?? "unknown"} · Checked {detail.source_last_checked_at ?? "unknown"}</div>}</section>}
-        <section className="rounded-10 border border-border bg-raised p-16"><h2 className="mb-12 mt-0 text-14 font-semibold text-text">Enabled for</h2>{detail.deployments.length === 0 ? <p className="m-0 text-12 text-text-muted">No deployments recorded.</p> : <ul className="m-0 list-none p-0">{detail.deployments.map((deployment) => <li key={deployment.agent_id} className="flex items-center justify-between gap-8 border-t border-border py-8 first:border-0"><span className="min-w-0"><strong className="block truncate text-12 text-text">{deployment.agent_name}</strong><span className="text-11 text-text-muted">{deployment.target_path ?? deployment.mode ?? "No target path"}</span><span className="block text-11 text-text-muted">Available after per-agent deployment lands.</span></span><Toggle checked={deployment.state === "linked"} disabled label={`Enabled for ${deployment.agent_name}`} description="Available after per-agent deployment lands." onCheckedChange={() => undefined}/></li>)}</ul>}</section>
+        <section className="rounded-10 border border-border bg-raised p-16"><div className="flex items-center justify-between gap-8"><h2 className="m-0 text-14 font-semibold text-text">Enabled for</h2><Button size="sm" disabled={!detail.editable || detail.missing || agentChoices.length === 0} onClick={() => setEnablePopoverOpen((open) => !open)}>Manage agents</Button></div>{agentsError && <p role="alert" className="mb-0 mt-8 text-12 text-danger">{agentsError}</p>}{detail.deployments.length === 0 ? <p className="m-0 mt-8 text-12 text-text-muted">No deployments recorded.</p> : <ul className="m-0 mt-8 list-none p-0">{detail.deployments.map((deployment) => <li key={deployment.agent_id} className="flex items-center justify-between gap-8 border-t border-border py-8 first:border-0"><span className="min-w-0"><strong className="block truncate text-12 text-text">{deployment.agent_name}</strong><span className="text-11 text-text-muted">{deployment.target_path ?? deployment.mode ?? "No target path"}</span></span><span className="text-11 text-text-secondary">{deployment.state === "linked" ? "Enabled" : deployment.state}</span></li>)}</ul>}{enablePopoverOpen && <EnableSkillPopover itemId={detail.item_id} scope={detail.scope} projectId={detail.scope === "project" || detail.scope === "local" ? snapshot.activeProject : null} agents={agentChoices.map((agent) => { const deployment = detail.deployments.find((entry) => entry.agent_id === agent.id); return { id: agent.id, label: agent.name, enabled: deployment?.state === "linked", disabledReason: !agent.installed ? "Not installed" : !agent.managed ? "AgenTuna management is off" : undefined }; })} onClose={() => setEnablePopoverOpen(false)} onApplied={() => { setEnablePopoverOpen(false); onRefresh(); }} />}</section>
         <section className="rounded-10 border border-border bg-raised p-16"><h2 className="mb-12 mt-0 text-14 font-semibold text-text">History</h2>{detail.history.length === 0 ? <p className="m-0 text-12 text-text-muted">No captured versions yet.</p> : <ol className="m-0 list-none p-0">{detail.history.map((entry) => <li key={`${entry.version_id}-${entry.captured_at}`} className="flex items-center justify-between gap-8 border-t border-border py-8 first:border-0"><span className="min-w-0"><strong className="block text-12 text-text">{entry.operation_kind ?? "Captured version"}</strong><span className="text-11 text-text-muted">{entry.captured_at} · {entry.content_hash.slice(0, 10)}</span></span><Button size="sm" disabled={versionLoading !== null} onClick={() => { setVersionLoading(entry.version_id); setVersionError(null); void compareSkillVersion(detail.item_id, entry.version_id).then(setVersionComparison, () => setVersionError("The stored version or its backup is no longer available.")).finally(() => setVersionLoading(null)); }}>{versionLoading === entry.version_id ? "Comparing…" : "Compare"}</Button></li>)}</ol>}{versionError && <p role="alert" className="mt-8 text-12 text-danger">{versionError}</p>}{versionComparison && <div className="mt-12 border-t border-border pt-12"><div className="mb-8 flex items-center justify-between gap-8"><span className="text-11 text-text-muted">Historical {versionComparison.version_hash.slice(0, 10)} → current {versionComparison.current_hash.slice(0, 10)}</span><Button size="sm" onClick={() => setVersionComparison(null)}>Close diff</Button></div><DiffViewer diff={versionComparison.diff} displayPath="SKILL.md" /></div>}</section>
       </aside>
     </div>

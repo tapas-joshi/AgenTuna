@@ -7,6 +7,9 @@ use ts_rs::TS;
 
 use super::commands::{CommandError, CommandErrorCode};
 use super::state::AppState;
+/// Remote actions, cancellable jobs and conflict-review commands.
+#[path = "remote_backup_actions.rs"]
+pub(super) mod actions;
 
 /// Settings and status visible to the remote-backup screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -30,6 +33,15 @@ pub struct RemoteBackupSettingsView {
     pub error_kind: Option<String>,
     /// Whether a credential is stored in the OS credential store.
     pub token_saved: bool,
+}
+
+fn repo_url_has_credentials_or_sensitive_suffix(repo_url: &str) -> bool {
+    url::Url::parse(repo_url).is_ok_and(|parsed| {
+        parsed.password().is_some()
+            || (matches!(parsed.scheme(), "http" | "https") && !parsed.username().is_empty())
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+    })
 }
 
 fn remote_error() -> CommandError {
@@ -82,8 +94,14 @@ pub fn remote_backup_configure(
         ));
     }
     at_git::remote::validate_repo_url(&repo_url).map_err(|_| {
-        CommandError::invalid_argument("repo_url", "enter a valid GitHub repository URL")
+        CommandError::invalid_argument("repo_url", "enter a valid token-free GitHub repository URL")
     })?;
+    if repo_url_has_credentials_or_sensitive_suffix(&repo_url) {
+        return Err(CommandError::invalid_argument(
+            "repo_url",
+            "remove credentials, query parameters or fragments from the repository URL",
+        ));
+    }
     let mut database = state.database().map_err(|_| remote_error())?;
     at_store::remote_backup::set_device_name(&mut database, Some(&device_name))
         .map_err(|_| remote_error())?;

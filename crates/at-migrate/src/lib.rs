@@ -10,6 +10,11 @@ pub mod conflicts;
 pub mod apply;
 /// Build reviewed plans and exact dry-run rows.
 pub mod plan;
+/// Generic operation undo orchestration.
+pub mod undo;
+
+/// Prepare canonical MCP/rule content and adapter-projected native writes without mutation.
+pub mod native_projection;
 
 /// Fixtures and a round-trip harness for migration safety tests. Compiled only with the
 /// `testkit` cargo feature.

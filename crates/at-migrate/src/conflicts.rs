@@ -9,7 +9,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::scan::{ParseStatus, ScanItem, ScanReport};
 
 /// A native copy participating in a conflict.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConflictCopy {
     /// Agent that reads this copy.
     pub agent: AgentId,
@@ -24,7 +24,7 @@ pub struct ConflictCopy {
 }
 
 /// Suggested action after comparison.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ProposedResolution {
     /// Keep the first copy; only formatting differs.
@@ -34,7 +34,7 @@ pub enum ProposedResolution {
 }
 
 /// One group of conflicting copies for a normalized item name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conflict {
     /// Item kind.
     pub kind: ItemKind,
@@ -51,7 +51,7 @@ pub struct Conflict {
 }
 
 /// All substantive conflicts and formatting-only groups discovered in one scan.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConflictSet {
     /// Groups containing two or more distinct copies.
     pub conflicts: Vec<Conflict>,
@@ -116,6 +116,12 @@ pub fn detect_conflicts(scan: &ScanReport) -> ConflictSet {
                 copies[0].path.display(),
                 copies[1].path.display(),
                 name
+            )
+        } else if kind == ItemKind::Skill {
+            format!(
+                "--- {}\\n+++ {}\\n skill tree content differs\\n",
+                copies[0].path.display(),
+                copies[1].path.display()
             )
         } else {
             text_diff(&copies[0], &copies[1])

@@ -123,18 +123,56 @@ fn list_servers(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
     let _access = crate::runtime::CliAccess::for_command(globals, false)?;
     let (scope, layout) = scope_layout(globals)?;
     let loaded = McpStore::load(&layout).map_err(store_error)?;
+    let paths = crate::runtime::resolve_paths(globals)?;
+    let indexed = if paths.db_path().exists() {
+        at_engine::mcp_cli::list_rows(&paths, scope, None)
+            .map_err(|error| mcp_index_error(error.to_string()))?
+    } else {
+        Vec::new()
+    };
     let servers = loaded
         .store
         .servers
         .iter()
         .map(|(slug, definition)| {
+            let row = indexed.iter().find(|row| {
+                !row.native_only
+                    && row.scope == scope
+                    && row.display_name == definition.display_name
+            });
+            let agent_state = row
+                .map(|row| {
+                    row.agents
+                        .iter()
+                        .map(|cell| {
+                            let state = match &cell.state {
+                                at_db::mcp_index::McpCellState::Linked => "linked",
+                                at_db::mcp_index::McpCellState::Off => "off",
+                                at_db::mcp_index::McpCellState::Locked => "locked",
+                                at_db::mcp_index::McpCellState::Shadowed => "shadowed",
+                                at_db::mcp_index::McpCellState::Native { .. } => "native",
+                                at_db::mcp_index::McpCellState::None => "none",
+                                at_db::mcp_index::McpCellState::NotInstalled => "not_installed",
+                                _ => "unknown",
+                            };
+                            (
+                                cell.agent_id.to_string(),
+                                json!({
+                                    "state": state,
+                                    "config_path": cell.config_path,
+                                }),
+                            )
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                })
+                .unwrap_or_default();
             json!({
                 "id": slug,
                 "scope": scope.wire_name(),
                 "name": definition.display_name,
                 "transport": definition.transport.kind(),
-                "agent_state": {},
-                "health": "unknown"
+                "agent_state": agent_state,
+                "health": row.and_then(|row| row.latest_health.as_deref()).unwrap_or("unknown")
             })
         })
         .collect::<Vec<_>>();
@@ -589,6 +627,14 @@ fn store_error(error: impl std::fmt::Display) -> CliError {
         ErrorCode::Conflict,
         format!("MCP store operation failed: {error}"),
         "check the store and retry",
+    )
+}
+
+fn mcp_index_error(message: String) -> CliError {
+    CliError::new(
+        ErrorCode::Conflict,
+        format!("MCP state index is unavailable: {message}"),
+        "run `agentuna doctor` to inspect the index",
     )
 }
 fn engine_secret_error(error: at_engine::mcp_cli::McpCliError) -> CliError {

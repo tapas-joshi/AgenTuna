@@ -61,8 +61,8 @@ pub enum McpIntent {
         /// Destination scope.
         target: Scope,
     },
-    /// Remove a managed server.
-    Delete,
+    /// Remove a managed server from its canonical scope and selected native projections.
+    Remove,
 }
 
 /// One selected agent target for MCP projection.
@@ -197,7 +197,7 @@ pub struct McpPlanRequest<'a> {
     pub project_id: Option<String>,
     /// Global lock denial reason, if locked.
     pub locked_reason: Option<&'a str>,
-    /// Canonical store to update for add/edit/rename/delete intents.
+    /// Canonical store to update for add/edit/rename/remove intents.
     pub store_layout: Option<&'a at_store::layout::StoreLayout>,
     /// Destination canonical store for promote and move intents.
     pub target_store_layout: Option<&'a at_store::layout::StoreLayout>,
@@ -216,7 +216,7 @@ pub fn plan(request: McpPlanRequest<'_>) -> Result<McpPlan, McpPlanError> {
         McpIntent::Add { .. }
             | McpIntent::Edit { .. }
             | McpIntent::Rename { .. }
-            | McpIntent::Delete
+            | McpIntent::Remove
     ) {
         store_ops.extend(canonical_store_ops(&request)?);
     } else if let McpIntent::DisableInRepo { project } = request.intent {
@@ -327,7 +327,7 @@ pub fn plan(request: McpPlanRequest<'_>) -> Result<McpPlan, McpPlanError> {
                     op,
                 )?;
             }
-            McpIntent::Delete => {
+            McpIntent::Remove => {
                 source = project_once(
                     &target.agent,
                     &target.path,
@@ -393,7 +393,7 @@ pub fn plan(request: McpPlanRequest<'_>) -> Result<McpPlan, McpPlanError> {
     let kind = match request.intent {
         McpIntent::Promote { .. } => "promote",
         McpIntent::MoveToScope { .. } => "move",
-        McpIntent::Delete => "delete",
+        McpIntent::Remove => "delete",
         _ => "edit_mcp",
     };
     let preview_id = uuid::Uuid::now_v7().to_string();
@@ -523,7 +523,7 @@ fn canonical_store_ops(request: &McpPlanRequest<'_>) -> Result<Vec<FileOp>, McpP
                 .ok_or_else(|| McpPlanError::MissingStoreEntry(from.clone()))?;
             loaded.store.set(to.clone(), definition);
         }
-        McpIntent::Delete => {
+        McpIntent::Remove => {
             let slug = request
                 .targets
                 .first()
@@ -542,7 +542,7 @@ fn canonical_store_ops(request: &McpPlanRequest<'_>) -> Result<Vec<FileOp>, McpP
         follow_symlink: false,
         backup: true,
     }];
-    if matches!(request.intent, McpIntent::Delete) {
+    if matches!(request.intent, McpIntent::Remove) {
         let target = request
             .targets
             .first()
@@ -658,7 +658,7 @@ fn intent_name(intent: &McpIntent) -> &'static str {
         McpIntent::DisableInRepo { .. } => "disable",
         McpIntent::Promote { .. } => "promote",
         McpIntent::MoveToScope { .. } => "move",
-        McpIntent::Delete => "delete",
+        McpIntent::Remove => "delete",
     }
 }
 
@@ -965,6 +965,66 @@ mod tests {
             target_store_layout: None,
         });
         assert!(matches!(result, Err(McpPlanError::DuplicateId(id)) if id == "to"));
+    }
+
+    #[test]
+    fn remove_plans_canonical_manifest_and_native_changesets() {
+        use std::fs;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store_layout(&temp);
+        let mut canonical = at_store::mcp_store::McpStore::empty();
+        canonical.set("fixture", fixture());
+        fs::write(store.mcp_file(), canonical.to_bytes().expect("MCP bytes"))
+            .expect("seed MCP store");
+        let item_id = ItemId::new();
+        let mut manifest =
+            at_store::manifest::StoreManifest::new(Scope::User, at_store::layout::StoreId::new());
+        manifest
+            .insert_item(at_store::manifest::ManifestItem::new(
+                item_id,
+                at_model::ItemKind::McpServer,
+                at_store::layout::Slug::parse("fixture").expect("slug"),
+                at_store::manifest::StorePath::parse("mcp.json").expect("path"),
+                at_store::manifest::ContentHash::from_bytes(b"fixture"),
+            ))
+            .expect("manifest item");
+        fs::write(
+            store.manifest_path(),
+            manifest.to_bytes().expect("manifest bytes"),
+        )
+        .expect("seed manifest");
+
+        let registry = AgentAdapterRegistry::register();
+        let env = AgentEnvironment {
+            home: PathBuf::from("/fixture/home"),
+            project: None,
+            variables: BTreeMap::new(),
+        };
+        let definition = fixture();
+        let intent = McpIntent::Remove;
+        let target = McpTarget {
+            item_id,
+            ..target(AgentId::Codex, "/fixture/config.toml", "")
+        };
+        let plan = plan(McpPlanRequest {
+            registry: &registry,
+            env: &env,
+            intent: &intent,
+            targets: std::slice::from_ref(&target),
+            definition: &definition,
+            scope: Scope::User,
+            project_id: None,
+            locked_reason: None,
+            store_layout: Some(&store),
+            target_store_layout: None,
+        })
+        .expect("remove plan");
+
+        let store_plan = plan.store.as_ref().expect("canonical removal");
+        assert_eq!(store_plan.ops.len(), 2);
+        assert!(plan.native.is_some());
+        assert_eq!(plan.apply_order().count(), 2);
     }
 
     #[test]

@@ -38,6 +38,22 @@ impl CommandGroup for EffectiveGroup {
                         .value_name("KIND")
                         .value_parser(["skill", "mcp", "mcp_server", "rule"])
                         .help("Limit output to one item kind"),
+                )
+                .subcommand(
+                    Command::new("lock")
+                        .about("Lock an item at Global scope")
+                        .arg(Arg::new("item").required(true).value_name("ITEM"))
+                        .arg(
+                            Arg::new("reason")
+                                .long("reason")
+                                .required(true)
+                                .value_name("TEXT"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("unlock")
+                        .about("Remove a Global lock")
+                        .arg(Arg::new("item").required(true).value_name("ITEM")),
                 ),
         )
     }
@@ -47,6 +63,17 @@ impl CommandGroup for EffectiveGroup {
         globals: &GlobalArgs,
         matches: &ArgMatches,
     ) -> Result<CommandOutput, CliError> {
+        if let Some((command, args)) = matches.subcommand() {
+            return match command {
+                "lock" => mutate_lock(globals, args, true),
+                "unlock" => mutate_lock(globals, args, false),
+                _ => Err(CliError::new(
+                    ErrorCode::Usage,
+                    "unsupported effective subcommand",
+                    "run `agentuna effective --help`",
+                )),
+            };
+        }
         let scope = globals.scope().ok_or_else(|| {
             CliError::new(
                 ErrorCode::Validation,
@@ -110,6 +137,88 @@ impl CommandGroup for EffectiveGroup {
         });
         Ok(CommandOutput::new(data, human))
     }
+}
+fn mutate_lock(
+    globals: &GlobalArgs,
+    args: &ArgMatches,
+    lock: bool,
+) -> Result<CommandOutput, CliError> {
+    let scope = globals.scope().ok_or_else(|| {
+        CliError::new(
+            ErrorCode::Validation,
+            "lock commands require --scope global",
+            "select Global scope",
+        )
+    })?;
+    if scope != at_model::Scope::Global {
+        return Err(CliError::new(
+            ErrorCode::Locked,
+            "locks can only be changed at Global scope",
+            "select `--scope global`",
+        ));
+    }
+    let raw_id = args
+        .get_one::<String>("item")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let item_id = raw_id.parse::<at_model::ItemId>().map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            "invalid item id",
+            "use an item id from `agentuna effective --scope global`",
+        )
+    })?;
+    let reason = if lock {
+        let reason = args
+            .get_one::<String>("reason")
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim();
+        if reason.is_empty() || reason.chars().count() > 200 {
+            return Err(CliError::new(
+                ErrorCode::Validation,
+                "lock reason must contain 1–200 characters",
+                "provide a concise reason with `--reason`",
+            ));
+        }
+        Some(reason)
+    } else {
+        None
+    };
+    let paths = resolve_paths(globals)?;
+    let _access = CliAccess::write(&paths)?;
+    if let Some(reason) = reason {
+        let record =
+            at_engine::locks::lock_in_database(&paths, scope, item_id, reason, "agentuna CLI")
+                .map_err(|error| lock_cli_error(error, item_id))?;
+        Ok(CommandOutput::new(
+            json!({"locked": true, "reason": record.lock.reason, "item_id": item_id}),
+            format!("Locked {item_id}: {reason}\n"),
+        ))
+    } else {
+        let record = at_engine::locks::unlock_in_database(&paths, scope, item_id)
+            .map_err(|error| lock_cli_error(error, item_id))?;
+        Ok(CommandOutput::new(
+            json!({"locked": false, "reason": record.lock.reason, "item_id": item_id}),
+            format!("Unlocked {item_id}\n"),
+        ))
+    }
+}
+
+fn lock_cli_error(error: at_engine::EngineError, item_id: at_model::ItemId) -> CliError {
+    let message = error.to_string();
+    let code = if message.contains("does not exist") || message.contains("not locked") {
+        ErrorCode::NotFound
+    } else if message.contains("Global-only") {
+        ErrorCode::Locked
+    } else {
+        ErrorCode::Conflict
+    };
+    CliError::new(
+        code,
+        format!("{item_id}: {message}"),
+        "check the selected scope and index, then retry",
+    )
 }
 
 fn format_effective(

@@ -4,8 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use at_fs::{ApplyContext as FsApplyContext, ApplyRoots, ChangeSetApplyError, OperationRecorder};
-use at_model::{ChangeSet, DeployMode, ExpectedState, FileOp};
+pub use crate::undo::{UndoError, UndoOperationRequest, UndoOutcome, undo_operation};
+use at_fs::{ApplyContext as FsApplyContext, ApplyRoots, ChangeSetApplyError};
+use at_model::{
+    ChangeSet, DeployMode, ExpectedState, FileOp, ItemId, ItemKind, ItemState, SyncLabel,
+};
+use at_store::layout::{Slug, StoreLayout};
+use at_store::manifest::{ContentHash, ManifestItem, StoreManifest, StorePath};
 
 use crate::plan::{MigrationAction, MigrationPlan, PlanError, validate_plan};
 
@@ -17,8 +22,23 @@ pub struct ApplyPlanContext<'a> {
     pub backup_root: &'a Path,
     /// Existing roots authorized for absolute native paths.
     pub authorized_roots: &'a ApplyRoots,
-    /// Operation recorder, normally backed by `at-db`.
-    pub recorder: &'a mut dyn OperationRecorder,
+    /// Database for the operation journal and migration metadata.
+    pub database: &'a mut at_db::Database,
+}
+
+struct CanonicalMigrationItem {
+    id: ItemId,
+    kind: ItemKind,
+    scope: at_model::Scope,
+    native_scope: at_model::Scope,
+    slug: String,
+    name: String,
+    source_path: PathBuf,
+    store_path: PathBuf,
+    content_hash: String,
+    agents: Vec<at_model::AgentId>,
+    target_path: PathBuf,
+    mode: &'static str,
 }
 
 /// Result of applying a migration plan.
@@ -54,6 +74,9 @@ pub enum ApplyPlanError {
         #[source]
         source: std::io::Error,
     },
+    /// Canonical store metadata could not be loaded or updated.
+    #[error("canonical store update failed: {0}")]
+    Store(String),
     /// A reviewed ChangeSet failed preflight, apply, journalling or rollback.
     #[error(transparent)]
     Apply(#[from] ChangeSetApplyError),
@@ -61,16 +84,19 @@ pub enum ApplyPlanError {
     #[error("invalid migration operation kind: {0}")]
     OperationKind(String),
     /// The system clock predates the Unix epoch.
-    #[error("system clock is before the Unix epoch")]
+    #[error("the system clock is before the Unix epoch")]
     Clock,
+    /// Migration index rows could not be committed.
+    #[error("migration metadata failed: {0}")]
+    Metadata(String),
 }
 
 /// Applies the reviewed plan through one at-fs journal and operation record.
 ///
 /// Skill sources are copied into the store. `LeaveAndWatch` leaves native originals in
-/// place; replacement plans move originals into the store's operation backup area before
-/// creating a link or copy deployment. Plan and source hashes are rechecked immediately
-/// before the ChangeSet is submitted to at-fs.
+/// place; replacement plans move each original tree into the operation backup area before
+/// creating a link or a manifest-bearing copy deployment. Plan and source hashes are
+/// rechecked immediately before the ChangeSet is submitted to at-fs.
 ///
 /// # Errors
 /// Returns [`ApplyPlanError::Plan`] for stale input, or a typed filesystem/apply failure.
@@ -79,6 +105,66 @@ pub fn apply_plan(
     context: &mut ApplyPlanContext<'_>,
 ) -> Result<MigrationApplyOutcome, ApplyPlanError> {
     validate_plan(plan)?;
+    let layout = StoreLayout::new(plan.scope, context.store_root);
+    let loaded_manifest =
+        StoreManifest::load(&layout).map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+    let mut manifest = loaded_manifest.manifest;
+    let manifest_expected = ExpectedState::hash(loaded_manifest.hash.as_str())
+        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+    let mut manifest_changed = false;
+    let requests = plan
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.action,
+                MigrationAction::RenderMcp | MigrationAction::RenderRule
+            )
+        })
+        .map(|step| {
+            let agent = step.agents.iter().next().ok_or_else(|| {
+                ApplyPlanError::Unsupported(step.source.clone().unwrap_or_default())
+            })?;
+            let source = step
+                .source
+                .as_ref()
+                .ok_or_else(|| ApplyPlanError::Unsupported(PathBuf::new()))?;
+            let project = matches!(
+                step.scope,
+                at_model::Scope::Project | at_model::Scope::Local
+            )
+            .then(|| source.parent())
+            .flatten();
+            Ok(crate::native_projection::NativeProjectionRequest {
+                plan,
+                step,
+                store_root: context.store_root,
+                native_source_path: source,
+                agent,
+                item_name: step
+                    .item_name
+                    .as_deref()
+                    .ok_or_else(|| ApplyPlanError::Unsupported(source.clone()))?,
+                native_item_name: step
+                    .source_item_name
+                    .as_deref()
+                    .ok_or_else(|| ApplyPlanError::Unsupported(source.clone()))?,
+                project,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplyPlanError>>()?;
+    let projections = if requests.is_empty() {
+        crate::native_projection::PreparedNativeProjectionBatch {
+            items: Vec::new(),
+            canonical_writes: Vec::new(),
+            native_writes: Vec::new(),
+        }
+    } else {
+        crate::native_projection::prepare_native_projections(&requests)
+            .map_err(|error| ApplyPlanError::Store(error.to_string()))?
+    };
+    let mut projection_writes_added = false;
+    let mut canonical_items = Vec::new();
     let mut ops = Vec::new();
     let mut touched = Vec::new();
     let mut sources: Vec<(PathBuf, PathBuf, String)> = Vec::new();
@@ -103,14 +189,104 @@ pub fn apply_plan(
                     expected,
                 });
                 touched.push(destination.clone());
-                sources.push((
-                    source.clone(),
-                    destination.clone(),
-                    step.expected_source_hash.clone().unwrap_or_default(),
-                ));
+                let hash = step
+                    .expected_source_hash
+                    .as_deref()
+                    .ok_or_else(|| ApplyPlanError::Unsupported(source.clone()))?;
+                let slug_text = relative
+                    .file_name()
+                    .and_then(|part| part.to_str())
+                    .ok_or_else(|| ApplyPlanError::Unsupported(destination.clone()))?;
+                let slug = Slug::parse(slug_text)
+                    .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                let manifest_path =
+                    StorePath::parse(&relative.to_string_lossy().replace('\\', "/"))
+                        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                let content_hash = ContentHash::parse(hash)
+                    .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                let item_id = at_db::items::item_id_by_identity(
+                    context.database.connection(),
+                    ItemKind::Skill,
+                    plan.scope,
+                    None,
+                    slug_text,
+                )
+                .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
+                .unwrap_or_else(ItemId::new);
+                let item_name = slug_text.to_owned();
+                manifest
+                    .insert_item(
+                        ManifestItem::new(
+                            item_id,
+                            ItemKind::Skill,
+                            slug.clone(),
+                            manifest_path,
+                            content_hash,
+                        )
+                        .with_name(item_name.clone()),
+                    )
+                    .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                let deploy_step = plan.steps.iter().find(|candidate| {
+                    matches!(
+                        candidate.action,
+                        MigrationAction::WriteLink
+                            | MigrationAction::WriteCopy
+                            | MigrationAction::RecordWatched
+                    ) && candidate
+                        .source
+                        .as_ref()
+                        .is_some_and(|path| path == source || path == destination)
+                });
+                let (agents, target_path, mode) = deploy_step.map_or_else(
+                    || (Vec::new(), source.clone(), "native"),
+                    |candidate| {
+                        let mode = match candidate.action {
+                            MigrationAction::WriteCopy => "copy",
+                            MigrationAction::WriteLink => "symlink",
+                            _ => "native",
+                        };
+                        (
+                            candidate.agents.iter().cloned().collect(),
+                            candidate
+                                .destination
+                                .clone()
+                                .unwrap_or_else(|| source.clone()),
+                            mode,
+                        )
+                    },
+                );
+                canonical_items.push(CanonicalMigrationItem {
+                    id: item_id,
+                    kind: ItemKind::Skill,
+                    scope: plan.scope,
+                    native_scope: step.scope,
+                    slug: slug_text.to_owned(),
+                    name: item_name,
+                    source_path: source.clone(),
+                    store_path: destination.clone(),
+                    content_hash: hash.to_owned(),
+                    agents,
+                    target_path,
+                    mode,
+                });
+                manifest_changed = true;
+                sources.push((source.clone(), destination.clone(), hash.to_owned()));
             }
             MigrationAction::RecordWatched => {}
+            MigrationAction::UpdateManifest => manifest_changed = true,
             MigrationAction::WriteLink | MigrationAction::WriteCopy => {
+                let destination = step
+                    .destination
+                    .as_ref()
+                    .ok_or_else(|| ApplyPlanError::Unsupported(PathBuf::new()))?;
+                if plan.steps.iter().any(|candidate| {
+                    matches!(
+                        candidate.action,
+                        MigrationAction::RenderMcp | MigrationAction::RenderRule
+                    ) && candidate.source.as_ref() == Some(destination)
+                }) {
+                    continue;
+                }
                 let source = step
                     .source
                     .as_ref()
@@ -119,7 +295,7 @@ pub fn apply_plan(
                     .destination
                     .as_ref()
                     .ok_or_else(|| ApplyPlanError::Unsupported(source.clone()))?;
-                let original = plan
+                let _original = plan
                     .steps
                     .iter()
                     .find(|candidate| {
@@ -127,14 +303,6 @@ pub fn apply_plan(
                             && candidate.source.as_ref() == Some(destination)
                     })
                     .ok_or_else(|| ApplyPlanError::Unsupported(destination.clone()))?;
-                let backup = context
-                    .store_root
-                    .join(".state/migration-originals")
-                    .join(&plan.id)
-                    .join(format!("{:06}", original.seq));
-                let backup_relative = backup
-                    .strip_prefix(context.store_root)
-                    .map_err(|_| ApplyPlanError::OutsideStore(backup.clone()))?;
                 let expected_hash = at_fs::changeset::hash_node(destination)
                     .map_err(|source| ApplyPlanError::SourceRead {
                         path: destination.clone(),
@@ -143,9 +311,8 @@ pub fn apply_plan(
                     .ok_or_else(|| ApplyPlanError::Unsupported(destination.clone()))?;
                 let expected = ExpectedState::hash(&expected_hash)
                     .map_err(|_| ApplyPlanError::Unsupported(destination.clone()))?;
-                ops.push(FileOp::Move {
-                    from: destination.clone(),
-                    to: backup_relative.to_path_buf(),
+                ops.push(FileOp::Delete {
+                    path: destination.clone(),
                     expected,
                 });
                 match step.action {
@@ -154,21 +321,134 @@ pub fn apply_plan(
                         target: source.clone(),
                         mode: DeployMode::Link,
                     }),
-                    MigrationAction::WriteCopy => ops.push(FileOp::Copy {
-                        source: source.clone(),
-                        dest: destination.clone(),
-                        expected: ExpectedState::Absent,
+                    MigrationAction::WriteCopy => ops.push(FileOp::Symlink {
+                        link_path: destination.clone(),
+                        target: source.clone(),
+                        mode: DeployMode::Copy,
                     }),
                     _ => {}
                 }
-                touched.extend([destination.clone(), backup]);
+                touched.push(destination.clone());
             }
             MigrationAction::BackupOriginal => {}
             MigrationAction::RenderMcp | MigrationAction::RenderRule => {
-                let path = step.source.clone().unwrap_or_default();
-                return Err(ApplyPlanError::Unsupported(path));
+                if projection_writes_added {
+                    continue;
+                }
+                for projection_item in &projections.items {
+                    let step = plan
+                        .steps
+                        .iter()
+                        .find(|candidate| {
+                            candidate.source.as_ref() == Some(&projection_item.source_path)
+                                && candidate.item_name.as_deref()
+                                    == Some(projection_item.item_name.as_str())
+                        })
+                        .ok_or_else(|| {
+                            ApplyPlanError::Unsupported(projection_item.source_path.clone())
+                        })?;
+                    let destination = step.destination.as_ref().ok_or_else(|| {
+                        ApplyPlanError::Unsupported(projection_item.source_path.clone())
+                    })?;
+                    let relative = destination
+                        .strip_prefix(context.store_root)
+                        .map_err(|_| ApplyPlanError::OutsideStore(destination.clone()))?;
+                    // Rule files are named `AGENTS`/`CLAUDE`; store slugs are lowercase.
+                    let slug_text = projection_item.item_name.to_ascii_lowercase();
+                    let slug = Slug::parse(&slug_text)
+                        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                    let item_id = at_db::items::item_id_by_identity(
+                        context.database.connection(),
+                        projection_item.kind,
+                        plan.scope,
+                        None,
+                        slug.as_str(),
+                    )
+                    .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
+                    .unwrap_or_else(ItemId::new);
+                    let canonical = projections
+                        .canonical_writes
+                        .iter()
+                        .find(|write| write.path == *destination)
+                        .ok_or_else(|| ApplyPlanError::Unsupported(destination.clone()))?;
+                    let content_hash = at_fs::sha256_hex(&canonical.bytes);
+                    let store_path =
+                        StorePath::parse(&relative.to_string_lossy().replace('\\', "/"))
+                            .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                    let content_hash_typed = ContentHash::parse(&content_hash)
+                        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                    manifest
+                        .insert_item(
+                            ManifestItem::new(
+                                item_id,
+                                projection_item.kind,
+                                slug,
+                                store_path,
+                                content_hash_typed,
+                            )
+                            .with_name(projection_item.item_name.clone()),
+                        )
+                        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                    canonical_items.push(CanonicalMigrationItem {
+                        id: item_id,
+                        kind: projection_item.kind,
+                        scope: plan.scope,
+                        native_scope: step.scope,
+                        slug: slug_text,
+                        name: projection_item.item_name.clone(),
+                        source_path: projection_item.source_path.clone(),
+                        store_path: destination.clone(),
+                        content_hash,
+                        agents: vec![projection_item.agent.clone()],
+                        target_path: projection_item.source_path.clone(),
+                        mode: "native",
+                    });
+                }
+                for write in &projections.canonical_writes {
+                    let relative = write
+                        .path
+                        .strip_prefix(context.store_root)
+                        .map_err(|_| ApplyPlanError::OutsideStore(write.path.clone()))?;
+                    ops.push(FileOp::Write {
+                        path: relative.to_path_buf(),
+                        bytes: write.bytes.clone(),
+                        expected: write.expected.clone(),
+                        follow_symlink: false,
+                        backup: true,
+                    });
+                    touched.push(write.path.clone());
+                }
+                for write in &projections.native_writes {
+                    ops.push(FileOp::Write {
+                        path: write.path.clone(),
+                        bytes: write.bytes.clone(),
+                        expected: write.expected.clone(),
+                        follow_symlink: false,
+                        backup: true,
+                    });
+                    touched.push(write.path.clone());
+                }
+                manifest_changed = true;
+                projection_writes_added = true;
             }
         }
+    }
+    if manifest_changed {
+        let manifest_path = layout.manifest_path();
+        let relative = manifest_path
+            .strip_prefix(context.store_root)
+            .map_err(|_| ApplyPlanError::OutsideStore(manifest_path.clone()))?;
+        let bytes = manifest
+            .to_bytes()
+            .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+        ops.push(FileOp::Write {
+            path: relative.to_path_buf(),
+            bytes,
+            expected: manifest_expected,
+            follow_symlink: false,
+            backup: true,
+        });
+        touched.push(manifest_path);
     }
     for (source, _, expected) in &sources {
         let actual = hash_source(source).map_err(|source_error| ApplyPlanError::SourceRead {
@@ -195,12 +475,26 @@ pub fn apply_plan(
         ops,
         created_at_unix_seconds,
     };
-    let mut fs_context = FsApplyContext {
-        store_root: context.store_root,
-        backup_folder: context.backup_root,
-        recorder: context.recorder,
+    let mut outcome = {
+        let mut recorder = at_fs::DbOperationRecorder::new(context.database.connection_mut(), 30);
+        let mut fs_context = FsApplyContext {
+            store_root: context.store_root,
+            backup_folder: context.backup_root,
+            recorder: &mut recorder,
+        };
+        at_fs::apply_with_roots_reversible(&change_set, &mut fs_context, context.authorized_roots)?
     };
-    let outcome = at_fs::apply_with_roots(&change_set, &mut fs_context, context.authorized_roots)?;
+    if let Err(error) =
+        record_migration_metadata(context.database, &canonical_items, &outcome.operation_id)
+    {
+        if let Some(handle) = outcome.rollback_handle.take() {
+            at_fs::rollback_committed(handle)?;
+        }
+        return Err(error);
+    }
+    if let Some(handle) = outcome.rollback_handle.take() {
+        at_fs::commit_reversible(handle)?;
+    }
     touched.sort();
     touched.dedup();
     Ok(MigrationApplyOutcome {
@@ -210,6 +504,103 @@ pub fn apply_plan(
     })
 }
 
+fn record_migration_metadata(
+    database: &mut at_db::Database,
+    items: &[CanonicalMigrationItem],
+    operation_id: &str,
+) -> Result<(), ApplyPlanError> {
+    let transaction = database
+        .connection_mut()
+        .transaction()
+        .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
+    let mut adopted_paths = std::collections::BTreeSet::new();
+    for item in items {
+        let source_path = item.store_path.to_string_lossy();
+        let spec = at_db::items::AdoptedItemSpec {
+            proposed_id: item.id,
+            kind: item.kind,
+            scope: item.scope,
+            project_id: None,
+            slug: &item.slug,
+            name: &item.name,
+            source_path: &source_path,
+            content_hash: Some(&item.content_hash),
+        };
+        let stored_id = at_db::items::upsert_adopted_item(&transaction, &spec)
+            .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
+        if stored_id != item.id {
+            return Err(ApplyPlanError::Metadata(format!(
+                "store manifest id {} differs from database id {} for {}",
+                item.id, stored_id, item.slug
+            )));
+        }
+        if let Some(agent_id) = item.agents.first() {
+            let native_path = item.source_path.to_string_lossy();
+            if adopted_paths.insert(native_path.to_string()) {
+                let native = at_db::native::NativeAdoptionPath {
+                    agent_id,
+                    scope: item.native_scope,
+                    kind: item.kind,
+                    name: &item.name,
+                    path: &native_path,
+                    content_hash: Some(&item.content_hash),
+                };
+                at_db::native::adopt_paths(&transaction, &[native], &item.id)
+                    .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
+            }
+        }
+        let target_path = item.target_path.to_string_lossy();
+        let store_path = item.store_path.to_string_lossy();
+        for agent_id in &item.agents {
+            let mode = observed_mode(item)?;
+            let state = if mode == "native" {
+                ItemState::Native
+            } else {
+                ItemState::Linked
+            };
+            let mut deployment =
+                at_db::deployments::DeploymentSpec::new(&item.id, agent_id, item.scope, state)
+                    .with_mode(mode)
+                    .with_target_path(&target_path)
+                    .with_hashes(
+                        Some(&item.content_hash),
+                        Some(&item.content_hash),
+                        Some(&item.content_hash),
+                    )
+                    .with_sync_label(SyncLabel::InSync)
+                    .with_operation(operation_id);
+            if mode == "symlink" || mode == "junction" {
+                deployment = deployment.with_link_target(&store_path);
+            }
+            at_db::deployments::upsert_deployment(&transaction, &deployment)
+                .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| ApplyPlanError::Metadata(error.to_string()))
+}
+
+fn observed_mode(item: &CanonicalMigrationItem) -> Result<&'static str, ApplyPlanError> {
+    if item.mode != "symlink" {
+        return Ok(item.mode);
+    }
+    let metadata =
+        fs::symlink_metadata(&item.target_path).map_err(|source| ApplyPlanError::SourceRead {
+            path: item.target_path.clone(),
+            source,
+        })?;
+    if metadata.file_type().is_symlink() {
+        return Ok("symlink");
+    }
+    if at_fs::CopyManifest::read(&item.target_path)
+        .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
+        .is_some()
+    {
+        return Ok("copy");
+    }
+    Ok("junction")
+}
 fn hash_source(path: &Path) -> Result<String, std::io::Error> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {

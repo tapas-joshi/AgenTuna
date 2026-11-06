@@ -33,6 +33,7 @@ pub mod source_updates;
 pub mod state;
 pub mod updater;
 pub mod window_state;
+pub mod workflows;
 
 use at_store::config::LogLevel;
 use std::sync::Arc;
@@ -252,8 +253,20 @@ pub fn run() -> tauri::Result<()> {
         commands::settings_set,
         remote_backup::remote_backup_settings,
         remote_backup::remote_backup_configure,
+        remote_backup::actions::status,
+        remote_backup::actions::backup_now,
+        remote_backup::actions::sync_now,
+        remote_backup::actions::restore_commits,
+        remote_backup::actions::restore_confirmation,
+        remote_backup::actions::restore,
+        remote_backup::actions::conflicts_list,
+        remote_backup::actions::conflicts_reveal,
+        remote_backup::actions::conflicts_resolve_preview,
+        remote_backup::actions::conflicts_resolve_apply,
         effective::effective_query,
         effective::why_trace,
+        effective::effective_lock,
+        effective::effective_unlock,
         migrate::migrate_scan,
         overview::overview_load,
         overview::overview_enable_global_writes,
@@ -272,6 +285,7 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::skill_compare_copies,
         skill_detail::skill_version_compare,
         skill_detail::skill_reveal,
+        skill_detail::reveal_item,
         skill_detail::skill_edit_preview,
         skill_detail::skill_edit_apply,
         window_state::window_state_load,
@@ -308,7 +322,20 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_library_catalog,
         skill_wizard::skill_import_git_candidates,
         skill_wizard::skill_marketplace_search,
-        skill_wizard::skill_add_apply
+        skill_wizard::skill_add_apply,
+        migrate::migrate_conflicts,
+        workflows::instructions_list,
+        workflows::instruction_save,
+        workflows::instruction_create_project,
+        workflows::agents_list,
+        workflows::agent_manage_set,
+        workflows::agent_link_mode_set,
+        workflows::presets_list,
+        workflows::preset_create,
+        workflows::preset_rename,
+        workflows::preset_delete,
+        workflows::preset_member_set,
+        workflows::preset_apply
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -322,10 +349,23 @@ pub fn run() -> tauri::Result<()> {
         commands::settings_load,
         effective::effective_query,
         effective::why_trace,
+        effective::effective_lock,
+        effective::effective_unlock,
         migrate::migrate_scan,
+        migrate::migrate_conflicts,
         commands::settings_set,
         remote_backup::remote_backup_settings,
         remote_backup::remote_backup_configure,
+        remote_backup::actions::status,
+        remote_backup::actions::backup_now,
+        remote_backup::actions::sync_now,
+        remote_backup::actions::restore_commits,
+        remote_backup::actions::restore_confirmation,
+        remote_backup::actions::restore,
+        remote_backup::actions::conflicts_list,
+        remote_backup::actions::conflicts_reveal,
+        remote_backup::actions::conflicts_resolve_preview,
+        remote_backup::actions::conflicts_resolve_apply,
         commands::recovery_sheet,
         commands::recovery_discard,
         commands::recovery_restore,
@@ -343,6 +383,7 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::skill_compare_copies,
         skill_detail::skill_version_compare,
         skill_detail::skill_reveal,
+        skill_detail::reveal_item,
         skill_detail::skill_edit_preview,
         skill_detail::skill_edit_apply,
         window_state::window_state_load,
@@ -380,7 +421,19 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_library_catalog,
         skill_wizard::skill_marketplace_search,
         skill_wizard::skill_import_git_candidates,
-        skill_wizard::skill_add_apply
+        skill_wizard::skill_add_apply,
+        workflows::instructions_list,
+        workflows::instruction_save,
+        workflows::instruction_create_project,
+        workflows::agents_list,
+        workflows::agent_manage_set,
+        workflows::agent_link_mode_set,
+        workflows::presets_list,
+        workflows::preset_create,
+        workflows::preset_rename,
+        workflows::preset_delete,
+        workflows::preset_member_set,
+        workflows::preset_apply
     ]);
 
     let exit_paths = paths.clone();

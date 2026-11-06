@@ -33,7 +33,7 @@ test("picker, palette, Preferences and state-view baselines", async ({ page }) =
   await expect(page).toHaveScreenshot("preferences-populated.png", { animations: "disabled", caret: "hide" });
 
   await page.getByRole("button", { name: "Skills", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Skills", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Presets", exact: true })).toBeVisible();
   await expect(page).toHaveScreenshot("state-empty.png", { animations: "disabled", caret: "hide" });
 });
 test("Preferences loading and error state-view baselines", async ({ page }) => {

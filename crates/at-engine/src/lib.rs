@@ -1,7 +1,9 @@
 //! Scope resolution, effective config, and change planning engine.
 
 pub mod agent_paths;
+pub mod bulk_skill;
 pub mod deploy;
+pub mod drift;
 pub mod effective;
 pub mod error;
 pub mod health;

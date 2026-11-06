@@ -28,6 +28,8 @@ pub fn production_registry() -> Result<Registry, RegistryError> {
         Box::new(crate::agents::AgentsGroup),
         Box::new(crate::effective::EffectiveGroup),
         Box::new(crate::why::WhyGroup),
+        Box::new(crate::overview::OverviewGroup),
+        Box::new(crate::rules::RulesGroup),
     ])
 }
 

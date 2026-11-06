@@ -1026,4 +1026,61 @@ mod tests {
             b"third"
         );
     }
+    #[test]
+    fn ignored_sha_survives_database_reopen_until_a_newer_sha_is_discovered() {
+        let fixture = tempfile::tempdir().expect("fixture directory");
+        let database_path = fixture.path().join("index.sqlite");
+        let item_id = ItemId::new();
+        let source_id = {
+            let mut database =
+                at_db::Database::open_file(&database_path).expect("persistent database");
+            insert_item(&database, &item_id);
+            let mut spec =
+                at_db::sources::SourceSpec::new(&item_id, at_db::sources::SourceKind::Git);
+            spec.commit_sha = Some("installed");
+            let source_id =
+                at_db::sources::upsert_source(database.connection_mut(), &spec).expect("source");
+            at_db::sources::record_update_check(
+                database.connection(),
+                &source_id,
+                &at_db::sources::CheckOutcome {
+                    remote_sha: Some("ignored"),
+                    update_available: true,
+                    ..Default::default()
+                },
+            )
+            .expect("record update");
+            at_db::sources::set_ignored_sha(database.connection(), &source_id, Some("ignored"))
+                .expect("ignore sha");
+            source_id
+        };
+
+        let database = at_db::Database::open_file(&database_path).expect("reopen database");
+        let row = at_db::sources::get_source(database.connection(), &source_id)
+            .expect("read source")
+            .expect("source row");
+        assert_eq!(row.ignored_sha.as_deref(), Some("ignored"));
+        assert!(
+            at_db::sources::update_candidates(database.connection())
+                .expect("ignored candidate query")
+                .is_empty()
+        );
+
+        at_db::sources::record_update_check(
+            database.connection(),
+            &source_id,
+            &at_db::sources::CheckOutcome {
+                remote_sha: Some("newer"),
+                update_available: true,
+                ..Default::default()
+            },
+        )
+        .expect("discover newer sha");
+        assert_eq!(
+            at_db::sources::update_candidates(database.connection())
+                .expect("new candidate query")
+                .len(),
+            1
+        );
+    }
 }

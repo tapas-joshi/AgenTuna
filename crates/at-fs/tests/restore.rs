@@ -217,3 +217,41 @@ fn corrupt_blob_is_refused_without_target_or_history_changes() {
         0
     );
 }
+
+#[test]
+fn restores_directory_tree_from_catalogue_backup() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path().join("store");
+    let target = root.join("native/skill");
+    let backup_tree = temp.path().join("catalogue-tree/skill");
+    fs::create_dir_all(backup_tree.join("assets")).expect("backup tree");
+    fs::write(backup_tree.join("SKILL.md"), b"saved skill\n").expect("backup document");
+    fs::write(backup_tree.join("assets/logo.svg"), b"<svg/>\n").expect("backup asset");
+    fs::create_dir_all(&root).expect("store root");
+    let hash = at_fs::changeset::hash_node(&backup_tree)
+        .expect("hash tree")
+        .expect("tree exists");
+    let database = Database::open_in_memory().expect("database");
+    let original = "native/skill";
+    let backup_path = backup_tree.to_string_lossy().into_owned();
+    let backup_id = backups::record_backup(
+        database.connection(),
+        &backups::NewBackup::new(original, &backup_path).with_content(Some(&hash), None),
+    )
+    .expect("catalogue row");
+    let outcome = restore_backup(RestoreRequest {
+        connection: database.connection(),
+        store_root: &root,
+        backup_id: &backup_id,
+        confirmation: None,
+        actor: ops::OperationActor::Ui,
+    })
+    .expect("restore tree");
+    assert!(matches!(outcome, RestoreOutcome::Restored { .. }));
+    assert_eq!(
+        at_fs::changeset::hash_node(&target)
+            .expect("hash restored tree")
+            .as_deref(),
+        Some(hash.as_str())
+    );
+}

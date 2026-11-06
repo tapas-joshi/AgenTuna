@@ -455,11 +455,14 @@ dependencies = [
  "at-migrate",
  "at-model",
  "at-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "similar",
+ "tempfile",
  "thiserror 2.0.21",
+ "time",
  "toml_edit 0.25.18+spec-1.1.0",
 ]
 

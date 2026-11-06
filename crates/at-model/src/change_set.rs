@@ -402,7 +402,8 @@ pub struct ChangeSet {
 }
 
 impl ChangeSet {
-    /// Validates the set: at least one op, unique destinations, no parent/child collisions.
+    /// Validates the set: destinations are unique except for a Delete immediately followed
+    /// by a Symlink or Move at the same path, and no operation targets a parent of another.
     ///
     /// Pure; performs no IO. Returns [`ChangeSetError::PathCollision`] naming the first
     /// collision found.
@@ -415,7 +416,7 @@ impl ChangeSet {
             return Err(ChangeSetError::Empty);
         }
         let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-        for op in &self.ops {
+        for (index, op) in self.ops.iter().enumerate() {
             let Some(destination) = op.destination() else {
                 continue;
             };
@@ -426,10 +427,20 @@ impl ChangeSet {
                 });
             }
             if !seen.insert(destination.to_path_buf()) {
-                return Err(ChangeSetError::PathCollision {
-                    path: destination.display().to_string(),
-                    reason: "two operations write the same destination".to_owned(),
-                });
+                let replaced_delete = matches!(op, FileOp::Symlink { .. } | FileOp::Move { .. })
+                    && index
+                        .checked_sub(1)
+                        .and_then(|previous| self.ops.get(previous))
+                        .is_some_and(|previous| {
+                            previous.destination() == Some(destination)
+                                && matches!(previous, FileOp::Delete { .. })
+                        });
+                if !replaced_delete {
+                    return Err(ChangeSetError::PathCollision {
+                        path: destination.display().to_string(),
+                        reason: "two operations write the same destination".to_owned(),
+                    });
+                }
             }
         }
         // Parent-directory rule: no op may target a directory that is an ancestor of another

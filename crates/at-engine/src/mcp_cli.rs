@@ -170,6 +170,20 @@ pub fn make_server(scope: Scope, definition: McpServerDef) -> McpServer {
     McpServer::from_def(McpServerId::new(), scope, definition)
 }
 
+/// Loads the indexed MCP rows used by the CLI list command without creating or migrating a DB.
+///
+/// # Errors
+/// Returns a typed database failure when the existing index cannot be read.
+pub fn list_rows(
+    paths: &AppPaths,
+    scope: Scope,
+    project_id: Option<&str>,
+) -> Result<Vec<at_db::mcp_index::McpListRow>, McpCliError> {
+    let database = at_db::ReadOnlyDatabase::open(paths.db_path()).map_err(database_error)?;
+    at_db::mcp_index::mcp_list_rows(database.connection(), Some(scope), project_id)
+        .map_err(database_error)
+}
+
 fn secret_error(error: impl std::fmt::Display) -> McpCliError {
     McpCliError::Secret {
         message: error.to_string(),
