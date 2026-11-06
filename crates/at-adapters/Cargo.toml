@@ -19,6 +19,7 @@ url.workspace = true
 at-secrets.workspace = true
 toml_edit.workspace = true
 saphyr.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

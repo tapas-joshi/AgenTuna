@@ -13,13 +13,20 @@ workspace = true
 default = []
 # Fixtures and the round-trip harness (`at_migrate::testkit`). Never enabled by production
 # crates: it builds real agent folders inside a temporary home.
-testkit = ["dep:at-fs", "at-fs/testkit", "dep:at-store"]
+testkit = ["at-fs/testkit"]
 
 [dependencies]
 at-model.workspace = true
+at-adapters.workspace = true
+at-fs.workspace = true
+at-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-at-fs = { workspace = true, optional = true }
-at-store = { workspace = true, optional = true }
+toml_edit.workspace = true
+similar.workspace = true
+ 
 
 [dev-dependencies]
 # Dev-only cycle: the crate under test needs its own `testkit` feature during `cargo test`.

@@ -11,7 +11,7 @@ test("MCP add form reviews and saves a real-shaped preview", async ({ page }) =>
       files: [{
         agent: "codex",
         scope: "user",
-        path: "/sandbox/home/.codex/config.toml",
+        path: "/fixtures/user/.codex/config.toml",
         additions: 3,
         deletions: 0,
         diff: "+[mcp_servers.search]\n+command = \"npx\"",
@@ -30,7 +30,7 @@ test("MCP add form reviews and saves a real-shaped preview", async ({ page }) =>
   await page.getByRole("button", { name: "Codex" }).click();
   await page.getByRole("button", { name: "Review changes" }).click();
   await expect(page.getByText("Files that will change")).toBeVisible();
-  await expect(page.getByText("/sandbox/home/.codex/config.toml")).toBeVisible();
+  await expect(page.getByText("/fixtures/user/.codex/config.toml")).toBeVisible();
   await page.screenshot({ path: "test-results/mcp-add-review.png", animations: "disabled" });
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText("MCP server saved.", { exact: true })).toBeVisible();

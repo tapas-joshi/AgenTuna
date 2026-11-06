@@ -60,8 +60,15 @@ pub struct SourceDetails {
     pub folder_path: String,
     /// ZIP path selected by the user.
     pub zip_path: String,
+    /// Use-when description supplied for a new skill.
+    pub description: String,
     /// Selected template identifier for a new skill.
     pub template: Option<String>,
+    /// Selected imported repository skill identifier.
+    /// Selected folder skill candidate relative to the imported directory.
+    pub folder_selection: Option<String>,
+    /// Selected ZIP skill candidate relative to the extracted archive.
+    pub zip_selection: Option<String>,
     /// Selected imported repository skill identifier.
     pub fetched_repo_selection: Option<String>,
 }
@@ -89,8 +96,8 @@ pub struct AddSkillWizard {
 impl Default for AddSkillWizard {
     fn default() -> Self {
         Self {
-            step: WizardStep::Source,
             source: None,
+            step: WizardStep::Source,
             details: SourceDetails::default(),
             name: String::new(),
             scope: None,
@@ -111,7 +118,7 @@ pub enum WizardEvent {
     /// Update the proposed skill name.
     SetName(String),
     /// Update a typed source detail.
-    SetDetails(SourceDetails),
+    SetDetails(Box<SourceDetails>),
     /// Select the destination scope.
     SetScope(String),
     /// Replace selected agent identifiers.
@@ -146,7 +153,7 @@ pub enum WizardEffect {
         /// Source whose injected provider should be invoked.
         source: SourceKind,
         /// Current validated source parameters.
-        details: SourceDetails,
+        details: Box<SourceDetails>,
     },
     /// Discard the current draft and close the wizard.
     DiscardDraft,
@@ -212,7 +219,7 @@ impl AddSkillWizard {
                 Vec::new()
             }
             WizardEvent::SetDetails(details) => {
-                self.details = details;
+                self.details = *details;
                 Vec::new()
             }
             WizardEvent::SetScope(scope) => {
@@ -234,7 +241,7 @@ impl AddSkillWizard {
                 ) {
                     vec![WizardEffect::FetchSource {
                         source: source.clone(),
-                        details: self.details.clone(),
+                        details: Box::new(self.details.clone()),
                     }]
                 } else {
                     Vec::new()
@@ -384,11 +391,11 @@ mod tests {
     fn complete_details(wizard: &mut AddSkillWizard) {
         wizard.dispatch(WizardEvent::SelectSource(SourceKind::Git));
         wizard.dispatch(WizardEvent::SetName("Example Skill".to_owned()));
-        wizard.dispatch(WizardEvent::SetDetails(SourceDetails {
+        wizard.dispatch(WizardEvent::SetDetails(Box::new(SourceDetails {
             repo_url: "https://example.invalid/skills.git".to_owned(),
             fetched_repo_selection: Some("repo/skill".to_owned()),
             ..SourceDetails::default()
-        }));
+        })));
     }
 
     #[test]
@@ -455,7 +462,7 @@ mod tests {
             wizard.dispatch(WizardEvent::FetchSource),
             [WizardEffect::FetchSource {
                 source: SourceKind::Git,
-                details: SourceDetails::default(),
+                details: Box::new(SourceDetails::default()),
             }]
         );
         assert_eq!(

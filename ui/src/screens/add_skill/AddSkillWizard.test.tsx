@@ -6,11 +6,84 @@ const ipc = vi.hoisted(() => ({ calls: [] as { command: string; args: unknown }[
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, args?: unknown) => { ipc.calls.push({ command, args }); return ipc.reply(command, args); } }));
 
 type StubState = { step: string; source: string | null; details: Record<string, string | null>; name: string; scope: string | null; agents: string[]; completed: boolean };
-const initial = (): StubState => ({ step: "source", source: null, details: { repo_url: "", repo_reference: "", library_selection: null, marketplace_id: "", folder_path: "", zip_path: "", template: null, fetched_repo_selection: null }, name: "", scope: null, agents: [], completed: false });
+const initial = (): StubState => ({ step: "source", source: null, details: { repo_url: "", repo_reference: "", library_selection: null, marketplace_id: "", folder_path: "", zip_path: "", description: "", template: null, fetched_repo_selection: null }, name: "", scope: null, agents: [], completed: false });
 
 afterEach(() => { cleanup(); ipc.calls.length = 0; });
 
+  test("shows the policy-controlled marketplace unavailable state without searching", async () => {
+    ipc.reply = async (command, args) => {
+      if (command === "network_policy") return { offline: false, marketplace_enabled: false, statement: "Network actions disabled" };
+      const request = args as { wizard: StubState | null; event: { type: string; payload?: unknown } };
+      const state = structuredClone(request.wizard ?? initial());
+      if (request.event.type === "select_source") state.source = String(request.event.payload);
+      if (request.event.type === "next" && state.step === "source") state.step = "details";
+      return [state, []];
+    };
+    render(<AddSkillWizard onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Marketplace" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText(/network policy disables it/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Search" })).toBeNull();
+    expect(ipc.calls.some(({ command }) => command === "skill_marketplace_search")).toBe(false);
+  });
 describe("AddSkillWizard", () => {
+  test("chooses local folder paths through the native dialog command", async () => {
+    ipc.reply = async (command, args) => {
+      if (command === "skill_import_choose_folder") return "/sandbox/library/skill";
+      if (command === "skill_import_candidates") return { candidates: [{ id: "", name: "Folder Skill", description: "A local candidate.", markdown: "---\nname: folder-skill\n---\n", error: null }], error: null };
+      const request = args as { wizard: StubState | null; event: { type: string; payload?: unknown } };
+      const state = structuredClone(request.wizard ?? initial());
+      if (request.event.type === "select_source") state.source = String(request.event.payload);
+      if (request.event.type === "set_name") state.name = String(request.event.payload);
+      if (request.event.type === "next" && state.step === "source") state.step = "details";
+      if (request.event.type === "set_details") state.details = request.event.payload as StubState["details"];
+      return [state, []];
+    };
+    render(<AddSkillWizard onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Local folder" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByLabelText("Folder path")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
+    await waitFor(() => expect((screen.getByLabelText("Folder path") as HTMLInputElement).value).toBe("/sandbox/library/skill"));
+    fireEvent.click(screen.getByRole("button", { name: "Scan folder" }));
+    expect(await screen.findByRole("radio", { name: /Folder Skill/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: /Folder Skill/ }));
+    await waitFor(() => expect((screen.getByRole("radio", { name: /Folder Skill/ }) as HTMLInputElement).checked).toBe(true));
+    expect(await screen.findByLabelText("Folder Skill SKILL.md preview")).toBeTruthy();
+    expect(ipc.calls.some(({ command }) => command === "skill_import_choose_folder")).toBe(true);
+  });
+  test("renders canonical new-skill template previews and gates the description limit", async () => {
+    ipc.reply = async (command, args) => {
+      if (command === "skill_template_preview") return { slug: "daily-review", markdown: "# Daily Review", name_error: null, description_error: null };
+      const request = args as { wizard: StubState | null; event: { type: string; payload?: unknown } };
+      const state = request.wizard ?? initial();
+      if (request.event.type === "select_source") state.source = String(request.event.payload);
+      if (request.event.type === "next" && state.step === "source") state.step = "details";
+      if (request.event.type === "set_name") state.name = String(request.event.payload);
+      if (request.event.type === "set_details") state.details = request.event.payload as StubState["details"];
+      return [structuredClone(state), []];
+    };
+    render(<AddSkillWizard onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Blank/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Blank/ }).getAttribute("aria-checked")).toBe("true"));
+    fireEvent.click(screen.getByRole("radio", { name: /Checklist/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Checklist/ }).getAttribute("aria-checked")).toBe("true"));
+    fireEvent.change(screen.getByLabelText("Skill name"), { target: { value: "Daily Review" } });
+    fireEvent.change(screen.getByLabelText("Use when description"), { target: { value: "Review daily changes" } });
+    await waitFor(() => expect((screen.getByLabelText("Skill name") as HTMLInputElement).value).toBe("Daily Review"));
+    await waitFor(() => expect((screen.getByLabelText("Use when description") as HTMLTextAreaElement).value).toBe("Review daily changes"));
+    await waitFor(() => expect(ipc.calls.some(({ command }) => command === "skill_template_preview")).toBe(true));
+    expect(await screen.findByText("# Daily Review")).toBeTruthy();
+    expect(await screen.findByText("Slug: daily-review")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Use when description"), { target: { value: "x".repeat(1024) } });
+    expect(await screen.findByText("1024/1024")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   test("gates invalid navigation and preserves source detail when backing up", async () => {
     ipc.reply = async (_command, args) => {
       const request = args as { wizard: StubState | null; event: { type: string; payload?: unknown } };
@@ -102,7 +175,7 @@ describe("AddSkillWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
     await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.keyDown(window, { key: "Enter" });
-    expect(await screen.findByLabelText("Template")).toBeTruthy();
+    expect(await screen.findByRole("radio", { name: /Blank/ })).toBeTruthy();
   });
   test("keeps Next disabled until source details are valid", async () => {
     ipc.reply = async (_command, args) => {
@@ -114,13 +187,15 @@ describe("AddSkillWizard", () => {
     };
     render(<AddSkillWizard onClose={() => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await waitFor(() => expect(screen.getByLabelText("Template")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Blank/ })).toBeTruthy());
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
   });
   test("previews a typed file plan and shows only the applied outcome", async () => {
     const writtenPath = "/sandbox/user/skills/plan-skill/SKILL.md";
     ipc.reply = async (command, args) => {
+      if (command === "skill_template_preview") return { slug: "plan-skill", markdown: "# Plan Skill", name_error: null, description_error: null };
       if (command === "skill_add_preview") {
         return {
           preview_id: "preview-skill-add",
@@ -166,8 +241,10 @@ describe("AddSkillWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
     await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    fireEvent.change(await screen.findByLabelText("Template"), { target: { value: "blank" } });
+    fireEvent.click(await screen.findByRole("radio", { name: /Blank/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Blank/ }).getAttribute("aria-checked")).toBe("true"));
     fireEvent.change(screen.getByLabelText("Skill name"), { target: { value: "Plan Skill" } });
+    fireEvent.change(screen.getByLabelText("Use when description"), { target: { value: "Use this skill to plan work." } });
     await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.change(await screen.findByLabelText("Scope"), { target: { value: "user" } });

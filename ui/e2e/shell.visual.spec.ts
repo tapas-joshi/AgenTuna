@@ -43,10 +43,9 @@ test("MCP detail, MCP form and migration routes render meaningful states", async
   await page.keyboard.press("Meta+k");
   const palette = page.getByRole("dialog", { name: "Command palette" });
   const search = palette.getByRole("combobox", { name: "Search commands" });
-  await page.keyboard.type("Import native items");
-  await page.keyboard.press("Enter");
-  await expect(palette).toBeHidden();
-  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await search.fill("Import native items");
+  await expect(palette.getByRole("option", { name: /Import native items/ })).toBeVisible();
+  await palette.getByRole("option", { name: /Import native items/ }).click();
   await expect(page.getByRole("heading", { name: "Nothing to migrate" })).toBeVisible();
 });
 

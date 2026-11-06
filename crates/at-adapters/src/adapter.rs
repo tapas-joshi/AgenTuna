@@ -211,6 +211,9 @@ pub enum AgentError {
         #[source]
         source: AgentDelegateFailure,
     },
+    /// Rule file ownership or managed-block markers prevented a render.
+    #[error(transparent)]
+    RuleRender(#[from] at_fs::managed_block::ManagedBlockError),
     /// Filesystem access failed at an agent path.
     #[error("agent path {path}: {source}")]
     Io {
@@ -316,21 +319,36 @@ pub trait AgentAdapter: Send + Sync {
         })
     }
 
-    /// Plans one Local skill deployment and its git-exclude update.
+    /// Plans one Local skill deployment and its idempotent Git exclude update.
     ///
-    /// Only Claude Code currently declares this operation; returned FileOps are applied by at-fs.
+    /// The selected skills root comes from this adapter's Local path table; returned operations
+    /// must be reviewed and applied through at-fs.
+    ///
+    /// # Errors
+    /// Returns a typed adapter error for invalid paths, existing targets or malformed excludes.
     fn plan_local_skill(
         &self,
-        _project: &Path,
-        _slug: &str,
-        _store_skill: &Path,
-        _exclude_contents: Option<&[u8]>,
-        _created_at_unix_seconds: u64,
+        project: &Path,
+        slug: &str,
+        store_skill: &Path,
+        exclude_contents: Option<&[u8]>,
+        created_at_unix_seconds: u64,
     ) -> Result<at_model::ChangeSet, AgentError> {
-        Err(AgentError::Unsupported {
-            agent: self.id(),
-            kind: String::from("Local skill deployment planning"),
-        })
+        let env = AgentEnvironment {
+            home: project.to_path_buf(),
+            project: Some(project.to_path_buf()),
+            variables: BTreeMap::new(),
+        };
+        let target = self.skill_target(Scope::Local, &env, slug)?;
+        plan_local_skill_change(
+            &self.id(),
+            project,
+            slug,
+            store_skill,
+            &target,
+            exclude_contents,
+            created_at_unix_seconds,
+        )
     }
 
     /// Lists Codex project trust metadata without exposing other config values.
@@ -358,15 +376,32 @@ pub trait AgentAdapter: Send + Sync {
         env: &AgentEnvironment,
     ) -> Result<Vec<at_model::FileOp>, AgentError> {
         let candidates = self.paths(kind, scope, env);
+        if kind == ItemKind::Skill && self.detect(env).state == DetectionState::NotInstalled {
+            return Err(AgentError::NotInstalled {
+                agent: self.id(),
+                path: candidates
+                    .iter()
+                    .find(|candidate| candidate.kind == "skills_dir")
+                    .map(|candidate| candidate.path.clone())
+                    .unwrap_or_else(|| env.home.clone()),
+            });
+        }
         if candidates.is_empty() {
             return Err(AgentError::Unsupported {
                 agent: self.id(),
                 kind: format!("{kind} directory"),
             });
         }
+        let selected_skills_root = if kind == ItemKind::Skill {
+            select_skill_root(&candidates)
+        } else {
+            None
+        };
         let mut directories = BTreeSet::new();
         for candidate in candidates {
-            let directory = if candidate.kind == "skills_dir" || candidate.kind == "rules_dir" {
+            let directory = if let Some(root) = &selected_skills_root {
+                root.clone()
+            } else if candidate.kind == "skills_dir" || candidate.kind == "rules_dir" {
                 candidate.path
             } else {
                 candidate
@@ -387,6 +422,58 @@ pub trait AgentAdapter: Send + Sync {
                 parents: true,
             })
             .collect())
+    }
+
+    /// Resolves the target directory for one named skill from this agent's native path table.
+    ///
+    /// # Errors
+    /// Returns [`AgentError::Unsupported`] when this agent has no skills root for the scope.
+    fn skill_target(
+        &self,
+        scope: Scope,
+        env: &AgentEnvironment,
+        slug: &str,
+    ) -> Result<PathBuf, AgentError> {
+        if slug.is_empty() || slug == "." || slug == ".." || slug.contains(['/', '\\']) {
+            return Err(AgentError::Unsupported {
+                agent: self.id(),
+                kind: String::from("invalid skill slug"),
+            });
+        }
+        let candidates = self.paths(ItemKind::Skill, scope, env);
+        select_skill_root(&candidates)
+            .map(|root| root.join(slug))
+            .ok_or_else(|| AgentError::Unsupported {
+                agent: self.id(),
+                kind: format!("skills directory for {scope}"),
+            })
+    }
+
+    /// Deploys one canonical skill using the shared guarded at-fs strategy.
+    ///
+    /// Callers must check installation and obtain review/authorization before invoking this
+    /// materialization primitive. Local-scope callers also plan the corresponding Git exclude.
+    ///
+    /// # Errors
+    /// Returns typed filesystem failures, including unmanaged target conflicts.
+    fn deploy_skill(
+        &self,
+        source: &Path,
+        target: &Path,
+        strategy: at_fs::SkillStrategy,
+    ) -> Result<at_fs::SkillDeployOutcome, at_fs::FsError> {
+        at_fs::deploy_skill(&at_fs::SkillDeployRequest::new(source, target, strategy))
+    }
+
+    /// Removes a deployment only when its recorded ownership matches the request.
+    ///
+    /// # Errors
+    /// Returns typed filesystem failures; canonical store content is never removed.
+    fn undeploy_skill(
+        &self,
+        request: &at_fs::RemoveRequest,
+    ) -> Result<at_fs::RemoveOutcome, at_fs::FsError> {
+        at_fs::remove_deployment(request)
     }
 
     /// Reads an adapter-owned skills index or rules document. MCP is delegated to TM adapters.
@@ -483,11 +570,11 @@ pub trait AgentAdapter: Send + Sync {
         Ok(AgentIoDocument { path, content })
     }
 
-    /// Renders deployment bytes. Rule rendering belongs to TA-011's managed-block renderer.
+    /// Renders deployment bytes; rule files are wrapped in an AgenTuna-managed block.
     ///
     /// # Errors
-    /// Returns [`AgentError::Unsupported`] for rule rendering and [`AgentError::Delegate`] for
-    /// MCP rendering.
+    /// Returns [`AgentError::Delegate`] for MCP rendering and a typed adapter error when a
+    /// managed rule block cannot be rendered.
     fn render_io(&self, deployment: &AgentDeployment) -> Result<Vec<u8>, AgentError> {
         if deployment.kind == ItemKind::McpServer {
             return Err(AgentError::Delegate {
@@ -495,10 +582,45 @@ pub trait AgentAdapter: Send + Sync {
             });
         }
         if deployment.kind == ItemKind::Rule {
-            return Err(AgentError::Unsupported {
-                agent: self.id(),
-                kind: String::from("rule rendering requires TA-011 managed-block rendering"),
-            });
+            let existing = match std::fs::symlink_metadata(&deployment.path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    Some(std::fs::read(&deployment.path).map_err(|source| {
+                        if source.kind() == std::io::ErrorKind::PermissionDenied {
+                            AgentError::Permission {
+                                path: deployment.path.clone(),
+                            }
+                        } else {
+                            AgentError::Io {
+                                path: deployment.path.clone(),
+                                source,
+                            }
+                        }
+                    })?)
+                }
+                Ok(_) => {
+                    return Err(AgentError::Unsupported {
+                        agent: self.id(),
+                        kind: format!("non-regular rule path {}", deployment.path.display()),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Err(AgentError::Permission {
+                        path: deployment.path.clone(),
+                    });
+                }
+                Err(source) => {
+                    return Err(AgentError::Io {
+                        path: deployment.path.clone(),
+                        source,
+                    });
+                }
+            };
+            return Ok(at_fs::managed_block::render_managed_block(
+                &deployment.path,
+                existing.as_deref(),
+                &deployment.content,
+            )?);
         }
         Ok(deployment.content.clone())
     }
@@ -1030,6 +1152,153 @@ impl AgentAdapterRegistry {
         }
         Ok(roots)
     }
+    /// Returns every registered adapter in stable identifier order.
+    ///
+    /// # Errors
+    /// Returns [`AgentError::RegistryPoisoned`] when the registry lock is poisoned.
+    pub fn adapters(&self) -> Result<Vec<Arc<dyn AgentAdapter>>, AgentError> {
+        Ok(self
+            .adapters
+            .read()
+            .map_err(|_| AgentError::RegistryPoisoned)?
+            .values()
+            .cloned()
+            .collect())
+    }
+}
+
+fn plan_local_skill_change(
+    agent: &AgentId,
+    project: &Path,
+    slug: &str,
+    store_skill: &Path,
+    target: &Path,
+    exclude_contents: Option<&[u8]>,
+    created_at_unix_seconds: u64,
+) -> Result<at_model::ChangeSet, AgentError> {
+    use at_model::{ChangeSet, DeployMode, ExpectedState, FileOp, OperationKind};
+
+    if slug.is_empty() || slug == "." || slug == ".." || slug.contains(['/', '\\']) {
+        return Err(AgentError::Unsupported {
+            agent: agent.clone(),
+            kind: String::from("invalid skill slug"),
+        });
+    }
+    let relative_target = target
+        .strip_prefix(project)
+        .map_err(|error| AgentError::Io {
+            path: target.to_path_buf(),
+            source: std::io::Error::other(error),
+        })?;
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => {
+            return Err(AgentError::Unsupported {
+                agent: agent.clone(),
+                kind: format!(
+                    "refusing to overwrite existing skill path {}",
+                    target.display()
+                ),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(AgentError::Io {
+                path: target.to_path_buf(),
+                source,
+            });
+        }
+    }
+    let exclude_path = PathBuf::from(".git/info/exclude");
+    let old = exclude_contents.unwrap_or_default();
+    let old_text = std::str::from_utf8(old).map_err(|_| AgentError::Parse {
+        path: project.join(&exclude_path),
+        line: 1,
+        col: 1,
+    })?;
+    let entry = format!("/{}", relative_target.to_string_lossy().replace('\\', "/"));
+    let new_text = append_exclude_entry(old_text, &entry);
+    let old_hash = at_fs::sha256_hex(old);
+    let new_hash = at_fs::sha256_hex(new_text.as_bytes());
+    let expected = if exclude_contents.is_some() {
+        ExpectedState::hash(&old_hash).map_err(|error| AgentError::Io {
+            path: project.join(&exclude_path),
+            source: std::io::Error::other(error),
+        })?
+    } else {
+        ExpectedState::absent()
+    };
+    let operation_kind = OperationKind::parse("deploy").map_err(|error| AgentError::Io {
+        path: project.to_path_buf(),
+        source: std::io::Error::other(error),
+    })?;
+    let change_set = ChangeSet {
+        id: format!("{}-local-{}", agent, &new_hash[..16]),
+        preview_id: old_hash,
+        operation_kind,
+        scope: Some(Scope::Local),
+        project_id: None,
+        summary: format!("Deploy {agent} skill `{slug}` locally"),
+        ops: vec![
+            FileOp::Symlink {
+                link_path: relative_target.to_path_buf(),
+                target: store_skill.to_path_buf(),
+                mode: DeployMode::Link,
+            },
+            FileOp::Write {
+                path: exclude_path,
+                bytes: new_text.into_bytes(),
+                expected,
+                follow_symlink: false,
+                backup: true,
+            },
+        ],
+        created_at_unix_seconds,
+    };
+    change_set.validate().map_err(|error| AgentError::Io {
+        path: project.to_path_buf(),
+        source: std::io::Error::other(error),
+    })?;
+    Ok(change_set)
+}
+
+fn append_exclude_entry(contents: &str, entry: &str) -> String {
+    if contents
+        .lines()
+        .any(|line| line.trim_end_matches('\r') == entry)
+    {
+        return contents.to_owned();
+    }
+    let separator = if contents.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    if contents.is_empty() {
+        return format!("{entry}{separator}");
+    }
+    if contents.ends_with('\n') || contents.ends_with('\r') {
+        format!("{contents}{entry}{separator}")
+    } else {
+        format!("{contents}{separator}{entry}{separator}")
+    }
+}
+
+fn select_skill_root(candidates: &[AgentPathCandidate]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.kind == "skills_dir")
+        .find(|candidate| candidate.path.exists())
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.kind == "skills_dir" && candidate.primary)
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.kind == "skills_dir")
+        })
+        .map(|candidate| candidate.path.clone())
 }
 
 fn canonical_or_normalized(path: &Path) -> PathBuf {

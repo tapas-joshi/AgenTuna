@@ -269,6 +269,7 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "toml_edit 0.25.18+spec-1.1.0",
  "url",
 ]
@@ -443,11 +444,17 @@ dependencies = [
 name = "at-migrate"
 version = "0.1.0"
 dependencies = [
+ "at-adapters",
  "at-fs",
  "at-migrate",
  "at-model",
  "at-store",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "similar",
  "thiserror 2.0.21",
+ "toml_edit 0.25.18+spec-1.1.0",
 ]
 
 [[package]]
@@ -5248,6 +5255,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ec6e78bd70db9420d8d212fa9dc97f116448a1ceff5d00eabb991d407e21396"
 dependencies = [
  "indexmap 2.14.2",
+ "serde_core",
+ "serde_spanned 1.1.2",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
  "toml_writer",

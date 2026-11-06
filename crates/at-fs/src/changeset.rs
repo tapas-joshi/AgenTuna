@@ -435,14 +435,16 @@ fn apply_inner(
         .ops
         .iter()
         .zip(&paths)
-        .map(|(op, path)| JournalEntry {
-            path: path.clone(),
-            before_hash: fs::read(path).ok().map(|bytes| sha256_hex(&bytes)),
-            after_hash: match op {
-                FileOp::Write { bytes, .. } => sha256_hex(bytes),
-                FileOp::Delete { .. } => String::new(),
-                _ => String::new(),
-            },
+        .map(|(op, path)| {
+            let before_hash = node_hash(path).ok().flatten();
+            JournalEntry {
+                path: path.clone(),
+                before_hash,
+                after_hash: match op {
+                    FileOp::Write { bytes, .. } => sha256_hex(bytes),
+                    _ => String::new(),
+                },
+            }
         })
         .collect();
     let mut journal = PendingJournal {
@@ -462,12 +464,14 @@ fn apply_inner(
     for (index, ((op, path), backup_relative)) in
         set.ops.iter().zip(&paths).zip(&backup_relpaths).enumerate()
     {
-        let prior = fs::read(path).ok();
+        let prior = fs::symlink_metadata(path)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .and_then(|_| fs::read(path).ok());
         let backup_path = match execute_op(
             op,
             path,
             backup_relative,
-            prior.as_deref(),
             &ExecuteContext {
                 set,
                 operation_id: &operation_id,
@@ -492,12 +496,19 @@ fn apply_inner(
                 );
             }
         };
-        let before_hash = prior.as_ref().map(|bytes| sha256_hex(bytes));
-        let after_hash = fs::read(path).ok().map(|bytes| sha256_hex(&bytes));
+        let before_hash = journal
+            .entries
+            .get(index)
+            .and_then(|entry| entry.before_hash.clone());
+        let after_hash = node_hash(path).ok().flatten();
         if let Some(entry) = journal.entries.get_mut(index) {
             entry.after_hash = after_hash.clone().unwrap_or_default();
         }
-        done.push((index, prior));
+        done.push(CompletedOperation {
+            index,
+            prior,
+            delete_backup: backup_path.clone(),
+        });
         journal.completed_ops.push(index);
         if let Err(error) = write_journal(&journal_dir, &journal) {
             return fail_rollback(
@@ -562,7 +573,6 @@ fn execute_op(
     op: &FileOp,
     path: &Path,
     backup_relative: &Path,
-    prior: Option<&[u8]>,
     context: &ExecuteContext<'_>,
 ) -> Result<Option<PathBuf>, String> {
     crate::failpoint::hit(crate::failpoint::FaultPoint::ChangeSetOperation, path)
@@ -603,25 +613,23 @@ fn execute_op(
         }
         FileOp::Delete { expected, .. } => {
             let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
-            let actual = prior
-                .map(|bytes| ExpectedState::Hash(sha256_hex(bytes)))
-                .unwrap_or(ExpectedState::Absent);
+            let actual = node_expected(path)?;
             if !same_expected(&wanted, &actual) {
                 return Err(format!("stale target: {}", path.display()));
             }
-            let bytes =
-                prior.ok_or_else(|| format!("delete target is absent: {}", path.display()))?;
+            if matches!(actual, ExpectedState::Absent) {
+                return Err(format!("delete target is absent: {}", path.display()));
+            }
             let folder = backup_folder(context.backup_root, context.set.scope, backup_relative)?;
-            let files = crate::backup::copy_into(
-                &folder,
-                path,
-                bytes,
-                &backup_meta(context.set, context.operation_id, path, backup_relative),
-                OffsetDateTime::now_utc(),
-            )
-            .map_err(|error| error.to_string())?;
-            fs::remove_file(path).map_err(|error| error.to_string())?;
-            Ok(Some(files.blob))
+            let deleted = folder.join(format!("{}.deleted", context.operation_id));
+            if !expected_absent(&deleted) {
+                return Err(format!(
+                    "delete backup already exists: {}",
+                    deleted.display()
+                ));
+            }
+            fs::rename(path, &deleted).map_err(|error| error.to_string())?;
+            Ok(Some(deleted))
         }
         FileOp::Symlink { target, mode, .. } => {
             let source = resolve_path(context.store_root, target)?;
@@ -672,13 +680,28 @@ fn execute_op(
         FileOp::Move { from, expected, .. } => {
             let source = resolve_path(context.store_root, from)?;
             let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
-            let actual = fs::read(&source)
-                .map(|bytes| ExpectedState::Hash(sha256_hex(&bytes)))
-                .unwrap_or(ExpectedState::Absent);
+            let actual = node_expected(&source)?;
             if !same_expected(&wanted, &actual) || !expected_absent(path) {
                 return Err("move source or destination changed".to_owned());
             }
-            fs::rename(&source, path).map_err(|error| error.to_string())?;
+            match fs::rename(&source, path) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+                    let stage = path.with_file_name(format!(
+                        ".{}.agentuna-move-stage-{}",
+                        path.file_name().and_then(OsStr::to_str).unwrap_or("move"),
+                        context.operation_id
+                    ));
+                    copy_node(&source, &stage)?;
+                    if node_hash(&source)? != node_hash(&stage)? {
+                        remove_node(&stage)?;
+                        return Err("cross-device move verification failed".to_owned());
+                    }
+                    fs::rename(&stage, path).map_err(|error| error.to_string())?;
+                    remove_node(&source)?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
             Ok(None)
         }
         _ => Err("unsupported operation".to_owned()),
@@ -787,31 +810,112 @@ fn validate_expected(
 fn expected_absent(path: &Path) -> bool {
     matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
-
 fn expected_matches(path: &Path, expected: &at_model::ExpectedState) -> bool {
-    let Ok(expected) = translate_expected(expected) else {
+    let Ok(wanted) = translate_expected(expected) else {
         return false;
     };
-    match (expected, fs::symlink_metadata(path)) {
-        (ExpectedState::Absent, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => true,
-        (ExpectedState::Hash(hash), Ok(meta)) if meta.is_file() => {
-            fs::read(path).is_ok_and(|bytes| sha256_hex(&bytes) == hash)
-        }
-        (ExpectedState::HashAndMtime { hash, mtime }, Ok(meta)) if meta.is_file() => fs::read(path)
-            .is_ok_and(|bytes| sha256_hex(&bytes) == hash && meta.modified().ok() == Some(mtime)),
-        _ => false,
+    matches!(node_expected(path), Ok(actual) if same_expected(&wanted, &actual))
+}
+fn node_expected(path: &Path) -> Result<ExpectedState, String> {
+    match node_hash(path)? {
+        Some(hash) => Ok(ExpectedState::Hash(hash)),
+        None => Ok(ExpectedState::Absent),
     }
 }
 
+fn node_hash(path: &Path) -> Result<Option<String>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path).map_err(|error| error.to_string())?;
+        return Ok(Some(sha256_hex(target.as_os_str().as_encoded_bytes())));
+    }
+    if metadata.is_file() {
+        return fs::read(path)
+            .map(|bytes| Some(sha256_hex(&bytes)))
+            .map_err(|error| error.to_string());
+    }
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| error.to_string())?
+            .map(|entry| entry.map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut bytes = Vec::new();
+        for entry in entries {
+            let name = entry.file_name();
+            bytes.extend_from_slice(name.as_encoded_bytes());
+            bytes.push(0);
+            if let Some(hash) = node_hash(&entry.path())? {
+                bytes.extend_from_slice(hash.as_bytes());
+            }
+            bytes.push(0xff);
+        }
+        return Ok(Some(sha256_hex(&bytes)));
+    }
+    Err(format!("unsupported filesystem node: {}", path.display()))
+}
+
+fn remove_node(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).map_err(|error| error.to_string())
+    } else {
+        fs::remove_file(path).map_err(|error| error.to_string())
+    }
+}
+
+fn copy_node(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::create_dir(destination).map_err(|error| error.to_string())?;
+        for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            copy_node(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else if metadata.file_type().is_symlink() {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                fs::read_link(source).map_err(|error| error.to_string())?,
+                destination,
+            )
+            .map_err(|error| error.to_string())
+        }
+        #[cfg(not(unix))]
+        {
+            Err("symlink copy is unsupported on this platform".to_owned())
+        }
+    } else {
+        fs::copy(source, destination)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct CompletedOperation {
+    index: usize,
+    prior: Option<Vec<u8>>,
+    delete_backup: Option<PathBuf>,
+}
 fn rollback(
     set: &ChangeSet,
     root: &Path,
-    done: &[(usize, Option<Vec<u8>>)],
+    done: &[CompletedOperation],
     paths: &[PathBuf],
     entries: &[JournalEntry],
     created_dirs: &[PathBuf],
 ) -> Result<(), String> {
-    for (index, before) in done.iter().rev() {
+    for CompletedOperation {
+        index,
+        prior: before,
+        delete_backup,
+    } in done.iter().rev()
+    {
         let path = paths
             .get(*index)
             .ok_or_else(|| "rollback path missing".to_owned())?;
@@ -820,19 +924,25 @@ fn rollback(
             .ok_or_else(|| "journal entry missing".to_owned())?
             .after_hash
             .as_str();
-        let current = fs::read(path).ok();
-        if after.is_empty() {
-            if current.is_some() {
-                return Err(format!(
-                    "target changed during rollback: {}",
-                    path.display()
-                ));
-            }
-        } else if current.as_ref().map(|bytes| sha256_hex(bytes)).as_deref() != Some(after) {
+        let current_hash = node_hash(path)?;
+        if current_hash.as_deref() != (!after.is_empty()).then_some(after) {
             return Err(format!(
                 "target changed during rollback: {}",
                 path.display()
             ));
+        }
+        if matches!(set.ops.get(*index), Some(FileOp::Delete { .. })) {
+            let backup = delete_backup
+                .as_deref()
+                .ok_or_else(|| "delete backup missing during rollback".to_owned())?;
+            if !expected_absent(path) {
+                return Err(format!(
+                    "delete target changed during rollback: {}",
+                    path.display()
+                ));
+            }
+            fs::rename(backup, path).map_err(|error| error.to_string())?;
+            continue;
         }
         if let Some(FileOp::Move { from, .. }) = set.ops.get(*index) {
             let source = resolve_path(root, from)?;
@@ -857,14 +967,7 @@ fn rollback(
             }
             None => match fs::symlink_metadata(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Ok(meta) if meta.is_dir() => {
-                    if matches!(set.ops.get(*index), Some(FileOp::Copy { .. })) {
-                        fs::remove_dir_all(path).map_err(|error| error.to_string())?;
-                    } else {
-                        fs::remove_dir(path).map_err(|error| error.to_string())?;
-                    }
-                }
-                Ok(_) => fs::remove_file(path).map_err(|error| error.to_string())?,
+                Ok(_) => remove_node(path)?,
                 Err(error) => return Err(error.to_string()),
             },
         }
@@ -883,7 +986,7 @@ struct RollbackState<'a> {
     set: &'a ChangeSet,
     id: &'a str,
     journal_path: &'a Path,
-    done: &'a [(usize, Option<Vec<u8>>)],
+    done: &'a [CompletedOperation],
     paths: &'a [PathBuf],
     entries: &'a [JournalEntry],
     created_dirs: &'a [PathBuf],

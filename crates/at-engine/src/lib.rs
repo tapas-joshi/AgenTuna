@@ -15,15 +15,18 @@ pub mod project_sync;
 pub mod resolve;
 pub mod rules;
 pub mod skill_add_plan;
+pub mod skill_agent;
 pub mod skill_import;
 pub mod skill_names;
 pub mod skill_shadows;
 pub mod skill_source;
 pub mod skill_templates;
 pub mod skill_wizard;
+pub mod skills;
 pub mod state;
 pub mod tombstones;
 
+pub mod change_for_repo;
 pub use error::EngineError;
 pub mod why;
 pub use tombstones::{

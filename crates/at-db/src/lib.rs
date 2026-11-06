@@ -32,6 +32,7 @@ pub mod read_only;
 pub mod rebuild;
 pub mod remote_backup;
 pub mod retention;
+pub mod rules_index;
 pub mod secret_refs;
 pub mod settings;
 pub mod shared;

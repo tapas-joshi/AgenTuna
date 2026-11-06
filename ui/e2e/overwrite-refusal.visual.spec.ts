@@ -10,7 +10,7 @@ async function showRefusal(page: Page): Promise<void> {
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("agentuna:refused-overwrite", { detail: {
     code: "refused_overwrite",
     message: "AgenTuna refused to overwrite an unmanaged item.",
-    refusal: { path: "/sandbox/user/agents/skill", kind: "directory", existing_hash: null, remedies: ["adopt", "move_aside", "cancel"] },
+    refusal: { path: "/fixtures/user/agents/skill", kind: "directory", existing_hash: null, remedies: ["adopt", "move_aside", "cancel"] },
   } })));
 }
 
@@ -31,7 +31,7 @@ test("Move aside invokes the typed at-fs command; Cancel does not", async ({ pag
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Move aside" }).click();
   const resolved = page.getByRole("dialog", { name: "Overwrite resolved" });
-  await expect(resolved.getByText("/sandbox/user/agents/skill.agentuna-backup-20261106T100000Z")).toBeVisible();
+  await expect(resolved.getByText("/fixtures/user/agents/skill.agentuna-backup-20261106T100000Z")).toBeVisible();
   await expect(resolved.getByRole("button", { name: "Undo" })).toHaveCount(0);
   await resolved.getByRole("button", { name: "Done" }).click();
   await expect(resolved).toBeHidden();
