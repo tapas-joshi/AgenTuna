@@ -1,9 +1,72 @@
 //! Canonical item repository mutations.
 
+use std::str::FromStr;
+
 use at_model::{ItemId, ItemKind, Scope};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::DbError;
+
+/// One indexed item offered as a preset member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemCandidate {
+    /// Stable item identity.
+    pub id: ItemId,
+    /// Item kind.
+    pub kind: ItemKind,
+    /// Scope holding the canonical copy.
+    pub scope: Scope,
+    /// Display name.
+    pub name: String,
+}
+
+/// Lists indexed skills and MCP servers for one scope, ordered by kind then name.
+///
+/// Used by the preset editor to offer members; rules are excluded because presets apply only
+/// deployable skills and MCP servers.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails or a stored value is unknown.
+pub fn preset_member_candidates(
+    connection: &Connection,
+    scope: Scope,
+) -> Result<Vec<ItemCandidate>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT id, kind, name FROM items           WHERE scope = ?1 AND kind IN ('skill', 'mcp_server')           ORDER BY kind ASC, name COLLATE NOCASE ASC, id ASC",
+    )?;
+    let rows = statement.query_map([scope.wire_name()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut items = Vec::new();
+    for row in rows {
+        let (id, kind, name) = row?;
+        items.push(ItemCandidate {
+            id: ItemId::from_str(&id).map_err(DbError::from)?,
+            kind: ItemKind::from_str(&kind).map_err(DbError::from)?,
+            scope,
+            name,
+        });
+    }
+    Ok(items)
+}
+
+/// Deletes one canonical item row and its dependent version and deployment rows.
+///
+/// Used by undo of a Migrate or Adopt operation once the store files it created are gone and
+/// no deployment still references the item.
+///
+/// # Errors
+///
+/// [`DbError`] when the delete fails.
+pub fn delete_item(connection: &Connection, item_id: &ItemId) -> Result<bool, DbError> {
+    let deleted = connection.execute("DELETE FROM items WHERE id = ?1", [item_id.to_string()])?;
+    Ok(deleted == 1)
+}
 
 /// Canonical item fields and proposed id used when a native item is adopted.
 ///

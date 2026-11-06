@@ -31,6 +31,20 @@ pub struct MigrateScanItemView {
     pub ownership: String,
 }
 
+/// One native folder or document that produced scan rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigrateScanRootView {
+    /// Native folder or document path.
+    pub path: String,
+    /// Agents that read this root.
+    pub agents: Vec<String>,
+    /// Rows that would be moved into the store.
+    pub new_items: i64,
+    /// Rows that already point at the store.
+    pub in_sync: i64,
+}
+
 /// Complete migration scan result, including partial-scan status and skipped roots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -41,6 +55,8 @@ pub struct MigrateScanView {
     pub partial: bool,
     /// Missing candidate roots skipped during discovery.
     pub skipped_roots: Vec<String>,
+    /// Scanned folders and documents with their item counts.
+    pub roots: Vec<MigrateScanRootView>,
 }
 
 fn item_view(item: ScanItem) -> MigrateScanItemView {
@@ -153,6 +169,7 @@ pub async fn migrate_scan(
     .await
     .map_err(|_| CommandError::internal("native scan worker stopped unexpectedly"))?
     .map_err(|_| CommandError::internal("native scan failed"))?;
+    let roots = scan_roots(&report);
     Ok(MigrateScanView {
         items: report.items.into_iter().map(item_view).collect(),
         partial: report.partial,
@@ -161,7 +178,41 @@ pub async fn migrate_scan(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
+        roots,
     })
+}
+
+/// Groups scan rows by the native folder or document that produced them.
+fn scan_roots(report: &ScanReport) -> Vec<MigrateScanRootView> {
+    let mut grouped: BTreeMap<PathBuf, (std::collections::BTreeSet<String>, i64, i64)> =
+        BTreeMap::new();
+    for item in &report.items {
+        let root = match item.kind {
+            at_model::ItemKind::Skill => item
+                .path
+                .parent()
+                .map_or_else(|| item.path.clone(), std::path::Path::to_path_buf),
+            _ => item.path.clone(),
+        };
+        let entry = grouped.entry(root).or_default();
+        for agent in &item.agents {
+            entry.0.insert(agent.to_string());
+        }
+        if item.ownership == Ownership::Managed {
+            entry.2 += 1;
+        } else {
+            entry.1 += 1;
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(path, (agents, new_items, in_sync))| MigrateScanRootView {
+            path: path.display().to_string(),
+            agents: agents.into_iter().collect(),
+            new_items,
+            in_sync,
+        })
+        .collect()
 }
 /// One comparable native copy in a migration conflict.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -279,4 +330,450 @@ pub async fn migrate_conflicts(
             })
             .collect(),
     })
+}
+
+/// One explicit conflict choice carried into the migration plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigrateResolutionView {
+    /// Normalized conflict name (`kind:name` is not used; the name alone keys the choice).
+    pub name: String,
+    /// `keep_a`, `keep_b` or `keep_both`.
+    pub choice: String,
+    /// Two names for `keep_both`, in A/B copy order.
+    pub names: Vec<String>,
+}
+
+/// Inputs for one reviewed migration plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigratePlanRequest {
+    /// Registered project providing Project scope paths.
+    pub project_id: Option<String>,
+    /// Native paths selected in the scan.
+    pub selected_paths: Vec<String>,
+    /// Explicit choices for every conflict group.
+    pub resolutions: Vec<MigrateResolutionView>,
+    /// `replace_with_links` or `leave_and_watch`.
+    pub strategy: String,
+}
+
+/// One ordered step of a reviewed migration plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigratePlanStepView {
+    /// Step sequence, starting at one.
+    pub seq: usize,
+    /// Action name.
+    pub action: String,
+    /// Selected canonical item name.
+    pub item_name: Option<String>,
+    /// Source path.
+    pub source: Option<String>,
+    /// Destination path.
+    pub destination: Option<String>,
+    /// Planned backup destination.
+    pub backup_path: Option<String>,
+    /// Bytes read or written.
+    pub bytes: u64,
+    /// Agents that can read the native path.
+    pub agents: Vec<String>,
+}
+
+/// Summary counts of a reviewed migration plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigratePlanCountsView {
+    /// Unique item copies selected.
+    pub items: i32,
+    /// Destinations written.
+    pub files_created: i32,
+    /// Originals backed up.
+    pub files_backed_up: i32,
+    /// Links created.
+    pub links_written: i32,
+    /// Source copies left in place.
+    pub files_left_in_place: i32,
+}
+
+/// A plan built from the scan and the user's conflict choices, plus its dry run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigratePlanView {
+    /// Stable plan id.
+    pub plan_id: String,
+    /// SHA-256 binding the reviewed steps and strategy.
+    pub plan_hash: String,
+    /// Store scope receiving the items.
+    pub scope: String,
+    /// Selected strategy.
+    pub strategy: String,
+    /// Summary counts.
+    pub counts: MigratePlanCountsView,
+    /// Ordered steps.
+    pub steps: Vec<MigratePlanStepView>,
+    /// Files rechecked for the dry run.
+    pub files_checked: i32,
+}
+
+/// Builds one reviewed plan from a scan and the user's conflict choices.
+///
+/// Retains only selected paths, detects conflicts among them, applies the explicit resolutions and
+/// revalidates the resulting plan so the returned dry run is the exact write list.
+// One argument per independent input of the reviewed plan; the two call sites build them inline.
+#[allow(clippy::too_many_arguments)]
+fn plan_from_scan(
+    mut scan: ScanReport,
+    selected_paths: &std::collections::BTreeSet<PathBuf>,
+    resolutions: &[MigrateResolutionView],
+    strategy: at_migrate::plan::MigrationStrategy,
+    scope: at_model::Scope,
+    store_root: PathBuf,
+    backup_root: PathBuf,
+    copy_agents: &std::collections::BTreeSet<at_model::AgentId>,
+) -> Result<
+    (
+        at_migrate::plan::MigrationPlan,
+        Vec<at_migrate::plan::DryRunRow>,
+    ),
+    String,
+> {
+    scan.items
+        .retain(|item| selected_paths.contains(&item.path));
+    let conflicts = at_migrate::conflicts::detect_conflicts(&scan);
+    let mut choices = BTreeMap::new();
+    for resolution in resolutions {
+        let choice = match resolution.choice.as_str() {
+            "keep_a" => at_migrate::plan::ConflictResolution::KeepA,
+            "keep_b" => at_migrate::plan::ConflictResolution::KeepB,
+            "keep_both" => at_migrate::plan::ConflictResolution::KeepBoth {
+                names: resolution.names.clone(),
+            },
+            other => return Err(format!("unknown conflict choice `{other}`")),
+        };
+        choices.insert(resolution.name.clone(), choice);
+    }
+    let plan = at_migrate::plan::build_plan(at_migrate::plan::BuildPlanRequest {
+        scan: &scan,
+        conflicts: &conflicts,
+        resolutions: &choices,
+        selected_paths,
+        store_root,
+        copy_agents,
+        strategy,
+        scope,
+        backup_root,
+    })
+    .map_err(|error| error.to_string())?;
+    at_migrate::plan::validate_plan(&plan).map_err(|error| error.to_string())?;
+    let dry_run = at_migrate::plan::dry_run(&plan);
+    Ok((plan, dry_run))
+}
+
+/// Builds the migration plan from a fresh scan and the reviewed conflict choices.
+///
+/// The scan is repeated so the plan binds to current native bytes; the returned dry run is the
+/// exact ordered write list the preview step shows. Nothing is written.
+#[tauri::command]
+pub async fn migrate_plan(
+    state: State<'_, AppState>,
+    request: MigratePlanRequest,
+) -> Result<MigratePlanView, CommandError> {
+    let (project, settings, agents) = {
+        let database = state.database().map_err(CommandError::unavailable)?;
+        let project = match request.project_id.as_deref() {
+            Some(id) => Some(PathBuf::from(
+                at_db::projects::find_project_by_id(database.connection(), id)
+                    .map_err(|_| CommandError::internal("could not query registered projects"))?
+                    .ok_or_else(|| {
+                        CommandError::invalid_argument("project_id", "project is not registered")
+                    })?
+                    .path,
+            )),
+            None => None,
+        };
+        let settings = at_db::settings::load(database.connection())
+            .map_err(|_| CommandError::internal("could not read deployment settings"))?;
+        let agents = at_db::agents::list_agents_on_mac(database.connection())
+            .map_err(|_| CommandError::internal("could not read detected agents"))?;
+        (project, settings, agents)
+    };
+    let strategy = match request.strategy.as_str() {
+        "replace_with_links" => at_migrate::plan::MigrationStrategy::ReplaceWithLinks,
+        "leave_and_watch" => at_migrate::plan::MigrationStrategy::LeaveAndWatch,
+        _ => {
+            return Err(CommandError::invalid_argument(
+                "strategy",
+                "expected replace_with_links or leave_and_watch",
+            ));
+        }
+    };
+    let scope = if project.is_some() {
+        at_model::Scope::Project
+    } else {
+        at_model::Scope::User
+    };
+    let paths = resolve_process_paths(project.as_deref())
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let home = paths
+        .home_dir()
+        .ok_or_else(|| CommandError::unavailable("home directory is unavailable"))?
+        .to_path_buf();
+    let layout = at_store::layout::StoreLayout::for_scope(&paths, scope)
+        .map_err(|_| CommandError::unavailable("the migration store is unavailable"))?;
+    let store_root = layout.root().to_path_buf();
+    let backup_root = paths.backup_dir().join("migration");
+    let (roots, store_items) = store_inventory(&paths)?;
+    let copy_agents = agents
+        .iter()
+        .filter(|agent| settings.link_mode(&agent.id) == at_model::LinkMode::Copy)
+        .map(|agent| agent.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected_paths = request
+        .selected_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<std::collections::BTreeSet<_>>();
+    let resolutions = request.resolutions;
+    let built = tokio::task::spawn_blocking(move || {
+        let environment = AgentEnvironment {
+            home,
+            project,
+            variables: BTreeMap::new(),
+        };
+        let registry = AgentAdapterRegistry::register();
+        let scan = at_migrate::scan::scan(ScanRequest {
+            environment: &environment,
+            adapters: &registry,
+            store_roots: &roots,
+            store_items: &store_items,
+        })
+        .map_err(|_| "migration scan failed".to_owned())?;
+        plan_from_scan(
+            scan,
+            &selected_paths,
+            &resolutions,
+            strategy,
+            scope,
+            store_root,
+            backup_root,
+            &copy_agents,
+        )
+    })
+    .await
+    .map_err(|_| CommandError::internal("migration plan worker stopped unexpectedly"))?
+    .map_err(|error| CommandError::invalid_argument("selected_paths", &error))?;
+    let (plan, dry_run) = built;
+    Ok(MigratePlanView {
+        plan_id: plan.id,
+        plan_hash: plan.plan_hash,
+        scope: plan.scope.to_string(),
+        strategy: match plan.strategy {
+            at_migrate::plan::MigrationStrategy::ReplaceWithLinks => {
+                String::from("replace_with_links")
+            }
+            at_migrate::plan::MigrationStrategy::LeaveAndWatch => String::from("leave_and_watch"),
+            _ => String::from("unknown"),
+        },
+        counts: MigratePlanCountsView {
+            items: i32::try_from(plan.counts.items).unwrap_or(i32::MAX),
+            files_created: i32::try_from(plan.counts.files_created).unwrap_or(i32::MAX),
+            files_backed_up: i32::try_from(plan.counts.files_backed_up).unwrap_or(i32::MAX),
+            links_written: i32::try_from(plan.counts.links_written).unwrap_or(i32::MAX),
+            files_left_in_place: i32::try_from(plan.counts.files_left_in_place).unwrap_or(i32::MAX),
+        },
+        files_checked: i32::try_from(dry_run.len()).unwrap_or(i32::MAX),
+        steps: plan
+            .steps
+            .into_iter()
+            .map(|step| MigratePlanStepView {
+                seq: step.seq,
+                action: format!("{:?}", step.action).to_lowercase(),
+                item_name: step.item_name,
+                source: step.source.map(|path| path.display().to_string()),
+                destination: step.destination.map(|path| path.display().to_string()),
+                backup_path: step.backup_path.map(|path| path.display().to_string()),
+                bytes: step.bytes,
+                agents: step
+                    .agents
+                    .into_iter()
+                    .map(|agent| agent.to_string())
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+
+    use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+    use at_model::{AgentId, ItemKind, Scope};
+
+    use super::{MigrateResolutionView, plan_from_scan};
+
+    fn item(name: &str, path: &str, agent: AgentId, hash: char) -> ScanItem {
+        ScanItem {
+            kind: ItemKind::Skill,
+            name: name.to_owned(),
+            agents: BTreeSet::from([agent]),
+            path: PathBuf::from(path),
+            scope: Scope::User,
+            content_hash: Some(hash.to_string().repeat(64)),
+            normalized_hash: Some(hash.to_string().repeat(64)),
+            parse_status: ParseStatus::Parsed,
+            store_link: false,
+            ownership: Ownership::NotInAgenTuna,
+        }
+    }
+
+    fn temp_store() -> tempfile::TempDir {
+        let store = tempfile::tempdir().expect("temporary store");
+        at_store::layout::init_store(Scope::User, store.path().join("store"))
+            .expect("initialise store");
+        store
+    }
+
+    #[test]
+    fn reviewed_choices_reach_the_plan_and_drop_the_unselected_copy() {
+        let store = temp_store();
+        let first = store.path().join("skills/a/SKILL.md");
+        let second = store.path().join("skills/b/SKILL.md");
+        std::fs::create_dir_all(first.parent().expect("dir")).expect("mkdir a");
+        std::fs::create_dir_all(second.parent().expect("dir")).expect("mkdir b");
+        std::fs::write(&first, b"alpha").expect("write a");
+        std::fs::write(&second, b"beta").expect("write b");
+        let scan = ScanReport {
+            items: vec![
+                item(
+                    "review",
+                    &first.display().to_string(),
+                    AgentId::ClaudeCode,
+                    'a',
+                ),
+                item("review", &second.display().to_string(), AgentId::Codex, 'b'),
+            ],
+            partial: false,
+            skipped_roots: Vec::new(),
+        };
+        let selected = BTreeSet::from([first.clone(), second.clone()]);
+        let resolutions = vec![MigrateResolutionView {
+            name: "review".to_owned(),
+            choice: "keep_a".to_owned(),
+            names: Vec::new(),
+        }];
+        let (plan, dry_run) = plan_from_scan(
+            scan,
+            &selected,
+            &resolutions,
+            at_migrate::plan::MigrationStrategy::LeaveAndWatch,
+            Scope::User,
+            store.path().join("store"),
+            store.path().join("backups"),
+            &BTreeSet::new(),
+        )
+        .expect("plan");
+        assert_eq!(plan.counts.items, 1, "Keep A selects one copy");
+        assert!(
+            plan.steps
+                .iter()
+                .filter_map(|step| step.source.as_ref())
+                .all(|path| path != &second),
+            "the dropped copy must not appear in the plan"
+        );
+        assert_eq!(dry_run.len(), plan.steps.len());
+    }
+
+    #[test]
+    fn missing_resolution_and_invalid_keep_both_names_are_refused() {
+        let store = temp_store();
+        let first = store.path().join("skills/a/SKILL.md");
+        let second = store.path().join("skills/b/SKILL.md");
+        std::fs::create_dir_all(first.parent().expect("dir")).expect("mkdir a");
+        std::fs::create_dir_all(second.parent().expect("dir")).expect("mkdir b");
+        std::fs::write(&first, b"alpha").expect("write a");
+        std::fs::write(&second, b"beta").expect("write b");
+        let scan = ScanReport {
+            items: vec![
+                item(
+                    "review",
+                    &first.display().to_string(),
+                    AgentId::ClaudeCode,
+                    'a',
+                ),
+                item("review", &second.display().to_string(), AgentId::Codex, 'b'),
+            ],
+            partial: false,
+            skipped_roots: Vec::new(),
+        };
+        let selected = BTreeSet::from([first, second]);
+        let unresolved = plan_from_scan(
+            scan.clone(),
+            &selected,
+            &[],
+            at_migrate::plan::MigrationStrategy::LeaveAndWatch,
+            Scope::User,
+            store.path().join("store"),
+            store.path().join("backups"),
+            &BTreeSet::new(),
+        )
+        .expect_err("an unresolved conflict blocks the plan");
+        assert!(unresolved.contains("requires an explicit resolution"));
+
+        let invalid = plan_from_scan(
+            scan,
+            &selected,
+            &[MigrateResolutionView {
+                name: "review".to_owned(),
+                choice: "keep_both".to_owned(),
+                names: vec!["same name".to_owned(), "same name".to_owned()],
+            }],
+            at_migrate::plan::MigrationStrategy::LeaveAndWatch,
+            Scope::User,
+            store.path().join("store"),
+            store.path().join("backups"),
+            &BTreeSet::new(),
+        )
+        .expect_err("invalid keep-both names block the plan");
+        assert!(invalid.contains("KeepBoth"));
+    }
+
+    #[test]
+    fn copy_agents_produce_copy_steps_instead_of_links() {
+        let store = temp_store();
+        let first = store.path().join("skills/a/SKILL.md");
+        std::fs::create_dir_all(first.parent().expect("dir")).expect("mkdir a");
+        std::fs::write(&first, b"alpha").expect("write a");
+        let scan = ScanReport {
+            items: vec![item(
+                "solo",
+                &first.display().to_string(),
+                AgentId::ClaudeCode,
+                'a',
+            )],
+            partial: false,
+            skipped_roots: Vec::new(),
+        };
+        let selected = BTreeSet::from([first]);
+        let (plan, _) = plan_from_scan(
+            scan,
+            &selected,
+            &[],
+            at_migrate::plan::MigrationStrategy::ReplaceWithLinks,
+            Scope::User,
+            store.path().join("store"),
+            store.path().join("backups"),
+            &BTreeSet::from([AgentId::ClaudeCode]),
+        )
+        .expect("plan");
+        assert_eq!(plan.counts.links_written, 0);
+        assert!(
+            plan.steps.iter().any(|step| {
+                matches!(step.action, at_migrate::plan::MigrationAction::WriteCopy)
+            })
+        );
+        let _ = BTreeMap::<String, String>::new();
+    }
 }

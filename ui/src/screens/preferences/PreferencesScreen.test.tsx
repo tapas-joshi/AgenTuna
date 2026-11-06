@@ -33,7 +33,7 @@ const emptyLogs = { path: "/sandbox/logs/agentuna-*.log", lines: [] };
 const paths = { support_dir: "/sandbox/support", db_path: "/sandbox/support/index.sqlite", log_dir: "/sandbox/support/logs", backup_dir: "/sandbox/support/backups", cache_dir: "/sandbox/support/cache", user_store: "/sandbox/user", project_store: null, global_store: "/sandbox/global", global_store_source: "default" };
 const remoteSettings = { device_name: "workstation", repo_url: "https://github.com/acme/backup.git", branch: "main", last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: true };
 const remoteStatus = { repo_url: remoteSettings.repo_url, device_name: remoteSettings.device_name, branch: "main", last_push_at: null, last_sync_at: null, last_commit: null, conflict_count: 1, offline: false, status: "idle", error_kind: null };
-const remoteConflicts = [{ id: "laptop_20261106T100000Z", device_name: "laptop", timestamp: "20261106T100000Z", files: [{ path: "skills/review-helper/SKILL.md", local_path: "/sandbox/user/skills/review-helper/SKILL.md", remote_path: "/sandbox/user/.state/remote-conflicts/laptop/20261106T100000Z/skills/review-helper/SKILL.md", local_exists: true, remote_size: 142, local_size: 136 }] }];
+const remoteConflicts = [{ id: "travel-laptop_20261106T100000Z", device_name: "travel-laptop", timestamp: "20261106T100000Z", files: [{ path: "skills/review-helper/SKILL.md", local_path: "/sandbox/user/skills/review-helper/SKILL.md", remote_path: "/sandbox/user/.state/remote-conflicts/travel-laptop/20261106T100000Z/skills/review-helper/SKILL.md", local_exists: true, remote_size: 142, local_size: 136 }] }];
 const remoteCommits = [{ commit: "a".repeat(40), committed_at: "2026-11-06T10:00:00Z", message: "Backup from laptop" }];
 const remoteConfirmation = { confirmation_token: "one-use-test-grant", device_name: "workstation", repo_url: remoteSettings.repo_url, commit: remoteCommits[0]?.commit ?? "" };
 const remotePreview = { preview_id: "preview-test-conflict", summary: "Keep the remote copy.", files: [{ path: "skills/review-helper/SKILL.md", action: "write", diff: "--- local\\n+++ remote\\n", before_hash: "1".repeat(64), after_hash: "2".repeat(64), backup_required: true }], archived_remote_path: null };
@@ -85,24 +85,33 @@ describe("PreferencesScreen", () => {
     expect(control.getAttribute("aria-checked")).toBe("false");
     expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThan(0);
   });
-  // TC-028: the action workflow UI was not finished or verified (author hit its usage limit);
-  // the mocked command replies below do not yet match the real command shapes.
-  test.skip("remote backup clears the token field after saving and never loads token contents", async () => {
+  test("remote backup clears the token field after saving and never loads token contents", async () => {
     const remote = { device_name: "workstation", repo_url: "https://github.com/acme/backup.git", branch: "main", last_push_at: null, last_pull_at: null, last_commit: null, status: "idle", error_kind: null, token_saved: false };
     ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : command === "remote_backup_settings" || command === "remote_backup_configure" ? remote : paths);
     render(<PreferencesScreen />);
     const token = await screen.findByLabelText("GitHub token") as HTMLInputElement;
     fireEvent.change(token, { target: { value: "ghp-secret-sentinel" } });
     fireEvent.click(screen.getByRole("button", { name: "Save remote backup settings" }));
-    expect(await screen.findByText("Last backup: Never")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("Last backup:").parentElement?.textContent).toBe("Last backup: Never"));
     expect(token.value).toBe("");
-    const call = ipc.calls.find(item => item.command === "remote_backup_configure");
-    expect(call?.args).toEqual({ deviceName: "workstation", repoUrl: "https://github.com/acme/backup.git", token: "ghp-secret-sentinel" });
+    const writes = ipc.calls.filter(item => JSON.stringify(item.args ?? null).includes("ghp-secret-sentinel"));
+    expect(writes).toEqual([{ command: "remote_backup_configure", args: { deviceName: "workstation", repoUrl: "https://github.com/acme/backup.git", token: "ghp-secret-sentinel" } }]);
     expect(screen.queryByText("ghp-secret-sentinel")).toBeNull();
   });
-  // TC-028: the action workflow UI was not finished or verified (author hit its usage limit);
-  // the mocked command replies below do not yet match the real command shapes.
-  test.skip("runs backup as a cancellable job and displays progress events", async () => {
+  test("device name validation blocks slashes and empty values before writing", async () => {
+    ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : command === "remote_backup_settings" ? remoteSettings : paths);
+    render(<PreferencesScreen />);
+    const name = await screen.findByLabelText("Remote backup device name") as HTMLInputElement;
+    fireEvent.change(name, { target: { value: "lab/desk" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save remote backup settings" }));
+    expect(await screen.findByText("Device names cannot contain slashes.")).toBeTruthy();
+    expect(name.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.change(name, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save remote backup settings" }));
+    expect(await screen.findByText("Enter a device name before saving.")).toBeTruthy();
+    expect(ipc.calls.some(call => call.command === "remote_backup_configure")).toBe(false);
+  });
+  test("runs backup as a cancellable job and displays progress events", async () => {
     ipc.reply = (command) => Promise.resolve(command === "backup_now" ? "job_test_backup" : command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : paths);
     render(<PreferencesScreen />);
     const backup = await screen.findByRole("button", { name: "Backup now" });
@@ -111,7 +120,13 @@ describe("PreferencesScreen", () => {
     await waitFor(() => expect(ipc.calls.some(call => call.command === "backup_now")).toBe(true));
     act(() => tauriEvents.emit("agentuna:job-progress", { id: "job_test_backup", name: "Backup remote store", fraction: 0.5, label: "Uploading snapshot" }));
     expect(await screen.findByText("Uploading snapshot")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Cancel backup remote store" })).toBeTruthy();
+    expect((screen.getByRole("progressbar", { name: "Remote backup progress" }) as HTMLProgressElement).value).toBe(0.5);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel backup remote store" }));
+    await waitFor(() => expect(ipc.calls.some(call => call.command === "jobs_cancel" && JSON.stringify(call.args).includes("job_test_backup"))).toBe(true));
+    act(() => tauriEvents.emit("agentuna:job-finished", { id: "job_test_backup", name: "Backup remote store", state: "cancelled", error: null }));
+    expect(await screen.findByText("Remote backup action was cancelled.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Backup now" }));
+    await waitFor(() => expect(ipc.calls.filter(call => call.command === "backup_now").length).toBe(2));
     act(() => tauriEvents.emit("agentuna:job-finished", { id: "job_test_backup", name: "Backup remote store", state: "succeeded", error: null }));
     expect(await screen.findByText("Remote backup action completed.")).toBeTruthy();
   });
@@ -138,17 +153,20 @@ describe("PreferencesScreen", () => {
     expect(ipc.calls.find(call => call.command === "restore")?.args).toEqual({ commit: remoteCommits[0]?.commit, confirmationToken: "one-use-test-grant" });
   });
 
-  // TC-028: the action workflow UI was not finished or verified (author hit its usage limit);
-  // the mocked command replies below do not yet match the real command shapes.
-  test.skip("conflict resolution previews a reviewed change set before applying it", async () => {
+  test("conflict resolution previews a reviewed change set before applying it", async () => {
     ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : paths);
     render(<PreferencesScreen />);
     fireEvent.click(await screen.findByRole("button", { name: "Resolve conflicts (1)" }));
     expect(await screen.findByText("travel-laptop · 20261106T100000Z")).toBeTruthy();
+    expect(screen.getByText("/sandbox/user/skills/review-helper/SKILL.md · 136 B")).toBeTruthy();
+    expect(screen.getByText("/sandbox/user/.state/remote-conflicts/travel-laptop/20261106T100000Z/skills/review-helper/SKILL.md · 142 B")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /overwrite/i })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open local" }));
     await waitFor(() => expect(ipc.calls.some(call => call.command === "conflicts_reveal")).toBe(true));
+    expect(ipc.calls.find(call => call.command === "conflicts_reveal")?.args).toEqual({ groupId: "travel-laptop_20261106T100000Z", relativePath: "skills/review-helper/SKILL.md", side: "local" });
     fireEvent.click(screen.getByRole("button", { name: "Keep remote" }));
     expect(await screen.findByText("Keep the remote copy.")).toBeTruthy();
+    expect(ipc.calls.find(call => call.command === "conflicts_resolve_preview")?.args).toEqual({ groupId: "travel-laptop_20261106T100000Z", relativePath: "skills/review-helper/SKILL.md", resolution: "keep_remote" });
     fireEvent.click(screen.getByRole("button", { name: "Apply reviewed resolution" }));
     expect(await screen.findByText("Conflict resolution applied (1 file changes).")).toBeTruthy();
     expect(ipc.calls.find(call => call.command === "conflicts_resolve_apply")?.args).toEqual({ previewId: "preview-test-conflict" });
@@ -177,10 +195,11 @@ describe("PreferencesScreen", () => {
     expect(await screen.findByText("Rejected [redacted]")).toBeTruthy();
     expect(screen.queryByText("ghp-secret-sentinel")).toBeNull();
   });
-});
+
   test("populated Preferences and embedded Logs have no axe violations", async () => {
     ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : paths);
     const { container } = render(<PreferencesScreen />);
     await screen.findByLabelText("Health interval");
     expect((await axe(container)).violations).toEqual([]);
   });
+});

@@ -31,4 +31,8 @@ hash: string,
 /**
  * Consumer agents.
  */
-agents: Array<string>, };
+agents: Array<string>, 
+/**
+ * Read failure that prevents editing this file, with the failing path.
+ */
+read_error: string | null, };

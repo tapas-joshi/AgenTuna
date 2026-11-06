@@ -457,3 +457,52 @@ fn parse_kind(value: &str) -> Result<ItemKind, CommandError> {
 fn parse_agent(value: &str) -> Result<AgentId, CommandError> {
     AgentId::from_str(value).map_err(|_| CommandError::invalid_argument("agent", "unknown agent"))
 }
+
+/// Indexed item counts per kind, used for the Effective config tab labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct EffectiveCountsView {
+    /// Indexed skills across every scope.
+    pub skills: i32,
+    /// Indexed MCP servers across every scope.
+    pub mcp_servers: i32,
+    /// Indexed instruction files across every scope.
+    pub rules: i32,
+}
+
+/// Counts indexed items per kind without resolving them.
+#[tauri::command]
+pub fn effective_counts(
+    state: tauri::State<'_, super::state::AppState>,
+) -> Result<EffectiveCountsView, super::commands::CommandError> {
+    let database = state
+        .database()
+        .map_err(super::commands::CommandError::unavailable)?;
+    let mut statement = database
+        .connection()
+        .prepare("SELECT kind, COUNT(*) FROM items GROUP BY kind")
+        .map_err(|_| super::commands::CommandError::internal("could not count indexed items"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| super::commands::CommandError::internal("could not count indexed items"))?;
+    let mut counts = EffectiveCountsView {
+        skills: 0,
+        mcp_servers: 0,
+        rules: 0,
+    };
+    for row in rows {
+        let (kind, count) = row.map_err(|_| {
+            super::commands::CommandError::internal("could not count indexed items")
+        })?;
+        let count = i32::try_from(count).unwrap_or(i32::MAX);
+        match kind.as_str() {
+            "skill" => counts.skills = count,
+            "mcp_server" => counts.mcp_servers = count,
+            "rule" => counts.rules = count,
+            _ => {}
+        }
+    }
+    Ok(counts)
+}

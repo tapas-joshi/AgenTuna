@@ -50,6 +50,27 @@ pub struct MigrationApplyOutcome {
     pub completed: usize,
     /// Absolute paths changed by the operation.
     pub touched_paths: Vec<PathBuf>,
+    /// Deviations from the reviewed plan that completed instead of failing.
+    pub warnings: Vec<MigrationWarning>,
+}
+
+/// A reviewed mode that the platform refused, replaced by a working equivalent.
+///
+/// The apply continues: the deployment row records the mode actually written, so the item is
+/// never left in a state the UI cannot explain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MigrationWarning {
+    /// The platform refused the symbolic link, so a manifest-bearing copy was written.
+    ///
+    /// This is the `EPERM`/`EXDEV`/network-volume/Windows-without-privilege path. The copy
+    /// carries [`at_fs::COPY_MANIFEST_FILE`] and the deployment row records `mode = copy`.
+    CopyFallback {
+        /// Agent path that received the copy instead of a link.
+        path: PathBuf,
+        /// Mode observed at that path after the write (`copy`).
+        observed_mode: &'static str,
+    },
 }
 
 /// Typed failures applying a migration plan.
@@ -73,6 +94,14 @@ pub enum ApplyPlanError {
         /// Underlying read failure.
         #[source]
         source: std::io::Error,
+    },
+    /// An agent folder refused access, so nothing was backed up or replaced.
+    #[error("cannot write agent folder `{path}`: permission denied; {required}")]
+    PermissionDenied {
+        /// The existing folder that must be writable, named so the user can fix it.
+        path: PathBuf,
+        /// What the user has to grant.
+        required: &'static str,
     },
     /// Canonical store metadata could not be loaded or updated.
     #[error("canonical store update failed: {0}")]
@@ -98,13 +127,33 @@ pub enum ApplyPlanError {
 /// creating a link or a manifest-bearing copy deployment. Plan and source hashes are
 /// rechecked immediately before the ChangeSet is submitted to at-fs.
 ///
+/// The whole migration is one operation: the canonical store files and manifest, the
+/// `items`/`deployments`/`native_items` rows and the native links or copies either all
+/// commit or none of them do. A metadata failure after the filesystem apply rolls the
+/// filesystem back; a filesystem failure records no metadata at all.
+///
+/// A platform that refuses the link (`EPERM`, `EXDEV`, a network volume, Windows without
+/// the symlink privilege) falls back to a manifest-bearing copy for that item, records
+/// `mode = copy` in the deployment row and reports [`MigrationWarning::CopyFallback`]
+/// instead of failing. On Windows a directory may be replaced by an NTFS junction, which
+/// [`at_fs`] documents as reviewable-only code behind `cfg(windows)`; the junction mode is
+/// stored as `junction` in the deployment row and no macOS or Linux run produces it.
+///
+/// Two agents that read one physical skills root (Codex and omp share
+/// `<project>/.agents/skills`) get one planned step for that path and one deployment row
+/// per agent pointing at it: the effect is coupled, and the plan says so instead of
+/// offering two independent switches.
+///
 /// # Errors
-/// Returns [`ApplyPlanError::Plan`] for stale input, or a typed filesystem/apply failure.
+/// Returns [`ApplyPlanError::Plan`] for stale input, [`ApplyPlanError::PermissionDenied`]
+/// when an agent folder refuses access (nothing is written), or a typed filesystem/apply
+/// failure.
 pub fn apply_plan(
     plan: &MigrationPlan,
     context: &mut ApplyPlanContext<'_>,
 ) -> Result<MigrationApplyOutcome, ApplyPlanError> {
     validate_plan(plan)?;
+    preflight_native_access(plan)?;
     let layout = StoreLayout::new(plan.scope, context.store_root);
     let loaded_manifest =
         StoreManifest::load(&layout).map_err(|error| ApplyPlanError::Store(error.to_string()))?;
@@ -182,12 +231,7 @@ pub fn apply_plan(
                 let relative = destination
                     .strip_prefix(context.store_root)
                     .map_err(|_| ApplyPlanError::OutsideStore(destination.clone()))?;
-                let expected = ExpectedState::Absent;
-                ops.push(FileOp::Copy {
-                    source: source.clone(),
-                    dest: relative.to_path_buf(),
-                    expected,
-                });
+                push_store_item_ops(source, relative, &mut ops)?;
                 touched.push(destination.clone());
                 let hash = step
                     .expected_source_hash
@@ -213,7 +257,10 @@ pub fn apply_plan(
                 )
                 .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
                 .unwrap_or_else(ItemId::new);
-                let item_name = slug_text.to_owned();
+                let item_name = step
+                    .item_name
+                    .clone()
+                    .unwrap_or_else(|| slug_text.to_owned());
                 manifest
                     .insert_item(
                         ManifestItem::new(
@@ -341,8 +388,9 @@ pub fn apply_plan(
                         .iter()
                         .find(|candidate| {
                             candidate.source.as_ref() == Some(&projection_item.source_path)
-                                && candidate.item_name.as_deref()
-                                    == Some(projection_item.item_name.as_str())
+                                && candidate.item_name.as_deref().is_some_and(|name| {
+                                    name.to_ascii_lowercase() == projection_item.item_name
+                                })
                         })
                         .ok_or_else(|| {
                             ApplyPlanError::Unsupported(projection_item.source_path.clone())
@@ -484,14 +532,19 @@ pub fn apply_plan(
         };
         at_fs::apply_with_roots_reversible(&change_set, &mut fs_context, context.authorized_roots)?
     };
-    if let Err(error) =
-        record_migration_metadata(context.database, &canonical_items, &outcome.operation_id)
-    {
-        if let Some(handle) = outcome.rollback_handle.take() {
-            at_fs::rollback_committed(handle)?;
+    let warnings = match record_migration_metadata(
+        context.database,
+        &canonical_items,
+        &outcome.operation_id,
+    ) {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            if let Some(handle) = outcome.rollback_handle.take() {
+                at_fs::rollback_committed(handle)?;
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     if let Some(handle) = outcome.rollback_handle.take() {
         at_fs::commit_reversible(handle)?;
     }
@@ -501,6 +554,7 @@ pub fn apply_plan(
         operation_id: outcome.operation_id,
         completed: outcome.completed,
         touched_paths: touched,
+        warnings,
     })
 }
 
@@ -508,12 +562,13 @@ fn record_migration_metadata(
     database: &mut at_db::Database,
     items: &[CanonicalMigrationItem],
     operation_id: &str,
-) -> Result<(), ApplyPlanError> {
+) -> Result<Vec<MigrationWarning>, ApplyPlanError> {
     let transaction = database
         .connection_mut()
         .transaction()
         .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
     let mut adopted_paths = std::collections::BTreeSet::new();
+    let mut warnings = Vec::new();
     for item in items {
         let source_path = item.store_path.to_string_lossy();
         let spec = at_db::items::AdoptedItemSpec {
@@ -551,8 +606,16 @@ fn record_migration_metadata(
         }
         let target_path = item.target_path.to_string_lossy();
         let store_path = item.store_path.to_string_lossy();
+        let mode = observed_mode(item)?;
+        if item.mode == "symlink" && mode != "symlink" {
+            // The link was refused: the deployment row below records the mode that exists,
+            // and the caller is told instead of discovering a silent downgrade later.
+            warnings.push(MigrationWarning::CopyFallback {
+                path: item.target_path.clone(),
+                observed_mode: mode,
+            });
+        }
         for agent_id in &item.agents {
-            let mode = observed_mode(item)?;
             let state = if mode == "native" {
                 ItemState::Native
             } else {
@@ -578,7 +641,8 @@ fn record_migration_metadata(
     }
     transaction
         .commit()
-        .map_err(|error| ApplyPlanError::Metadata(error.to_string()))
+        .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
+    Ok(warnings)
 }
 
 fn observed_mode(item: &CanonicalMigrationItem) -> Result<&'static str, ApplyPlanError> {
@@ -601,6 +665,28 @@ fn observed_mode(item: &CanonicalMigrationItem) -> Result<&'static str, ApplyPla
     }
     Ok("junction")
 }
+/// Appends the canonical-store write for one migrated skill folder.
+///
+/// The store item is plain content: a [`FileOp::Copy`] directory would write
+/// [`at_fs::COPY_MANIFEST_FILE`] into the item, and that manifest would become part of the
+/// item's hashed content (and of every copy deployed from it). [`FileOp::CopyTree`] copies
+/// the tree without it, so `hash_skill_folder(store item)` equals the reviewed source hash.
+fn push_store_item_ops(
+    source: &Path,
+    destination_relative: &Path,
+    ops: &mut Vec<FileOp>,
+) -> Result<(), ApplyPlanError> {
+    if !source.is_dir() {
+        return Err(ApplyPlanError::Unsupported(source.to_path_buf()));
+    }
+    ops.push(FileOp::CopyTree {
+        source: source.to_path_buf(),
+        dest: destination_relative.to_path_buf(),
+        expected: ExpectedState::Absent,
+    });
+    Ok(())
+}
+
 fn hash_source(path: &Path) -> Result<String, std::io::Error> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
@@ -610,5 +696,99 @@ fn hash_source(path: &Path) -> Result<String, std::io::Error> {
     } else {
         let bytes = fs::read(path)?;
         Ok(at_fs::sha256_hex(&bytes))
+    }
+}
+
+/// What the user has to grant when an agent folder is not writable.
+const REQUIRED_WRITE_ACCESS: &str = "grant write access to this folder; nothing was written";
+
+/// What the user has to grant when macOS protects the folder with TCC.
+const REQUIRED_FULL_DISK_ACCESS: &str = "grant AgenTuna Full Disk Access in System Settings \
+     → Privacy & Security (macOS protects this folder with TCC); nothing was written";
+
+/// Folder names macOS guards with TCC inside a user's home.
+const TCC_PROTECTED: [&str; 4] = ["Desktop", "Documents", "Downloads", "Library"];
+
+/// Checks that every agent folder this plan replaces is writable, before anything is backed up.
+///
+/// A read-only or macOS-TCC-protected agent folder becomes
+/// [`ApplyPlanError::PermissionDenied`] naming the folder, so the caller can show an
+/// actionable error while every original is still untouched.
+fn preflight_native_access(plan: &MigrationPlan) -> Result<(), ApplyPlanError> {
+    let mut probed = std::collections::BTreeSet::new();
+    for step in &plan.steps {
+        if !matches!(
+            step.action,
+            MigrationAction::WriteLink
+                | MigrationAction::WriteCopy
+                | MigrationAction::RenderMcp
+                | MigrationAction::RenderRule
+        ) {
+            continue;
+        }
+        let Some(destination) = step
+            .destination
+            .as_deref()
+            .filter(|path| path.is_absolute())
+        else {
+            continue;
+        };
+        let Some(anchor) = destination.parent().and_then(nearest_existing) else {
+            continue;
+        };
+        if !probed.insert(anchor.clone()) {
+            continue;
+        }
+        if !writable_directory(&anchor) {
+            return Err(ApplyPlanError::PermissionDenied {
+                required: required_permission(&anchor),
+                path: anchor,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The closest ancestor of `path` that exists, so a not-yet-created destination is still checked.
+fn nearest_existing(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if fs::symlink_metadata(candidate).is_ok() {
+            return Some(candidate.to_path_buf());
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+/// Whether the current user may create entries in `path`.
+///
+/// `access(2)` honours ACLs, which mode bits alone would miss. A check that fails for any
+/// other reason returns `true` and lets the apply surface its own typed error.
+fn writable_directory(path: &Path) -> bool {
+    match rustix::fs::access(
+        path,
+        rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+    ) {
+        Ok(()) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+        ),
+    }
+}
+
+/// Names the permission the user has to grant for `path`, calling out macOS TCC protection.
+fn required_permission(path: &Path) -> &'static str {
+    let protected = path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| TCC_PROTECTED.contains(&name))
+    });
+    if cfg!(target_os = "macos") && protected {
+        REQUIRED_FULL_DISK_ACCESS
+    } else {
+        REQUIRED_WRITE_ACCESS
     }
 }

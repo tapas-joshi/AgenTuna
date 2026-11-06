@@ -20,7 +20,22 @@ pub enum RuleFileType {
 }
 
 impl RuleFileType {
-    fn file_name(self) -> &'static str {
+    /// The adapter that owns this filename in its native rule paths.
+    ///
+    /// `AGENTS.md` belongs to Codex/omp; the Claude filenames belong to Claude Code. Picking
+    /// the owner keeps `rules new --type AGENTS.md` from asking Claude Code for a path it does
+    /// not have.
+    #[must_use]
+    pub const fn owner_agent(self) -> AgentId {
+        match self {
+            Self::Agents => AgentId::Codex,
+            Self::Claude | Self::ClaudeLocal => AgentId::ClaudeCode,
+        }
+    }
+
+    /// The native filename this type creates.
+    #[must_use]
+    pub const fn file_name(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
             Self::Agents => "AGENTS.md",
@@ -134,6 +149,84 @@ pub struct RuleSaveOutcome {
     pub apply: Option<at_fs::ApplyOutcome>,
 }
 
+/// Saves a whole native rule file that has no AgenTuna managed block.
+///
+/// The managed-block editor refuses an unmarked file (`AdoptRequired`) because it would have to
+/// choose which bytes AgenTuna owns. `rules save` is the agent-operable file writer, so it writes
+/// the complete buffer instead — still through the journaled, backed-up pipeline, and still
+/// refusing a stale buffer: `source` must be the snapshot the caller reviewed.
+///
+/// A caller that intends to overwrite a newer external edit (the CLI's `--force`) re-reads the
+/// file and passes the refreshed snapshot, so the same comparison still guards the write.
+///
+/// # Errors
+/// Returns [`RuleEditorError::Conflict`] with the unified diff when the file changed since it was
+/// read, and the same IO/apply errors as [`save_rule`].
+pub fn save_rule_raw(
+    source: &RuleSource,
+    editor_buffer: &[u8],
+    item_id: &ItemId,
+    connection: &rusqlite::Connection,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    recent_writes: &at_fs::RecentWrites,
+) -> Result<RuleSaveOutcome, RuleEditorError> {
+    let current = std::fs::read(&source.path).map_err(|error| io_error(&source.path, error))?;
+    if editor_buffer == current {
+        return Ok(RuleSaveOutcome {
+            changed: false,
+            apply: None,
+        });
+    }
+    let metadata =
+        std::fs::metadata(&source.path).map_err(|error| io_error(&source.path, error))?;
+    let current_hash = at_fs::sha256_hex(&current);
+    if current_hash != source.sha256 {
+        return Err(RuleEditorError::Conflict {
+            path: source.path.clone(),
+            diff: similar::TextDiff::from_lines(
+                String::from_utf8_lossy(&current),
+                String::from_utf8_lossy(editor_buffer),
+            )
+            .unified_diff()
+            .to_string(),
+        });
+    }
+    if metadata.permissions().mode() & 0o222 == 0 {
+        return Err(RuleEditorError::PermissionDenied {
+            path: source.path.clone(),
+            os_error: std::io::Error::from(std::io::ErrorKind::PermissionDenied).raw_os_error(),
+        });
+    }
+    let expected = at_model::ExpectedState::hash(&current_hash)?;
+    let change_set = rule_change_set(
+        "edit_rule",
+        "Save native rule file",
+        source.scope,
+        &source.path,
+        editor_buffer.to_vec(),
+        expected,
+        true,
+    )?;
+    let apply = at_fs::apply_with_roots(&change_set, context, roots)
+        .map_err(|error| apply_error(error, &source.path, editor_buffer))?;
+    let saved_hash = at_fs::sha256_hex(editor_buffer);
+    recent_writes.record(&source.path, saved_hash.clone());
+    record_version(
+        item_id,
+        source.scope,
+        &source.path,
+        &saved_hash,
+        editor_buffer.len(),
+        &apply.operation_id,
+        connection,
+    )?;
+    Ok(RuleSaveOutcome {
+        changed: true,
+        apply: Some(apply),
+    })
+}
+
 /// Saves editor content by replacing only the managed block.
 ///
 /// `source` must be the exact read-on-open snapshot. The prepared ChangeSet carries its hash and
@@ -219,7 +312,7 @@ pub fn save_rule(
     })
 }
 
-/// Resolves a new rule intent using the standard adapter registry and Claude Code's native path.
+/// Resolves a new rule intent using the standard adapter registry and the file type's owner.
 ///
 /// # Errors
 /// Returns the same errors as [`new_rule`] when the path is unsupported, occupied or read-only.
@@ -239,7 +332,7 @@ pub fn new_registered_rule(
     new_rule(
         file_type,
         scope,
-        &AgentId::ClaudeCode,
+        &file_type.owner_agent(),
         &registry,
         &env,
         global_writable,

@@ -19,4 +19,8 @@ kind: string,
 /**
  * Whether the preset enables it.
  */
-enabled: boolean, };
+enabled: boolean, 
+/**
+ * Whether the referenced item still exists.
+ */
+exists: boolean, };

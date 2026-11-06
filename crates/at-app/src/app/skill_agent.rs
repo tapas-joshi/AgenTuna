@@ -99,6 +99,60 @@ fn plans() -> &'static Mutex<HashMap<String, CachedPlan>> {
     &PLANS
 }
 
+/// One reviewed single-item plan handed to a bulk batch (TS-015).
+pub(crate) struct ReviewedSkillPlan {
+    pub(crate) item_id: ItemId,
+    pub(crate) set: Option<ChangeSet>,
+    pub(crate) no_op: bool,
+    pub(crate) source: PathBuf,
+    pub(crate) source_hash: String,
+    pub(crate) store_root: PathBuf,
+    pub(crate) backup_root: PathBuf,
+    pub(crate) authorized_roots: Vec<PathBuf>,
+    pub(crate) scope: Scope,
+    pub(crate) agent: AgentId,
+    pub(crate) project_id: Option<String>,
+    pub(crate) target: PathBuf,
+    pub(crate) enabled: bool,
+}
+
+/// Takes the reviewed plans for `preview_ids`, consuming each one.
+///
+/// A missing id means the user reviewed it in another session or it already applied, so the
+/// whole batch is refused instead of applying a partial selection.
+pub(crate) fn take_reviewed_plans(
+    preview_ids: &[String],
+) -> Result<Vec<ReviewedSkillPlan>, CommandError> {
+    let mut cache = plans()
+        .lock()
+        .map_err(|_| CommandError::internal("skill preview cache is unavailable"))?;
+    let mut taken = Vec::with_capacity(preview_ids.len());
+    for preview_id in preview_ids {
+        let cached = cache.remove(preview_id).ok_or_else(|| {
+            CommandError::invalid_argument(
+                "preview_ids",
+                "a reviewed skill preview expired; review the selection again",
+            )
+        })?;
+        taken.push(ReviewedSkillPlan {
+            item_id: cached.item_id,
+            set: cached.set,
+            no_op: cached.no_op,
+            source: cached.source,
+            source_hash: cached.source_hash,
+            store_root: cached.store_root,
+            backup_root: cached.backup_root,
+            authorized_roots: cached.authorized_roots,
+            scope: cached.scope,
+            agent: cached.agent,
+            project_id: cached.project_id,
+            target: cached.target,
+            enabled: cached.enabled,
+        });
+    }
+    Ok(taken)
+}
+
 /// Builds and caches the exact ChangeSet for a per-agent skill toggle.
 #[tauri::command]
 pub fn skill_agent_preview(

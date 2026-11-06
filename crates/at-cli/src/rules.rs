@@ -222,6 +222,24 @@ fn apply_rule_buffer(
     source: &rules::RuleSource,
     buffer: &[u8],
 ) -> Result<CommandOutput, CliError> {
+    let current = std::fs::read(&source.path).map_err(|error| {
+        CliError::new(
+            ErrorCode::Conflict,
+            format!("cannot read {}: {error}", source.path.display()),
+            "check the rule file and retry",
+        )
+    })?;
+    if buffer == current {
+        return Ok(CommandOutput::new(
+            json!({
+                "path": source.path.display().to_string(),
+                "changed": false,
+                "scope": source.scope.to_string(),
+                "backup_path": null,
+            }),
+            format!("{} is unchanged.\n", source.path.display()),
+        ));
+    }
     let database = at_db::Database::open_file(paths.db_path()).map_err(|error| {
         CliError::new(
             ErrorCode::Conflict,
@@ -242,47 +260,110 @@ fn apply_rule_buffer(
             "check rule and support directories",
         )
     })?;
+    let item_id = index_rule(&database, source)?;
     let mut recorder = at_fs::DbOperationRecorder::new(database.connection(), 30);
     let mut context = at_fs::ApplyContext {
         store_root: support,
         backup_folder: backup,
         recorder: &mut recorder,
     };
-    let outcome = at_engine::rule_editor::save_rule(
-        source,
-        buffer,
-        &ItemId::new(),
-        database.connection(),
-        &mut context,
-        &roots,
-        &at_fs::RecentWrites::new(),
-    )
-    .map_err(|error| {
-        let code = if matches!(
-            error,
-            at_engine::rule_editor::RuleEditorError::Conflict { .. }
-        ) {
-            ErrorCode::Conflict
-        } else {
-            ErrorCode::Validation
-        };
-        CliError::new(
-            code,
-            error.to_string(),
-            "review the rule-file diff and retry",
-        )
-    })?;
-    let data = json!({ "path": source.path.display().to_string(), "changed": outcome.changed, "scope": source.scope.to_string() });
-    let human = if outcome.changed {
-        format!(
-            "Saved {}. Backup: {}\n",
-            source.path.display(),
-            backup.display()
+    // A managed file is edited inside its markers; an unmarked native file is saved whole.
+    let outcome = if source.managed {
+        at_engine::rule_editor::save_rule(
+            source,
+            buffer,
+            &item_id,
+            database.connection(),
+            &mut context,
+            &roots,
+            &at_fs::RecentWrites::new(),
         )
     } else {
+        at_engine::rule_editor::save_rule_raw(
+            source,
+            buffer,
+            &item_id,
+            database.connection(),
+            &mut context,
+            &roots,
+            &at_fs::RecentWrites::new(),
+        )
+    }
+    .map_err(rule_editor_error)?;
+    let backup_path = outcome
+        .apply
+        .as_ref()
+        .and_then(|apply| {
+            at_db::backups::backups_for_operation(database.connection(), &apply.operation_id).ok()
+        })
+        .and_then(|backups| backups.into_iter().find_map(|backup| backup.backup_path));
+    let human = if !outcome.changed {
         format!("{} is unchanged.\n", source.path.display())
+    } else {
+        backup_path.as_deref().map_or_else(
+            || format!("Saved {}.\n", source.path.display()),
+            |path| format!("Saved {}. Backup: {path}\n", source.path.display()),
+        )
     };
-    Ok(CommandOutput::new(data, human))
+    Ok(CommandOutput::new(
+        json!({
+            "path": source.path.display().to_string(),
+            "changed": outcome.changed,
+            "scope": source.scope.to_string(),
+            "backup_path": backup_path,
+        }),
+        human,
+    ))
+}
+
+/// Records a scanned rule file in the index and returns its stable item id.
+fn index_rule(database: &at_db::Database, source: &rules::RuleSource) -> Result<ItemId, CliError> {
+    at_db::rules_index::upsert_on_scan(
+        database.connection(),
+        &at_db::rules_index::ScannedRule {
+            scope: source.scope,
+            project_id: None,
+            agent: source
+                .agent_consumers
+                .first()
+                .map_or_else(|| "unknown".to_owned(), ToString::to_string),
+            path: source.path.display().to_string(),
+            link_target: source
+                .link_target
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            bytes: source.bytes.clone(),
+            mtime: source
+                .mtime
+                .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|duration| i64::try_from(duration.as_millis()).ok()),
+            managed: source.managed,
+        },
+    )
+    .map_err(|error| {
+        CliError::new(
+            ErrorCode::Conflict,
+            format!("cannot index the rule file: {error}"),
+            "run `agentuna doctor` to inspect the index",
+        )
+    })
+}
+
+/// Maps a rule-editor refusal onto the published error classes.
+fn rule_editor_error(error: at_engine::rule_editor::RuleEditorError) -> CliError {
+    let code = if matches!(
+        error,
+        at_engine::rule_editor::RuleEditorError::Conflict { .. }
+    ) {
+        ErrorCode::Conflict
+    } else {
+        ErrorCode::Validation
+    };
+    CliError::new(
+        code,
+        error.to_string(),
+        "review the rule-file diff and retry",
+    )
 }
 
 fn new_rule(globals: &GlobalArgs, args: &ArgMatches) -> Result<CommandOutput, CliError> {
@@ -353,6 +434,21 @@ fn new_rule(globals: &GlobalArgs, args: &ArgMatches) -> Result<CommandOutput, Cl
             "check rule and support directories",
         )
     })?;
+    // `item_versions` has a foreign key to `items`, so the rule row exists before the
+    // create-only write records its version.
+    let item_id = index_rule(
+        &database,
+        &rules::RuleSource {
+            scope,
+            agent_consumers: vec![file_type.owner_agent()],
+            path: intent.path.clone(),
+            bytes: intent.template.clone(),
+            mtime: None,
+            sha256: at_fs::sha256_hex(&intent.template),
+            managed: false,
+            link_target: None,
+        },
+    )?;
     let mut recorder = at_fs::DbOperationRecorder::new(database.connection(), 30);
     let mut context = at_fs::ApplyContext {
         store_root: support,
@@ -361,7 +457,7 @@ fn new_rule(globals: &GlobalArgs, args: &ArgMatches) -> Result<CommandOutput, Cl
     };
     let (source, _) = at_engine::rule_editor::apply_new_rule(
         &intent,
-        &ItemId::new(),
+        &item_id,
         database.connection(),
         &mut context,
         &roots,

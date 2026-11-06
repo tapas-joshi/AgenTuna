@@ -349,6 +349,8 @@ pub enum CommandErrorCode {
     RefusedOverwrite,
     /// A reviewed plan conflicts with newer or divergent state.
     Conflict,
+    /// A Global lock blocks the requested change.
+    Locked,
 }
 
 /// Structured details for an unmanaged target refused by `at-fs`.

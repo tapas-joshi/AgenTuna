@@ -524,11 +524,13 @@ fn apply_inner(
                     || matches!(prior, FileOp::Delete { path: deleted, .. }
                         if Some(deleted.as_path()) == op.destination())
             })
-            || matches!(op, FileOp::Move { .. })
-                && set.ops[..index].iter().any(|prior| {
-                    matches!(prior, FileOp::Delete { path: deleted, .. }
-                        if Some(deleted.as_path()) == op.destination())
-                });
+            || matches!(
+                op,
+                FileOp::Copy { .. } | FileOp::CopyTree { .. } | FileOp::Move { .. }
+            ) && set.ops[..index].iter().any(|prior| {
+                matches!(prior, FileOp::Delete { path: deleted, .. }
+                    if Some(deleted.as_path()) == op.destination())
+            });
         validate_expected(op, path, root, replaced_by_prior_move)?;
     }
     if let Some(guard) = ownership_guard {
@@ -825,6 +827,18 @@ fn execute_op(
                     .map_err(|error| error.to_string())
             }
         }
+        FileOp::CopyTree {
+            source, expected, ..
+        } => {
+            let source = resolve_path(context.store_root, source)?;
+            let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
+            if wanted != ExpectedState::Absent {
+                return Err("copy-tree destination replacement is not supported".to_owned());
+            }
+            // Plain content: no copy manifest, so the destination hashes as the source does.
+            copy_node(&source, path)?;
+            Ok(None)
+        }
         FileOp::Mkdir { mode, parents, .. } => {
             if path.is_absolute() {
                 crate::guard::create_parents_if_target_absent(path)
@@ -967,9 +981,15 @@ fn validate_expected(
         parent = current.parent();
     }
     let valid = match op {
-        FileOp::Write { expected, .. }
-        | FileOp::Delete { expected, .. }
-        | FileOp::Copy { expected, .. } => expected_matches(path, expected),
+        FileOp::Write { expected, .. } | FileOp::Delete { expected, .. } => {
+            expected_matches(path, expected)
+        }
+        // A Copy that replaces a just-deleted destination is the undo pipeline re-creating a
+        // backed-up tree; the Delete immediately before it removed what was there.
+        FileOp::Copy { expected, .. } | FileOp::CopyTree { expected, .. } => {
+            expected_matches(path, expected)
+                || (replaced_by_prior_move && matches!(expected, at_model::ExpectedState::Absent))
+        }
         FileOp::Symlink { target, .. } => {
             (expected_absent(path) || replaced_by_prior_move)
                 && (resolve_path(store_root, target).is_ok_and(|target| target.exists())
@@ -1549,6 +1569,69 @@ mod tests {
             },
         );
         assert!(fs::symlink_metadata(root.join("copy")).is_err());
+        assert_eq!(
+            fs::read(root.join("source/file.txt")).expect("source"),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn copy_tree_writes_plain_content_without_a_deploy_manifest() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(root.join("source/nested")).expect("source");
+        fs::write(root.join("source/SKILL.md"), b"canonical").expect("skill doc");
+        fs::write(root.join("source/nested/helper.txt"), b"helper").expect("nested file");
+        let set = changeset(vec![FileOp::CopyTree {
+            source: PathBuf::from("source"),
+            dest: PathBuf::from("item"),
+            expected: ModelExpected::Absent,
+        }]);
+        let backup_root = root.join("backups");
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backup_root,
+            recorder: &mut recorder,
+        };
+
+        apply(&set, &mut context).expect("copy tree");
+
+        assert_eq!(
+            fs::read(root.join("item/SKILL.md")).expect("skill doc"),
+            b"canonical"
+        );
+        assert_eq!(
+            fs::read(root.join("item/nested/helper.txt")).expect("nested file"),
+            b"helper"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("item").join(crate::deploy::COPY_MANIFEST_FILE))
+                .is_err(),
+            "a store item carries no deployment manifest"
+        );
+        assert_eq!(
+            hash_node(&root.join("item")).expect("item hash"),
+            hash_node(&root.join("source")).expect("source hash"),
+            "the copy hashes exactly as the source does"
+        );
+    }
+
+    #[test]
+    fn copy_tree_failure_rolls_back_the_whole_tree() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(root.join("source")).expect("source");
+        fs::write(root.join("source/file.txt"), b"source").expect("source file");
+        fail_after_one_operation(
+            &root,
+            FileOp::CopyTree {
+                source: PathBuf::from("source"),
+                dest: PathBuf::from("item"),
+                expected: ModelExpected::Absent,
+            },
+        );
+        assert!(fs::symlink_metadata(root.join("item")).is_err());
         assert_eq!(
             fs::read(root.join("source/file.txt")).expect("source"),
             b"source"

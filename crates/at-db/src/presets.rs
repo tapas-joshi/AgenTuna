@@ -310,11 +310,114 @@ const INSERT_APPLICATION_MEMBER_SQL: &str = "\
 INSERT INTO preset_application_members (application_id, item_id, prior_enabled) \
 VALUES (?1, ?2, ?3)";
 
+const LIST_APPLICATIONS_SQL: &str = "\
+SELECT id, preset_id, target_kind, target_id, applied_at, \
+       COALESCE(member_count, 0), operation_id \
+  FROM preset_applications \
+ WHERE preset_id = ?1 \
+ ORDER BY applied_at DESC, id DESC";
+
+const FIND_APPLICATION_SQL: &str = "\
+SELECT id, preset_id, target_kind, target_id, applied_at, \
+       COALESCE(member_count, 0), operation_id \
+  FROM preset_applications WHERE id = ?1";
+
 const APPLICATION_MEMBERS_SQL: &str = "\
 SELECT id, application_id, item_id, prior_enabled \
   FROM preset_application_members \
  WHERE application_id = ?1 \
  ORDER BY id ASC";
+
+/// One `preset_applications` row as [`list_applications`] returns it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresetApplicationRecord {
+    /// Application row id; unapply takes this id.
+    pub id: i64,
+    /// Preset that was applied.
+    pub preset_id: String,
+    /// Agent or project the preset was applied to.
+    pub target_kind: PresetTargetKind,
+    /// Agent id or project id.
+    pub target_id: String,
+    /// When the application was recorded (RFC 3339 text).
+    pub applied_at: String,
+    /// Members the apply changed, as stored.
+    pub member_count: i64,
+    /// Operation that performed the apply, when recorded.
+    pub operation_id: Option<String>,
+}
+
+/// One recorded application by id.
+///
+/// # Errors
+/// A SQLite failure or an unknown stored target kind.
+pub fn find_application(
+    connection: &Connection,
+    application_id: i64,
+) -> Result<Option<PresetApplicationRecord>, DbError> {
+    let mut statement = connection.prepare(FIND_APPLICATION_SQL)?;
+    let mut rows = statement.query_map([application_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    let Some(row) = rows.next() else {
+        return Ok(None);
+    };
+    let (id, preset_id, raw_kind, target_id, applied_at, member_count, operation_id) = row?;
+    Ok(Some(PresetApplicationRecord {
+        id,
+        preset_id,
+        target_kind: PresetTargetKind::from_str(&raw_kind).map_err(DbError::from)?,
+        target_id,
+        applied_at,
+        member_count,
+        operation_id,
+    }))
+}
+
+/// Every recorded application of one preset, newest first.
+///
+/// # Errors
+/// A SQLite failure or an unknown stored target kind.
+pub fn list_applications(
+    connection: &Connection,
+    preset_id: &str,
+) -> Result<Vec<PresetApplicationRecord>, DbError> {
+    let mut statement = connection.prepare(LIST_APPLICATIONS_SQL)?;
+    let rows = statement.query_map([preset_id], |row| {
+        let raw_kind: String = row.get(2)?;
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            raw_kind,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    let mut applications = Vec::new();
+    for row in rows {
+        let (id, preset_id, raw_kind, target_id, applied_at, member_count, operation_id) = row?;
+        applications.push(PresetApplicationRecord {
+            id,
+            preset_id,
+            target_kind: PresetTargetKind::from_str(&raw_kind).map_err(DbError::from)?,
+            target_id,
+            applied_at,
+            member_count,
+            operation_id,
+        });
+    }
+    Ok(applications)
+}
 
 const RATIO_SQL: &str = "\
 SELECT m.item_id, m.kind, m.enabled, \
@@ -782,6 +885,8 @@ mod tests {
             INSERT_APPLICATION_MEMBER_SQL,
             APPLICATION_MEMBERS_SQL,
             RATIO_SQL,
+            LIST_APPLICATIONS_SQL,
+            FIND_APPLICATION_SQL,
             "SELECT scope FROM presets WHERE id = ?1",
             "SELECT name FROM presets WHERE id = ?1",
         ] {
@@ -807,5 +912,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn applications_round_trip_and_find_by_id() {
+        let mut database = crate::Database::open_in_memory().expect("database");
+        let item = ItemId::new();
+        let item_text = item.to_string();
+        let preset_id = tests_support::seed_preset(&mut database, &item);
+        let application_id = record_application(
+            database.connection_mut(),
+            &NewApplication {
+                preset_id: &preset_id,
+                target_kind: PresetTargetKind::Agent,
+                target_id: "codex",
+                operation_id: Some("op_1"),
+                members: vec![ApplicationMemberSpec {
+                    item_id: &item_text,
+                    prior_enabled: Some(false),
+                }],
+                member_count: None,
+            },
+        )
+        .expect("record application");
+        let listed = list_applications(database.connection(), &preset_id).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, application_id);
+        assert_eq!(listed[0].target_kind, PresetTargetKind::Agent);
+        assert_eq!(listed[0].target_id, "codex");
+        assert_eq!(listed[0].member_count, 1);
+        let found = find_application(database.connection(), application_id)
+            .expect("find")
+            .expect("row");
+        assert_eq!(found.preset_id, preset_id);
+        assert!(
+            find_application(database.connection(), application_id + 1)
+                .expect("missing")
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+
+    /// Creates one preset holding `item` and returns its id.
+    pub fn seed_preset(database: &mut crate::Database, item: &ItemId) -> String {
+        database
+            .connection()
+            .execute(
+                "INSERT INTO items (id, kind, scope, slug, name) \
+                 VALUES (?1, 'skill', 'user', 'support-skill', 'Support skill')",
+                [item.to_string()],
+            )
+            .expect("item");
+        let preset_id = create_preset(
+            database.connection_mut(),
+            &NewPreset {
+                id: None,
+                name: "Support",
+                description: None,
+                scope: Scope::User,
+                is_builtin: false,
+            },
+        )
+        .expect("preset");
+        set_member(
+            database.connection(),
+            &preset_id,
+            item,
+            ItemKind::Skill,
+            true,
+        )
+        .expect("member");
+        preset_id
     }
 }

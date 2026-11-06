@@ -152,6 +152,78 @@ impl DriftService<'_> {
     }
 }
 
+/// Builds the watcher targets from the deployment index.
+///
+/// Every deployment row with a target path becomes one target: its kind selects the hashing
+/// method, and its recorded baseline (falling back to the observed target hash) is the value the
+/// current file must still match. Rows without a target path, and rows whose state is `off`, are
+/// not deployed and therefore not watched.
+///
+/// # Errors
+/// Returns a database error when the deployment matrix cannot be read.
+pub fn targets_from_index(connection: &rusqlite::Connection) -> Result<Vec<DriftTarget>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT d.item_id, d.agent_id, d.scope, d.target_path, d.link_target, \
+                COALESCE(d.baseline_hash, d.target_hash, \
+                  (SELECT v.content_hash FROM item_versions v \
+                    WHERE v.item_id = d.item_id AND v.scope = d.scope \
+                    ORDER BY v.captured_at DESC, v.id DESC LIMIT 1)) AS expected, \
+                i.kind \
+           FROM deployments d JOIN items i ON i.id = d.item_id \
+          WHERE d.target_path IS NOT NULL AND d.state != 'off' \
+          ORDER BY d.target_path, d.agent_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut targets = Vec::new();
+    for row in rows {
+        let (item_id, agent_id, scope, target_path, link_target, expected_hash, kind) = row?;
+        let item_id = item_id
+            .parse::<ItemId>()
+            .map_err(|error| DbError::InvalidValue {
+                field: "deployments.item_id",
+                reason: error.to_string(),
+            })?;
+        let agent_id = agent_id
+            .parse::<AgentId>()
+            .map_err(|error| DbError::InvalidValue {
+                field: "deployments.agent_id",
+                reason: error.to_string(),
+            })?;
+        let scope = scope
+            .parse::<Scope>()
+            .map_err(|error| DbError::InvalidValue {
+                field: "deployments.scope",
+                reason: error.to_string(),
+            })?;
+        let content = match kind.as_str() {
+            "skill" => DriftContent::SkillFolder,
+            "rule" => DriftContent::RuleFile,
+            _ => DriftContent::File,
+        };
+        targets.push(DriftTarget {
+            item_id: Some(item_id),
+            agent_id,
+            scope,
+            path: PathBuf::from(target_path),
+            expected_hash,
+            content,
+            link_target: link_target.map(PathBuf::from),
+            store_side_of_link: false,
+        });
+    }
+    Ok(targets)
+}
+
 /// Creates a watcher config with the shared RecentWrites registry and drift debounce.
 #[must_use]
 pub fn drift_watch_config(

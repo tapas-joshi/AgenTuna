@@ -1,10 +1,13 @@
 //! MCP server and Keychain commands for `agentuna mcp`.
 
 use std::io::{self, IsTerminal, Read};
+use std::path::PathBuf;
+use std::str::FromStr;
 
 use at_fs::{BackupPolicy, ExpectedState};
-use at_model::{EnvValue, McpServerDef, McpTransport, Scope};
-use at_store::layout::StoreLayout;
+use at_model::{AgentId, EnvValue, ItemKind, ItemState, McpServerDef, McpTransport, Scope};
+use at_store::layout::{Slug, StoreLayout};
+use at_store::manifest::StoreManifest;
 use at_store::mcp_store::{LoadedMcpStore, McpStore};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -66,6 +69,28 @@ impl CommandGroup for McpGroup {
                     .about("Test an MCP server after explicit approval")
                     .arg(Arg::new("id").required(true).value_name("ID")),
             )
+            .subcommand(
+                Command::new("enable")
+                    .about("Enable an MCP server for one agent in a scope")
+                    .arg(Arg::new("id").required(true).value_name("ID"))
+                    .arg(
+                        Arg::new("agent")
+                            .long("agent")
+                            .required(true)
+                            .value_name("AGENT"),
+                    ),
+            )
+            .subcommand(
+                Command::new("disable")
+                    .about("Disable an MCP server for one agent in a scope")
+                    .arg(Arg::new("id").required(true).value_name("ID"))
+                    .arg(
+                        Arg::new("agent")
+                            .long("agent")
+                            .required(true)
+                            .value_name("AGENT"),
+                    ),
+            )
             .subcommand(secret);
         root.subcommand(mcp)
     }
@@ -90,6 +115,8 @@ impl CommandGroup for McpGroup {
             "edit" => mutate_server(globals, args, Mutation::Edit(required(args, "id")?)),
             "remove" => remove_server(globals, args, required(args, "id")?),
             "test" => test_server(globals, required(args, "id")?),
+            "enable" => set_agent_enabled(globals, args, true),
+            "disable" => set_agent_enabled(globals, args, false),
             _ => Err(CliError::new(
                 ErrorCode::Usage,
                 "unsupported MCP command",
@@ -124,66 +151,98 @@ fn list_servers(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
     let (scope, layout) = scope_layout(globals)?;
     let loaded = McpStore::load(&layout).map_err(store_error)?;
     let paths = crate::runtime::resolve_paths(globals)?;
-    let indexed = if paths.db_path().exists() {
+    let indexed = paths.db_path().exists();
+    let rows = if indexed {
         at_engine::mcp_cli::list_rows(&paths, scope, None)
             .map_err(|error| mcp_index_error(error.to_string()))?
     } else {
         Vec::new()
     };
-    let servers = loaded
-        .store
-        .servers
-        .iter()
-        .map(|(slug, definition)| {
-            let row = indexed.iter().find(|row| {
-                !row.native_only
-                    && row.scope == scope
-                    && row.display_name == definition.display_name
-            });
-            let agent_state = row
-                .map(|row| {
-                    row.agents
-                        .iter()
-                        .map(|cell| {
-                            let state = match &cell.state {
-                                at_db::mcp_index::McpCellState::Linked => "linked",
-                                at_db::mcp_index::McpCellState::Off => "off",
-                                at_db::mcp_index::McpCellState::Locked => "locked",
-                                at_db::mcp_index::McpCellState::Shadowed => "shadowed",
-                                at_db::mcp_index::McpCellState::Native { .. } => "native",
-                                at_db::mcp_index::McpCellState::None => "none",
-                                at_db::mcp_index::McpCellState::NotInstalled => "not_installed",
-                                _ => "unknown",
-                            };
-                            (
-                                cell.agent_id.to_string(),
-                                json!({
-                                    "state": state,
-                                    "config_path": cell.config_path,
-                                }),
-                            )
-                        })
-                        .collect::<serde_json::Map<_, _>>()
+    // The index is the UI's own list query, so `mcp list` counts what the MCP screen shows.
+    // Without an index (a fresh sandbox) fall back to the canonical store so a script still
+    // sees the definitions it can act on; `indexed: false` says the states are unknown.
+    let manifest = StoreManifest::load(&layout).map_err(store_error)?;
+    let servers = if indexed {
+        rows.iter()
+            .map(|row| {
+                let item = row.item_id.and_then(|id| manifest.manifest.item(id));
+                let slug = item.map(|item| item.slug.as_str().to_owned());
+                let transport = slug
+                    .as_deref()
+                    .and_then(|slug| loaded.store.get(slug))
+                    .map_or("unknown", |definition| definition.transport.kind());
+                json!({
+                    "id": slug,
+                    "item_id": row.item_id.map(|id| id.to_string()),
+                    "scope": row.scope.wire_name(),
+                    "name": row.display_name,
+                    "transport": transport,
+                    "native": row.native_only,
+                    "locked": row.locked_by.is_some(),
+                    "agent_state": agent_state(row),
+                    "health": row.latest_health.as_deref().unwrap_or("unknown"),
                 })
-                .unwrap_or_default();
-            json!({
-                "id": slug,
-                "scope": scope.wire_name(),
-                "name": definition.display_name,
-                "transport": definition.transport.kind(),
-                "agent_state": agent_state,
-                "health": row.and_then(|row| row.latest_health.as_deref()).unwrap_or("unknown")
             })
-        })
-        .collect::<Vec<_>>();
-    Ok(CommandOutput::new(
-        json!({"servers":servers,"count":servers.len()}),
+            .collect::<Vec<_>>()
+    } else {
+        loaded
+            .store
+            .servers
+            .iter()
+            .map(|(slug, definition)| {
+                json!({
+                    "id": slug,
+                    "item_id": null,
+                    "scope": scope.wire_name(),
+                    "name": definition.display_name,
+                    "transport": definition.transport.kind(),
+                    "native": false,
+                    "locked": false,
+                    "agent_state": {},
+                    "health": "unknown",
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let count = servers.len();
+    let human = if indexed {
+        format!("{count} MCP server(s) in {} scope\n", scope.wire_name())
+    } else {
         format!(
-            "{} MCP server(s) in {} scope\n",
-            servers.len(),
+            "{count} MCP server(s) in {} scope (index missing; per-agent state unknown)\n",
             scope.wire_name()
-        ),
+        )
+    };
+    Ok(CommandOutput::new(
+        json!({"servers": servers, "count": count, "indexed": indexed}),
+        human,
     ))
+}
+
+/// Per-agent state map for one indexed MCP row.
+fn agent_state(row: &at_db::mcp_index::McpListRow) -> serde_json::Map<String, Value> {
+    row.agents
+        .iter()
+        .map(|cell| {
+            let state = match &cell.state {
+                at_db::mcp_index::McpCellState::Linked => "linked",
+                at_db::mcp_index::McpCellState::Off => "off",
+                at_db::mcp_index::McpCellState::Locked => "locked",
+                at_db::mcp_index::McpCellState::Shadowed => "shadowed",
+                at_db::mcp_index::McpCellState::Native { .. } => "native",
+                at_db::mcp_index::McpCellState::None => "none",
+                at_db::mcp_index::McpCellState::NotInstalled => "not_installed",
+                _ => "unknown",
+            };
+            (
+                cell.agent_id.to_string(),
+                json!({
+                    "state": state,
+                    "config_path": cell.config_path,
+                }),
+            )
+        })
+        .collect()
 }
 
 fn show_server(globals: &GlobalArgs, id: &str) -> Result<CommandOutput, CliError> {
@@ -227,6 +286,218 @@ fn test_server(globals: &GlobalArgs, id: &str) -> Result<CommandOutput, CliError
             result.server_name, result.tools_count, result.latency_ms
         ),
     ))
+}
+
+fn set_agent_enabled(
+    globals: &GlobalArgs,
+    args: &ArgMatches,
+    enabled: bool,
+) -> Result<CommandOutput, CliError> {
+    let dry_run = globals.dry_run;
+    let access = crate::runtime::CliAccess::for_command(globals, !dry_run)?;
+    access.ensure_writable()?;
+    let paths = access.paths().clone();
+    let id = required(args, "id")?;
+    let agent = AgentId::from_str(required(args, "agent")?).map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            "unknown agent id",
+            "use an agent id from `agentuna agents list`",
+        )
+    })?;
+    let scope: Scope = globals.scope.unwrap_or(ScopeArg::User).into();
+    let layout = StoreLayout::for_scope(&paths, scope).map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            "the selected scope has no store",
+            "select a valid project for project or local scope",
+        )
+    })?;
+    let slug = Slug::parse(id).map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            format!("invalid MCP server id `{id}`"),
+            "use the id printed by `agentuna mcp list`",
+        )
+    })?;
+    let manifest = StoreManifest::load(&layout).map_err(store_error)?;
+    let item_id = manifest
+        .manifest
+        .item_by_slug(ItemKind::McpServer, &slug)
+        .map(|item| item.id)
+        .ok_or_else(|| not_found(id))?;
+    let database =
+        at_db::Database::open_file(paths.db_path()).map_err(|error| db_error(error.to_string()))?;
+    let connection = database.connection();
+    if let Some(lock) = at_db::locks::locks_for_item(connection, &item_id)
+        .map_err(|error| db_error(error.to_string()))?
+        .into_iter()
+        .next()
+    {
+        return Err(locked_error(&lock));
+    }
+    let installed = at_db::agents::list_agents_on_mac(connection)
+        .map_err(|error| db_error(error.to_string()))?
+        .into_iter()
+        .filter(|agent| agent.presence != at_db::agents::AgentPresence::NotInstalled)
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let deployed = at_db::deployments::list_deployments_for_item(connection, &item_id)
+        .map_err(|error| db_error(error.to_string()))?
+        .into_iter()
+        .filter(|cell| cell.scope == scope)
+        .map(|cell| cell.agent_id)
+        .collect::<Vec<_>>();
+    let planned = at_engine::mcp_plan::plan_item(at_engine::mcp_plan::McpItemPlanRequest {
+        paths: &paths,
+        scope,
+        project_id: None,
+        item_id,
+        action: at_engine::mcp_plan::McpItemAction::SetEnabled {
+            agent: agent.clone(),
+            enabled,
+        },
+        installed: &installed,
+        deployed: &deployed,
+        locked_reason: None,
+    })
+    .map_err(plan_error)?;
+    if dry_run {
+        return Ok(CommandOutput::new(
+            json!({
+                "id": id,
+                "scope": scope.wire_name(),
+                "agent": agent.to_string(),
+                "enabled": enabled,
+                "dry_run": true,
+                "files": planned
+                    .plan
+                    .apply_order()
+                    .flat_map(|set| set.ops.iter())
+                    .filter_map(|op| op.destination())
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>(),
+            }),
+            format!(
+                "Would {} {id} for {agent}\n",
+                if enabled { "enable" } else { "disable" }
+            ),
+        ));
+    }
+    let roots = at_fs::ApplyRoots::new(authorized_roots(&paths)).map_err(|_| {
+        CliError::new(
+            ErrorCode::Conflict,
+            "authorized configuration roots are unavailable",
+            "check that the home, store and project folders exist",
+        )
+    })?;
+    let mut recorder = at_fs::DbOperationRecorder::new(connection, 30);
+    let mut context = at_fs::ApplyContext {
+        store_root: paths.support_dir(),
+        backup_folder: &paths.support_dir().join(at_store::layout::BACKUPS_DIR),
+        recorder: &mut recorder,
+    };
+    let outcome = at_engine::mcp_plan::apply_item_plan(&planned, &mut context, &roots)
+        .map_err(apply_error)?;
+    let target_path = planned.plan.native.as_ref().and_then(|set| {
+        set.ops.iter().find_map(|op| {
+            let path = op.destination()?;
+            (path.file_name().is_some()).then(|| path.display().to_string())
+        })
+    });
+    let state = if enabled {
+        ItemState::Linked
+    } else {
+        ItemState::Off
+    };
+    let mut spec = at_db::deployments::DeploymentSpec::new(&item_id, &agent, scope, state)
+        .with_mode("native")
+        .with_operation(&outcome.operation_id);
+    if let Some(path) = target_path.as_deref() {
+        spec = spec.with_target_path(path);
+    }
+    at_db::deployments::upsert_deployment(connection, &spec)
+        .map_err(|error| db_error(error.to_string()))?;
+    Ok(CommandOutput::new(
+        json!({
+            "id": id,
+            "scope": scope.wire_name(),
+            "agent": agent.to_string(),
+            "enabled": enabled,
+            "files_changed": outcome.completed,
+            "operation_id": outcome.operation_id,
+        }),
+        format!(
+            "{} {id} for {agent}: {} file(s) changed\n",
+            if enabled { "Enabled" } else { "Disabled" },
+            outcome.completed
+        ),
+    ))
+}
+
+/// Maps a planner refusal onto the published error classes.
+fn plan_error(error: at_engine::mcp_plan::McpPlanError) -> CliError {
+    let code = match &error {
+        at_engine::mcp_plan::McpPlanError::Locked(_) => ErrorCode::Locked,
+        at_engine::mcp_plan::McpPlanError::MissingStoreEntry(_)
+        | at_engine::mcp_plan::McpPlanError::NotMcpServer(_) => ErrorCode::NotFound,
+        at_engine::mcp_plan::McpPlanError::AgentNotInstalled(_) => ErrorCode::NotFound,
+        at_engine::mcp_plan::McpPlanError::CapabilityRefusal { .. }
+        | at_engine::mcp_plan::McpPlanError::UnreadableTarget(_) => ErrorCode::Conflict,
+        _ => ErrorCode::Conflict,
+    };
+    CliError::new(
+        code,
+        error.to_string(),
+        "inspect the server definition and retry",
+    )
+}
+
+/// Maps a ChangeSet application failure onto the published error classes.
+fn apply_error(error: at_fs::ChangeSetApplyError) -> CliError {
+    CliError::new(
+        ErrorCode::Conflict,
+        format!("the MCP change could not be applied: {error}"),
+        "review the current file state and retry",
+    )
+}
+
+/// The roots a reviewed MCP write may touch.
+fn authorized_roots(paths: &at_store::paths::AppPaths) -> Vec<PathBuf> {
+    let mut roots = vec![paths.support_dir().to_path_buf()];
+    if let Some(home) = paths.home_dir() {
+        roots.push(home.to_path_buf());
+    }
+    roots.push(paths.global_store().to_path_buf());
+    roots.push(paths.user_store().to_path_buf());
+    if let Some(project) = paths.project_store().and_then(std::path::Path::parent) {
+        roots.push(project.to_path_buf());
+    }
+    roots.retain(|path| path.is_dir());
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// The error returned when a lock blocks a write.
+fn locked_error(lock: &at_db::shared::LockRow) -> CliError {
+    CliError::new(
+        ErrorCode::Locked,
+        format!(
+            "the MCP server is locked at {} scope{}",
+            lock.scope.wire_name(),
+            lock.reason
+                .as_deref()
+                .map_or_else(String::new, |reason| format!(": {reason}"))
+        ),
+        "remove the lock in Effective config, or ask an administrator",
+    )
+    .with_details(json!({
+        "locked": true,
+        "scope": lock.scope.wire_name(),
+        "reason": lock.reason,
+        "item_id": lock.item_id.to_string(),
+    }))
 }
 
 enum Mutation<'a> {

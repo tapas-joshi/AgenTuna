@@ -27,4 +27,8 @@ content: string,
 /**
  * Registered project id when editing Project or Local scope.
  */
-project_id: string | null, };
+project_id: string | null, 
+/**
+ * Whether the user explicitly chose Overwrite after reviewing an external edit.
+ */
+force: boolean, };

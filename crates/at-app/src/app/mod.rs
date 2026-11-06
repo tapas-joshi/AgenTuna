@@ -1,24 +1,28 @@
 //! Tauri application setup: builder, command registry and window lifecycle.
 
 pub mod bridge;
+pub mod bulk_skill;
 pub mod cli_install;
 pub mod commands;
 pub mod config;
 pub mod detection;
 pub mod diagnostics;
 pub mod dialogs;
+pub mod drift;
 pub mod effective;
 pub mod instance;
 pub mod jobs;
 pub mod linux;
 pub mod logs;
 pub mod mcp_form;
+pub mod mcp_servers;
 pub mod menu;
 pub mod migrate;
 pub mod network;
 pub mod overview;
 pub mod overwrite;
 pub mod paths;
+pub mod preset_apply;
 pub mod privilege;
 pub mod project_sync;
 pub mod projects;
@@ -179,11 +183,21 @@ pub fn run() -> tauri::Result<()> {
                 && let Err(error) = detection::start(
                     app.handle().clone(),
                     setup_paths.clone(),
-                    database,
+                    Arc::clone(&database),
                     app.state::<AppState>().recent_writes(),
                 )
             {
                 tracing::warn!(%error, "agent filesystem detection watcher unavailable");
+            }
+            if let Ok(database) = app.state::<AppState>().database_handle()
+                && let Err(error) = drift::start(
+                    app.handle().clone(),
+                    setup_paths.clone(),
+                    database,
+                    app.state::<AppState>().recent_writes(),
+                )
+            {
+                tracing::warn!(%error, "drift watcher unavailable");
             }
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore_window(&window, app.state::<AppState>().inner());
@@ -264,6 +278,7 @@ pub fn run() -> tauri::Result<()> {
         remote_backup::actions::conflicts_resolve_preview,
         remote_backup::actions::conflicts_resolve_apply,
         effective::effective_query,
+        effective::effective_counts,
         effective::why_trace,
         effective::effective_lock,
         effective::effective_unlock,
@@ -308,12 +323,20 @@ pub fn run() -> tauri::Result<()> {
         network::network_set_offline,
         mcp_form::mcp_plan_preview,
         mcp_form::mcp_save,
+        mcp_servers::mcp_server_list,
+        mcp_servers::mcp_server_disable,
+        mcp_servers::mcp_server_delete,
+        mcp_servers::mcp_server_test,
+        bulk_skill::bulk_skill_apply,
         commands::mcp_test_connection,
         secrets::secrets_list,
         secrets::secrets_create,
         secrets::secrets_rotate,
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
+        overwrite::adopt_preview,
+        overwrite::adopt_apply,
+        overwrite::operation_undo,
         skill_wizard::skill_wizard_transition,
         skill_wizard::skill_add_preview,
         skill_wizard::skill_template_preview,
@@ -330,12 +353,18 @@ pub fn run() -> tauri::Result<()> {
         workflows::agents_list,
         workflows::agent_manage_set,
         workflows::agent_link_mode_set,
+        workflows::agents_rescan,
+        workflows::agent_path_set,
+        workflows::agent_path_choose,
         workflows::presets_list,
         workflows::preset_create,
         workflows::preset_rename,
         workflows::preset_delete,
         workflows::preset_member_set,
-        workflows::preset_apply
+        workflows::preset_member_candidates,
+        preset_apply::preset_apply,
+        preset_apply::preset_unapply,
+        migrate::migrate_plan
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -348,6 +377,7 @@ pub fn run() -> tauri::Result<()> {
         commands::app_paths,
         commands::settings_load,
         effective::effective_query,
+        effective::effective_counts,
         effective::why_trace,
         effective::effective_lock,
         effective::effective_unlock,
@@ -406,12 +436,20 @@ pub fn run() -> tauri::Result<()> {
         config::config_report,
         mcp_form::mcp_plan_preview,
         mcp_form::mcp_save,
+        mcp_servers::mcp_server_list,
+        mcp_servers::mcp_server_disable,
+        mcp_servers::mcp_server_delete,
+        mcp_servers::mcp_server_test,
+        bulk_skill::bulk_skill_apply,
         commands::mcp_test_connection,
         secrets::secrets_list,
         secrets::secrets_create,
         secrets::secrets_rotate,
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
+        overwrite::adopt_preview,
+        overwrite::adopt_apply,
+        overwrite::operation_undo,
         skill_wizard::skill_wizard_transition,
         skill_wizard::skill_template_preview,
         skill_wizard::skill_add_preview,
@@ -428,12 +466,18 @@ pub fn run() -> tauri::Result<()> {
         workflows::agents_list,
         workflows::agent_manage_set,
         workflows::agent_link_mode_set,
+        workflows::agents_rescan,
+        workflows::agent_path_set,
+        workflows::agent_path_choose,
         workflows::presets_list,
         workflows::preset_create,
         workflows::preset_rename,
         workflows::preset_delete,
         workflows::preset_member_set,
-        workflows::preset_apply
+        workflows::preset_member_candidates,
+        preset_apply::preset_apply,
+        preset_apply::preset_unapply,
+        migrate::migrate_plan
     ]);
 
     let exit_paths = paths.clone();

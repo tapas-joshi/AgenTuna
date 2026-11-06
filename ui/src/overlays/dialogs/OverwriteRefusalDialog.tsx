@@ -1,8 +1,13 @@
 import { useRef, useState } from "react";
 import type { JSX } from "react";
+import type { AdoptApplyView } from "../../generated/AdoptApplyView";
+import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
 import type { ErrorReportView } from "../../components/states";
 import { Button } from "../../components/button";
 import { Modal } from "./Modal";
+
+/** How an adopted item's native original is handled. */
+export type AdoptHandling = "link" | "copy" | "watch";
 
 /** RefusedOverwrite error details, normalized by the shared typed error contract. */
 export interface RefusedOverwriteDetails {
@@ -44,32 +49,80 @@ export function refusedOverwriteDetails(value: unknown): RefusedOverwriteDetails
   };
 }
 
+/** Human description of what adoption does with the native original. */
+export function handlingDescription(handling: AdoptHandling): string {
+  switch (handling) {
+    case "copy":
+      return "The original becomes a copy that AgenTuna keeps in sync.";
+    case "watch":
+      return "The original stays where it is and AgenTuna records it as watched.";
+    default:
+      return "The original is replaced by a link to the store item.";
+  }
+}
+
 /** Modal for resolving a refused overwrite without modifying the original on cancel. */
 export function OverwriteRefusalDialog({
   refusal,
+  onAdoptPreview,
+  onAdoptApply,
   onMoveAside,
   onUndo,
   onClose,
 }: {
   readonly refusal: RefusedOverwriteDetails;
+  readonly onAdoptPreview?: (handling: AdoptHandling) => Promise<AdoptPreviewView>;
+  readonly onAdoptApply?: (handling: AdoptHandling) => Promise<AdoptApplyView>;
   readonly onMoveAside: () => Promise<OverwriteRemedyResult>;
   readonly onUndo?: (operationId: string) => Promise<void>;
   readonly onClose: () => void;
 }): JSX.Element {
   const cancelRef = useRef<HTMLButtonElement>(null);
-  const [status, setStatus] = useState<"refused" | "working" | "done" | "error">("refused");
+  const [status, setStatus] = useState<"refused" | "reviewing" | "working" | "done" | "error">("refused");
   const [result, setResult] = useState<OverwriteRemedyResult | null>(null);
+  const [preview, setPreview] = useState<AdoptPreviewView | null>(null);
+  const [handling, setHandling] = useState<AdoptHandling>("link");
   const [error, setError] = useState<string | null>(null);
   const [undoing, setUndoing] = useState(false);
   const kindLabel = refusal.kind === "directory" ? "directory" : "file";
+  const canAdopt = Boolean(onAdoptPreview && onAdoptApply);
   const dismiss = () => {
-    if (status === "refused" || status === "done") onClose();
+    if (status === "refused" || status === "done" || status === "reviewing") onClose();
   };
   const run = async () => {
     setStatus("working");
     setError(null);
     try {
       setResult(await onMoveAside());
+      setStatus("done");
+    } catch (reason) {
+      setError(String(reason));
+      setStatus("error");
+    }
+  };
+  const review = async () => {
+    if (!onAdoptPreview) return;
+    setStatus("working");
+    setError(null);
+    try {
+      setPreview(await onAdoptPreview(handling));
+      setStatus("reviewing");
+    } catch (reason) {
+      setError(String(reason));
+      setStatus("error");
+    }
+  };
+  const adopt = async () => {
+    if (!onAdoptApply) return;
+    setStatus("working");
+    setError(null);
+    try {
+      const applied = await onAdoptApply(handling);
+      setResult({
+        summary: applied.summary,
+        movedTo: applied.store_destination,
+        operationId: applied.operation_id,
+      });
       setStatus("done");
     } catch (reason) {
       setError(String(reason));
@@ -87,24 +140,47 @@ export function OverwriteRefusalDialog({
       setUndoing(false);
     }
   };
-  const title = status === "done" ? "Overwrite resolved" : "AgenTuna won't overwrite this item";
-  const description = status === "done" ? "The selected remedy completed." : `An unmanaged ${kindLabel} already exists at this path.`;
+  const title = status === "done" ? "Overwrite resolved" : status === "reviewing" ? "Adopt this item" : "AgenTuna won't overwrite this item";
+  const description = status === "done"
+    ? "The selected remedy completed."
+    : status === "reviewing"
+      ? "Review where the item goes and what happens to the original."
+      : `An unmanaged ${kindLabel} already exists at this path.`;
   return <Modal open title={title} description={description} onOpenChange={(open) => { if (!open) dismiss(); }} dismissible={status !== "working"} initialFocusRef={cancelRef} size="md">
     <div className="flex flex-col gap-12">
-      <div className="flex items-start gap-8">
+      {status !== "reviewing" && <div className="flex items-start gap-8">
         <code aria-label={`Refused path: ${refusal.report.path ?? "unknown path"}`} className="min-w-0 flex-1 select-text whitespace-normal [overflow-wrap:anywhere] font-mono text-12 text-text">{refusal.report.path ?? "Unknown path"}</code>
         <Button variant="secondary" onClick={() => { const path = refusal.report.path; if (path) void navigator.clipboard.writeText(path); }}>Copy path</Button>
-      </div>
-      <p className="text-13 text-text-secondary">AgenTuna will not replace the unmanaged {kindLabel}. Move aside preserves it elsewhere; Cancel leaves it untouched.</p>
-      <p className="text-12 text-text-muted">Adopt is unavailable until TC-011 implements native-item adoption. The existing item has not been adopted.</p>
-      {refusal.existingHash && <p className="text-11 text-text-muted">Existing content hash: <code>{refusal.existingHash}</code></p>}
+      </div>}
+      {status !== "reviewing" && <p className="text-13 text-text-secondary">AgenTuna will not replace the unmanaged {kindLabel}. Adopt stores the item and records its ownership; Move aside preserves it elsewhere; Cancel leaves it untouched.</p>}
+      {status !== "reviewing" && refusal.existingHash && <p className="text-11 text-text-muted">Existing content hash: <code>{refusal.existingHash}</code></p>}
+      {status === "reviewing" && preview && <div className="flex flex-col gap-8 text-13">
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-12 gap-y-4">
+          <dt className="text-text-secondary">Source</dt><dd><code className="select-text [overflow-wrap:anywhere]">{preview.source}</code></dd>
+          <dt className="text-text-secondary">Store destination</dt><dd><code className="select-text [overflow-wrap:anywhere]">{preview.store_destination}</code></dd>
+          <dt className="text-text-secondary">Store slug</dt><dd><code>{preview.slug}</code>{preview.renamed && <span className="ml-8 text-12 text-text-muted">A store name collision added a suffix.</span>}</dd>
+          <dt className="text-text-secondary">Kind</dt><dd>{preview.kind.replace("_", " ")} · {preview.agents.join(", ")}</dd>
+        </dl>
+        <label className="flex flex-col gap-4 text-13 text-text">
+          Original handling
+          <select aria-label="Original handling" className="h-32 rounded-6 border border-border bg-raised px-8 text-13 text-text" value={handling} onChange={(event) => setHandling(event.target.value as AdoptHandling)}>
+            <option value="link">Link</option>
+            <option value="copy">Copy</option>
+            <option value="watch">Keep watched</option>
+          </select>
+          <span className="text-12 text-text-muted">{handlingDescription(handling)}</span>
+        </label>
+      </div>}
       {status === "working" && <p role="status" aria-live="polite">Working…</p>}
       {status === "error" && <div role="alert" className="text-13 text-danger">{error ?? refusal.report.message} <Button variant="secondary" onClick={() => { setStatus("refused"); setError(null); }}>Retry</Button></div>}
-      {status === "done" && result && <div role="status" className="flex flex-col gap-8 text-13"><p>{result.summary}</p>{result.movedTo && <p>Moved to <code className="[overflow-wrap:anywhere]">{result.movedTo}</code></p>}</div>}
+      {status === "done" && result && <div role="status" className="flex flex-col gap-8 text-13"><p>{result.summary}</p>{result.movedTo && <p>Now at <code className="[overflow-wrap:anywhere]">{result.movedTo}</code></p>}</div>}
     </div>
     <div className="mt-16 flex justify-end gap-8">
-      {status === "done" ? <>{result?.operationId && onUndo && <Button variant="secondary" disabled={undoing} onClick={() => void undo()}>{undoing ? "Undoing…" : "Undo"}</Button>}<Button onClick={onClose}>Done</Button></> : <>
-        <Button variant="secondary" disabled title="Native adoption is not implemented (TC-011)">Adopt</Button>
+      {status === "done" ? <>{result?.operationId && onUndo && <Button variant="secondary" disabled={undoing} onClick={() => void undo()}>{undoing ? "Undoing…" : "Undo"}</Button>}<Button onClick={onClose}>Done</Button></> : status === "reviewing" ? <>
+        <Button variant="secondary" onClick={() => { setStatus("refused"); setPreview(null); }}>Back</Button>
+        <Button onClick={() => void adopt()}>Confirm adopt</Button>
+      </> : <>
+        <Button variant="secondary" disabled={!canAdopt || status === "working"} title={canAdopt ? "Review the adoption" : "Native adoption is unavailable"} onClick={() => void review()}>Adopt</Button>
         <Button variant="destructive" disabled={status === "working"} onClick={() => void run()}>Move aside</Button>
         <button ref={cancelRef} type="button" disabled={status === "working"} className="inline-flex h-32 items-center justify-center rounded-6 border border-border bg-raised px-12 text-13 text-text focus-visible:outline-2 focus-visible:outline-focus disabled:opacity-50" onClick={onClose}>Cancel</button>
       </>}

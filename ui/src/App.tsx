@@ -25,6 +25,7 @@ import { InstructionsScreen } from "./screens/instructions/InstructionsScreen";
 import { AgentsScreen } from "./screens/agents/AgentsScreen";
 import { PresetsScreen } from "./screens/presets/PresetsScreen";
 import { AddMcpServerForm } from "./screens/mcp_form";
+import { McpListScreen } from "./screens/mcp_list/McpListScreen";
 import type { AddMcpServerDraft } from "./screens/mcp_form";
 import type { McpChangeSetPreviewView } from "./generated/McpChangeSetPreviewView";
 import type { McpPlanPreviewRequest } from "./generated/McpPlanPreviewRequest";
@@ -74,6 +75,7 @@ function RouteBody({
   if (route === "effective") return <EffectiveScreen />;
   if (route === "migrate") return <MigrateScanScreen />;
   if (route === "settings") return <PreferencesScreen />;
+  if (route === "mcp-list") return <McpListScreen />;
   if (route === "mcp-form") return <AddMcpServerForm
     onCancel={onClose}
     onPlan={(draft: AddMcpServerDraft, itemId?: string) => {

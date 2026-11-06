@@ -498,14 +498,12 @@ pub fn prepare_native_projections(
                     .ok_or(NativeProjectionError::InvalidStep)?;
                 let item = &work[index];
                 let expected_store = expected_for_destination(&item.destination)?;
-                let native_bytes = registry.render_io(
+                let native_bytes = render_rule_or_adopt(
+                    &registry,
                     &item.agent,
-                    &AgentDeployment {
-                        kind: ItemKind::Rule,
-                        scope: item.scope,
-                        path: source_path.clone(),
-                        content: source.bytes.clone(),
-                    },
+                    item.scope,
+                    &source_path,
+                    &source.bytes,
                 )?;
                 verify_source_unchanged(&source_path, &source.bytes)?;
                 insert_write(
@@ -677,6 +675,35 @@ fn parse_native_mcp_entries(
             agent: agent.clone(),
             kind: ItemKind::McpServer,
         }),
+    }
+}
+
+/// Renders one rule through its adapter, adopting an unmarked native file first.
+///
+/// A rule file without an AgenTuna managed block is unmanaged content: the adapter refuses to
+/// replace it. Adoption wraps the existing bytes in a managed block instead of discarding
+/// them, which is what makes the file AgenTuna-owned from then on; the same bytes are stored
+/// canonically by the caller.
+fn render_rule_or_adopt(
+    registry: &AgentAdapterRegistry,
+    agent: &AgentId,
+    scope: Scope,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<Vec<u8>, NativeProjectionError> {
+    let deployment = AgentDeployment {
+        kind: ItemKind::Rule,
+        scope,
+        path: path.to_path_buf(),
+        content: bytes.to_vec(),
+    };
+    match registry.render_io(agent, &deployment) {
+        Ok(rendered) => Ok(rendered),
+        Err(AgentError::RuleRender(at_fs::managed_block::ManagedBlockError::AdoptRequired {
+            ..
+        })) => at_fs::managed_block::render_managed_block(path, None, bytes)
+            .map_err(|error| NativeProjectionError::Adapter(AgentError::RuleRender(error))),
+        Err(error) => Err(NativeProjectionError::Adapter(error)),
     }
 }
 

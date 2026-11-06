@@ -35,4 +35,52 @@ health: string,
 /**
  * Current deployment mode.
  */
-link_mode: string, };
+link_mode: string, 
+/**
+ * `installed`, `configured_only` or `not_installed`.
+ */
+presence: string, 
+/**
+ * Native format summary derived from recorded configuration paths.
+ */
+format: string, 
+/**
+ * Managed skill deployments.
+ */
+managed_skills: number, 
+/**
+ * Managed MCP server deployments.
+ */
+managed_servers: number, 
+/**
+ * Skills present only in the agent folder.
+ */
+native_skills: number, 
+/**
+ * MCP servers present only in the agent folder.
+ */
+native_servers: number, 
+/**
+ * Whether a copy deployment stands in for a requested link.
+ */
+copy_fallback: boolean, 
+/**
+ * Primary configuration path, when one is recorded.
+ */
+primary_path: string | null, 
+/**
+ * Whether the primary path still needs a user-chosen replacement.
+ */
+needs_path: boolean, 
+/**
+ * Deployments whose sync label is `in_sync`.
+ */
+in_sync: number, 
+/**
+ * Total deployment rows for the agent.
+ */
+total: number, 
+/**
+ * Deployments currently materialised as links; switching to copy would migrate these.
+ */
+linked_deployments: number, };

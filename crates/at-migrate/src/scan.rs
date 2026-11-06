@@ -366,13 +366,61 @@ fn raw_skill_hash(root: &Path) -> Result<String, std::io::Error> {
 }
 
 fn normalize_rule(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
-    let normalized = text
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n");
-    at_store::manifest::hash_rule_bytes(normalized.trim_end().as_bytes()).to_string()
+    crate::normalize::rule_bytes(bytes).to_string()
+}
+
+/// Reads the MCP server map from a native configuration file, inferring the format.
+///
+/// `.toml` files (Codex) are read with `mcp_servers`; every other file is JSON with
+/// `mcpServers`/`mcp_servers`. Only the server map is returned: comments and unrelated keys are
+/// left alone because this function never writes.
+///
+/// # Errors
+/// A human-readable parse error when the document is not valid JSON/TOML of that shape.
+pub fn read_mcp_entries(path: &Path, bytes: &[u8]) -> Result<BTreeMap<String, Value>, String> {
+    let format = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| *extension == "toml");
+    read_mcp_entries_with(bytes, format)
+}
+
+fn read_mcp_entries_with(
+    bytes: &[u8],
+    format: Option<&str>,
+) -> Result<BTreeMap<String, Value>, String> {
+    if format == Some("toml") {
+        std::str::from_utf8(bytes)
+            .map_err(|error| error.to_string())
+            .and_then(|text| {
+                toml_edit::de::from_str::<BTreeMap<String, Value>>(text)
+                    .map_err(|error| error.to_string())
+            })
+            .map(|mut document| {
+                document
+                    .remove("mcp_servers")
+                    .and_then(|servers| match servers {
+                        Value::Object(map) => Some(map.into_iter().collect()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            })
+    } else {
+        serde_json::from_slice::<Value>(bytes)
+            .map_err(|error| error.to_string())
+            .map(|document| {
+                document
+                    .get("mcpServers")
+                    .or_else(|| document.get("mcp_servers"))
+                    .and_then(Value::as_object)
+                    .map(|map| {
+                        map.iter()
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+    }
 }
 
 fn item_error(
@@ -473,29 +521,7 @@ fn scan_mcp(
             return;
         }
     };
-    let parsed: Result<BTreeMap<String, Value>, String> = if format == Some("toml") {
-        std::str::from_utf8(&bytes)
-            .map_err(|error| error.to_string())
-            .and_then(|text| {
-                toml_edit::de::from_str::<BTreeMap<String, BTreeMap<String, Value>>>(text)
-                    .map_err(|error| error.to_string())
-            })
-            .map(|mut doc| doc.remove("mcp_servers").unwrap_or_default())
-    } else {
-        serde_json::from_slice::<Value>(&bytes)
-            .map_err(|error| error.to_string())
-            .map(|doc| {
-                doc.get("mcpServers")
-                    .or_else(|| doc.get("mcp_servers"))
-                    .and_then(Value::as_object)
-                    .map(|map| {
-                        map.iter()
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-    };
+    let parsed = read_mcp_entries_with(&bytes, format);
     match parsed {
         Ok(entries) => {
             for (name, entry) in entries {

@@ -333,6 +333,22 @@ pub fn adopt_paths(
     Ok(adopted)
 }
 
+/// Clears the adoption of every native row that points at `item_id`.
+///
+/// The rows keep their history but become unmanaged findings again, so an undo of the adopt
+/// does not leave a dangling `adopted_item_id`.
+///
+/// # Errors
+///
+/// [`DbError`] when the update fails.
+pub fn release_adoptions(connection: &Connection, item_id: &ItemId) -> Result<usize, DbError> {
+    let released = connection.execute(
+        "UPDATE native_items             SET adopted_item_id = NULL, status = 'new'           WHERE adopted_item_id = ?1",
+        [item_id.to_string()],
+    )?;
+    Ok(released)
+}
+
 /// Every native row matching `filter`, ordered by agent, scope, kind, name.
 ///
 /// Missing rows are excluded unless [`NativeItemFilter::include_missing`] is

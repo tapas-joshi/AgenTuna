@@ -76,6 +76,23 @@ pub fn start(
     Ok(())
 }
 
+/// Watch roots for the detected agents and AgenTuna stores.
+///
+/// Shared with the drift watcher (TC-012) so both consumers watch exactly the same paths.
+pub(crate) fn watch_roots_for(paths: &AppPaths) -> Vec<WatchRoot> {
+    let adapters = AgentAdapterRegistry::register();
+    let mut variables = BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        variables.insert(String::from("PATH"), path);
+    }
+    let environment = AgentEnvironment {
+        home: paths.home_dir().unwrap_or(paths.user_store()).to_path_buf(),
+        project: paths.project_store().map(ToOwned::to_owned),
+        variables,
+    };
+    watch_roots(&adapters, &environment, paths)
+}
+
 fn watch_roots(
     adapters: &AgentAdapterRegistry,
     environment: &AgentEnvironment,
@@ -116,6 +133,48 @@ fn watch_roots(
     roots
 }
 
+/// Runs one detection pass over every registered adapter and records the results.
+///
+/// The caller owns the environment and database handle, so an on-demand rescan from a command
+/// uses the same persistence path as the background watcher.
+///
+/// # Errors
+/// Returns an error when the adapter registry or the database lock is unavailable.
+pub fn rescan(
+    adapters: &Arc<AgentAdapterRegistry>,
+    environment: &AgentEnvironment,
+    database: &Arc<Mutex<Database>>,
+) -> Result<usize, &'static str> {
+    let adapter_list = adapters
+        .adapters()
+        .map_err(|_| "agent adapter registry unavailable")?;
+    let results = tauri::async_runtime::block_on(async {
+        let mut tasks = tokio::task::JoinSet::new();
+        for adapter in adapter_list {
+            let id = adapter.id();
+            let registry = Arc::clone(adapters);
+            let environment = environment.clone();
+            tasks.spawn(async move {
+                let probe = version_probe_for(&id, &environment);
+                let result = detect_one(&registry, &id, &environment, probe.as_ref()).await;
+                (id, result)
+            });
+        }
+        let mut results = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(result) => results.push(result),
+                Err(error) => tracing::warn!(%error, "agent detection task failed"),
+            }
+        }
+        results
+    });
+    let database = database
+        .lock()
+        .map_err(|_| "database lock poisoned during agent detection")?;
+    Ok(persist_results(database.connection(), results))
+}
+
 fn detect_and_persist(
     app: &AppHandle,
     adapters: &Arc<AgentAdapterRegistry>,
@@ -151,7 +210,28 @@ fn detect_and_persist(
         tracing::warn!("database lock poisoned during agent detection");
         return;
     };
-    let connection = database.connection();
+    let detected_count = persist_results(database.connection(), results);
+    if let Some(state) = app.try_state::<super::state::AppState>() {
+        state.invalidate_scope_cache();
+    }
+    if let Err(error) = app.emit(
+        EVENT_AGENTS_DETECTED,
+        DetectionEvent {
+            agents: detected_count,
+        },
+    ) {
+        tracing::warn!(%error, "agent detection event emission failed");
+    }
+}
+
+/// Persists one completed detection pass and returns how many agents were recorded.
+fn persist_results(
+    connection: &rusqlite::Connection,
+    results: Vec<(
+        at_model::AgentId,
+        Result<at_adapters::detect::AgentDetectionResult, at_adapters::adapter::AgentError>,
+    )>,
+) -> usize {
     let mut detected_count = 0;
     for (id, result) in results {
         match result {
@@ -176,17 +256,7 @@ fn detect_and_persist(
             Err(error) => tracing::warn!(%error, agent = %id, "agent detection failed"),
         }
     }
-    if let Some(state) = app.try_state::<super::state::AppState>() {
-        state.invalidate_scope_cache();
-    }
-    if let Err(error) = app.emit(
-        EVENT_AGENTS_DETECTED,
-        DetectionEvent {
-            agents: detected_count,
-        },
-    ) {
-        tracing::warn!(%error, "agent detection event emission failed");
-    }
+    detected_count
 }
 
 fn version_probe_for(

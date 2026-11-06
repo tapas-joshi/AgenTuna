@@ -3,4 +3,4 @@
 /**
  * Machine-readable class of a command failure.
  */
-export type CommandErrorCode = "invalid_argument" | "not_found" | "bridge" | "cli_install" | "unavailable" | "internal" | "refused_overwrite" | "conflict";
+export type CommandErrorCode = "invalid_argument" | "not_found" | "bridge" | "cli_install" | "unavailable" | "internal" | "refused_overwrite" | "conflict" | "locked";

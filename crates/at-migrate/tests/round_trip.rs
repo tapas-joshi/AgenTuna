@@ -1,9 +1,9 @@
 //! TF-048: migration fixtures, snapshots and the round-trip harness.
 //!
-//! The [`Scenario`] below stands in for the TC-009/TC-010 engine until it lands: it applies a
-//! small set of operations with the real `at-fs` primitives and restores from the backups those
-//! writes produced. Every assertion is about what the harness observed on disk, not about the
-//! scenario's own bookkeeping.
+//! The [`Scenario`] below drives the real engine: `at_migrate::scan` → `conflicts` →
+//! `plan::build_plan` → `apply::apply_plan` → `undo::undo_operation`, with the at-fs journal
+//! underneath. Nothing in the harness stands in for the implementation, so every assertion is
+//! about what the production code did to the filesystem, not about a simulation of it.
 
 #![cfg(feature = "testkit")]
 
@@ -573,7 +573,6 @@ impl Scenario {
                     for relative in walk_tree(source)? {
                         keys.insert(self.key(&destination.join(relative)));
                     }
-                    keys.insert(self.key(&destination.join(COPY_MANIFEST_FILE)));
                 }
                 at_migrate::plan::MigrationAction::UpdateManifest => {
                     keys.insert(
@@ -657,26 +656,6 @@ impl Scenario {
                     [operation_id],
                 )
                 .map_err(|error| error.to_string())?;
-        }
-        if let Some(detail) = at_db::ops::operation_detail(self.database.connection(), operation_id)
-            .map_err(|error| error.to_string())?
-        {
-            for file in &detail.files {
-                let backup = file
-                    .backup_id
-                    .as_deref()
-                    .and_then(|id| {
-                        at_db::backups::backup_by_id(self.database.connection(), id).ok()
-                    })
-                    .flatten();
-                eprintln!(
-                    "UNDO DEBUG file={file:?} backup={backup:?} backup_exists={}",
-                    backup
-                        .as_ref()
-                        .and_then(|row| row.backup_path.as_deref())
-                        .is_some_and(|path| Path::new(path).exists())
-                );
-            }
         }
         let paths = self.fixture.paths();
         let roots = ApplyRoots::new([paths.home.clone()]).map_err(|error| error.to_string())?;

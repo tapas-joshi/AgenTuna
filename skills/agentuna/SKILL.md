@@ -111,6 +111,8 @@ agentuna mcp add --help
 agentuna mcp edit --help
 agentuna mcp remove --help
 agentuna mcp test --help
+agentuna mcp enable --help
+agentuna mcp disable --help
 agentuna mcp secret --help
 agentuna mcp secret list --help
 agentuna mcp secret set --help

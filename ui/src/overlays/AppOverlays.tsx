@@ -23,7 +23,7 @@ import type { ScopeToken } from "../theme";
 import { ACTION_IDS, SHORTCUTS, routeForAction, shortcutHint } from "../shell/actions";
 import { OverwriteRefusalDialog, refusedOverwriteDetails } from "./dialogs/OverwriteRefusalDialog";
 import type { RefusedOverwriteDetails } from "./dialogs/OverwriteRefusalDialog";
-import { moveRefusedItemAside } from "./dialogs/overwrite-commands";
+import { applyAdoption, moveRefusedItemAside, previewAdoption } from "./dialogs/overwrite-commands";
 function projectRow(project: ProjectView): ProjectPickerProject {
   const pathParts = project.path.split(/[\\/]+/).filter(Boolean);
   const shortPath = pathParts.length > 2 ? `…/${pathParts.slice(-2).join("/")}` : project.path;
@@ -214,6 +214,17 @@ export function AppOverlays({ state, scope, route, hasProject, children }: {
       const path = overwriteRefusal.report.path;
       if (!path) return Promise.reject(new Error("The refused path is unavailable."));
       return moveRefusedItemAside(path);
+    }} onAdoptPreview={(handling) => {
+      const path = overwriteRefusal.report.path;
+      if (!path) return Promise.reject(new Error("The refused path is unavailable."));
+      return previewAdoption(path, overwriteRefusal.existingHash, handling);
+    }} onAdoptApply={(handling) => {
+      const path = overwriteRefusal.report.path;
+      if (!path) return Promise.reject(new Error("The refused path is unavailable."));
+      return applyAdoption(path, overwriteRefusal.existingHash, handling);
+    }} onUndo={async (operationId) => {
+      await invoke("operations_undo", { operationId });
+      state.toasts.show({ kind: "success", title: "Adoption undone", message: "The original tree was restored from its backup." });
     }} />}
     <Palette open={paletteOpen} index={paletteIndex} onClose={() => setPaletteOpen(false)} onRun={(entry) => entry.run?.()} />
     {recovery ? <RecoverySheet recovery={recovery} onContinue={() => setRecovery(null)} onDiscard={(operationId) => {

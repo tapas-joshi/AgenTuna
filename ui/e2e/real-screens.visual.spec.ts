@@ -6,16 +6,16 @@ async function openMigration(page: Page) {
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await palette.getByRole("combobox", { name: "Search commands" }).fill("Import native items");
   await palette.getByRole("option", { name: /Import native items/ }).click();
-  await expect(page.getByRole("heading", { name: "Move into AgenTuna" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /items outside AgenTuna/ })).toBeVisible();
 }
 
 test("Effective config shows populated agent state and why-trace dialog", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Effective config", exact: true }).click();
   const main = page.getByRole("main", { name: "Effective config" });
-  await expect(main.getByText("Code Review", { exact: true })).toBeVisible();
-  await expect(main.getByText("2 agents", { exact: true })).toBeVisible();
-  await expect(main.getByText("claude_code: linked")).toBeVisible();
+  await expect(main.getByText("Code Review", { exact: true }).first()).toBeVisible();
+  await expect(main.getByText("2/2", { exact: true }).first()).toBeVisible();
+  await expect(main.getByRole("region", { name: "Effective item detail" })).toContainText("Loaded for Claude Code, Codex");
   await expect(page).toHaveScreenshot("effective-config-populated.png", { animations: "disabled", caret: "hide" });
 
   await main.getByRole("button", { name: "Why is this on?" }).first().click();
@@ -27,7 +27,6 @@ test("Effective config shows populated agent state and why-trace dialog", async 
 test("Migrate scan renders several discovered items", async ({ page }) => {
   await page.goto("/");
   await openMigration(page);
-  await page.getByRole("button", { name: "Rescan" }).click();
   await expect(page.getByText("3 found · 0 selected")).toBeVisible();
   await expect(page.getByText("Visual migration skill")).toBeVisible();
   await expect(page.getByText("Local docs server")).toBeVisible();
@@ -50,12 +49,52 @@ test("Remote-backup preferences show status and reviewed conflict actions withou
   await expect(section.getByRole("button", { name: "Restore", exact: true })).toBeVisible();
   await expect(section).toContainText("Last sync: Never");
   await expect(section).toContainText("Last commit: None");
+
+  // A device name with a slash is refused before any command is sent.
+  const device = section.getByRole("textbox", { name: "Remote backup device name" });
+  await device.fill("lab/desk");
+  await section.getByRole("button", { name: "Save remote backup settings" }).click();
+  await expect(section.getByRole("alert")).toContainText("Device names cannot contain slashes.");
+  await expect(device).toHaveAttribute("aria-invalid", "true");
+  await device.scrollIntoViewIfNeeded();
+  await expect(page).toHaveScreenshot("preferences-remote-backup-validation.png", { animations: "disabled", caret: "hide" });
+  expect(await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls)).not.toContain("remote_backup_configure");
+  await device.fill("Visual workstation");
+  await expect(section.getByRole("alert")).toHaveCount(0);
+
+  // Restore names the device and repository in its confirmation.
+  await section.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(section.getByLabel("Restore commit")).toBeVisible();
+  await section.getByRole("button", { name: "Review restore" }).click();
+  const confirm = page.getByRole("dialog", { name: "Confirm restore" });
+  await expect(confirm).toContainText("Visual workstation");
+  await expect(confirm).toContainText("https://example.invalid/agentuna-backup.git");
+  await confirm.scrollIntoViewIfNeeded();
+  await expect(page).toHaveScreenshot("preferences-remote-backup-restore.png", { animations: "disabled", caret: "hide" });
+  await section.getByRole("button", { name: "Cancel restore" }).click();
+  await section.getByRole("button", { name: "Close", exact: true }).first().click();
+
+  // Backup now runs as a cancellable job that reports progress and a final status.
+  await section.getByRole("button", { name: "Backup now" }).click();
+  await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-progress", { id: "job_visual_remote_backup", name: "Backup remote store", fraction: 0.5, label: "Uploading snapshot" }));
+  await expect(section.getByText("Uploading snapshot")).toBeVisible();
+  await expect(section.getByRole("progressbar", { name: "Remote backup progress" })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Cancel backup remote store" })).toBeVisible();
+  await section.getByRole("button", { name: "Cancel backup remote store" }).scrollIntoViewIfNeeded();
+  await expect(page).toHaveScreenshot("preferences-remote-backup-progress.png", { animations: "disabled", caret: "hide" });
+  await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-finished", { id: "job_visual_remote_backup", name: "Backup remote store", state: "succeeded", error: null }));
+  await expect(section.getByText("Remote backup action completed.")).toBeVisible();
+
+  // The conflict list shows both copies and only offers a reviewed resolution.
   await section.getByRole("button", { name: /Resolve conflicts/ }).click();
-  await expect(section.getByText("skills/review-helper/SKILL.md")).toBeVisible();
+  await expect(section.getByText("skills/review-helper/SKILL.md", { exact: true })).toBeVisible();
+  await expect(section).toContainText("/sandbox/user/skills/review-helper/SKILL.md");
+  await expect(section).toContainText(".state/remote-conflicts/travel-laptop");
+  await expect(section.getByRole("button", { name: /overwrite/i })).toHaveCount(0);
   await section.getByRole("button", { name: "Keep remote" }).click();
   await expect(section.getByRole("button", { name: "Apply reviewed resolution" })).toBeVisible();
-  await section.scrollIntoViewIfNeeded();
-  await expect(section).toHaveScreenshot("preferences-remote-backup.png", { animations: "disabled", caret: "hide" });
+  await section.getByRole("button", { name: "Apply reviewed resolution" }).scrollIntoViewIfNeeded();
+  await expect(page).toHaveScreenshot("preferences-remote-backup.png", { animations: "disabled", caret: "hide" });
 });
 
 test("Skill detail compares the project and user copies", async ({ page }) => {

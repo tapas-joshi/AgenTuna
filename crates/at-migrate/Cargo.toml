@@ -29,6 +29,7 @@ rusqlite.workspace = true
 time.workspace = true
 toml_edit.workspace = true
 similar.workspace = true
+rustix.workspace = true
  
 
 [dev-dependencies]

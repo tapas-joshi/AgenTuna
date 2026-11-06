@@ -195,6 +195,20 @@ pub enum FileOp {
         /// What must be at `dest`.
         expected: ExpectedState,
     },
+    /// Copy `source` to `dest` as plain content, with no deployment manifest.
+    ///
+    /// A directory source is copied file by file. [`FileOp::Copy`] instead writes
+    /// `copy-manifest.json` into a directory destination, which is right for an agent
+    /// deployment and wrong for a canonical store item: the manifest would become part of
+    /// the item's hashed content. Migration writes store items with this operation.
+    CopyTree {
+        /// Source path.
+        source: PathBuf,
+        /// Destination path.
+        dest: PathBuf,
+        /// What must be at `dest`.
+        expected: ExpectedState,
+    },
     /// Rename `from` to `to`, checking `expected` at both ends.
     Move {
         /// Current path.
@@ -219,8 +233,8 @@ pub enum FileOp {
 impl FileOp {
     /// The destination path this op writes, when it has one.
     ///
-    /// `Symlink` reports `link_path`; `Copy` and `Move` report their destination; `Mkdir`
-    /// reports its directory. Used by collision validation.
+    /// `Symlink` reports `link_path`; `Copy`, `CopyTree` and `Move` report their destination;
+    /// `Mkdir` reports its directory. Used by collision validation.
     #[must_use]
     pub fn destination(&self) -> Option<&Path> {
         match self {
@@ -228,7 +242,7 @@ impl FileOp {
                 Some(path)
             }
             Self::Symlink { link_path, .. } => Some(link_path),
-            Self::Copy { dest, .. } => Some(dest),
+            Self::Copy { dest, .. } | Self::CopyTree { dest, .. } => Some(dest),
             Self::Move { to, .. } => Some(to),
         }
     }
@@ -240,7 +254,9 @@ impl FileOp {
                 vec![path]
             }
             Self::Symlink { link_path, .. } => vec![link_path],
-            Self::Copy { source, dest, .. } => vec![source, dest],
+            Self::Copy { source, dest, .. } | Self::CopyTree { source, dest, .. } => {
+                vec![source, dest]
+            }
             Self::Move { from, to, .. } => vec![from, to],
         }
     }
@@ -403,7 +419,8 @@ pub struct ChangeSet {
 
 impl ChangeSet {
     /// Validates the set: destinations are unique except for a Delete immediately followed
-    /// by a Symlink or Move at the same path, and no operation targets a parent of another.
+    /// by a Copy, CopyTree, Symlink or Move at the same path, and no operation targets a parent
+    /// of another.
     ///
     /// Pure; performs no IO. Returns [`ChangeSetError::PathCollision`] naming the first
     /// collision found.
@@ -427,14 +444,19 @@ impl ChangeSet {
                 });
             }
             if !seen.insert(destination.to_path_buf()) {
-                let replaced_delete = matches!(op, FileOp::Symlink { .. } | FileOp::Move { .. })
-                    && index
-                        .checked_sub(1)
-                        .and_then(|previous| self.ops.get(previous))
-                        .is_some_and(|previous| {
-                            previous.destination() == Some(destination)
-                                && matches!(previous, FileOp::Delete { .. })
-                        });
+                let replaced_delete = matches!(
+                    op,
+                    FileOp::Copy { .. }
+                        | FileOp::CopyTree { .. }
+                        | FileOp::Symlink { .. }
+                        | FileOp::Move { .. }
+                ) && index
+                    .checked_sub(1)
+                    .and_then(|previous| self.ops.get(previous))
+                    .is_some_and(|previous| {
+                        previous.destination() == Some(destination)
+                            && matches!(previous, FileOp::Delete { .. })
+                    });
                 if !replaced_delete {
                     return Err(ChangeSetError::PathCollision {
                         path: destination.display().to_string(),
