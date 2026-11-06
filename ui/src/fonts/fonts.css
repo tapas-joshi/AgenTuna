@@ -1,0 +1,56 @@
+/*
+ * Self-hosted app fonts (TU-024).
+ *
+ * Inter (UI) and JetBrains Mono (code, tables) ship inside the bundle as woff2
+ * files, so the webview never fetches a font at runtime: first launch works
+ * offline and a strict Content-Security-Policy needs no font-src exception.
+ * Both fonts are SIL Open Font License 1.1; the licence texts sit next to the
+ * files in `./files`.
+ *
+ * The theme stacks name the same two families and keep system fallbacks, so a
+ * missing file changes only the glyphs. `font-display: swap` keeps text visible
+ * while a file loads and after it fails.
+ *
+ * Density: `density.ts` writes `data-density` and `--at-pixel-ratio` at startup
+ * and on monitor change. `--at-hairline` is exactly one device pixel, so
+ * borders stay crisp at 1x, 1.5x and 2x instead of landing between pixels.
+ */
+
+:root {
+  --at-pixel-ratio: 1;
+  --at-hairline: calc(1px / var(--at-pixel-ratio));
+}
+
+/* Inter Variable, latin subset: weights 100-900 cover 400, 500 and 600. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./files/inter-latin-wght-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* JetBrains Mono Variable, latin subset: weights 100-800. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("./files/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ * Code surfaces use tabular figures and fixed advance widths, so monospace
+ * columns in the editor and tables line up at every pixel ratio.
+ */
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--at-font-mono);
+  font-variant-numeric: tabular-nums;
+}

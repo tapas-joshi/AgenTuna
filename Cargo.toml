@@ -65,6 +65,7 @@ notify = "8.0.0"
 notify-debouncer-full = "0.7"
 similar = "3.2"
 saphyr = "0.3"
+fs4 = { version = "1.1", default-features = false, features = ["sync"] }
 keyring = "4.2"
 keyring-core = "1.0"
 zeroize = "1.9"
@@ -85,4 +86,6 @@ uuid = { version = "1.11", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 sha2 = "0.11"
 libc = "0.2"
+junction = "2.1"
 tempfile = "3"
+env-lock = "1.0"

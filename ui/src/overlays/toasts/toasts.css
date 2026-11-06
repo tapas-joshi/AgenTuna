@@ -1,0 +1,182 @@
+/*
+ * Toast surfaces (TU-005).
+ *
+ * Placement: fixed to the bottom-right corner, above the status bar. The
+ * container is pointer-transparent and only the cards accept input, so a toast
+ * cannot swallow a click meant for the primary action behind it; the stack is
+ * capped at three cards and never covers the centre of the screen.
+ *
+ * Colour and type come from the theme tokens only (TU-001); the kind is always
+ * spelled out in text, so colour never carries meaning alone.
+ */
+
+.at-toasts {
+  position: fixed;
+  inset-block-end: calc(var(--at-space-32) + var(--at-status-bar-height, 0px));
+  inset-inline-end: var(--at-space-16);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: var(--at-space-8);
+  width: min(360px, calc(100vw - var(--at-space-32)));
+  pointer-events: none;
+}
+
+/*
+ * Live regions stay mounted and visually hidden: mounting a live region
+ * together with its text is unreliable in screen readers. `display: none`
+ * would silence them, so the text is clipped instead of hidden.
+ */
+.at-toasts__live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.at-toasts__stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--at-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.at-toasts__item {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--at-space-8);
+  padding: var(--at-space-12);
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-inline-start: 3px solid var(--at-color-text-muted);
+  border-radius: var(--at-radius-10);
+  background: var(--at-color-overlay);
+  color: var(--at-color-text);
+  box-shadow: 0 var(--at-space-8) var(--at-space-24)
+    color-mix(in srgb, var(--at-color-sidebar) 70%, transparent);
+  font-family: var(--at-font-ui);
+  font-size: var(--at-text-13);
+  line-height: 1.45;
+  animation: at-toast-in 120ms ease-out;
+}
+
+.at-toasts__item[data-kind="success"] {
+  border-inline-start-color: var(--at-color-success);
+}
+
+.at-toasts__item[data-kind="warning"] {
+  border-inline-start-color: var(--at-color-warning);
+}
+
+.at-toasts__item[data-kind="info"] {
+  border-inline-start-color: var(--at-color-accent);
+}
+
+.at-toasts__item[data-kind="error"] {
+  border-inline-start-color: var(--at-color-danger);
+}
+
+.at-toasts__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--at-space-8);
+}
+
+.at-toasts__kind {
+  color: var(--at-color-text-muted);
+  font-size: var(--at-text-11);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.at-toasts__count {
+  min-width: var(--at-space-16);
+  padding: 0 var(--at-space-4);
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-radius: var(--at-radius-3);
+  color: var(--at-color-text-secondary);
+  font-size: var(--at-text-11);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.at-toasts__title {
+  color: var(--at-color-text);
+  font-size: var(--at-text-12);
+  font-weight: 600;
+}
+
+.at-toasts__message {
+  margin: 0;
+  color: var(--at-color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.at-toasts__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--at-space-8);
+}
+
+.at-toasts__action,
+.at-toasts__copy,
+.at-toasts__close {
+  border: var(--at-hairline, 1px) solid var(--at-color-border);
+  border-radius: var(--at-radius-6);
+  background: var(--at-color-raised);
+  color: var(--at-color-text);
+  font-family: inherit;
+  font-size: var(--at-text-12);
+  padding: var(--at-space-4) var(--at-space-8);
+  cursor: pointer;
+}
+
+.at-toasts__action {
+  background: var(--at-color-accent);
+  border-color: var(--at-color-accent);
+  color: var(--at-color-surface);
+  font-weight: 600;
+}
+
+.at-toasts__close {
+  margin-inline-start: auto;
+  border-color: transparent;
+  background: transparent;
+  color: var(--at-color-text-muted);
+  font-size: var(--at-text-15);
+  line-height: 1;
+}
+
+.at-toasts__action:hover,
+.at-toasts__copy:hover,
+.at-toasts__close:hover {
+  filter: brightness(1.1);
+}
+
+.at-toasts__action:focus-visible,
+.at-toasts__copy:focus-visible,
+.at-toasts__close:focus-visible {
+  outline: 2px solid var(--at-color-focus);
+  outline-offset: 2px;
+}
+
+@keyframes at-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--at-space-8));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .at-toasts__item {
+    animation: none;
+  }
+}

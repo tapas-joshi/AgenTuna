@@ -1,9 +1,9 @@
 //! Commands this slice implements itself.
 //!
-//! `projects`, `scan` and `doctor` exist in the tree so `--help` is honest about the
-//! planned surface, but their engine work is owned by TU-027 and TU-032. Until those
-//! land they return a typed not-implemented error and a distinct exit code instead of
-//! pretending to succeed.
+//! `doctor` is implemented here (TU-032); `projects` and `scan` exist in the tree so
+//! `--help` is honest about the planned surface, but their engine work is owned by
+//! TU-027. Until that lands they return a typed not-implemented error and a distinct
+//! exit code instead of pretending to succeed.
 
 use serde_json::json;
 
@@ -19,7 +19,7 @@ pub(crate) fn dispatch(cli: &Cli, registry: &Registry) -> Result<CommandOutput, 
         RootCommand::Completions { shell } => Ok(completions(registry, *shell)),
         RootCommand::Projects { .. } => Err(CliError::not_implemented("projects", "TU-027")),
         RootCommand::Scan { .. } => Err(CliError::not_implemented("scan", "TU-027")),
-        RootCommand::Doctor { .. } => Err(CliError::not_implemented("doctor", "TU-032")),
+        RootCommand::Doctor { fix } => crate::doctor::dispatch(&cli.global, *fix),
     }
 }
 

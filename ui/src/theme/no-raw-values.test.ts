@@ -34,7 +34,7 @@ const RULES: readonly Rule[] = [
   },
   {
     id: "font-size literal",
-    pattern: /font-size\s*:\s*(?!var\()[^;}\n]+/gi,
+    pattern: /font-size\s*:\s*(?!\s*var\()[^;}\n]+/gi,
     hint: "use a type token (text-13, var(--at-text-…))",
   },
   {

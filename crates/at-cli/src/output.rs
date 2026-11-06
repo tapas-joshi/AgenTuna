@@ -16,6 +16,23 @@ use crate::error::CliError;
 /// Adding a field is allowed within version 1; removing or renaming one requires 2.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Fields every version-1 envelope carries.
+///
+/// The contract test asserts each name is present, so removing or renaming one fails
+/// until the schema version is bumped and a new frozen set is added. Adding a field is
+/// allowed within version 1: append it here and record it in the test's frozen set.
+pub const ENVELOPE_FIELDS: &[&str] = &[
+    "schema_version",
+    "command",
+    "ok",
+    "data",
+    "warnings",
+    "error",
+];
+
+/// Fields every version-1 `error` object carries.
+pub const ERROR_FIELDS: &[&str] = &["code", "message", "details", "hint"];
+
 /// Whether a run may write ANSI escape sequences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -63,6 +80,9 @@ pub struct CommandOutput {
     pub human: String,
     /// Warnings carried in the envelope.
     pub warnings: Vec<Warning>,
+    /// Whether [`human`](Self::human) already lists the warnings, so the root must not
+    /// repeat them on stderr. Report-style commands such as `doctor` set this.
+    pub warnings_in_report: bool,
 }
 
 impl CommandOutput {
@@ -73,6 +93,7 @@ impl CommandOutput {
             data,
             human: human.into(),
             warnings: Vec::new(),
+            warnings_in_report: false,
         }
     }
 
@@ -86,6 +107,13 @@ impl CommandOutput {
     #[must_use]
     pub fn with_warnings(mut self, warnings: Vec<Warning>) -> Self {
         self.warnings = warnings;
+        self
+    }
+
+    /// Declares that the human rendering already lists the warnings.
+    #[must_use]
+    pub fn reporting_warnings(mut self) -> Self {
+        self.warnings_in_report = true;
         self
     }
 }
@@ -118,13 +146,17 @@ pub fn envelope_ok(command: &str, output: &CommandOutput) -> Value {
 }
 
 /// Builds the failure envelope for `command`.
+///
+/// `data` is `null` unless the command attached a payload with
+/// [`CliError::with_data`], which report-style commands such as `doctor` use so an
+/// agent can read the findings that caused the failure.
 #[must_use]
 pub fn envelope_err(command: &str, error: &CliError) -> Value {
     json!({
         "schema_version": SCHEMA_VERSION,
         "command": command,
         "ok": false,
-        "data": Value::Null,
+        "data": error.data().cloned().unwrap_or(Value::Null),
         "warnings": Vec::<Value>::new(),
         "error": {
             "code": error.code().as_str(),

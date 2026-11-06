@@ -1,0 +1,24 @@
+{
+  "$schema": "https://example.test/mcp-schema.json",
+  "enabledServers": [
+    "alpha"
+  ],
+  "customTopLevel": {
+    "keep": true,
+    "nested": [
+      1,
+      2,
+      3
+    ]
+  },
+  "mcpServers": {
+    "alpha": {
+      "type": "stdio",
+      "command": "alpha-mcp",
+      "enabled": true,
+      "x-vendor": {
+        "flag": 1
+      }
+    }
+  }
+}

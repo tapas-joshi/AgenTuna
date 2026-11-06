@@ -1,0 +1,3 @@
+# Codex parses `[mcp_servers.org.team]` as a nested table, not as the id `org.team`.
+[mcp_servers.org.team]
+command = "nested"

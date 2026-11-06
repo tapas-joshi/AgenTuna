@@ -13,14 +13,18 @@ pub mod error;
 pub mod keychain;
 pub mod memory;
 pub mod name;
+pub mod redact;
 pub mod refs;
 pub mod secret;
 pub mod store;
+pub mod var_ref;
 
 pub use error::SecretsError;
 pub use keychain::KeychainStore;
 pub use memory::MemoryStore;
 pub use name::{KEYCHAIN_SERVICE, KeychainId, SecretName};
+pub use redact::Redactor;
 pub use refs::{SecretReference, SecretRefs, delete_with_refs};
 pub use secret::SecretString;
 pub use store::SecretStore;
+pub use var_ref::{ImportOutcome, Imported, RefError, RefWarning, VarTemplate, import_value};

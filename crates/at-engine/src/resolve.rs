@@ -8,28 +8,66 @@
 //! Resolution is pure: it reads only the [`ResolveInput`] it is given. Later layers of
 //! the feature (Global locks in TA-002, disable tombstones in TA-003) attach to the same
 //! input and the same [`ResolvedSet`] without changing this function's signature.
+//!
+//! ## Global locks
+//!
+//! [`ResolveInput::with_locks`] attaches a [`LockStore`]. A lock pins its item to the
+//! definition at the locking scope, so that definition wins even when a nearer scope
+//! defines the same logical id; the winner carries the lock in
+//! [`ResolvedItem::lock`] and every other definition of that logical id is reported as
+//! blocked ([`Shadowed::blocked`], the story's `Blocked{lock_id}`) instead of merely
+//! shadowed. The store is read on every call, never cached: a lock created by the CLI
+//! is visible in an already running GUI on its next resolve. A lock whose item has no
+//! definition in the given layers pins nothing and is left for
+//! [`crate::locks::inspect`] to report as an orphan.
 
+use core::fmt;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::path::PathBuf;
 
 use at_model::{Definition, ItemId, LogicalId, Scope, ScopeSnapshot};
 
+use crate::locks::{LockMark, LockRecord, LockStore};
+
 /// Input to [`resolve`].
 ///
 /// Fields are private on purpose: later resolution inputs (Global locks, tombstones,
 /// agent filters) arrive as additional constructor and builder methods, so every
 /// caller written against [`ResolveInput::new`] keeps compiling.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct ResolveInput<'a> {
     layers: &'a [ScopeSnapshot],
+    locks: Option<&'a dyn LockStore>,
+}
+
+impl fmt::Debug for ResolveInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolveInput")
+            .field("layers", &self.layers)
+            .field("locks_attached", &self.locks.is_some())
+            .finish()
+    }
 }
 
 impl<'a> ResolveInput<'a> {
     /// Resolution over the given scope layers, supplied in any order.
     #[must_use]
     pub const fn new(layers: &'a [ScopeSnapshot]) -> Self {
-        Self { layers }
+        Self {
+            layers,
+            locks: None,
+        }
+    }
+
+    /// Attaches the Global lock source.
+    ///
+    /// The store is read on every [`resolve`] call, so locks created after the
+    /// input was built take effect on the next call without rebuilding it.
+    #[must_use]
+    pub const fn with_locks(mut self, locks: &'a dyn LockStore) -> Self {
+        self.locks = Some(locks);
+        self
     }
 }
 
@@ -42,6 +80,25 @@ pub struct ResolvedItem {
     pub scope: Scope,
     /// The winning definition, original spelling preserved.
     pub definition: Definition,
+    /// The lock that pins this item to its definition at [`LockMark::locked_by_scope`].
+    ///
+    /// `None` when no lock names the winning definition's item. When present the
+    /// winner is the locked definition even if a nearer scope also defined the id.
+    pub lock: Option<LockMark>,
+}
+
+impl ResolvedItem {
+    /// Whether this item is pinned by a lock.
+    #[must_use]
+    pub const fn is_locked(&self) -> bool {
+        self.lock.is_some()
+    }
+
+    /// The recorded lock reason, when the item is locked.
+    #[must_use]
+    pub fn lock_reason(&self) -> Option<&str> {
+        self.lock.as_ref().map(|lock| lock.reason.as_str())
+    }
 }
 
 /// A definition that lost its logical id to another definition.
@@ -55,6 +112,26 @@ pub struct Shadowed {
     pub definition: Definition,
     /// The definition that won.
     pub shadowed_by: ShadowedBy,
+    /// The lock that caused this definition to lose, when one did.
+    ///
+    /// `Some` is the story's `Blocked{lock_id}`: the winner is pinned to its Global
+    /// definition and this scope may not override it. `None` means the definition
+    /// merely lost on precedence.
+    pub blocked: Option<LockMark>,
+}
+
+impl Shadowed {
+    /// Whether a lock, rather than precedence, made this definition lose.
+    #[must_use]
+    pub const fn is_blocked(&self) -> bool {
+        self.blocked.is_some()
+    }
+
+    /// The lock that blocked this definition, when one did.
+    #[must_use]
+    pub fn blocking_lock(&self) -> Option<&LockMark> {
+        self.blocked.as_ref()
+    }
 }
 
 /// Identifies the definition that outranked a [`Shadowed`] one.
@@ -76,6 +153,23 @@ pub struct ResolvedSet {
     /// Every definition that lost, ordered by kind, normalized name, logical key,
     /// losing scope depth, then path.
     pub shadowed: Vec<Shadowed>,
+    /// Problems that did not stop resolution, such as an unreadable lock store.
+    pub diagnostics: Vec<ResolveDiagnostic>,
+}
+
+/// Something resolution could not do, reported instead of failing or guessing.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveDiagnostic {
+    /// The lock source could not be read, so this pass enforced no locks.
+    ///
+    /// Callers that must not resolve without lock enforcement treat
+    /// [`ResolvedSet::lock_read_failed`] as a failure; callers that can show a
+    /// warning use it to explain why a locked item appears unlocked.
+    LockReadFailed {
+        /// Store error text, already free of secret values.
+        message: String,
+    },
 }
 
 impl ResolvedSet {
@@ -92,6 +186,14 @@ impl ResolvedSet {
         self.items
             .iter()
             .find(|item| &item.logical_id == logical_id)
+    }
+
+    /// Whether the lock store could not be read during this pass.
+    #[must_use]
+    pub fn lock_read_failed(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, ResolveDiagnostic::LockReadFailed { .. }))
     }
 }
 
@@ -154,6 +256,47 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
         }
     }
 
+    // Locks are read on every call, never cached: a lock created by the CLI must be
+    // visible to an already open GUI on its next resolve (TA-002).
+    let mut diagnostics: Vec<ResolveDiagnostic> = Vec::new();
+    let mut pinned: BTreeMap<LogicalId, usize> = BTreeMap::new();
+    let mut marks: BTreeMap<LogicalId, LockMark> = BTreeMap::new();
+    if let Some(store) = input.locks {
+        match store.list() {
+            Ok(records) => {
+                let by_item: BTreeMap<ItemId, LockRecord> = records
+                    .into_iter()
+                    .map(|record| (record.lock.item_id, record))
+                    .collect();
+                for (position, candidate) in candidates.iter().enumerate() {
+                    let Some(item_id) = candidate.definition.item_id else {
+                        continue;
+                    };
+                    let Some(record) = by_item.get(&item_id) else {
+                        continue;
+                    };
+                    // A lock pins the definition at its own scope; a copy of the same
+                    // item in another scope cannot satisfy it.
+                    if candidate.scope != record.lock.scope {
+                        continue;
+                    }
+                    let logical_id = candidate.definition.logical_id();
+                    if let Entry::Vacant(slot) = pinned.entry(logical_id.clone()) {
+                        slot.insert(position);
+                        marks.insert(logical_id, LockMark::from(record));
+                    }
+                }
+            }
+            Err(error) => diagnostics.push(ResolveDiagnostic::LockReadFailed {
+                message: error.to_string(),
+            }),
+        }
+    }
+    // A locked definition wins its logical id whatever the nearer scopes say.
+    for (logical_id, position) in &pinned {
+        winners.insert(logical_id.clone(), *position);
+    }
+
     let mut items: Vec<ResolvedItem> = winners
         .iter()
         .map(|(logical_id, position)| {
@@ -162,6 +305,7 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
                 logical_id: logical_id.clone(),
                 scope: candidate.scope,
                 definition: candidate.definition.clone(),
+                lock: marks.get(logical_id).cloned(),
             }
         })
         .collect();
@@ -177,6 +321,7 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
         }
         let winner = &candidates[winner_position];
         shadowed.push(Shadowed {
+            blocked: marks.get(&logical_id).cloned(),
             logical_id,
             scope: candidate.scope,
             definition: candidate.definition.clone(),
@@ -206,5 +351,9 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
         )
     });
 
-    ResolvedSet { items, shadowed }
+    ResolvedSet {
+        items,
+        shadowed,
+        diagnostics,
+    }
 }

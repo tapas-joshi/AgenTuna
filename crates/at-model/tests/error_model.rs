@@ -10,11 +10,11 @@ const REMEDY_SNAPSHOT: &str = include_str!("snapshots/remedy_ids.txt");
 
 #[test]
 fn codes_round_trip_and_are_locked_by_snapshot() {
-    assert_eq!(ErrorKind::ALL.len(), 15);
+    assert_eq!(ErrorKind::ALL.len(), 16);
     let mut unique: Vec<&str> = ErrorKind::ALL.iter().map(|kind| kind.code()).collect();
     unique.sort_unstable();
     unique.dedup();
-    assert_eq!(unique.len(), 15, "every kind must have its own code");
+    assert_eq!(unique.len(), 16, "every kind must have its own code");
 
     let declared: Vec<&str> = ErrorKind::ALL.iter().map(|kind| kind.code()).collect();
     let snapshot: Vec<&str> = CODE_SNAPSHOT.lines().collect();

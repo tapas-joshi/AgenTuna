@@ -1,0 +1,43 @@
+# Synthetic Codex config used by the TM-006 golden tests.
+# Every value is invented; this is not a real user configuration.
+
+model = "gpt-5-codex"
+approval_policy = "on-request"
+
+# Trust settings for this checkout.
+[projects."<project>"]
+trust_level = "trusted"
+
+[features]
+web_search = true
+view_image = true
+
+[mcp_servers.playwright]
+# Launched on demand from the browser panel.
+command = "npx"
+args = ["-y", "@playwright/mcp@0.0.0"]
+
+[mcp_servers.node_repl]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-everything"]
+env = { NODE_REPL_MODE = "sandbox" }
+env_vars = ["NODE_REPL_TOKEN"]
+enabled = true
+startup_timeout_sec = 20
+
+[mcp_servers.shuttle]
+url = "https://mcp.example.com/mcp"
+
+[mcp_servers.computer-use]
+command = "<project>/tools/computer-use"
+cwd = "<project>/tools"
+enabled = false
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
+
+# Plugin registries are managed outside this file.
+[marketplaces.local]
+path = "<project>/marketplace"

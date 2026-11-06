@@ -1,14 +1,18 @@
 //! Numbered schema migrations and the runner that applies them.
 //!
-//! A [`Migrations`] set is an ascending, gap-free sequence starting at v1. Each
-//! version runs in its own transaction and is recorded in `schema_version`
-//! together with the SHA-256 of the SQL that ran. During an open the runner
-//! checks every recorded row against the shipped SQL: a changed migration or a
-//! database from a newer binary is refused before anything is written.
+//! A [`Migrations`] set is an ascending sequence starting at v1. Each version
+//! runs in its own transaction and is recorded in `schema_version` together
+//! with the SHA-256 of the SQL that ran. During an open the runner checks every
+//! recorded row against the shipped SQL: a changed migration or a database from
+//! a newer binary is refused before anything is written.
 //!
-//! Later stories append their migration to [`SHIPPED_MIGRATIONS`] and add the
+//! Stories append their migration to [`SHIPPED_MIGRATIONS`] and add the
 //! matching `.sql` file under `crates/at-db/migrations/` (embedded with
-//! `include_str!`, never read at runtime).
+//! `include_str!`, never read at runtime). Numbered migrations land in waves,
+//! so the registry may temporarily contain a higher version before its
+//! lower-numbered neighbours: [`Migrations::shipped`] applies the longest
+//! contiguous prefix starting at v1 and leaves later migrations dormant until
+//! the gap is filled. A binary therefore never skips a schema step.
 
 use std::collections::HashSet;
 
@@ -20,14 +24,33 @@ use crate::DbError;
 /// SQL for migration v1: creates only the `schema_version` bookkeeping table.
 pub const MIGRATION_V1_SQL: &str = include_str!("../migrations/0001_schema_version.sql");
 
+/// SQL for migration v2: projects, agents and agent paths (TF-011).
+pub const MIGRATION_V2_SQL: &str =
+    include_str!("../migrations/0002_projects_agents_agent_paths.sql");
+
+/// SQL for migration v7: operations, operation files and backups (TF-016).
+pub const MIGRATION_V7_SQL: &str = include_str!("../migrations/0007_operations_backups.sql");
+
+/// SQL for migration v9: settings, secret references and remote backup state (TF-018).
+pub const MIGRATION_V9_SQL: &str =
+    include_str!("../migrations/0009_settings_secrets_remote_backup.sql");
+
 /// Name of the table that records applied migrations.
 pub(crate) const SCHEMA_VERSION_TABLE: &str = "schema_version";
 
 /// Every migration this binary ships, in ascending version order.
 ///
 /// TF-011..TF-018 append their `include_str!` migration here (v2..v9) and add
-/// the matching `.sql` file under `crates/at-db/migrations/`.
-pub const SHIPPED_MIGRATIONS: &[Migration] = &[Migration::new(1, MIGRATION_V1_SQL)];
+/// the matching `.sql` file under `crates/at-db/migrations/`. Entries are
+/// sorted by version; a gap is allowed while lower-numbered migrations are
+/// still in flight, and [`Migrations::shipped`] only applies the contiguous
+/// prefix.
+pub const SHIPPED_MIGRATIONS: &[Migration] = &[
+    Migration::new(1, MIGRATION_V1_SQL),
+    Migration::new(2, MIGRATION_V2_SQL),
+    Migration::new(7, MIGRATION_V7_SQL),
+    Migration::new(9, MIGRATION_V9_SQL),
+];
 
 /// One numbered schema migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,9 +128,79 @@ impl Migrations {
         })
     }
 
-    /// The validated set in [`SHIPPED_MIGRATIONS`].
+    /// A set built from a registry that may skip versions.
+    ///
+    /// Unlike [`Self::new`], missing versions are allowed: the set contains
+    /// exactly the migrations it was given, in ascending order. This exists for
+    /// two callers. [`Self::shipped`] uses it internally to represent the
+    /// contiguous prefix of a wave-based registry, and tests use it to apply a
+    /// migration whose lower-numbered neighbours are owned by another branch.
+    /// The list must be non-empty, start at v1, and be strictly ascending.
+    pub fn sparse(migrations: &[Migration]) -> Result<Self, DbError> {
+        if migrations.is_empty() {
+            return Err(DbError::InvalidMigrations {
+                reason: "no migrations registered".to_owned(),
+            });
+        }
+        let mut previous = 0_u32;
+        for migration in migrations {
+            if migration.version == 0 {
+                return Err(DbError::InvalidMigrations {
+                    reason: "migration versions start at v1".to_owned(),
+                });
+            }
+            if previous == 0 && migration.version != 1 {
+                return Err(DbError::InvalidMigrations {
+                    reason: format!("expected migration v1 first, got v{}", migration.version),
+                });
+            }
+            if migration.version <= previous {
+                return Err(DbError::InvalidMigrations {
+                    reason: format!("migration v{} is not after v{previous}", migration.version),
+                });
+            }
+            if migration.sql.trim().is_empty() {
+                return Err(DbError::InvalidMigrations {
+                    reason: format!("migration v{} has empty SQL", migration.version),
+                });
+            }
+            previous = migration.version;
+        }
+        Ok(Self {
+            list: migrations.to_vec(),
+        })
+    }
+
+    /// The longest contiguous run starting at v1 in [`SHIPPED_MIGRATIONS`].
+    ///
+    /// Higher versions registered ahead of a missing neighbour stay dormant
+    /// until that neighbour lands; this keeps every open on the same ordered
+    /// upgrade path instead of applying v7 before v3..v6 exist. Duplicate
+    /// versions in the registry are an error.
     pub fn shipped() -> Result<Self, DbError> {
-        Self::new(SHIPPED_MIGRATIONS)
+        let mut sorted = SHIPPED_MIGRATIONS.to_vec();
+        sorted.sort_by_key(|migration| migration.version);
+        let mut prefix = Vec::new();
+        let mut expected = 1_u32;
+        for migration in sorted {
+            if migration.version < expected {
+                return Err(DbError::InvalidMigrations {
+                    reason: format!(
+                        "duplicate migration v{} in SHIPPED_MIGRATIONS",
+                        migration.version
+                    ),
+                });
+            }
+            if migration.version == expected {
+                prefix.push(migration);
+                expected = expected
+                    .checked_add(1)
+                    .ok_or_else(|| DbError::InvalidMigrations {
+                        reason: "migration versions overflow u32".to_owned(),
+                    })?;
+            }
+        }
+        Self::new(&prefix)
     }
 
     /// Highest version in the set; never zero because the set is non-empty.
@@ -117,10 +210,15 @@ impl Migrations {
     }
 
     /// The migration for `version`, if the set ships one.
+    ///
+    /// Sparse sets skip versions, so this searches by version rather than by
+    /// position.
     #[must_use]
     pub fn get(&self, version: u32) -> Option<&Migration> {
         self.list
-            .get(usize::try_from(version.checked_sub(1)?).ok()?)
+            .binary_search_by_key(&version, |migration| migration.version)
+            .ok()
+            .map(|index| &self.list[index])
     }
 
     /// Migrations in ascending version order.

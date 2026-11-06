@@ -82,6 +82,17 @@ pub struct GlobalArgs {
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
 
+    /// Report what a command would change without writing anything.
+    ///
+    /// Every writing command must honour it; `doctor --fix --dry-run` lists the
+    /// repairs it would perform and touches nothing.
+    #[arg(long, global = true)]
+    pub dry_run: bool,
+
+    /// Open the store read-only: SQLite `query_only`, no migrations, writes refused.
+    #[arg(long, global = true)]
+    pub read_only: bool,
+
     /// Increase diagnostic output; repeat for more detail.
     #[arg(long, short = 'v', global = true, action = ArgAction::Count)]
     pub verbose: u8,

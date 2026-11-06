@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 /// Crates allowed to resolve `$HOME` and build the `.agentuna` store path.
 const ALLOWED_CRATES: &[&str] = &["at-store", "at-app"];
 
+/// Test-only fixture module (cargo feature `testkit`, never compiled into production
+/// builds) that must set HOME for sandboxed homes. Exactly this file, relative to the
+/// workspace root, is exempt.
+const EXEMPT_FILES: &[&str] = &["crates/at-fs/src/testkit.rs"];
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -53,6 +58,13 @@ fn violations() -> Vec<String> {
         let mut files = Vec::new();
         rust_files(&directory.join("src"), &mut files);
         for file in files {
+            let relative = file.strip_prefix(workspace_root()).unwrap_or(&file);
+            if EXEMPT_FILES
+                .iter()
+                .any(|exempt| relative == Path::new(exempt))
+            {
+                continue;
+            }
             scanned += 1;
             let text = fs::read_to_string(&file).expect("read source");
             for (index, line) in text.lines().enumerate() {

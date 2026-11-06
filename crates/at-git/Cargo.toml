@@ -12,3 +12,5 @@ workspace = true
 [dependencies]
 at-model.workspace = true
 thiserror.workspace = true
+time.workspace = true
+tracing.workspace = true

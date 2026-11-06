@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use at_db::migrations::MIGRATION_V1_SQL;
+use at_db::migrations::{MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V7_SQL, SHIPPED_MIGRATIONS};
 use at_db::{Database, DbError, Migration, Migrations};
 use rusqlite::Connection;
 use rusqlite::types::FromSql;
@@ -27,6 +27,26 @@ fn v1_only(sql: &'static str) -> Migrations {
     Migrations::new(&[Migration::new(1, sql)]).expect("v1-only migration list is valid")
 }
 
+/// Versions a shipped binary applies: the contiguous prefix of
+/// [`SHIPPED_MIGRATIONS`] starting at v1. Numbered migrations land in waves, so
+/// higher versions may sit in the registry before their neighbours exist.
+fn contiguous_shipped_versions() -> Vec<u32> {
+    let mut versions: Vec<u32> = SHIPPED_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version())
+        .collect();
+    versions.sort_unstable();
+    let mut prefix = Vec::new();
+    let mut expected = 1_u32;
+    for version in versions {
+        if version == expected {
+            prefix.push(version);
+            expected += 1;
+        }
+    }
+    prefix
+}
+
 fn database_path(dir: &TempDir) -> std::path::PathBuf {
     dir.path().join("index.sqlite")
 }
@@ -43,7 +63,8 @@ fn fresh_file_applies_v1_and_creates_only_schema_version() {
     let dir = TempDir::new().expect("temp dir");
     let path = database_path(&dir);
 
-    let database = Database::open_file(&path).expect("fresh file opens");
+    let database =
+        Database::open_file_with(&path, v1_only(MIGRATION_V1_SQL)).expect("fresh file opens");
 
     let applied = database
         .applied_migrations()
@@ -100,7 +121,14 @@ fn migrate_twice_is_a_noop() {
     let second = database.applied_migrations().expect("read migrations");
 
     assert_eq!(first, second, "applied_at and hashes are unchanged");
-    assert_eq!(second.len(), 1, "v1 is not recorded twice");
+    assert_eq!(
+        second
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        contiguous_shipped_versions(),
+        "no migration is recorded twice"
+    );
 }
 
 #[test]
@@ -163,7 +191,10 @@ fn newer_schema_is_refused_and_database_is_untouched() {
     match error {
         DbError::SchemaTooNew { found, supported } => {
             assert_eq!(found, 99);
-            assert_eq!(supported, 1);
+            assert_eq!(
+                supported,
+                *contiguous_shipped_versions().last().expect("v1 ships")
+            );
         }
         other => panic!("expected schema-too-new, got {other:?}"),
     }
@@ -221,7 +252,10 @@ fn memory_database_disables_wal_and_keeps_other_pragmas() {
     assert_eq!(pragma::<i64>(&database, "foreign_keys"), 1);
     assert_eq!(pragma::<i64>(&database, "synchronous"), 1, "NORMAL");
     assert_eq!(pragma::<i64>(&database, "busy_timeout"), 5_000);
-    assert_eq!(database.schema_version().expect("version"), 1);
+    assert_eq!(
+        database.schema_version().expect("version"),
+        *contiguous_shipped_versions().last().expect("v1 ships")
+    );
     assert!(database.path().is_none());
 }
 
@@ -374,11 +408,58 @@ fn migration_lists_must_start_at_v1_without_gaps() {
 #[test]
 fn shipped_migration_set_is_valid() {
     let migrations = Migrations::shipped().expect("shipped list is valid");
-    assert_eq!(migrations.latest(), 1);
+    assert_eq!(
+        migrations
+            .iter()
+            .map(|migration| migration.version())
+            .collect::<Vec<_>>(),
+        contiguous_shipped_versions(),
+        "shipped applies the longest contiguous prefix"
+    );
     assert_eq!(
         migrations.get(1).map(|migration| migration.sha256()),
         Some(sha256_hex(MIGRATION_V1_SQL.as_bytes()))
     );
     assert!(migrations.get(0).is_none());
-    assert!(migrations.get(2).is_none());
+    assert_eq!(
+        migrations.get(2).map(|migration| migration.sha256()),
+        Some(sha256_hex(MIGRATION_V2_SQL.as_bytes()))
+    );
+}
+
+#[test]
+fn sparse_sets_allow_gaps_but_require_order() {
+    let set = Migrations::sparse(&[
+        Migration::new(1, MIGRATION_V1_SQL),
+        Migration::new(7, MIGRATION_V7_SQL),
+    ])
+    .expect("v1+v7 is a valid sparse set");
+    assert_eq!(
+        set.iter()
+            .map(|migration| migration.version())
+            .collect::<Vec<_>>(),
+        vec![1, 7]
+    );
+    assert!(set.get(2).is_none(), "lookup is by version, not position");
+    assert!(set.get(7).is_some());
+
+    assert!(matches!(
+        Migrations::sparse(&[Migration::new(2, "SELECT 1;")]),
+        Err(DbError::InvalidMigrations { .. })
+    ));
+    assert!(matches!(
+        Migrations::sparse(&[
+            Migration::new(1, "SELECT 1;"),
+            Migration::new(1, "SELECT 2;")
+        ]),
+        Err(DbError::InvalidMigrations { .. })
+    ));
+    assert!(matches!(
+        Migrations::sparse(&[
+            Migration::new(1, "SELECT 1;"),
+            Migration::new(7, MIGRATION_V7_SQL),
+            Migration::new(2, "SELECT 2;")
+        ]),
+        Err(DbError::InvalidMigrations { .. })
+    ));
 }
