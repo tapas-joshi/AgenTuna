@@ -157,7 +157,7 @@ fn is_empty_dir(path: &Path) -> Result<bool, FsError> {
 }
 
 /// Lexically cleans an absolute path: drops `.`, rejects `..` and relative paths.
-fn clean_absolute(path: &Path) -> Result<PathBuf, FsError> {
+pub(crate) fn clean_absolute(path: &Path) -> Result<PathBuf, FsError> {
     if !path.is_absolute() {
         return Err(FsError::InvalidPath {
             path: path.to_path_buf(),
@@ -183,7 +183,7 @@ fn clean_absolute(path: &Path) -> Result<PathBuf, FsError> {
 /// Resolves symlinks in the longest existing prefix and appends the rest unchanged.
 /// This makes a store-root comparison immune to `/var` vs `/private/var` and to a symlinked
 /// ancestor that points outside the store.
-fn resolve_existing_prefix(path: &Path) -> Result<PathBuf, FsError> {
+pub(crate) fn resolve_existing_prefix(path: &Path) -> Result<PathBuf, FsError> {
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
     let mut probe = path.to_path_buf();
     loop {

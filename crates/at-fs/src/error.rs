@@ -98,6 +98,43 @@ pub enum FsError {
         /// Why.
         reason: &'static str,
     },
+    /// The platform refused to create a symbolic link (`EPERM`, `ENOTSUP`, `ENOSYS`).
+    #[error("{}: the platform does not allow symbolic links here: {source}", .path.display())]
+    LinkUnsupported {
+        /// The deployment path a link was requested for.
+        path: PathBuf,
+        /// The error the operating system returned.
+        #[source]
+        source: io::Error,
+    },
+    /// A rename would have to cross filesystems (`EXDEV`).
+    #[error(
+        "{}: cannot rename across filesystems to {}",
+        .from.display(),
+        .to.display()
+    )]
+    CrossDeviceRename {
+        /// Rename source.
+        from: PathBuf,
+        /// Rename destination.
+        to: PathBuf,
+    },
+    /// The copy manifest is unreadable or does not describe this deployment.
+    #[error("{}: {reason}", .path.display())]
+    InvalidManifest {
+        /// Manifest path.
+        path: PathBuf,
+        /// Why it cannot be used.
+        reason: String,
+    },
+    /// Removal was refused because the path is not an AgenTuna-owned deployment.
+    #[error("{}: refusing to remove the deployment: {reason}", .path.display())]
+    DeploymentNotOwned {
+        /// Path removal was asked to delete.
+        path: PathBuf,
+        /// Why the path is not removable.
+        reason: &'static str,
+    },
     /// Backup creation or verification failed.
     #[error(transparent)]
     Backup(#[from] BackupError),

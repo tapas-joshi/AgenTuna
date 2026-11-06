@@ -12,3 +12,6 @@ workspace = true
 [dependencies]
 at-model.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

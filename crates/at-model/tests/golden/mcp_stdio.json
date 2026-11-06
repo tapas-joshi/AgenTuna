@@ -1,0 +1,26 @@
+{
+  "id": "mcp_0192f5c4-1b2c-7e3f-9a4b-5c6d7e8f9a0b",
+  "display_name": "GitHub",
+  "description": "GitHub MCP server",
+  "transport": {
+    "type": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-github"
+    ],
+    "cwd": null,
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": {
+        "env_name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "keychain_account": "agentuna/github"
+      },
+      "LOG_LEVEL": "info"
+    }
+  },
+  "scope": "user",
+  "enabled": true,
+  "vendor_extension": {
+    "keep": true
+  }
+}
