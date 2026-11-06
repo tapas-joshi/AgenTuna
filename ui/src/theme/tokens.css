@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+/*
+ * Theme tokens (TU-001).
+ *
+ * `tokens.ts` is the single source of truth for these values; this file mirrors
+ * it so the first paint is themed before JavaScript runs. `theme-css.test.ts`
+ * fails when a value or variable name drifts between the two.
+ *
+ * At runtime `applyTheme(root, mode)` sets `data-theme` and rewrites every
+ * custom property inline, so switching modes restyles the shell, tables and
+ * overlays without a restart.
+ */
+
+/*
+ * Tailwind CSS 4 sees these as theme tokens. `inline` makes utilities emit
+ * `var(--at-…)` directly, which is what lets a `data-theme` switch on <html>
+ * cascade into every generated utility.
+ */
+@theme inline {
+  --color-surface: var(--at-color-surface);
+  --color-raised: var(--at-color-raised);
+  --color-overlay: var(--at-color-overlay);
+  --color-sidebar: var(--at-color-sidebar);
+  --color-border: var(--at-color-border);
+  --color-text: var(--at-color-text);
+  --color-text-secondary: var(--at-color-text-secondary);
+  --color-text-muted: var(--at-color-text-muted);
+  --color-accent: var(--at-color-accent);
+  --color-success: var(--at-color-success);
+  --color-warning: var(--at-color-warning);
+  --color-danger: var(--at-color-danger);
+  --color-focus: var(--at-color-focus);
+  --color-scope-global: var(--at-color-scope-global);
+  --color-scope-user: var(--at-color-scope-user);
+  --color-scope-project: var(--at-color-scope-project);
+  --color-scope-local: var(--at-color-scope-local);
+
+  /*
+   * Numeric spacing utilities are the pixel values from the token table:
+   * `p-4` is 4px (not Tailwind's 16px default), `p-16` is 16px.
+   */
+  --spacing-2: var(--at-space-2);
+  --spacing-4: var(--at-space-4);
+  --spacing-8: var(--at-space-8);
+  --spacing-12: var(--at-space-12);
+  --spacing-16: var(--at-space-16);
+  --spacing-24: var(--at-space-24);
+  --spacing-32: var(--at-space-32);
+
+  --radius-3: var(--at-radius-3);
+  --radius-6: var(--at-radius-6);
+  --radius-10: var(--at-radius-10);
+
+  --text-11: var(--at-text-11);
+  --text-12: var(--at-text-12);
+  --text-13: var(--at-text-13);
+  --text-14: var(--at-text-14);
+  --text-15: var(--at-text-15);
+  --text-16: var(--at-text-16);
+  --text-18: var(--at-text-18);
+  --text-22: var(--at-text-22);
+  --text-26: var(--at-text-26);
+
+  --font-ui: var(--at-font-ui);
+  --font-mono: var(--at-font-mono);
+}
+
+/* Dark is the default: these are the tokens used before `applyTheme` runs. */
+:root {
+  color-scheme: dark;
+
+  --at-color-surface: #0f172a;
+  --at-color-raised: #1b2336;
+  --at-color-overlay: #272f42;
+  --at-color-sidebar: #0b1222;
+  --at-color-border: #475569;
+  --at-color-text: #f8fafc;
+  --at-color-text-secondary: #cbd5e1;
+  --at-color-text-muted: #94a3b8;
+  --at-color-accent: #22c55e;
+  --at-color-success: #22c55e;
+  --at-color-warning: #f59e0b;
+  --at-color-danger: #f87171;
+  --at-color-focus: #ffffff;
+  --at-color-scope-global: #a78bfa;
+  --at-color-scope-user: #38bdf8;
+  --at-color-scope-project: #fbbf24;
+  --at-color-scope-local: #94a3b8;
+
+  --at-space-2: 2px;
+  --at-space-4: 4px;
+  --at-space-8: 8px;
+  --at-space-12: 12px;
+  --at-space-16: 16px;
+  --at-space-24: 24px;
+  --at-space-32: 32px;
+
+  --at-radius-3: 3px;
+  --at-radius-6: 6px;
+  --at-radius-10: 10px;
+
+  --at-text-11: 11px;
+  --at-text-12: 12px;
+  --at-text-13: 13px;
+  --at-text-14: 14px;
+  --at-text-15: 15px;
+  --at-text-16: 16px;
+  --at-text-18: 18px;
+  --at-text-22: 22px;
+  --at-text-26: 26px;
+
+  --at-font-ui: "Inter", "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --at-font-mono: "Menlo", ui-monospace, "SFMono-Regular", monospace;
+}
+
+/*
+ * Light overrides only the tokens that differ; spacing, radii and type are
+ * mode-independent and stay inherited from `:root`.
+ */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --at-color-surface: #f8fafc;
+  --at-color-raised: #ffffff;
+  --at-color-overlay: #f1f5f9;
+  --at-color-sidebar: #f1f5f9;
+  --at-color-border: #cbd5e1;
+  --at-color-text: #0f172a;
+  --at-color-text-secondary: #334155;
+  --at-color-text-muted: #475569;
+  --at-color-accent: #15803d;
+  --at-color-success: #15803d;
+  --at-color-warning: #b45309;
+  --at-color-danger: #b91c1c;
+  --at-color-focus: #0f172a;
+  --at-color-scope-global: #6d28d9;
+  --at-color-scope-user: #0369a1;
+  --at-color-scope-project: #b45309;
+  --at-color-scope-local: #475569;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--at-color-surface);
+  color: var(--at-color-text);
+  font-family: var(--at-font-ui);
+  font-size: var(--at-text-14);
+  line-height: 1.4;
+}
+
+:focus-visible {
+  outline: 2px solid var(--at-color-focus);
+  outline-offset: 2px;
+}

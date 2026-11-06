@@ -1,0 +1,11 @@
+adopt
+move_aside
+retry
+open_folder
+reveal_in_finder
+reauthenticate
+install_agent
+set_path
+open_settings
+copy_details
+cancel

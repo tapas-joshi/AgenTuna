@@ -13,3 +13,7 @@ workspace = true
 at-model.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

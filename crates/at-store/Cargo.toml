@@ -11,4 +11,9 @@ workspace = true
 
 [dependencies]
 at-model.workspace = true
+directories.workspace = true
+saphyr.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

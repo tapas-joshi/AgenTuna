@@ -12,7 +12,7 @@ export function App() {
 
   return (
     <main className="p-8">
-      <h1 className="m-0 font-mono text-[26px] font-semibold">{info?.name ?? "AgenTuna"}</h1>
+      <h1 className="m-0 font-mono text-26 font-semibold">{info?.name ?? "AgenTuna"}</h1>
       <p className="text-text-muted">
         {error ? `Backend error: ${error}` : info ? `v${info.version} · local` : "Loading…"}
       </p>

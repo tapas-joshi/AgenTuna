@@ -1,0 +1,24 @@
+{
+  "id": "mcp_0192f5c4-1b2d-7f40-8b5c-6d7e8f9a0b1c",
+  "display_name": "Remote docs",
+  "description": null,
+  "transport": {
+    "type": "http",
+    "url": "https://mcp.example.com/docs",
+    "headers": {
+      "Authorization": {
+        "env_name": "DOCS_TOKEN",
+        "keychain_account": "agentuna/docs"
+      }
+    },
+    "oauth": {
+      "issuer": "https://auth.example.com",
+      "client_id": "agentuna",
+      "scopes": [
+        "mcp.read"
+      ],
+      "token_ref": "agentuna/docs-oauth"
+    }
+  },
+  "scope": "project"
+}

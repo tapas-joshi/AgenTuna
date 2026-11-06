@@ -45,5 +45,20 @@ fn manifest_depends_only_on_allowed_crates() {
         .filter_map(|l| l.split('.').next().map(str::trim))
         .filter(|l| !l.is_empty())
         .collect();
-    assert_eq!(deps, ["serde", "thiserror", "uuid", "time"]);
+    assert_eq!(
+        deps,
+        [
+            // Pure data and formatting crates. `serde_json` carries unknown native
+            // MCP keys opaquely (TM-001); `url` types the HTTP transport and
+            // `unicode-normalization` normalizes names (TA resolution). None of
+            // them performs IO, networking or persistence.
+            "serde",
+            "serde_json",
+            "thiserror",
+            "unicode-normalization",
+            "url",
+            "uuid",
+            "time",
+        ]
+    );
 }

@@ -1,10 +1,10 @@
 //! AgenTuna CLI entry point.
+//!
+//! Everything lives in the `at_cli` library so integration tests and future tooling
+//! drive the exact same tree and dispatch path as the shipped binary.
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("agentuna {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
-    println!("agentuna {}", env!("CARGO_PKG_VERSION"));
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    at_cli::run_from_env()
 }
