@@ -3,7 +3,7 @@ import { expect, test } from "./support/tauri-mock";
 const project = {
   id: "prj_visual_fixture",
   name: "AgenTuna",
-  path: "/sandbox/Projects/AgenTuna",
+  path: "/fixtures/Projects/AgenTuna",
   last_used_at: "2026-11-06T10:00:00Z",
   skill_count: 5,
   server_count: 2,
@@ -29,6 +29,7 @@ test("picker, palette, Preferences and state-view baselines", async ({ page }) =
 
   await page.keyboard.press("Meta+,");
   await expect(page.getByRole("heading", { name: "Preferences" })).toBeVisible();
+  await expect(page.getByText("Hide MCP servers banner")).toBeVisible();
   await expect(page).toHaveScreenshot("preferences-populated.png", { animations: "disabled", caret: "hide" });
 
   await page.getByRole("button", { name: "Skills", exact: true }).click();

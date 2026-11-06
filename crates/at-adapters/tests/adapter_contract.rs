@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use at_adapters::adapter::{
-    AgentAdapterRegistry, AgentDeployment, AgentEnvironment, AgentError, DetectionState,
+    AgentAdapterRegistry, AgentDeployment, AgentEnvironment, DetectionState,
 };
 use at_model::{AgentId, FileOp, ItemKind, Scope};
 
@@ -75,21 +75,26 @@ fn every_registered_adapter_obeys_native_adapter_contract() {
         let detection = adapter.detect(&env);
         assert!(matches!(detection.state, DetectionState::NotInstalled));
         assert!(!detection.candidates.is_empty());
+        let config_root = match id {
+            AgentId::ClaudeCode => env.home.join(".claude"),
+            AgentId::Codex => env.home.join(".codex"),
+            AgentId::Omp => env.home.join(".omp/agent"),
+            AgentId::Cursor => env.home.join(".cursor"),
+            AgentId::Custom(_) => env.home.join(".agentuna/custom/skills"),
+        };
+        fs::create_dir_all(config_root).expect("configured temp agent");
 
         for scope in [Scope::User, Scope::Project] {
             let mkdirs = adapter
                 .ensure_dirs(ItemKind::Skill, scope, &env)
                 .expect("directory operations");
             assert!(
-                mkdirs.iter().any(|op| matches!(op, FileOp::Mkdir { .. })),
+                mkdirs.iter().any(|op| matches!(op, FileOp::Mkdir { .. }))
+                    || adapter
+                        .paths(ItemKind::Skill, scope, &env)
+                        .iter()
+                        .all(|candidate| candidate.path.exists()),
                 "{id} {scope:?} planned dirs: {mkdirs:?}"
-            );
-            assert!(
-                adapter
-                    .paths(ItemKind::Skill, scope, &env)
-                    .iter()
-                    .any(|candidate| !candidate.path.exists()),
-                "{id} {scope:?} paths are missing before fixtures"
             );
             let skill_paths = seed_paths(adapter.as_ref(), &env, ItemKind::Skill, scope);
             let rule_paths = seed_paths(adapter.as_ref(), &env, ItemKind::Rule, scope);
@@ -146,27 +151,29 @@ fn every_registered_adapter_obeys_native_adapter_contract() {
             let rule_deployment = AgentDeployment {
                 kind: ItemKind::Rule,
                 scope,
-                path: temp.path().join("AGENTS.md"),
+                path: temp.path().join("generated-managed-rules.md"),
                 content: b"# Managed rules\n".to_vec(),
             };
-            let unsupported = adapter
-                .render_io(&rule_deployment)
-                .expect_err("rule rendering is implemented by TA-011");
-            match unsupported {
-                AgentError::Unsupported { kind, .. } => {
-                    assert!(kind.contains("TA-011"), "{kind}");
-                }
-                error => panic!("expected typed Unsupported for TA-011, got {error}"),
-            }
+            let rendered = adapter.render_io(&rule_deployment).expect("rule rendering");
+            assert!(rendered.starts_with(b"<!-- agentuna:begin -->\n# Managed rules\n"));
+            assert!(rendered.ends_with(b"<!-- agentuna:end -->\n"));
             let rule_write = adapter
                 .write_io(&rule_deployment)
-                .expect_err("rule writes require TA-011 rendering");
-            match rule_write {
-                AgentError::Unsupported { kind, .. } => {
-                    assert!(kind.contains("TA-011"), "{kind}");
-                }
-                error => panic!("expected typed Unsupported for TA-011, got {error}"),
-            }
+                .expect("rule write payload");
+            assert_eq!(rule_write.path, rule_deployment.path);
+            assert_eq!(rule_write.content, rendered);
+            let unmanaged_path = temp.path().join(format!("{id:?}-unmanaged.md"));
+            fs::write(&unmanaged_path, b"hand-authored\n").expect("unmanaged rule fixture");
+            let unmanaged_deployment = AgentDeployment {
+                path: unmanaged_path,
+                ..rule_deployment.clone()
+            };
+            assert!(matches!(
+                adapter.render_io(&unmanaged_deployment),
+                Err(at_adapters::adapter::AgentError::RuleRender(
+                    at_fs::managed_block::ManagedBlockError::AdoptRequired { .. }
+                ))
+            ));
 
             let after = fs::read(&rule_read.path).expect("rule unchanged");
             assert_eq!(after, rule_read.content);
@@ -175,7 +182,7 @@ fn every_registered_adapter_obeys_native_adapter_contract() {
 
     assert_eq!(
         fs::read_dir(temp.path()).expect("temp root").count(),
-        registered_ids().len()
+        2 * registered_ids().len()
     );
 }
 

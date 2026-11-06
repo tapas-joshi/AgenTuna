@@ -24,7 +24,7 @@ test("populated Overview uses compact scope cards and usable attention and chang
         { id: "op_today", kind: "skill_added", summary: "Added MCP server 'postgres'", created_at: today, file_count: 2, scope: "project", files: [{ path: "./.agentuna/mcp.json", scope: "project" }, { path: "./.agentuna/store.json", scope: "project" }] },
         { id: "op_yesterday", kind: "skill_enabled", summary: "Enabled 'ui-ux-pro-max' for omp", created_at: yesterday, file_count: 1, scope: "user", files: [{ path: "~/.agentuna/skills/ui-ux-pro-max", scope: "user" }] },
       ],
-      user_path: "/sandbox/user/.agentuna", global_path: "/sandbox/global", global_writable: false, global_reason: "read only",
+      user_path: "/fixtures/user/.agentuna", global_path: "/fixtures/global", global_writable: false, global_reason: "read only",
     };
     mocks.commandOverrides.project_sync_status = [
       { item_id: "itm_project", scope: "project", name: "Search Skill", label: "project_newer", action: "push" },

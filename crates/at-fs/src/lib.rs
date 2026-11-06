@@ -30,6 +30,7 @@ pub mod failpoint;
 pub(crate) mod failpoint;
 pub mod guard;
 mod hash;
+pub mod managed_block;
 pub mod platform;
 pub mod privilege;
 pub mod recovery;

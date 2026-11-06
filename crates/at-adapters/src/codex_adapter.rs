@@ -80,8 +80,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::adapter::{AgentPathCandidate, DetectionState};
-    use at_model::ItemKind;
+    use crate::adapter::{AgentError, AgentPathCandidate, DetectionState};
+    use at_model::{FileOp, ItemKind};
 
     #[test]
     fn config_root_dual_skill_roots_and_local_paths_are_exposed() {
@@ -152,5 +152,81 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].project_path, PathBuf::from("/fixture/project"));
         assert_eq!(rows[0].trust_level.as_deref(), Some("trusted"));
+    }
+
+    #[test]
+    fn local_skill_plan_targets_codex_root_and_excludes_path_once() {
+        let temp = tempfile::tempdir().expect("temporary project");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project");
+        let store_skill = temp.path().join("store/skills/example");
+        let adapter = CodexAdapter;
+        let existing = b"# local ignores\n";
+        let plan = adapter
+            .plan_local_skill(&project, "example", &store_skill, Some(existing), 42)
+            .expect("plan Local skill deployment");
+        assert_eq!(plan.scope, Some(Scope::Local));
+        let local_root = adapter
+            .paths(
+                ItemKind::Skill,
+                Scope::Local,
+                &AgentEnvironment {
+                    home: temp.path().join("home"),
+                    project: Some(project.clone()),
+                    variables: BTreeMap::new(),
+                },
+            )
+            .into_iter()
+            .find(|candidate| candidate.primary)
+            .expect("Codex Local skill root")
+            .path;
+        let symlink = plan.ops.iter().find_map(|operation| match operation {
+            FileOp::Symlink {
+                link_path, target, ..
+            } => Some((link_path, target)),
+            _ => None,
+        });
+        assert_eq!(
+            local_root.join("example"),
+            project.join(".agents/skills/example")
+        );
+        assert_eq!(
+            symlink,
+            Some((&PathBuf::from(".agents/skills/example"), &store_skill))
+        );
+        let excluded = plan.ops.iter().find_map(|operation| match operation {
+            FileOp::Write { path, bytes, .. } if path == Path::new(".git/info/exclude") => {
+                Some(bytes)
+            }
+            _ => None,
+        });
+        const EXCLUDE: &[u8] = b"/.agents/skills/example\n";
+        assert_eq!(
+            excluded.map(Vec::as_slice),
+            Some(b"# local ignores\n/.agents/skills/example\n".as_slice())
+        );
+
+        let repeated = adapter
+            .plan_local_skill(&project, "example", &store_skill, Some(EXCLUDE), 43)
+            .expect("idempotent exclude plan");
+        let repeated_exclude = repeated.ops.iter().find_map(|operation| match operation {
+            FileOp::Write { path, bytes, .. } if path == Path::new(".git/info/exclude") => {
+                Some(bytes)
+            }
+            _ => None,
+        });
+        assert_eq!(repeated_exclude.map(Vec::as_slice), Some(EXCLUDE));
+    }
+
+    #[test]
+    fn local_skill_plan_refuses_existing_destination() {
+        let temp = tempfile::tempdir().expect("temporary project");
+        let project = temp.path().join("project");
+        let destination = project.join(".agents/skills/example");
+        std::fs::create_dir_all(&destination).expect("existing skill");
+        let error = CodexAdapter
+            .plan_local_skill(&project, "example", Path::new("store/example"), None, 42)
+            .expect_err("existing unmanaged path must not be overwritten");
+        assert!(matches!(error, AgentError::Unsupported { .. }));
     }
 }

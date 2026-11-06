@@ -55,6 +55,9 @@ pub struct McpPlanPreviewRequest {
     pub agents: Vec<String>,
     /// Registered project identity for project and local scopes.
     pub project_id: Option<String>,
+    /// Existing canonical item id; omitted for add mode.
+    #[serde(default)]
+    pub item_id: Option<String>,
 }
 
 /// Identity used to apply a reviewed MCP plan.
@@ -230,7 +233,49 @@ pub fn mcp_plan_preview(
             installed: installed.contains(&agent),
         });
     }
-    let intent = at_engine::mcp_plan::McpIntent::Add { slug, definition };
+    let intent = if let Some(raw_id) = request.item_id.as_deref() {
+        let item_id = raw_id.parse::<ItemId>().map_err(|_| {
+            CommandError::invalid_argument("item_id", "expected a canonical item id")
+        })?;
+        let store_layout =
+            at_store::layout::StoreLayout::for_scope(&paths, scope).map_err(|_| {
+                CommandError::invalid_argument("scope", "canonical store is unavailable")
+            })?;
+        let manifest = at_store::manifest::StoreManifest::load(&store_layout).map_err(|_| {
+            CommandError::invalid_argument("item_id", "canonical item could not be loaded")
+        })?;
+        let item = manifest.manifest.item(item_id).ok_or_else(|| {
+            CommandError::invalid_argument("item_id", "server does not exist in this scope")
+        })?;
+        if item.kind != ItemKind::McpServer {
+            return Err(CommandError::invalid_argument(
+                "item_id",
+                "item is not an MCP server",
+            ));
+        }
+        let loaded = at_store::mcp_store::McpStore::load(&store_layout).map_err(|_| {
+            CommandError::invalid_argument("item_id", "canonical server could not be loaded")
+        })?;
+        let old_definition = loaded.store.get(item.slug.as_str()).ok_or_else(|| {
+            CommandError::invalid_argument("item_id", "canonical server definition is missing")
+        })?;
+        let old_slug = item.slug.as_str().to_owned();
+        if old_slug != slug {
+            return Err(CommandError::invalid_argument(
+                "name",
+                "renaming MCP servers requires the rename flow",
+            ));
+        }
+        let mut edited = definition.clone();
+        edited.description.clone_from(&old_definition.description);
+        edited.extra.clone_from(&old_definition.extra);
+        at_engine::mcp_plan::McpIntent::Edit {
+            slug: old_slug,
+            definition: edited,
+        }
+    } else {
+        at_engine::mcp_plan::McpIntent::Add { slug, definition }
+    };
     let project_id = request.project_id.clone();
     let store_layout = at_store::layout::StoreLayout::for_scope(&paths, scope)
         .map_err(|_| CommandError::invalid_argument("scope", "canonical store is unavailable"))?;
@@ -240,7 +285,8 @@ pub fn mcp_plan_preview(
         intent: &intent,
         targets: &targets,
         definition: match &intent {
-            at_engine::mcp_plan::McpIntent::Add { definition, .. } => definition,
+            at_engine::mcp_plan::McpIntent::Add { definition, .. }
+            | at_engine::mcp_plan::McpIntent::Edit { definition, .. } => definition,
             _ => return Err(CommandError::internal("MCP plan intent is invalid")),
         },
         scope,

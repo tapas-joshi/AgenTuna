@@ -279,6 +279,12 @@ pub fn run() -> tauri::Result<()> {
         overwrite::overwrite_move_aside,
         skill_wizard::skill_wizard_transition,
         skill_wizard::skill_add_preview,
+        skill_wizard::skill_template_preview,
+        skill_wizard::skill_import_choose_folder,
+        skill_wizard::skill_import_choose_zip,
+        skill_wizard::skill_import_candidates,
+        skill_wizard::skill_import_git_candidates,
+        skill_wizard::skill_marketplace_search,
         skill_wizard::skill_add_apply
     ]);
     #[cfg(not(debug_assertions))]
@@ -336,7 +342,13 @@ pub fn run() -> tauri::Result<()> {
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
         skill_wizard::skill_wizard_transition,
+        skill_wizard::skill_template_preview,
         skill_wizard::skill_add_preview,
+        skill_wizard::skill_import_choose_folder,
+        skill_wizard::skill_import_choose_zip,
+        skill_wizard::skill_import_candidates,
+        skill_wizard::skill_marketplace_search,
+        skill_wizard::skill_import_git_candidates,
         skill_wizard::skill_add_apply
     ]);
 

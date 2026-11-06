@@ -9,6 +9,7 @@ pub mod codex_mcp;
 pub mod codex_projects;
 pub mod cursor_adapter;
 pub mod custom_agent;
+pub mod detect;
 pub mod generic_mcp;
 pub mod mcp_capabilities;
 pub mod mcp_projection;

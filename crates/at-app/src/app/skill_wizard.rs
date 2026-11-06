@@ -8,7 +8,7 @@ use std::{
 
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_engine::{
-    skill_templates::{SkillDraft, SkillTemplate, render_preview, slugify},
+    skill_templates::{DescriptionIssue, SkillDraft, SkillTemplate, render_preview, slugify},
     skill_wizard::{AddSkillWizard, SourceKind, WizardEffect, WizardEvent, WizardStep},
 };
 use at_model::{
@@ -17,12 +17,258 @@ use at_model::{
 };
 use at_store::{layout::StoreLayout, skill_package::SkillPackage};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use std::hash::{Hash, Hasher};
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use ts_rs::TS;
 
 use super::{
     commands::CommandError, network::NetworkState, paths::resolve_process_paths, state::AppState,
 };
+
+/// Opens the native folder picker used by Local folder skill imports.
+#[tauri::command]
+pub async fn skill_import_choose_folder(app: AppHandle) -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Choose a skill folder")
+            .blocking_pick_folder()
+            .map(|selected| {
+                selected
+                    .into_path()
+                    .map(|path| path.display().to_string())
+                    .map_err(|_| {
+                        CommandError::unavailable("the selected folder path is unavailable")
+                    })
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|_| CommandError::internal("folder picker task failed"))?
+}
+
+/// Opens the native ZIP picker used by ZIP skill imports.
+#[tauri::command]
+pub async fn skill_import_choose_zip(app: AppHandle) -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Choose a skill ZIP")
+            .add_filter("ZIP archive", &["zip"])
+            .blocking_pick_file()
+            .map(|selected| {
+                selected
+                    .into_path()
+                    .map(|path| path.display().to_string())
+                    .map_err(|_| CommandError::unavailable("the selected ZIP path is unavailable"))
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|_| CommandError::internal("ZIP picker task failed"))?
+}
+
+/// One discovered local skill and its parsed preview, if valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillImportCandidateView {
+    /// Candidate directory relative to the selected import root.
+    pub id: String,
+    /// Parsed skill name.
+    pub name: Option<String>,
+    /// Parsed skill description.
+    pub description: Option<String>,
+    /// Original SKILL.md text for a read-only preview.
+    pub markdown: Option<String>,
+    /// Parse error for candidates that cannot be selected.
+    pub error: Option<String>,
+}
+
+/// Read-only candidates returned after scanning one local folder or ZIP file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillImportCandidatesView {
+    /// Parsed candidates; invalid entries remain visible.
+    pub candidates: Vec<SkillImportCandidateView>,
+    /// Whether a ZIP validation failure prevented candidate listing.
+    pub error: Option<String>,
+}
+
+/// Scans a user-selected folder or ZIP without modifying its contents.
+#[tauri::command]
+pub fn skill_import_candidates(
+    path: String,
+    zip: bool,
+    project_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<SkillImportCandidatesView, CommandError> {
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let project = project_root(database.connection(), project_id.as_deref(), Scope::Project)?;
+    let paths = resolve_process_paths(project.as_deref())
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let selected = Path::new(path.trim());
+    if selected.as_os_str().is_empty() || !allowed_import_path(selected, &paths, project.as_deref())
+    {
+        return Err(CommandError::invalid_argument(
+            "path",
+            "choose a folder or ZIP under the current home or registered project",
+        ));
+    }
+    let candidates = if zip {
+        let imported = at_engine::skill_import::import_zip(selected, paths.cache_dir())
+            .map_err(|error| CommandError::invalid_argument("path", &error.to_string()))?;
+        imported.candidates
+    } else {
+        at_engine::skill_import::import_folder(selected)
+            .map_err(|error| CommandError::invalid_argument("path", &error.to_string()))?
+    };
+    Ok(SkillImportCandidatesView {
+        candidates: candidates
+            .into_iter()
+            .map(|candidate| SkillImportCandidateView {
+                id: candidate.subpath.to_string_lossy().replace('\\', "/"),
+                name: candidate.name,
+                description: candidate.description,
+                markdown: candidate.doc.map(|doc| doc.raw),
+                error: candidate.error,
+            })
+            .collect(),
+        error: None,
+    })
+}
+
+/// Fetches a Git repository after the user explicitly requests candidate discovery.
+#[tauri::command]
+pub fn skill_import_git_candidates(
+    url: String,
+    reference: Option<String>,
+    network: State<'_, NetworkState>,
+) -> Result<SkillImportCandidatesView, CommandError> {
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty() && !host.contains('@'))
+        .ok_or_else(|| CommandError::invalid_argument("url", "enter a valid HTTPS Git URL"))?;
+    network
+        .authorize(NetworkAction::GitClone, host, NetworkTrigger::User)
+        .map_err(|_| CommandError::unavailable("Network policy refused this Git source."))?;
+    let paths = resolve_process_paths(None)
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let policy = network.policy();
+    let mut log = NetworkEventLog::default();
+    let imported = at_engine::skill_import::import_git(
+        &url,
+        reference
+            .as_deref()
+            .filter(|reference| !reference.trim().is_empty()),
+        paths.cache_dir(),
+        &policy,
+        &mut log,
+    )
+    .map_err(|_| {
+        CommandError::unavailable(
+            "Git source could not be cloned. Check the URL and network policy.",
+        )
+    })?;
+    Ok(SkillImportCandidatesView {
+        candidates: imported
+            .candidates
+            .into_iter()
+            .map(|candidate| SkillImportCandidateView {
+                id: candidate.subpath.to_string_lossy().replace('\\', "/"),
+                name: candidate.name,
+                description: candidate.description,
+                markdown: candidate.doc.map(|doc| doc.raw),
+                error: candidate.error,
+            })
+            .collect(),
+        error: None,
+    })
+}
+
+/// One skills.sh marketplace search result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MarketplaceSkillView {
+    /// Stable marketplace item identifier.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// GitHub author.
+    pub author: String,
+    /// Reported install count.
+    pub installs: u64,
+    /// Git repository URL used to import the skill.
+    pub source: String,
+    /// Short listing description.
+    pub description: String,
+}
+
+/// Search results and their cache/offline provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MarketplaceSearchView {
+    /// Marketplace rows.
+    pub results: Vec<MarketplaceSkillView>,
+    /// Results came from cache because network access was unavailable.
+    pub offline: bool,
+    /// The cached result is older than the marketplace freshness period.
+    pub stale: bool,
+    /// Data provider.
+    pub provenance: String,
+}
+
+/// Searches or refreshes the skills.sh marketplace after an explicit user action.
+#[tauri::command]
+pub async fn skill_marketplace_search(
+    query: String,
+    refresh: bool,
+    network: State<'_, NetworkState>,
+) -> Result<MarketplaceSearchView, CommandError> {
+    let policy = network.policy();
+    if !policy.marketplace_enabled() && !policy.offline() {
+        return Err(CommandError::unavailable(
+            "Marketplace access is disabled by network policy.",
+        ));
+    }
+    let paths = resolve_process_paths(None)
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    query.trim().to_ascii_lowercase().hash(&mut hasher);
+    let cache_file = paths
+        .cache_dir()
+        .join(format!("skills-sh-{:016x}.json", hasher.finish()));
+    at_mcp::ensure_crypto_provider();
+    let client = at_git::marketplace::MarketplaceClient::new()
+        .map_err(|_| CommandError::unavailable("Marketplace search is unavailable"))?;
+    let mut log = NetworkEventLog::default();
+    let page = if refresh {
+        client.refresh(&query, &cache_file, &policy, &mut log).await
+    } else {
+        client.search(&query, &cache_file, &policy, &mut log).await
+    }
+    .map_err(|_| {
+        CommandError::unavailable("Marketplace search failed or no cached results are available")
+    })?;
+    Ok(MarketplaceSearchView {
+        results: page
+            .skills
+            .into_iter()
+            .map(|skill| MarketplaceSkillView {
+                id: skill.id,
+                name: skill.name,
+                author: skill.author,
+                installs: skill.installs,
+                source: skill.source_url,
+                description: skill.description,
+            })
+            .collect(),
+        offline: page.offline,
+        stale: page.stale,
+        provenance: "skills.sh".to_owned(),
+    })
+}
 
 /// Applies one typed wizard event without performing filesystem or network work.
 #[tauri::command]
@@ -33,6 +279,46 @@ pub fn skill_wizard_transition(
     let mut wizard = wizard.unwrap_or_default();
     let effects = wizard.dispatch(event);
     (wizard, effects)
+}
+
+/// Read-only preview generated by the canonical skill template renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillTemplatePreviewView {
+    /// Canonical filesystem slug when the name is valid.
+    pub slug: Option<String>,
+    /// Complete generated SKILL.md document.
+    pub markdown: String,
+    /// Name parser issue, if any.
+    pub name_error: Option<String>,
+    /// Description parser issue, if any.
+    pub description_error: Option<String>,
+}
+
+/// Renders a live preview with the same engine used by skill creation.
+#[tauri::command]
+pub fn skill_template_preview(
+    name: String,
+    description: String,
+    template: String,
+) -> Result<SkillTemplatePreviewView, CommandError> {
+    let template = SkillTemplate::ALL
+        .into_iter()
+        .find(|candidate| candidate.as_str() == template)
+        .ok_or_else(|| CommandError::invalid_argument("template", "choose a supported template"))?;
+    let preview = render_preview(&SkillDraft::new(&name, &description, template));
+    Ok(SkillTemplatePreviewView {
+        slug: preview.slug,
+        markdown: preview.markdown,
+        name_error: preview.name_error.map(|error| error.to_string()),
+        description_error: preview.description_error.map(|issue| match issue {
+            DescriptionIssue::Empty => "Description is required".to_owned(),
+            DescriptionIssue::TooLong { len, limit } => {
+                format!("Description is {len} characters; the limit is {limit}")
+            }
+            _ => "Description is invalid".to_owned(),
+        }),
+    })
 }
 
 /// Request to build a read-only Add Skill review plan.
@@ -443,7 +729,7 @@ fn resolve_skill_package(
                 })?;
             let rendered = render_preview(&SkillDraft::new(
                 wizard.name.trim(),
-                "A reusable skill.",
+                wizard.details.description.trim(),
                 template,
             ));
             let mut package = SkillPackage::new();
@@ -462,7 +748,18 @@ fn resolve_skill_package(
                     "choose a folder under the current home or registered project",
                 ));
             }
-            SkillPackage::read(path)
+            let candidates = at_engine::skill_import::import_folder(path).map_err(|_| {
+                CommandError::invalid_argument(
+                    "folder_path",
+                    "the selected folder could not be scanned",
+                )
+            })?;
+            let candidate = select_import_candidate(
+                &candidates,
+                wizard.details.folder_selection.as_deref(),
+                "folder_selection",
+            )?;
+            SkillPackage::read(&path.join(&candidate.subpath))
                 .map(|loaded| loaded.package)
                 .map_err(|_| {
                     CommandError::invalid_argument(
@@ -576,29 +873,120 @@ fn resolve_skill_package(
                         "the ZIP archive is invalid or unsafe",
                     )
                 })?;
-            let valid = imported
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.is_valid())
-                .collect::<Vec<_>>();
-            if valid.len() != 1 {
-                return Err(CommandError::invalid_argument(
-                    "zip_path",
-                    "select an archive containing exactly one skill package",
-                ));
-            }
-            SkillPackage::read(&imported.staging_root().join(&valid[0].subpath))
+            let candidate = select_import_candidate(
+                &imported.candidates,
+                wizard.details.zip_selection.as_deref(),
+                "zip_selection",
+            )?;
+            SkillPackage::read(&imported.staging_root().join(&candidate.subpath))
                 .map(|loaded| loaded.package)
                 .map_err(|_| CommandError::unavailable("the extracted skill package is unreadable"))
         }
-        SourceKind::Marketplace => Err(CommandError::unavailable(
-            "Marketplace imports are not available in this build. Choose Git, Library, Folder or ZIP instead.",
-        )),
+        SourceKind::Marketplace => {
+            let id = wizard.details.marketplace_id.trim();
+            let mut id_parts = id.split('/');
+            let (Some(author), Some(repository), Some(skill_name)) =
+                (id_parts.next(), id_parts.next(), id_parts.next())
+            else {
+                return Err(CommandError::invalid_argument(
+                    "marketplace_id",
+                    "select a valid marketplace listing",
+                ));
+            };
+            if id_parts.next().is_some()
+                || [author, repository, skill_name]
+                    .iter()
+                    .any(|part| part.is_empty())
+            {
+                return Err(CommandError::invalid_argument(
+                    "marketplace_id",
+                    "select a valid marketplace listing",
+                ));
+            }
+            let listing = at_git::marketplace::MarketplaceSkill {
+                id: id.to_owned(),
+                name: wizard.name.clone(),
+                description: String::new(),
+                author: author.to_owned(),
+                installs: 0,
+                source_url: format!("https://github.com/{author}/{repository}"),
+                updated_at: None,
+            };
+            let url = at_git::marketplace::MarketplaceClient::authorize_install(
+                &listing,
+                &network.policy(),
+            )
+            .map_err(|_| {
+                CommandError::unavailable("Network policy refused this marketplace install.")
+            })?;
+            let host = "github.com";
+            network
+                .authorize(NetworkAction::GitClone, host, NetworkTrigger::User)
+                .map_err(|_| {
+                    CommandError::unavailable("Git clone access is disabled by network policy.")
+                })?;
+            let policy = network.policy();
+            let mut log = NetworkEventLog::default();
+            let imported = at_engine::skill_import::import_git(
+                url,
+                None,
+                paths.cache_dir(),
+                &policy,
+                &mut log,
+            )
+            .map_err(|_| {
+                CommandError::unavailable("Marketplace skill source could not be fetched.")
+            })?;
+            let candidate = imported
+                .candidates
+                .iter()
+                .find(|candidate| {
+                    candidate.is_valid()
+                        && (candidate
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(skill_name))
+                            || candidate.subpath.file_name().is_some_and(|name| {
+                                name.to_string_lossy().eq_ignore_ascii_case(skill_name)
+                            }))
+                })
+                .ok_or_else(|| {
+                    CommandError::invalid_argument(
+                        "marketplace_id",
+                        "the selected marketplace skill was not found in its repository",
+                    )
+                })?;
+            SkillPackage::read(&imported.repository_root().join(&candidate.subpath))
+                .map(|loaded| loaded.package)
+                .map_err(|_| {
+                    CommandError::unavailable("the marketplace skill package is unreadable")
+                })
+        }
         _ => Err(CommandError::invalid_argument(
             "source",
             "choose a supported skill source",
         )),
     }
+}
+
+fn select_import_candidate<'a>(
+    candidates: &'a [at_engine::skill_import::SkillImportCandidate],
+    selection: Option<&str>,
+    argument: &str,
+) -> Result<&'a at_engine::skill_import::SkillImportCandidate, CommandError> {
+    let valid = candidates
+        .iter()
+        .filter(|candidate| candidate.is_valid())
+        .collect::<Vec<_>>();
+    let selected = match selection {
+        Some(selection) => valid
+            .into_iter()
+            .find(|candidate| candidate.subpath == Path::new(selection)),
+        None if valid.len() == 1 => valid.first().copied(),
+        None => None,
+    };
+    selected
+        .ok_or_else(|| CommandError::invalid_argument(argument, "choose one valid skill candidate"))
 }
 
 fn allowed_import_path(

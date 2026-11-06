@@ -66,7 +66,7 @@ function RouteBody({
   if (route === "settings") return <PreferencesScreen />;
   if (route === "mcp-form") return <AddMcpServerForm
     onCancel={onClose}
-    onPlan={(draft: AddMcpServerDraft) => {
+    onPlan={(draft: AddMcpServerDraft, itemId?: string) => {
       const request: McpPlanPreviewRequest = {
         name: draft.name,
         transport: draft.transport,
@@ -78,6 +78,7 @@ function RouteBody({
         scope: draft.scope,
         agents: [...draft.agents],
         project_id: projectId,
+        item_id: itemId ?? null,
       };
       return invoke<McpChangeSetPreviewView>("mcp_plan_preview", { request });
     }}

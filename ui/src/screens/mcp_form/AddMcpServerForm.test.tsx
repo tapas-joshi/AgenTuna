@@ -57,4 +57,18 @@ describe("AddMcpServerForm", () => {
     expect(screen.getAllByText("not installed").length).toBe(3);
     expect(screen.getByText("Local (only you, this repo)")).toBeTruthy();
   });
+  it("prefills edit values and disables save until dirty", () => {
+    const onPlan = vi.fn().mockResolvedValue(preview);
+    render(<AddMcpServerForm mode="edit" initialState={{
+      id: "itm_fixture", name: "github", transport: "stdio", command: "node", args: ["server.js"], url: "",
+      headers: [], env: [{ name: "TOKEN", value: "GITHUB_TOKEN", kind: "secret" }],
+      scope: "user", agents: ["codex"],
+    }} onCancel={() => undefined} onPlan={onPlan} onSave={() => Promise.resolve()} />);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("github");
+    expect((screen.getByLabelText("Command") as HTMLInputElement).value).toBe("node");
+    expect((screen.getByRole("button", { name: "Review edit" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Command"), { target: { value: "node-new" } });
+    expect((screen.getByRole("button", { name: "Review edit" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
 });

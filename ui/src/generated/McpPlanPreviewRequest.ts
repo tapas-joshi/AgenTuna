@@ -44,4 +44,8 @@ agents: Array<string>,
 /**
  * Registered project identity for project and local scopes.
  */
-project_id: string | null, };
+project_id: string | null, 
+/**
+ * Existing canonical item id; omitted for add mode.
+ */
+item_id: string | null, };

@@ -1,0 +1,224 @@
+//! Reviewed plans for enabling or disabling one agent's skill deployment.
+
+use std::path::PathBuf;
+
+use at_model::{AgentId, ChangeSet, FileOp, LinkMode};
+use thiserror::Error;
+
+use crate::deploy::{self, DeployPlanError, DeployWarning, PlanRequest};
+
+/// One user-requested skill enablement change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetSkillAgentEnabled {
+    /// Stable skill identity.
+    pub item_id: at_model::ItemId,
+    /// Scope containing the canonical skill.
+    pub scope: at_model::Scope,
+    /// Agent whose deployment is being changed.
+    pub agent: AgentId,
+    /// Desired state.
+    pub enabled: bool,
+}
+
+/// Inputs shared by deployment planning and the disable-manifest plan.
+#[derive(Debug, Clone)]
+pub struct SkillAgentPlanRequest {
+    /// Requested state transition.
+    pub intent: SetSkillAgentEnabled,
+    /// Path, mode and shared-root data for the common deployment planner.
+    pub deployment: PlanRequest,
+    /// Whether the adapter detected the agent as installed/configured.
+    pub agent_installed: bool,
+    /// Global lock reason, when present.
+    pub lock_reason: Option<String>,
+    /// Whether the deployment already matches the requested state.
+    pub already_enabled: bool,
+    /// Disable tombstone ChangeSet prepared from the selected manifest.
+    pub disable_change_set: Option<ChangeSet>,
+}
+
+/// Details of an owned deployment to remove after the reviewed tombstone plan applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRemoval {
+    /// Exact adapter target path.
+    pub target: PathBuf,
+    /// Canonical source path used to validate link ownership.
+    pub source: PathBuf,
+    /// Last recorded materialization mode.
+    pub mode: LinkMode,
+    /// Other agents coupled to the same native discovery root.
+    pub coupled_agents: Vec<AgentId>,
+}
+
+/// A single reviewed transition, including any coupled-root warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillAgentPlan {
+    /// Filesystem and manifest operations to review and apply.
+    pub change_set: Option<ChangeSet>,
+    /// Deployment materialization selected by the common planner.
+    pub mode_used: Option<LinkMode>,
+    /// Agents affected by the shared root.
+    pub coupled_agents: Vec<AgentId>,
+    /// Warnings that must be shown before confirmation.
+    pub warnings: Vec<DeployWarning>,
+    /// True when the request already matches the indexed state.
+    pub no_op: bool,
+    /// Existing AgenTuna-owned deployment to remove after the reviewed manifest applies.
+    pub removal: Option<SkillRemoval>,
+}
+
+/// Why the single-agent skill intent could not be planned.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SkillAgentPlanError {
+    /// Agent detection says the selected agent is unavailable.
+    #[error("agent `{agent}` is not installed")]
+    AgentNotInstalled {
+        /// Agent requested by the user.
+        agent: AgentId,
+    },
+    /// The item is locked at Global scope.
+    #[error("skill {item_id} is locked: {reason}")]
+    Locked {
+        /// Stable item identity.
+        item_id: at_model::ItemId,
+        /// Recorded lock reason.
+        reason: String,
+    },
+    /// The disable plan targets a path that is not an AgenTuna deployment.
+    #[error("native conflict at {path}")]
+    NativeConflict {
+        /// Unmanaged target path.
+        path: PathBuf,
+    },
+    /// Disable requires the reviewed manifest ChangeSet.
+    #[error("a reviewed disable-manifest ChangeSet is required")]
+    MissingDisablePlan,
+    /// Agent is installed but not managed, so AgenTuna will not create a deployment.
+    #[error("agent `{agent}` is not managed by AgenTuna")]
+    AgentUnmanaged {
+        /// Agent that is not managed.
+        agent: AgentId,
+    },
+    /// Copy-mode directory removal needs the pending restorable at-fs ChangeSet operation.
+    #[error("copy-mode skill directory removal is not yet supported at {path}")]
+    UnsupportedCopyRemoval {
+        /// Deployment directory.
+        path: PathBuf,
+    },
+    /// The common deployment planner refused the request.
+    #[error(transparent)]
+    Deployment(#[from] DeployPlanError),
+}
+
+/// Plans one per-agent skill enable or disable using the shared deployment planner.
+///
+/// Disable plans carry the reviewed tombstone ChangeSet and the exact owned target to remove;
+/// the application applies the ChangeSet with at-fs and performs the guarded removal using its
+/// deployment-row snapshot. It must not present the action as agent-independent when roots match.
+///
+/// # Errors
+/// Returns typed missing-agent, lock, native-conflict, missing-plan, or deployment errors.
+pub fn plan_skill_agent_change(
+    request: SkillAgentPlanRequest,
+) -> Result<SkillAgentPlan, SkillAgentPlanError> {
+    if !request.agent_installed {
+        return Err(SkillAgentPlanError::AgentNotInstalled {
+            agent: request.intent.agent,
+        });
+    }
+    if let Some(reason) = request.lock_reason {
+        return Err(SkillAgentPlanError::Locked {
+            item_id: request.intent.item_id,
+            reason,
+        });
+    }
+    if request.already_enabled == request.intent.enabled {
+        return Ok(SkillAgentPlan {
+            change_set: None,
+            mode_used: None,
+            coupled_agents: Vec::new(),
+            warnings: Vec::new(),
+            no_op: true,
+            removal: None,
+        });
+    }
+
+    let mut deployment_request = request.deployment;
+    deployment_request.item_id = request.intent.item_id;
+    deployment_request.scope = request.intent.scope;
+    deployment_request.agent = request.intent.agent.clone();
+    let shared_agents = deployment_request.shared_agents.clone();
+    if request.intent.enabled {
+        let planned = deploy::plan(deployment_request)?;
+        if planned.skipped_unmanaged {
+            return Err(SkillAgentPlanError::AgentUnmanaged {
+                agent: request.intent.agent,
+            });
+        }
+        return Ok(SkillAgentPlan {
+            change_set: planned.change_set,
+            mode_used: planned.mode_used,
+            coupled_agents: planned.coupled_agents,
+            warnings: planned.warnings,
+            no_op: false,
+            removal: None,
+        });
+    }
+
+    if deployment_request.destination.exists() && !deployment_request.destination_managed {
+        return Err(SkillAgentPlanError::NativeConflict {
+            path: deployment_request.destination,
+        });
+    }
+    if deployment_request.mode == LinkMode::Copy {
+        return Err(SkillAgentPlanError::UnsupportedCopyRemoval {
+            path: deployment_request.destination,
+        });
+    }
+    let change_set = request
+        .disable_change_set
+        .ok_or(SkillAgentPlanError::MissingDisablePlan)?;
+    if !change_set.ops.iter().any(|operation| {
+        matches!(
+            operation,
+            FileOp::Delete { path, .. } if path == &deployment_request.destination
+        )
+    }) {
+        return Err(SkillAgentPlanError::MissingDisablePlan);
+    }
+    let mut coupled_agents = shared_agents
+        .into_iter()
+        .filter(|agent| agent != &request.intent.agent)
+        .collect::<Vec<_>>();
+    coupled_agents.sort();
+    coupled_agents.dedup();
+    let warnings = if coupled_agents.is_empty() {
+        Vec::new()
+    } else {
+        vec![DeployWarning::SharedRoot {
+            path: deployment_request
+                .destination
+                .parent()
+                .unwrap_or(&deployment_request.destination)
+                .to_path_buf(),
+            agents: coupled_agents.clone(),
+        }]
+    };
+    let removal = deployment_request
+        .destination_managed
+        .then(|| SkillRemoval {
+            target: deployment_request.destination,
+            source: deployment_request.source,
+            mode: deployment_request.mode,
+            coupled_agents: coupled_agents.clone(),
+        });
+    Ok(SkillAgentPlan {
+        change_set: Some(change_set),
+        mode_used: Some(deployment_request.mode),
+        coupled_agents,
+        warnings,
+        no_op: false,
+        removal,
+    })
+}

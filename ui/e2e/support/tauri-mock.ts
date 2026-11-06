@@ -7,17 +7,17 @@ export const test = base.extend({
       const fixedNow = 1_798_560_000_000;
       const settings = { schema_version: 1, values: {} as Record<string, unknown> };
       const projects: Array<Record<string, unknown>> = [];
-      const project = { id: "prj_visual_fixture", name: "AgenTuna", path: "/sandbox/Projects/AgenTuna", last_used_at: "2026-11-06T10:00:00Z", skill_count: 5, server_count: 2 };
+      const project = { id: "prj_visual_fixture", name: "AgenTuna", path: "/fixtures/Projects/AgenTuna", last_used_at: "2026-11-06T10:00:00Z", skill_count: 5, server_count: 2 };
       projects.push(project);
       settings.values.last_project_id = project.id;
       const mocks = { settings, projects, policyMode: "normal", commandOverrides: {} as Record<string, unknown> };
       Object.defineProperty(window, "__AT_TEST_MOCKS__", { value: mocks });
-      const paths = { support_dir: "/sandbox/support", db_path: "/sandbox/support/index.sqlite", log_dir: "/sandbox/support/logs", backup_dir: "/sandbox/support/backups", cache_dir: "/sandbox/support/cache", user_store: "/sandbox/user", project_store: "/sandbox/Projects/AgenTuna/.config-studio", global_store: "/sandbox/global", global_store_source: "default" };
+      const paths = { support_dir: "/fixtures/support", db_path: "/fixtures/support/index.sqlite", log_dir: "/fixtures/support/logs", backup_dir: "/fixtures/support/backups", cache_dir: "/fixtures/support/cache", user_store: "/fixtures/user", project_store: "/fixtures/Projects/AgenTuna/.config-studio", global_store: "/fixtures/global", global_store_source: "default" };
       const policy = { offline: false, marketplace_enabled: false, background_health: "local", updates_opt_in: false, statement: "No automatic network calls.", allowed_hosts: [], actions: [], events: [], capacity: 100 };
-      const emptyOverview = { scopes: [{ scope: "global", skills: 0, mcp: 0, rules: 0, locks: 0, last_edited: null, disabled: 0 }, { scope: "user", skills: 1, mcp: 0, rules: 0, locks: 0, last_edited: "2026-11-06T10:00:00Z", disabled: 0 }, { scope: "project", skills: 0, mcp: 1, rules: 0, locks: 0, last_edited: null, disabled: 0 }], attention: [], attention_total: 0, changes: [], user_path: "/sandbox/user", global_path: "/sandbox/global", global_writable: true, global_reason: null };
+      const emptyOverview = { scopes: [{ scope: "global", skills: 0, mcp: 0, rules: 0, locks: 0, last_edited: null, disabled: 0 }, { scope: "user", skills: 1, mcp: 0, rules: 0, locks: 0, last_edited: "2026-11-06T10:00:00Z", disabled: 0 }, { scope: "project", skills: 0, mcp: 1, rules: 0, locks: 0, last_edited: null, disabled: 0 }], attention: [], attention_total: 0, changes: [], user_path: "/fixtures/user", global_path: "/fixtures/global", global_writable: true, global_reason: null };
       const skill = {
         item_id: "itm_visual_skill", name: "Code Review", slug: "code-review", scope: "user",
-        path: "/sandbox/user/skills/code-review",
+        path: "/fixtures/user/skills/code-review",
         markdown: "---\nname: Code Review\ndescription: A deterministic visual fixture.\n---\n\n# Code Review\n\nA deterministic visual fixture.\n",
         description: "A deterministic visual fixture.", hash: "0".repeat(64), updated_at: "2026-11-06T10:00:00Z",
         source: null, mode: "copy", shadowed_by: null, shadow_chain: ["user"], deployments: [], history: [],
@@ -52,8 +52,8 @@ export const test = base.extend({
             case "skill_reveal": return null;
             case "secrets_list": return [];
             case "network_policy": return mocks.policyMode === "error" ? Promise.reject(new Error("mock network policy unavailable")) : mocks.policyMode === "pending" ? new Promise(() => undefined) : policy;
-            case "app_paths": return paths;
-            case "recovery_sheet": return null;
+            case "skill_marketplace_search": return { results: [{ id: "example/visual-skill", name: "Visual Skill", author: "Example", installs: 12, source: "https://example.invalid/visual-skill", description: "A deterministic visual fixture." }], offline: false, stale: false, provenance: "Deterministic marketplace fixture" };
+            case "skill_import_git_candidates": return { candidates: [{ id: "skills/review-checklist", name: "Review checklist", description: "A deterministic Git import candidate.", markdown: "---\nname: Review checklist\ndescription: A deterministic Git import candidate.\n---\n\n# Review checklist\n\n1. Review the changes.", error: null }], error: null };
             case "plugin:event|listen": {
               const event = String(args?.event ?? "");
               const ids = eventCallbacks.get(event) ?? new Set<number>();
@@ -68,7 +68,7 @@ export const test = base.extend({
               eventCallbacks.set(event, ids);
               return 1;
             }
-            case "overwrite_move_aside": return { original: args?.path ?? "/sandbox/user/agents/skill", moved_to: "/sandbox/user/agents/skill.agentuna-backup-20261106T100000Z" };
+            case "overwrite_move_aside": return { original: args?.path ?? "/fixtures/user/agents/skill", moved_to: "/fixtures/user/agents/skill.agentuna-backup-20261106T100000Z" };
             case "logs_tail": return { lines: [], truncated: false };
             case "diagnostics_export": return "cancelled";
             case "projects_choose_folder": return null;
@@ -76,6 +76,12 @@ export const test = base.extend({
             case "jobs_cancel": return null;
             case "cli_install_status": return { installed: false };
             case "diagnostics_report_copy": return "Diagnostics unavailable in browser preview.";
+            case "skill_template_preview": {
+              const request = args as { name?: string; description?: string; template?: string } | undefined;
+              const name = request?.name?.trim() ?? "";
+              const slug = name ? name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : null;
+              return { slug, markdown: `# ${name || "New skill"}\n\n${request?.description?.trim() || "Skill instructions."}\n\nTemplate: ${request?.template ?? "blank"}`, name_error: name && !slug ? "Enter a name with letters or numbers." : null, description_error: null };
+            }
             case "skill_wizard_transition": {
               const input = args?.wizard as { step: string; source: string | null; details: Record<string, unknown>; name: string; scope: string | null; agents: string[]; completed: boolean } | undefined;
               const event = args?.event as { type: string; payload?: unknown } | undefined;
@@ -98,12 +104,12 @@ export const test = base.extend({
               const request = args?.request as { stage_requested?: boolean; wizard?: { scope?: string } } | undefined;
               skillAddStageRequested = Boolean(request?.stage_requested);
               const projectScope = request?.wizard?.scope === "project";
-              const root = projectScope ? "/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill" : "/sandbox/user/skills/visual-skill";
-              return { preview_id: "preview-visual-skill-add", canonical_dir: root, files: [{ path: `${root}/SKILL.md`, package_path: "SKILL.md", diff: null }, { path: "/sandbox/Projects/AgenTuna/.agents/skills/visual-skill", package_path: "SKILL.md", diff: null }], deployments: [{ agent: "omp", path: "/sandbox/Projects/AgenTuna/.agents/skills/visual-skill", mode: "symlink" }], stage_available: projectScope, stage_requested: skillAddStageRequested, requires_overwrite_confirmation: false };
+              const root = projectScope ? "/fixtures/Projects/AgenTuna/.config-studio/skills/visual-skill" : "/fixtures/user/skills/visual-skill";
+              return { preview_id: "preview-visual-skill-add", canonical_dir: root, files: [{ path: `${root}/SKILL.md`, package_path: "SKILL.md", diff: null }, { path: "/fixtures/Projects/AgenTuna/.agents/skills/visual-skill", package_path: "SKILL.md", diff: null }], deployments: [{ agent: "omp", path: "/fixtures/Projects/AgenTuna/.agents/skills/visual-skill", mode: "symlink" }], stage_available: projectScope, stage_requested: skillAddStageRequested, requires_overwrite_confirmation: false };
             }
             case "skill_add_apply": {
-              const root = "/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill";
-              return { skill_name: "Visual Skill", operation_id: "op_visual_skill_add", paths_written: [`${root}/SKILL.md`, "/sandbox/Projects/AgenTuna/.agents/skills/visual-skill"], deployments: [{ agent: "omp", path: "/sandbox/Projects/AgenTuna/.agents/skills/visual-skill", mode: "symlink" }], staged: skillAddStageRequested, staged_paths: skillAddStageRequested ? ["skills/visual-skill/SKILL.md"] : [], stage_error: null, backup_hint: "Operation op_visual_skill_add is recorded. Backups for replaced files, if any, are stored in /sandbox/support/backups and can be restored through operation history and recovery." };
+              const root = "/fixtures/Projects/AgenTuna/.config-studio/skills/visual-skill";
+              return { skill_name: "Visual Skill", operation_id: "op_visual_skill_add", paths_written: [`${root}/SKILL.md`, "/fixtures/Projects/AgenTuna/.agents/skills/visual-skill"], deployments: [{ agent: "omp", path: "/fixtures/Projects/AgenTuna/.agents/skills/visual-skill", mode: "symlink" }], staged: skillAddStageRequested, staged_paths: skillAddStageRequested ? ["skills/visual-skill/SKILL.md"] : [], stage_error: null, backup_hint: "Operation op_visual_skill_add is recorded. Backups for replaced files, if any, are stored in /fixtures/support/backups and can be restored through operation history and recovery." };
             }
           }
         },

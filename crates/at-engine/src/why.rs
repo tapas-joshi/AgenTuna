@@ -230,6 +230,57 @@ mod tests {
     }
 
     #[test]
+    fn trace_steps_snapshot_inherited_and_disabled_states() {
+        let inherited = trace(
+            ItemId::new(),
+            Scope::Project,
+            AgentId::Codex,
+            [
+                evidence(Scope::Global, true, true, false),
+                evidence(Scope::User, false, false, false),
+                evidence(Scope::Project, false, false, false),
+                evidence(Scope::Local, false, false, false),
+            ],
+        );
+        let inherited_snapshot = inherited
+            .steps
+            .iter()
+            .map(|step| (step.scope, &step.status, step.reason.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(inherited_snapshot[0].0, Scope::Global);
+        assert_eq!(inherited_snapshot[0].1, &StepStatus::Winning);
+        assert_eq!(inherited_snapshot[2].1, &StepStatus::Inherited);
+        assert_eq!(
+            inherited_snapshot[2].2,
+            "Defined here; inherited by the active scope"
+        );
+
+        let disabled = trace(
+            ItemId::new(),
+            Scope::Project,
+            AgentId::Codex,
+            [
+                evidence(Scope::Global, false, false, false),
+                evidence(Scope::User, true, false, false),
+                evidence(Scope::Project, false, false, true),
+                evidence(Scope::Local, false, false, false),
+            ],
+        );
+        let disabled_snapshot = disabled
+            .steps
+            .iter()
+            .map(|step| (step.scope, &step.status, step.reason.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(disabled_snapshot[2].0, Scope::Project);
+        assert_eq!(disabled_snapshot[2].1, &StepStatus::Disabled);
+        assert_eq!(
+            disabled_snapshot[2].2,
+            "Disabled by a tombstone at this scope"
+        );
+        assert!(!disabled.verdict.on);
+    }
+
+    #[test]
     fn project_tombstone_is_decisive_and_global_lock_has_reason() {
         let disabled = trace(
             ItemId::new(),

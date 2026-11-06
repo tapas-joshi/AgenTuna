@@ -1056,3 +1056,504 @@ fn claude_span_patch_preserves_crlf() {
     let span = single_edit_span(&source, &output);
     assert_eq!(span.removed, 0);
 }
+
+/// TA-091: discover adapter-owned format fixtures by convention and guard coverage.
+///
+/// Each registered adapter has one or more case directories under `fixtures/<agent>/<case>/`.
+/// Every case contains `skills.input.*`/`skills.expected.*`, `rules.*`, and `settings.*`.
+#[test]
+fn adapter_owned_fixture_coverage_is_discovered_by_convention() {
+    use at_adapters::adapter::AgentAdapterRegistry;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let registered = AgentAdapterRegistry::register()
+        .adapters()
+        .expect("enumerate registered adapters");
+    let categories = ["skills", "rules", "settings"];
+    for adapter in registered {
+        let id = adapter.id();
+        let agent = match id {
+            at_model::AgentId::Custom(_) => String::from("custom"),
+            other => other.to_string(),
+        };
+        let agent_root = root.join(&agent);
+        let cases = fs::read_dir(&agent_root)
+            .unwrap_or_else(|error| {
+                panic!("missing fixtures for registered adapter {agent}: {error}")
+            })
+            .map(|entry| entry.expect("fixture directory entry").path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        assert!(!cases.is_empty(), "adapter {agent} has no fixture cases");
+        for case in cases {
+            let mut categories_seen = Vec::new();
+            for category in categories {
+                let input = fixture_file(&case, category, "input");
+                if !input.exists() {
+                    continue;
+                }
+                let expected = fixture_file(&case, category, "expected");
+                assert!(
+                    expected.exists(),
+                    "{} lacks expected file {}",
+                    input.display(),
+                    expected.display()
+                );
+                let input_bytes = fs::read(&input).expect("read adapter input fixture");
+                let expected_bytes = fs::read(&expected).expect("read adapter expected fixture");
+                validate_fixture_format(&input, &input_bytes);
+                validate_fixture_format(&expected, &expected_bytes);
+                if input_bytes != expected_bytes {
+                    let expected_text = std::str::from_utf8(&expected_bytes).expect("validated");
+                    let input_text = std::str::from_utf8(&input_bytes).expect("validated");
+                    let diff = similar::TextDiff::from_lines(expected_text, input_text)
+                        .unified_diff()
+                        .context_radius(3)
+                        .header("expected", "input")
+                        .to_string();
+                    panic!("no-op fixture mismatch for {}:\n{diff}", input.display());
+                }
+                categories_seen.push(category);
+            }
+            for category in categories {
+                assert!(
+                    categories_seen.contains(&category),
+                    "{} fixture case lacks {category} input",
+                    case.display()
+                );
+            }
+        }
+    }
+}
+
+fn fixture_file(case: &Path, category: &str, role: &str) -> std::path::PathBuf {
+    let candidates = ["json", "toml", "md", "mdc"];
+    candidates
+        .iter()
+        .map(|extension| case.join(format!("{category}.{role}.{extension}")))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| case.join(format!("{category}.{role}.json")))
+}
+
+fn validate_fixture_format(path: &Path, bytes: &[u8]) {
+    let text = std::str::from_utf8(bytes)
+        .unwrap_or_else(|error| panic!("{} is not UTF-8: {error}", path.display()));
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("json") => {
+            jsonc_parser::parse_to_value(text, &Default::default())
+                .unwrap_or_else(|error| panic!("{} is invalid JSONC: {error}", path.display()))
+                .expect("fixture must have a JSONC value");
+        }
+        Some("toml") => {
+            text.parse::<toml_edit::DocumentMut>()
+                .unwrap_or_else(|error| panic!("{} is invalid TOML: {error}", path.display()));
+        }
+        Some("md" | "mdc") => {}
+        extension => panic!(
+            "{} has unsupported fixture extension {extension:?}",
+            path.display()
+        ),
+    }
+}
+
+#[test]
+fn malformed_mcp_documents_leave_source_hashes_and_directory_unchanged() {
+    let temp = tempfile::tempdir().expect("temporary MCP fixture directory");
+    let documents = [
+        (
+            "claude.json",
+            "{\n  \"mcpServers\": [\n",
+            ClaudeMcpConfig::parse("{\n  \"mcpServers\": [\n", ClaudeConfigScope::User).is_err(),
+        ),
+        (
+            "codex.toml",
+            "[mcp_servers\n",
+            CodexConfigFile::parse("[mcp_servers\n").is_err(),
+        ),
+        (
+            "omp.json",
+            "{\n  \"mcpServers\": {\n",
+            OmpMcpConfig::parse("{\n  \"mcpServers\": {\n").is_err(),
+        ),
+    ];
+    for (name, malformed, rejected) in documents {
+        assert!(rejected, "malformed {name} input was accepted");
+        let case_dir = temp.path().join(name);
+        fs::create_dir(&case_dir).expect("create isolated fixture directory");
+        let path = case_dir.join(name);
+        fs::write(&path, malformed).expect("write malformed fixture");
+        let before = at_fs::sha256_hex(malformed.as_bytes());
+        assert_eq!(
+            at_fs::sha256_hex(&fs::read(&path).expect("read input")),
+            before,
+            "hash changed for {name}"
+        );
+        let entries = fs::read_dir(&case_dir)
+            .expect("list fixture directory")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1, "unexpected temp file left for {name}");
+        assert_eq!(entries[0], name);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_and_omp_mcp_edits_preserve_symlinked_agent_config_paths() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("MCP symlink sandbox");
+
+    let codex_target = temp.path().join("codex-target.toml");
+    let codex_link = temp.path().join("config.toml");
+    fs::write(&codex_target, CODEX_GOLDEN).expect("Codex source");
+    symlink(&codex_target, &codex_link).expect("Codex symlink");
+    let mut codex = CodexConfigFile::load(&codex_link).expect("load Codex config");
+    codex
+        .set_server(
+            "new-local",
+            &CodexServerEntry {
+                command: Some("node".to_owned()),
+                ..CodexServerEntry::default()
+            },
+        )
+        .expect("edit Codex config");
+    codex
+        .save(&codex_link, BackupPolicy::None)
+        .expect("write through Codex config link");
+    assert!(
+        fs::symlink_metadata(&codex_link)
+            .expect("Codex link metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::read_to_string(&codex_target)
+            .expect("Codex target")
+            .contains("new-local")
+    );
+
+    let omp_target = temp.path().join("omp-target.json");
+    let omp_link = temp.path().join("mcp.json");
+    fs::write(&omp_target, OMP_GOLDEN).expect("omp source");
+    symlink(&omp_target, &omp_link).expect("omp symlink");
+    let omp = OmpMcpConfig::parse(OMP_GOLDEN).expect("parse omp config");
+    let server = OmpServer::new(
+        "new-local",
+        McpTransport::Stdio {
+            command: "node".to_owned(),
+            args: vec!["server.js".to_owned()],
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        true,
+    );
+    let edited = omp.upsert_server(&server).expect("edit omp config");
+    OmpMcpAdapter::new()
+        .save_edit(&omp_link, &omp, &edited, BackupPolicy::None)
+        .expect("write through omp config link");
+    assert!(
+        fs::symlink_metadata(&omp_link)
+            .expect("omp link metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::read_to_string(&omp_target)
+            .expect("omp target")
+            .contains("new-local")
+    );
+}
+
+#[test]
+fn claude_local_settings_round_trip_and_toggle_preserves_unrelated_jsonc() {
+    use at_adapters::adapter::AgentEnvironment;
+    use at_adapters::claude_adapter::ClaudeAdapter;
+
+    let temp = tempfile::tempdir().expect("settings sandbox");
+    let project = temp.path().join("project");
+    let env = AgentEnvironment {
+        home: temp.path().join("home"),
+        project: Some(project),
+        variables: BTreeMap::new(),
+    };
+    let source = concat!(
+        "{\n",
+        "  \"permissions\": { \"allow\": [\"Read\"] },\n",
+        "  \"hooks\": { \"PreToolUse\": [] },\n",
+        "  \"enabledMcpjsonServers\": [\"keep\", \"toggle\"],\n",
+        "  \"disabledMcpjsonServers\": []\n",
+        "}\n",
+    );
+    let settings = ClaudeAdapter
+        .parse_settings(&env, source.to_owned())
+        .expect("parse settings.local.json");
+    assert_eq!(settings.source().as_bytes(), source.as_bytes());
+    let edited = settings
+        .set_server_enabled("toggle", false)
+        .expect("disable MCP entry");
+    jsonc_parser::parse_to_value(&edited, &Default::default())
+        .expect("valid output")
+        .expect("JSONC object");
+    assert!(edited.contains("\"permissions\": { \"allow\": [\"Read\"] }"));
+    assert!(edited.contains("\"hooks\": { \"PreToolUse\": [] }"));
+    assert!(edited.contains("\"enabledMcpjsonServers\": [\"keep\"]"));
+    assert!(edited.contains("\"disabledMcpjsonServers\": [\"toggle\"]"));
+    let span = single_edit_span(source, &edited);
+    let removed = &source[span.start..span.start + span.removed];
+    assert!(span.removed > 0);
+    assert!(!removed.contains("\"permissions\""));
+    assert!(!removed.contains("\"hooks\""));
+    assert_eq!(
+        settings.source(),
+        source,
+        "parse/edit must not mutate source"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_skill_listing_reports_but_does_not_follow_external_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment};
+    use at_adapters::claude_adapter::ClaudeAdapter;
+
+    let temp = tempfile::tempdir().expect("skill sandbox");
+    let home = temp.path().join("home");
+    let skills = home.join(".claude/skills");
+    let external = temp.path().join("external-skill");
+    fs::create_dir_all(&skills).expect("skills root");
+    fs::create_dir_all(&external).expect("external skill");
+    fs::write(
+        external.join("SKILL.md"),
+        "---\nname: external\ndescription: fixture\n---\n",
+    )
+    .expect("external skill document");
+    let link = skills.join("outside");
+    symlink(&external, &link).expect("external skill link");
+    let env = AgentEnvironment {
+        home,
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let listing = ClaudeAdapter
+        .list_native_skills(&env, &[])
+        .expect("list native skills");
+    let row = listing
+        .iter()
+        .find(|row| row.path == link)
+        .expect("symlink row");
+    assert_eq!(row.target.as_deref(), Some(external.as_path()));
+    assert!(
+        !row.valid,
+        "external content must not be read as a native skill"
+    );
+    assert!(
+        row.error
+            .as_deref()
+            .is_some_and(|error| error.contains("outside injected roots"))
+    );
+}
+
+#[test]
+fn claude_settings_reject_truncation_and_bom_without_changing_fixture_bytes() {
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment, AgentError};
+    use at_adapters::claude_adapter::ClaudeAdapter;
+    use at_model::ItemKind;
+
+    let temp = tempfile::tempdir().expect("settings sandbox");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project root");
+    let env = AgentEnvironment {
+        home: temp.path().join("home"),
+        project: Some(project.clone()),
+        variables: BTreeMap::new(),
+    };
+    let settings_path = project.join(".claude/settings.local.json");
+    fs::create_dir_all(settings_path.parent().expect("settings parent"))
+        .expect("settings directory");
+    let adapter = ClaudeAdapter;
+    for (malformed, expected_line) in [
+        ("{\n  \"enabledMcpjsonServers\": [", 2),
+        ("\u{feff}{\"permissions\":{}}", 1),
+    ] {
+        fs::write(&settings_path, malformed).expect("write malformed settings fixture");
+        let before = at_fs::sha256_hex(malformed.as_bytes());
+        let error = adapter
+            .parse_settings(
+                &env,
+                fs::read_to_string(&settings_path).expect("read settings"),
+            )
+            .expect_err("malformed settings must be rejected");
+        assert!(matches!(
+            error,
+            AgentError::Parse { line, col, .. } if line == expected_line && col > 0
+        ));
+        assert_eq!(
+            at_fs::sha256_hex(&fs::read(&settings_path).expect("unchanged settings")),
+            before
+        );
+    }
+    assert_eq!(
+        adapter.paths(ItemKind::Rule, at_model::Scope::Project, &env)[0].path,
+        project.join("CLAUDE.md")
+    );
+}
+
+#[test]
+fn codex_lists_primary_and_unmanaged_alternative_skill_roots() {
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment};
+    use at_adapters::codex_adapter::CodexAdapter;
+
+    let temp = tempfile::tempdir().expect("Codex skills sandbox");
+    let home = temp.path().join("home");
+    let primary = home.join(".codex/skills/primary");
+    let alternative = home.join(".agents/skills/alternative");
+    for (path, name) in [(&primary, "primary"), (&alternative, "alternative")] {
+        fs::create_dir_all(path).expect("skill folder");
+        fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n"),
+        )
+        .expect("skill document");
+    }
+    let env = AgentEnvironment {
+        home,
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let rows = CodexAdapter
+        .list_native_skills(&env, &[])
+        .expect("list Codex skills");
+    assert_eq!(rows.len(), 2);
+    let primary_row = rows
+        .iter()
+        .find(|row| row.path == primary)
+        .expect("primary");
+    let alternative_row = rows
+        .iter()
+        .find(|row| row.path == alternative)
+        .expect("alternative");
+    assert!(!primary_row.unmanaged_alternative);
+    assert!(alternative_row.unmanaged_alternative);
+}
+
+#[test]
+fn mcp_format_parsers_preserve_tab_indentation_and_unrelated_text() {
+    let claude_source = concat!(
+        "{\n",
+        "\t\"mcpServers\": {},\n",
+        "\t\"unrelated\": {\n",
+        "\t\t\"keep\": true\n",
+        "\t}\n",
+        "}\n",
+    );
+    let claude = ClaudeMcpConfig::parse(claude_source, ClaudeConfigScope::User)
+        .expect("tab-indented Claude JSONC");
+    let claude_after = claude
+        .upsert(&ClaudeServer {
+            name: "tabbed".to_owned(),
+            transport: McpTransport::Stdio {
+                command: "node".to_owned(),
+                args: vec!["tool.js".to_owned()],
+                cwd: None,
+                env: BTreeMap::new(),
+            },
+            extra: BTreeMap::new(),
+        })
+        .expect("edit Claude JSONC");
+    assert!(claude_after.contains("\t\"unrelated\": {\n\t\t\"keep\": true"));
+
+    let codex_source = "[mcp_servers.tabbed]\n\tcommand = \"node\"\n\targs = [\"tool.js\"]\n";
+    let codex = CodexConfigFile::parse(codex_source).expect("tab-indented Codex TOML");
+    assert_eq!(codex.text(), codex_source);
+
+    let omp_source = "{\n\t\"$schema\": \"https://example.invalid/schema.json\",\n\t\"mcpServers\": {},\n\t\"keep\": true\n}\n";
+    let omp = OmpMcpConfig::parse(omp_source).expect("tab-indented omp JSONC");
+    assert_eq!(
+        omp.render_unchanged().expect("render omp JSONC"),
+        omp_source
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn omp_mcp_unwritable_config_directory_preserves_original_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("MCP permission sandbox");
+    let config_path = temp.path().join("mcp.json");
+    fs::write(&config_path, OMP_GOLDEN).expect("write source fixture");
+    let config = OmpMcpConfig::parse(OMP_GOLDEN).expect("parse source fixture");
+    let server = OmpServer::new(
+        "permission-test",
+        McpTransport::Stdio {
+            command: "node".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        true,
+    );
+    let edited = config.upsert_server(&server).expect("build edit");
+    let mut permissions = fs::metadata(temp.path())
+        .expect("directory permissions")
+        .permissions();
+    permissions.set_mode(0o555);
+    fs::set_permissions(temp.path(), permissions).expect("make fixture directory read-only");
+    let result = OmpMcpAdapter::new().save_edit(&config_path, &config, &edited, BackupPolicy::None);
+    let mut permissions = fs::metadata(temp.path())
+        .expect("read-only directory permissions")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(temp.path(), permissions).expect("restore fixture directory");
+    assert!(matches!(
+        result,
+        Err(at_adapters::omp_mcp::OmpMcpError::Fs(
+            at_fs::FsError::PermissionDenied { .. }
+        ))
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("original config"),
+        OMP_GOLDEN.as_bytes()
+    );
+    assert_eq!(
+        fs::read_dir(temp.path())
+            .expect("list fixture directory")
+            .count(),
+        1,
+        "failed writes leave no temp siblings"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_symlink_loop_is_reported_as_a_typed_discovery_error() {
+    use std::os::unix::fs::symlink;
+
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment, AgentError};
+    use at_adapters::claude_adapter::ClaudeAdapter;
+
+    let temp = tempfile::tempdir().expect("skill symlink sandbox");
+    let home = temp.path().join("home");
+    let skills = home.join(".claude/skills");
+    fs::create_dir_all(&skills).expect("skills root");
+    let loop_link = skills.join("loop");
+    symlink(&loop_link, &loop_link).expect("symlink loop");
+    let env = AgentEnvironment {
+        home,
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let error = ClaudeAdapter
+        .list_native_skills(&env, &[])
+        .expect_err("a cyclic link cannot be resolved as a skill");
+    assert!(matches!(error, AgentError::Io { .. }));
+    assert!(
+        fs::symlink_metadata(&loop_link)
+            .expect("loop metadata")
+            .file_type()
+            .is_symlink()
+    );
+}

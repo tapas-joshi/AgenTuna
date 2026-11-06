@@ -31,6 +31,176 @@ pub struct RuleSource {
     pub link_target: Option<PathBuf>,
 }
 
+/// One reviewed rule-render target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleRenderTarget {
+    /// Absolute destination path.
+    pub path: PathBuf,
+    /// Exact existing bytes, or `None` when the target does not exist.
+    pub existing: Option<Vec<u8>>,
+}
+
+/// One target's textual change preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleRenderDiff {
+    /// Destination path.
+    pub path: PathBuf,
+    /// Unified diff from existing bytes to the rendered output.
+    pub text: String,
+}
+
+/// Paired CLAUDE.md and AGENTS.md writes for one canonical rule source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleRenderPlan {
+    /// Reviewed multi-file operation, absent when both rendered files are already current.
+    pub change_set: Option<at_model::ChangeSet>,
+    /// Diffs for changed files only.
+    pub diffs: Vec<RuleRenderDiff>,
+}
+
+/// Failures while planning a paired rule render.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RuleRenderError {
+    /// Managed-block ownership or markers were invalid.
+    #[error(transparent)]
+    ManagedBlock(#[from] ManagedBlockError),
+    /// ChangeSet construction failed.
+    #[error(transparent)]
+    ChangeSet(#[from] at_model::ChangeSetError),
+}
+
+/// Plans both native rule targets from one source without performing filesystem writes.
+///
+/// Apply the returned `ChangeSet` once through `at_fs::apply_with_roots` so both files
+/// are journaled and rolled back as one operation.
+///
+/// # Errors
+/// Returns [`RuleRenderError::ManagedBlock`] when either existing file requires adoption or
+/// has malformed markers, and [`RuleRenderError::ChangeSet`] for invalid operations.
+pub fn plan_rule_render(
+    source: &[u8],
+    targets: [RuleRenderTarget; 2],
+    scope: Scope,
+    project_id: Option<String>,
+) -> Result<RuleRenderPlan, RuleRenderError> {
+    use similar::TextDiff;
+    let mut ops = Vec::with_capacity(2);
+    let mut diffs = Vec::with_capacity(2);
+    for target in targets {
+        if !target.path.is_absolute() {
+            return Err(at_model::ChangeSetError::InvalidPath {
+                path: target.path.display().to_string(),
+                reason: "rule target must be absolute".to_owned(),
+            }
+            .into());
+        }
+        let bytes = render_managed_block(&target.path, target.existing.as_deref(), source)?;
+        let before = target.existing.as_deref().unwrap_or_default();
+        if target.existing.as_deref() == Some(bytes.as_slice()) {
+            continue;
+        }
+        let expected = match &target.existing {
+            Some(existing) => at_model::ExpectedState::hash(at_fs::sha256_hex(existing))?,
+            None => at_model::ExpectedState::absent(),
+        };
+        let diff = TextDiff::from_lines(
+            String::from_utf8_lossy(before),
+            String::from_utf8_lossy(&bytes),
+        )
+        .unified_diff()
+        .to_string();
+        diffs.push(RuleRenderDiff {
+            path: target.path.clone(),
+            text: diff,
+        });
+        ops.push(at_model::FileOp::Write {
+            path: target.path,
+            bytes,
+            expected,
+            follow_symlink: false,
+            backup: true,
+        });
+    }
+    if ops.is_empty() {
+        return Ok(RuleRenderPlan {
+            change_set: None,
+            diffs,
+        });
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    let change_set = at_model::ChangeSet {
+        id: id.clone(),
+        preview_id: id,
+        operation_kind: at_model::OperationKind::parse("edit_rule")?,
+        scope: Some(scope),
+        project_id,
+        summary: "Render shared instruction rules".to_owned(),
+        ops,
+        created_at_unix_seconds: 0,
+    };
+    change_set.validate()?;
+    Ok(RuleRenderPlan {
+        change_set: Some(change_set),
+        diffs,
+    })
+}
+/// Applies a reviewed two-file rule plan and records both written versions.
+///
+/// # Errors
+/// Returns filesystem, operation-history, or database errors. Absolute target paths are accepted
+/// only beneath `roots`; callers must supply the exact roots that were authorized for review.
+pub fn apply_rule_render_plan(
+    plan: &RuleRenderPlan,
+    item_id: &at_model::ItemId,
+    connection: &rusqlite::Connection,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+) -> Result<Option<at_fs::ApplyOutcome>, RuleRenderApplyError> {
+    let Some(change_set) = &plan.change_set else {
+        return Ok(None);
+    };
+    let outcome = at_fs::apply_with_roots(change_set, context, roots)?;
+    for op in &change_set.ops {
+        let at_model::FileOp::Write { path, bytes, .. } = op else {
+            continue;
+        };
+        let hash = at_fs::sha256_hex(bytes);
+        let size = i64::try_from(bytes.len()).map_err(|_| RuleRenderApplyError::VersionSize)?;
+        let path = path.to_string_lossy();
+        let mut version = at_db::versions::NewVersion::new(
+            item_id,
+            change_set.scope.unwrap_or(Scope::Project),
+            &hash,
+        )
+        .with_path(&path)
+        .with_size_mtime(size, 0)
+        .with_operation(&outcome.operation_id);
+        version.mtime = std::fs::metadata(path.as_ref())
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+        at_db::versions::record_skill_version(connection, &version)?;
+    }
+    Ok(Some(outcome))
+}
+
+/// Apply failures for a managed rule render.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RuleRenderApplyError {
+    /// A safe-write or operation-history failure.
+    #[error(transparent)]
+    Apply(#[from] at_fs::ChangeSetApplyError),
+    /// Version history could not be recorded.
+    #[error(transparent)]
+    Database(#[from] at_db::DbError),
+    /// Rendered file size exceeds SQLite's signed integer range.
+    #[error("rule file is too large to record in version history")]
+    VersionSize,
+}
+
 /// A non-fatal issue encountered while discovering rule files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -66,6 +236,87 @@ pub struct RuleScan {
     pub sources: Vec<RuleSource>,
     /// Sorted diagnostics.
     pub diagnostics: Vec<RuleDiagnostic>,
+}
+pub use at_fs::managed_block::{
+    MANAGED_BEGIN, MANAGED_END, ManagedBlockError, render_managed_block,
+};
+
+/// A rule file in an agent's effective instruction composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedRule {
+    /// Source rule metadata.
+    pub source: RuleSource,
+    /// Local Claude instructions add to and override earlier instructions; they do not replace.
+    pub override_source: bool,
+}
+
+/// Compose scanned rules in stable native load order up to and including `scope`.
+pub fn compose(
+    agent: &AgentId,
+    scope: Scope,
+    scan: &RuleScan,
+) -> (Vec<ComposedRule>, Vec<RuleDiagnostic>) {
+    let supported = matches!(
+        agent,
+        AgentId::ClaudeCode | AgentId::Codex | AgentId::Omp | AgentId::Cursor
+    ) || (matches!(agent, AgentId::Custom(_))
+        && scan
+            .sources
+            .iter()
+            .any(|source| source.agent_consumers.contains(agent)));
+    if !supported {
+        return (
+            Vec::new(),
+            vec![RuleDiagnostic::Unsupported {
+                agent: agent.clone(),
+            }],
+        );
+    }
+    let mut sources: Vec<_> = scan
+        .sources
+        .iter()
+        .filter(|source| {
+            (source.scope.precedence() <= scope.precedence()
+                || (scope == Scope::Project && source.scope == Scope::Local))
+                && source.agent_consumers.contains(agent)
+                && match agent {
+                    AgentId::ClaudeCode => source.path.file_name().is_some_and(|n| {
+                        n.eq_ignore_ascii_case("claude.md")
+                            || n.eq_ignore_ascii_case("claude.local.md")
+                    }),
+                    AgentId::Codex | AgentId::Omp => source
+                        .path
+                        .file_name()
+                        .is_some_and(|n| n.eq_ignore_ascii_case("agents.md")),
+                    AgentId::Cursor => source
+                        .path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mdc")),
+                    AgentId::Custom(_) => true,
+                }
+        })
+        .cloned()
+        .collect();
+    sources.sort_by(|a, b| {
+        (a.scope.precedence(), a.path.file_name(), &a.path).cmp(&(
+            b.scope.precedence(),
+            b.path.file_name(),
+            &b.path,
+        ))
+    });
+    let composed = sources
+        .into_iter()
+        .map(|source| ComposedRule {
+            override_source: agent == &AgentId::ClaudeCode
+                && source.scope == Scope::Local
+                && source
+                    .path
+                    .file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("claude.local.md")),
+            source,
+        })
+        .collect();
+    (composed, Vec::new())
 }
 
 /// Scans adapter-declared rule paths for the selected agents and scopes.
@@ -255,6 +506,105 @@ mod tests {
     use at_adapters::adapter::AgentEnvironment;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn managed_renderer_preserves_outside_bytes_and_requires_adoption() {
+        let path = Path::new("CLAUDE.md");
+        let original =
+            b"top\r\n<!-- agentuna:begin -->\r\nold\r\n<!-- agentuna:end -->\r\nbottom\r\n";
+        let rendered = render_managed_block(path, Some(original), b"new rule").expect("render");
+        assert!(rendered.starts_with(
+            b"top\r\n<!-- agentuna:begin -->\nnew rule\n<!-- agentuna:end -->\r\nbottom\r\n"
+        ));
+        assert_eq!(
+            render_managed_block(path, Some(b"user authored\n"), b"new"),
+            Err(ManagedBlockError::AdoptRequired {
+                path: path.to_path_buf()
+            })
+        );
+        assert!(matches!(
+            render_managed_block(path, Some(b"<!-- agentuna:begin -->\nbody"), b"new"),
+            Err(ManagedBlockError::MalformedManagedBlock { line: 1, .. })
+        ));
+    }
+    #[test]
+    fn paired_rule_plan_writes_identical_blocks_and_noops_when_current() {
+        let root = tempfile::tempdir().expect("root");
+        let claude = root.path().join("CLAUDE.md");
+        let agents = root.path().join("AGENTS.md");
+        let targets = [
+            RuleRenderTarget {
+                path: claude.clone(),
+                existing: None,
+            },
+            RuleRenderTarget {
+                path: agents.clone(),
+                existing: None,
+            },
+        ];
+        let plan = plan_rule_render(b"# shared\n", targets, Scope::Project, Some("repo".into()))
+            .expect("plan");
+        let set = plan.change_set.expect("two-file write");
+        assert_eq!(set.ops.len(), 2);
+        let rendered = match &set.ops[0] {
+            at_model::FileOp::Write { bytes, .. } => bytes,
+            _ => panic!("expected file writes"),
+        };
+        match &set.ops[1] {
+            at_model::FileOp::Write { bytes, .. } => assert_eq!(bytes, rendered),
+            _ => panic!("expected file writes"),
+        }
+        let current = Some(rendered.clone());
+        let plan = plan_rule_render(
+            b"# shared\n",
+            [
+                RuleRenderTarget {
+                    path: claude,
+                    existing: current.clone(),
+                },
+                RuleRenderTarget {
+                    path: agents,
+                    existing: current,
+                },
+            ],
+            Scope::Project,
+            Some("repo".into()),
+        )
+        .expect("idempotent plan");
+        assert!(plan.change_set.is_none());
+        assert!(plan.diffs.is_empty());
+    }
+    #[test]
+    fn composition_includes_local_override_after_project() {
+        let source = |scope, name: &str| RuleSource {
+            scope,
+            agent_consumers: vec![AgentId::ClaudeCode],
+            path: PathBuf::from(name),
+            bytes: Vec::new(),
+            mtime: None,
+            sha256: String::new(),
+            managed: false,
+            link_target: None,
+        };
+        let scan = RuleScan {
+            sources: vec![
+                source(Scope::Local, "CLAUDE.local.md"),
+                source(Scope::Project, "CLAUDE.md"),
+                source(Scope::User, "CLAUDE.md"),
+                source(Scope::Global, "CLAUDE.md"),
+            ],
+            diagnostics: Vec::new(),
+        };
+        let (composed, diagnostics) = compose(&AgentId::ClaudeCode, Scope::Project, &scan);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            composed
+                .iter()
+                .map(|rule| rule.source.scope)
+                .collect::<Vec<_>>(),
+            vec![Scope::Global, Scope::User, Scope::Project, Scope::Local]
+        );
+        assert!(composed[3].override_source);
+    }
     #[test]
     fn discovers_project_rule_and_merges_consumers_deterministically() {
         let root = tempfile::tempdir().expect("tempdir");

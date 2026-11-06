@@ -29,9 +29,22 @@ folder_path: string,
  */
 zip_path: string, 
 /**
+ * Use-when description supplied for a new skill.
+ */
+description: string, 
+/**
  * Selected template identifier for a new skill.
  */
 template: string | null, 
+/**
+ * Selected imported repository skill identifier.
+ * Selected folder skill candidate relative to the imported directory.
+ */
+folder_selection: string | null, 
+/**
+ * Selected ZIP skill candidate relative to the extracted archive.
+ */
+zip_selection: string | null, 
 /**
  * Selected imported repository skill identifier.
  */
