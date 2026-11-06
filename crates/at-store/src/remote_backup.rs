@@ -494,10 +494,14 @@ fn stage_work(
     auth: &GitAuth,
     remote_empty: bool,
 ) -> Result<(PathBuf, TempDirGuard), BackupError> {
+    // Two backups can start in the same instant (an injected clock, or coarse OS timers), so a
+    // process-wide sequence number keeps their work directories apart.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "agentuna-backup-{}-{}",
+        "agentuna-backup-{}-{}-{}",
         std::process::id(),
-        ctx.now.unix_timestamp_nanos()
+        ctx.now.unix_timestamp_nanos(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).map_err(|source| BackupError::Io {
         path: dir.clone(),
