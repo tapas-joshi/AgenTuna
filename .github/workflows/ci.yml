@@ -17,7 +17,7 @@ env:
 
 jobs:
   rust:
-    name: rust (macos-14)
+    name: rust
     runs-on: macos-15
     timeout-minutes: 45
     env:
@@ -123,7 +123,7 @@ jobs:
         run: pnpm --dir ui build
 
   supply-chain:
-    name: supply chain
+    name: supply-chain
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
