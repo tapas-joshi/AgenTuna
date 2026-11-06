@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use ts_rs::TS;
 
-use super::commands::CommandError;
 use super::AppState;
+use super::commands::CommandError;
 
 /// Maps a native rule filename onto its engine file type.
 fn rule_file_type(file_type: &str) -> Option<at_engine::rule_editor::RuleFileType> {
@@ -24,6 +24,13 @@ fn rule_file_type(file_type: &str) -> Option<at_engine::rule_editor::RuleFileTyp
     }
 }
 
+fn rule_file_slug(kind: at_engine::rule_editor::RuleFileType) -> &'static str {
+    match kind {
+        at_engine::rule_editor::RuleFileType::Claude => "claude",
+        at_engine::rule_editor::RuleFileType::Agents => "agents",
+        at_engine::rule_editor::RuleFileType::ClaudeLocal => "claude-local",
+    }
+}
 /// Scope availability for the new rule file dialog.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -92,13 +99,13 @@ fn home_dir(state: &AppState) -> Result<PathBuf, CommandError> {
 
 fn global_writability(state: &AppState) -> (bool, Option<String>) {
     let Some(paths) = state.paths() else {
-        return (false, Some(String::from("application paths are unavailable")));
+        return (
+            false,
+            Some(String::from("application paths are unavailable")),
+        );
     };
     let status = at_fs::privilege::GlobalStoreStatus::probe(paths.global_store());
-    (
-        status.is_available(),
-        status.reason().map(str::to_owned),
-    )
+    (status.is_available(), status.reason().map(str::to_owned))
 }
 
 fn local_availability(
@@ -115,9 +122,8 @@ fn local_availability(
         .paths()
         .cloned()
         .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
-    let store = at_store::local_store::LocalStorePaths::for_paths(&paths).map_err(|_| {
-        CommandError::unavailable("Local store paths are unavailable")
-    })?;
+    let store = at_store::local_store::LocalStorePaths::for_paths(&paths)
+        .map_err(|_| CommandError::unavailable("Local store paths are unavailable"))?;
     let scope = at_engine::local_scope::LocalScope::detect(project.to_path_buf(), store);
     Ok(match scope.status().is_available() {
         true => (true, None),
@@ -134,9 +140,16 @@ pub fn instruction_create_options(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<InstructionCreateOptions, CommandError> {
-    let project = active_project_path(&state, project_id.as_deref())?;
-    let (global_writable, global_reason) = global_writability(&state);
-    let (local_available, local_reason) = local_availability(&state, project.as_deref())?;
+    instruction_create_options_impl(&state, project_id.as_deref())
+}
+
+pub(crate) fn instruction_create_options_impl(
+    state: &AppState,
+    project_id: Option<&str>,
+) -> Result<InstructionCreateOptions, CommandError> {
+    let project = active_project_path(state, project_id)?;
+    let (global_writable, global_reason) = global_writability(state);
+    let (local_available, local_reason) = local_availability(state, project.as_deref())?;
     Ok(InstructionCreateOptions {
         global_writable,
         global_reason,
@@ -154,21 +167,24 @@ pub fn instruction_create_preview(
     scope: String,
     project_id: Option<String>,
 ) -> Result<InstructionCreatePreview, CommandError> {
-    let kind = rule_file_type(&file_type).ok_or_else(|| {
-        CommandError::invalid_argument("file_type", "unknown rule file name")
-    })?;
+    instruction_create_preview_impl(&state, &file_type, &scope, project_id.as_deref())
+}
+
+pub(crate) fn instruction_create_preview_impl(
+    state: &AppState,
+    file_type: &str,
+    scope: &str,
+    project_id: Option<&str>,
+) -> Result<InstructionCreatePreview, CommandError> {
+    let kind = rule_file_type(file_type)
+        .ok_or_else(|| CommandError::invalid_argument("file_type", "unknown rule file name"))?;
     let scope = scope
         .parse::<at_model::Scope>()
         .map_err(|_| CommandError::invalid_argument("scope", "unknown scope"))?;
-    let project = active_project_path(&state, project_id.as_deref())?;
-    let home = home_dir(&state)?;
-    match at_engine::rule_editor::new_registered_rule(
-        kind,
-        scope,
-        &home,
-        project.as_deref(),
-        true,
-    ) {
+    let project = active_project_path(state, project_id)?;
+    let home = home_dir(state)?;
+    match at_engine::rule_editor::new_registered_rule(kind, scope, &home, project.as_deref(), true)
+    {
         Ok(intent) => {
             let exists = std::fs::symlink_metadata(&intent.path).is_ok();
             Ok(InstructionCreatePreview {
@@ -218,16 +234,23 @@ pub fn instruction_create(
     request: InstructionCreateRequest,
     project_id: Option<String>,
 ) -> Result<String, CommandError> {
-    let kind = rule_file_type(&request.file_type).ok_or_else(|| {
-        CommandError::invalid_argument("file_type", "unknown rule file name")
-    })?;
+    instruction_create_impl(&state, request, project_id.as_deref())
+}
+
+pub(crate) fn instruction_create_impl(
+    state: &AppState,
+    request: InstructionCreateRequest,
+    project_id: Option<&str>,
+) -> Result<String, CommandError> {
+    let kind = rule_file_type(&request.file_type)
+        .ok_or_else(|| CommandError::invalid_argument("file_type", "unknown rule file name"))?;
     let scope = request
         .scope
         .parse::<at_model::Scope>()
         .map_err(|_| CommandError::invalid_argument("scope", "unknown scope"))?;
-    let project = active_project_path(&state, project_id.as_deref())?;
+    let project = active_project_path(state, project_id)?;
     if matches!(scope, at_model::Scope::Global) {
-        let (writable, reason) = global_writability(&state);
+        let (writable, reason) = global_writability(state);
         if !writable {
             return Err(CommandError::new(
                 super::commands::CommandErrorCode::Locked,
@@ -235,45 +258,62 @@ pub fn instruction_create(
             ));
         }
     }
-    if matches!(
-        scope,
-        at_model::Scope::Project | at_model::Scope::Local
-    ) && project.is_none()
-    {
+    if matches!(scope, at_model::Scope::Project | at_model::Scope::Local) && project.is_none() {
         return Err(CommandError::invalid_argument(
             "scope",
             "select a project to create files in this scope",
         ));
     }
-    let home = home_dir(&state)?;
-    let intent = at_engine::rule_editor::new_registered_rule(
-        kind,
-        scope,
-        &home,
-        project.as_deref(),
-        true,
-    )
-    .map_err(|error| {
-        CommandError::new(
-            super::commands::CommandErrorCode::Conflict,
-            preview_reason(&error),
-        )
-    })?;
+    let home = home_dir(state)?;
+    let intent =
+        at_engine::rule_editor::new_registered_rule(kind, scope, &home, project.as_deref(), true)
+            .map_err(|error| {
+            CommandError::new(
+                super::commands::CommandErrorCode::Conflict,
+                preview_reason(&error),
+            )
+        })?;
     let paths = state
         .paths()
         .cloned()
         .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
     let database = state.database().map_err(CommandError::unavailable)?;
     let item_id = at_model::ItemId::new();
-    let roots = at_fs::changeset::ApplyRoots::new(vec![
-        intent
-            .path
-            .parent()
-            .unwrap_or_else(|| Path::new("/"))
-            .to_path_buf(),
-        paths.support_dir().to_path_buf(),
-    ])
-    .map_err(|_| CommandError::unavailable("authorized instruction paths are unavailable"))?;
+    let slug = rule_file_slug(kind);
+    database
+        .connection()
+        .execute(
+            "INSERT INTO items (id, kind, scope, slug, name, source_path, managed) \
+             VALUES (?1, 'rule', ?2, ?3, ?4, ?5, 1)",
+            rusqlite::params![
+                item_id.to_string(),
+                scope.wire_name(),
+                slug,
+                request.file_type,
+                intent.path.to_string_lossy(),
+            ],
+        )
+        .map_err(|error| CommandError::internal(format!("could not record rule item: {error}")))?;
+    let target_parent = intent.path.parent().unwrap_or_else(|| Path::new("/"));
+    let mut native_root = target_parent.to_path_buf();
+    while !native_root.is_dir() {
+        if let Some(parent) = native_root.parent() {
+            native_root = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    if !paths.support_dir().exists() {
+        let _ = std::fs::create_dir_all(paths.support_dir());
+    }
+    if !paths.backup_dir().exists() {
+        let _ = std::fs::create_dir_all(paths.backup_dir());
+    }
+    let roots =
+        at_fs::changeset::ApplyRoots::new(vec![native_root, paths.support_dir().to_path_buf()])
+            .map_err(|_| {
+                CommandError::unavailable("authorized instruction paths are unavailable")
+            })?;
     let mut recorder = at_fs::changeset::DbOperationRecorder::new(database.connection(), 30);
     let mut context = at_fs::changeset::ApplyContext {
         store_root: paths.support_dir(),
@@ -295,4 +335,99 @@ pub fn instruction_create(
         )
     })?;
     Ok(source.path.display().to_string())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
+    use at_model::{Agent, AgentId};
+    use at_store::paths::{AppPaths, PathEnvironment};
+    use std::sync::Arc;
+
+    struct NullSink;
+    impl EventSink for NullSink {
+        fn emit(&self, _event: JobEvent) {}
+    }
+
+    struct TestHarness {
+        _home: at_fs::testkit::TestHome,
+        state: AppState,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let home = at_fs::testkit::TestHome::new().expect("test home");
+            let paths =
+                AppPaths::resolve(&PathEnvironment::default().with_home(home.home().to_path_buf()))
+                    .expect("app paths");
+            let db_dir = home.home().join("agentuna");
+            std::fs::create_dir_all(&db_dir).expect("db dir");
+            let database = at_db::Database::open_file(db_dir.join("index.db")).expect("database");
+            let connection = database.connection();
+            at_db::agents::upsert_agent(
+                connection,
+                &Agent {
+                    id: AgentId::ClaudeCode,
+                    display_name: "Claude Code".to_owned(),
+                    detected: true,
+                    version: Some("1.0".to_owned()),
+                },
+            )
+            .expect("agent");
+
+            let state = AppState::new(
+                Arc::new(JobBridge::new(
+                    Arc::new(NullSink),
+                    Arc::new(TracingOperationsLog),
+                )),
+                None,
+            )
+            .with_database(database)
+            .with_paths(paths);
+
+            Self { _home: home, state }
+        }
+    }
+
+    #[test]
+    fn options_reflect_project_absence() {
+        let harness = TestHarness::new();
+        let options = instruction_create_options_impl(&harness.state, None).expect("options");
+        assert!(!options.has_project);
+    }
+
+    #[test]
+    fn preview_and_create_user_rule_round_trip() {
+        let harness = TestHarness::new();
+        let preview = instruction_create_preview_impl(&harness.state, "CLAUDE.md", "user", None)
+            .expect("preview");
+
+        assert!(!preview.exists);
+        let target_path = preview.path.expect("target path");
+        assert!(target_path.ends_with(".claude/CLAUDE.md"));
+
+        let created = instruction_create_impl(
+            &harness.state,
+            InstructionCreateRequest {
+                file_type: "CLAUDE.md".to_owned(),
+                scope: "user".to_owned(),
+            },
+            None,
+        )
+        .expect("create");
+
+        assert_eq!(created, target_path);
+        assert!(std::path::Path::new(&created).exists());
+
+        // Second create should conflict because file exists
+        let repeat = instruction_create_impl(
+            &harness.state,
+            InstructionCreateRequest {
+                file_type: "CLAUDE.md".to_owned(),
+                scope: "user".to_owned(),
+            },
+            None,
+        );
+        assert!(repeat.is_err());
+    }
 }

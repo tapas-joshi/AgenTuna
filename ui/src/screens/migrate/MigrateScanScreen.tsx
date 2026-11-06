@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Badge, Button } from "../../components";
+import type { MigrateApplyResultView } from "../../generated/MigrateApplyResultView";
 import type { MigrateConflictView } from "../../generated/MigrateConflictView";
 import type { MigratePlanView } from "../../generated/MigratePlanView";
 import type { MigrateScanItemView } from "../../generated/MigrateScanItemView";
 import type { MigrateScanView } from "../../generated/MigrateScanView";
 import { useAppSnapshot } from "../../state/context";
+import { MigrateDoneScreen } from "./MigrateDoneScreen";
 import { MigratePlanScreen } from "./MigratePlanScreen";
 import { MigrateResolveScreen, resolutionPayload } from "./MigrateResolveScreen";
 import type { ConflictChoices, ConflictNames } from "./MigrateResolveScreen";
 
-type Step = "scan" | "resolve" | "plan";
+type Step = "scan" | "resolve" | "plan" | "done";
 type Strategy = "replace_with_links" | "leave_and_watch";
 
 const STEPS: readonly { readonly id: Step | "done"; readonly label: string }[] = [
@@ -47,6 +49,48 @@ export function MigrateScanScreen() {
   const [error, setError] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [staleSelectionCount, setStaleSelectionCount] = useState(0);
+  const [applyResult, setApplyResult] = useState<MigrateApplyResultView | null>(null);
+
+  async function handleApply(): Promise<void> {
+    if (!plan) return;
+    setBusy(true);
+    setPlanError(null);
+    try {
+      const jobId = await invoke<string>("migrate_apply", {
+        request: {
+          project_id: activeProject,
+          selected_paths: selectedPaths,
+          resolutions: resolutionPayload(conflicts, choices, names),
+          strategy,
+          plan_hash: plan.plan_hash,
+        },
+      });
+
+      let completedResult: MigrateApplyResultView | null = null;
+      for (let i = 0; i < 40; i++) {
+        try {
+          completedResult = await invoke<MigrateApplyResultView>("migrate_apply_result", {
+            job_id: jobId,
+          });
+          if (completedResult) break;
+        } catch {
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, 100);
+          await promise;
+        }
+      }
+      if (!completedResult) {
+        throw new Error("Migration timed out waiting for apply result.");
+      }
+      setApplyResult(completedResult);
+      setStep("done");
+    } catch (cause) {
+      setPlanError(String(cause));
+      throw cause;
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const scan = useCallback(async () => {
     setBusy(true);
@@ -98,7 +142,7 @@ export function MigrateScanScreen() {
     }
   }
 
-  const stepIndex = step === "scan" ? 0 : step === "resolve" ? 1 : 2;
+  const stepIndex = step === "scan" ? 0 : step === "resolve" ? 1 : step === "plan" ? 2 : 3;
 
   return (
     <main aria-label="Move into AgenTuna" className="mx-auto flex min-h-full max-w-[1180px] flex-col gap-16 p-24">
@@ -163,6 +207,18 @@ export function MigrateScanScreen() {
             void buildPlan(strategy, resolved);
           }}
         />
+      ) : step === "done" ? (
+        <MigrateDoneScreen
+          result={applyResult}
+          onFinish={() => {
+            setStep("scan");
+            void scan();
+          }}
+          onViewMcp={() => {
+            setStep("scan");
+            void scan();
+          }}
+        />
       ) : step === "plan" ? (
         <MigratePlanScreen
           plan={plan}
@@ -173,6 +229,7 @@ export function MigrateScanScreen() {
             setStrategy(next);
             void buildPlan(next, conflicts);
           }}
+          onApply={handleApply}
           onBack={() => setStep("resolve")}
           onCancel={() => setStep("scan")}
         />

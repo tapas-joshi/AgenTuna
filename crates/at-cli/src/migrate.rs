@@ -218,7 +218,10 @@ pub(crate) fn run_scan(
 }
 
 /// The store scope a migration writes to: Project with `--project`, otherwise User.
-fn migration_scope(globals: &GlobalArgs, paths: &at_store::paths::AppPaths) -> Result<Scope, CliError> {
+fn migration_scope(
+    globals: &GlobalArgs,
+    paths: &at_store::paths::AppPaths,
+) -> Result<Scope, CliError> {
     match globals.scope() {
         Some(Scope::Project) | Some(Scope::Local) => {
             if paths.project_store().is_none() {
@@ -460,8 +463,7 @@ fn plan(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, C
     let mut report = run_scan(&paths)?;
     let selected = match sub.get_many::<String>("select") {
         Some(paths_arg) => {
-            let wanted: BTreeSet<String> =
-                paths_arg.map(|path| path.as_str().to_owned()).collect();
+            let wanted: BTreeSet<String> = paths_arg.map(|path| path.as_str().to_owned()).collect();
             report
                 .items
                 .retain(|item| wanted.contains(&item.path.display().to_string()));
@@ -641,9 +643,9 @@ fn load_plan(
     let safe_id = plan_id.trim();
     if safe_id.is_empty()
         || safe_id.len() > 128
-        || !safe_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+        || !safe_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
     {
         return Err(CliError::new(
             ErrorCode::Validation,
@@ -740,9 +742,15 @@ fn apply(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, 
         .map(|warning| match warning {
             at_migrate::apply::MigrationWarning::CopyFallback { path, .. } => Warning::new(
                 "copy_fallback",
-                format!("{} received a manifest-bearing copy instead of a link", path.display()),
+                format!(
+                    "{} received a manifest-bearing copy instead of a link",
+                    path.display()
+                ),
             ),
-            _ => Warning::new("migration_warning", "the migration completed with a deviation"),
+            _ => Warning::new(
+                "migration_warning",
+                "the migration completed with a deviation",
+            ),
         })
         .collect::<Vec<_>>();
     Ok(CommandOutput {
@@ -757,9 +765,7 @@ fn apply(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, 
         }),
         human: format!(
             "Applied plan {}: {} operation row(s), {} file operation(s)\n",
-            plan.id,
-            outcome.operation_id,
-            outcome.completed
+            plan.id, outcome.operation_id, outcome.completed
         ),
         warnings,
         warnings_in_report: false,
@@ -800,13 +806,19 @@ fn open_index(paths: &at_store::paths::AppPaths) -> Result<at_db::Database, CliE
 }
 
 /// Home and project roots an apply may touch.
-pub(crate) fn authorized_roots(paths: &at_store::paths::AppPaths) -> Result<at_fs::ApplyRoots, CliError> {
+pub(crate) fn authorized_roots(
+    paths: &at_store::paths::AppPaths,
+) -> Result<at_fs::ApplyRoots, CliError> {
     let mut roots = Vec::new();
     if let Some(home) = paths.home_dir() {
         roots.push(home.to_path_buf());
     }
-    if let Some(project) = paths.project_store().and_then(|store| store.parent()) {
+    roots.push(paths.user_store().to_path_buf());
+    if let Some(project) = paths.project_store() {
         roots.push(project.to_path_buf());
+        if let Some(parent) = project.parent() {
+            roots.push(parent.to_path_buf());
+        }
     }
     at_fs::ApplyRoots::new(roots).map_err(|_| {
         CliError::new(
@@ -987,9 +999,13 @@ fn status(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
                 conflicting,
                 report.items.len() - managed - conflicting
             );
-            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{} pending plan(s)\n", plans.len()));
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("{} pending plan(s)\n", plans.len()),
+            );
             for plan in &plans {
-                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("  {}\n", plan["plan_id"]));
+                let _ =
+                    std::fmt::Write::write_fmt(&mut out, format_args!("  {}\n", plan["plan_id"]));
             }
             let _ = std::fmt::Write::write_fmt(
                 &mut out,
@@ -1011,7 +1027,10 @@ fn list_plans(store_root: &Path) -> Vec<Value> {
     let mut plans = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|extension| extension == "json") {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
             let plan_id = path
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())

@@ -181,7 +181,18 @@ export function DataTable<TData extends RowData>({
     getItemKey: (index) => rows[index]?.id ?? index,
     initialRect: viewportHeight === undefined ? undefined : { width: 0, height: viewportHeight },
   });
-  const virtualRows = rowVirtualizer.getVirtualItems();
+  const measuredVirtualRows = rowVirtualizer.getVirtualItems();
+  const virtualRows =
+    measuredVirtualRows.length > 0
+      ? measuredVirtualRows
+      : rows.slice(0, Math.min(rows.length, 25)).map((_, index) => ({
+          index,
+          start: index * rowHeight,
+          size: rowHeight,
+          end: (index + 1) * rowHeight,
+          key: rows[index]?.id ?? index,
+          lane: 0,
+        }));
   const totalSize = rowVirtualizer.getTotalSize();
 
   useEffect(() => {

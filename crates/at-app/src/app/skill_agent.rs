@@ -216,7 +216,7 @@ pub(crate) fn skill_agent_preview_impl(
             CommandError::invalid_argument("item_id", "skill is unavailable in this scope")
         })?;
     let project_root = preview_project_root(database, &request)?;
-    let layout = StoreLayout::for_scope(&paths, scope)
+    let layout = StoreLayout::for_scope(paths, scope)
         .map_err(|_| CommandError::unavailable("the skill store is unavailable"))?;
     let slug = Slug::parse(&item.slug).map_err(|_| {
         CommandError::invalid_argument("item_id", "the skill has an invalid stored slug")
@@ -380,12 +380,12 @@ pub(crate) fn skill_agent_preview_impl(
                 "{} holds an unmanaged skill folder; adopt it or move it aside first.",
                 path.display()
             ),
-            refusal: Some(super::commands::RefusedOverwriteView {
+            refusal: Some(Box::new(super::commands::RefusedOverwriteView {
                 path: path.display().to_string(),
                 kind: "directory".to_owned(),
                 existing_hash: None,
                 remedies: vec!["adopt".to_owned(), "move_aside".to_owned()],
-            }),
+            })),
         },
         other => CommandError::new(CommandErrorCode::Conflict, other.to_string()),
     })?;
@@ -595,12 +595,10 @@ mod command_tests {
     use std::sync::Arc;
 
     use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
-    use at_db::{
-        Database, agents, backups, deployments, locks, ops::OperationActor, settings,
-    };
+    use at_db::{Database, agents, backups, deployments, locks, ops::OperationActor, settings};
     use at_model::{Agent, AgentId, ItemState, LinkMode, Scope, SyncLabel};
-    use at_store::paths::{AppPaths, PathEnvironment};
     use at_store::layout::{Slug, StoreLayout};
+    use at_store::paths::{AppPaths, PathEnvironment};
 
     use super::*;
     use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
@@ -666,14 +664,14 @@ mod command_tests {
                         hash
                     ],
                 )?;
-                return Ok(Self {
+                Ok(Self {
                     _home: home,
                     paths,
                     database_path,
                     database,
                     item_id,
                     slug,
-                });
+                })
             }
         }
 
@@ -729,7 +727,7 @@ mod command_tests {
 
     #[test]
     fn enable_then_disable_round_trips_a_user_scope_symlink() {
-        let mut sandbox = Sandbox::new().expect("sandbox");
+        let sandbox = Sandbox::new().expect("sandbox");
         let target = sandbox.agent_skills_dir().join(sandbox.slug.as_str());
         let preview = skill_agent_preview_impl(
             sandbox.database.connection(),
@@ -744,7 +742,10 @@ mod command_tests {
         let applied =
             skill_agent_apply_impl(&sandbox.state(), &preview.preview_id).expect("enable apply");
         assert!(applied.changed);
-        assert!(target.symlink_metadata().is_ok(), "enable creates a symlink");
+        assert!(
+            target.symlink_metadata().is_ok(),
+            "enable creates a symlink"
+        );
         let deployment = deployments::find_deployment(
             sandbox.database.connection(),
             &sandbox.item_id,
@@ -757,9 +758,18 @@ mod command_tests {
         assert_eq!(deployment.state, ItemState::Linked);
         assert_eq!(deployment.mode.as_deref(), Some("symlink"));
         assert_eq!(deployment.sync_label, Some(SyncLabel::InSync));
+        let resolved_target = target
+            .parent()
+            .unwrap()
+            .join(std::fs::read_link(&target).expect("link target"))
+            .canonicalize()
+            .expect("canonical link target");
         assert_eq!(
-            std::fs::read_link(&target).expect("link target"),
-            sandbox.source_dir(),
+            resolved_target,
+            sandbox
+                .source_dir()
+                .canonicalize()
+                .expect("canonical source"),
         );
 
         // Re-applying the same state must not create a second operation.
@@ -906,12 +916,10 @@ mod command_tests {
         )
         .expect("backup catalogue");
         assert!(
-            backups
-                .iter()
-                .any(|entry| entry
-                    .original_path
-                    .as_deref()
-                    .is_some_and(|path| path.contains("demo-skill"))),
+            backups.iter().any(|entry| entry
+                .original_path
+                .as_deref()
+                .is_some_and(|path| path.contains("demo-skill"))),
             "the copied deployment was backed up before removal: {backups:?}"
         );
     }

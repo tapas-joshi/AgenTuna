@@ -83,3 +83,12 @@ W12Undo,A,TC-010/011/034/039 done
 W12UiRepair,A,found one-fixture root cause; TC-028 UI done
 W12Screens,B,backend good; UI tests left failing then quota
 W12EngineCli,A,five of six stories done
+W13MigrateScreens,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Lists,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13CliMigrate,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Dialogs,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Partials,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Stabilize,B,TS-014/TC-030/TC-035/TC-013 done and verified; 3 failing tests left (CLI reference not updated; 2 tests written as no-ops); TC-031/040/036 not started (quota stop)
+W13MigrateScreens-2,A,TC-023/024/025 done with e2e test and Playwright; verified
+W13Lists-2,A,TS-028/TM-020/TM-021/TS-001/TM-033 done with Playwright
+W13Dialogs-2,B,TA-057/059/055/TS-010/038 done; left stale Playwright specs and missing mock commands; TA-060 partial; TS-033-037/041/044 not started (quota stop)

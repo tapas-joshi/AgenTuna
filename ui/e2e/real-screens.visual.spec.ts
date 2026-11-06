@@ -106,8 +106,8 @@ test("Skill detail compares the project and user copies", async ({ page }) => {
   await page.getByRole("button", { name: "Compare copies" }).click();
   const dialog = page.getByRole("dialog", { name: "Compare copies" });
   await expect(dialog.getByText("user compared with winning project")).toBeVisible();
-  await expect(dialog.getByText("project · winner")).toBeVisible();
-  await expect(dialog.getByText("user · shadow")).toBeVisible();
+  await expect(dialog.getByText("project (winner)")).toBeVisible();
+  await expect(dialog.getByText("user (shadow)")).toBeVisible();
   await expect(page).toHaveScreenshot("skill-compare-copies.png", { animations: "disabled", caret: "hide" });
 });
 
@@ -148,9 +148,12 @@ test("Why trace explains all scopes, exposes diagnostics, and restores focus on 
   const opener = page.getByRole("button", { name: "Why is this on?" }).first();
   await opener.click();
   const dialog = page.getByRole("dialog", { name: "Why is this on?" });
-  for (const scope of ["global", "user", "project", "local"]) {
-    await expect(dialog.getByText(new RegExp(`^${scope} —`))).toBeVisible();
+  const steps = dialog.getByRole("list", { name: "Scope evaluation steps" }).getByRole("listitem");
+  await expect(steps).toHaveCount(4);
+  for (const [index, scope] of ["Global", "User", "Project", "Local"].entries()) {
+    await expect(steps.nth(index).getByText(scope, { exact: true })).toBeVisible();
   }
+  await expect(dialog.getByText("permission denied")).toBeVisible();
   await expect(dialog.getByText("The Project entry could not be read.")).toBeVisible();
   const diagnostics = dialog.getByRole("region", { name: "Load diagnostics" });
   await expect(diagnostics.getByText("The skill document could not be parsed.")).toBeVisible();
@@ -162,7 +165,7 @@ test("Why trace explains all scopes, exposes diagnostics, and restores focus on 
   const calledCommands = await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls);
   expect(calledCommands).toContain("reveal_item");
   await dialog.getByRole("button", { name: "Copy path" }).click();
-  await expect(dialog.getByRole("status")).toHaveText("Path copied.");
+  await expect(page.getByText("Path copied to clipboard").first()).toBeVisible();
   expect(await page.evaluate(() => (window as typeof window & { __AT_TEST_CLIPBOARD__?: string }).__AT_TEST_CLIPBOARD__)).toBe("/sandbox/user/skills/code-review/SKILL.md");
 
   await page.keyboard.press("Escape");

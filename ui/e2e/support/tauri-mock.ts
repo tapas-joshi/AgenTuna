@@ -74,6 +74,8 @@ export const test = base.extend({
             case "agent_manage_set": return null;
             case "agent_link_mode_set": return null;
             case "agent_path_choose": return "/sandbox/Applications/Cursor.app";
+            case "agent_path_candidates": return [];
+            case "agent_path_validate": return { exists: true, is_directory: true, structure_warning: null, reason: null };
             case "agent_path_set": return { ...agentCards[1], presence: "configured_only", primary_path: "/sandbox/Applications/Cursor.app", health: "/sandbox/Applications/Cursor.app · 0 / 0 managed · 0 in sync" };
             case "presets_list": return [presetFixture];
             case "preset_member_candidates": return [{ item_id: "itm_visual_candidate", name: "Release notes", kind: "skill", scope: "user" }];
@@ -99,6 +101,9 @@ export const test = base.extend({
             case "why_trace": return { trace: { item_id: "itm_visual_skill", active_scope: "user", agent: "claude_code", steps: [{ scope: "global", status: "Absent", location: null, reason: "No definition at Global." }, { scope: "user", status: "Winning", location: { path: "/sandbox/user/skills/code-review/SKILL.md", byte_span: null, line: null, rendering_path: null }, reason: "This User copy wins for Claude Code." }, { scope: "project", status: "Absent", location: null, reason: "No Project override." }, { scope: "local", status: "Absent", location: null, reason: "No Local override." }], verdict: { on: true, decisive_step: 1 } }, load_diagnostics: [] };
             case "migrate_scan": return { items: [{ kind: "skill", name: "Visual migration skill", agents: ["claude_code"], path: "/sandbox/home/.claude/skills/visual-migration", scope: "user", content_hash: "a".repeat(64), parse_error: null, store_link: false, ownership: "not_in_agentuna" }, { kind: "mcp_server", name: "Local docs server", agents: ["codex", "omp"], path: "/sandbox/home/.claude.json", scope: "user", content_hash: "b".repeat(64), parse_error: null, store_link: false, ownership: "not_in_agentuna" }, { kind: "rule", name: "Project guidance", agents: ["claude_code"], path: "/sandbox/Projects/AgenTuna/CLAUDE.md", scope: "project", content_hash: "c".repeat(64), parse_error: null, store_link: false, ownership: "not_in_agentuna" }], partial: false, skipped_roots: [], roots: [{ path: "/sandbox/home/.claude/skills", agents: ["claude_code"], new_items: 1, in_sync: 0 }, { path: "/sandbox/home/.claude.json", agents: ["codex", "omp"], new_items: 1, in_sync: 0 }, { path: "/sandbox/Projects/AgenTuna/CLAUDE.md", agents: ["claude_code"], new_items: 1, in_sync: 0 }] };
             case "migrate_plan": return migratePlanFixture;
+            case "migrate_apply": return "job_visual_migrate_apply";
+            case "migrate_apply_result": return { job_id: "job_visual_migrate_apply", operation_id: "op_visual_migration", completed: 5n, touched_paths: ["/sandbox/Projects/AgenTuna/.config-studio/skills/visual-migration"], warnings: [], backup_dir: "/sandbox/support/backups/migration", scope: "project", strategy: "replace_with_links", plan_hash: "d".repeat(64), counts: migratePlanFixture.counts, steps: migratePlanFixture.steps };
+            case "operation_undo_check": return { operation_id: "op_visual_migration", known: true, already_undone: false, expired: false, window_days: 30, expires_at_unix_ms: BigInt(Date.now() + 30 * 86400 * 1000), conflicted_paths: [] };
             case "item_lookup": return { kind: "skill", scope: "user", project_id: null };
             case "skill_detail_load": return skill;
             case "skill_compare_copies": return { winner: { scope: "project", markdown: "# Code Review\n\nProject copy.", hash: "1".repeat(64), deployments: ["claude_code"] }, shadow: { scope: "user", markdown: "# Code Review\n\nUser copy.", hash: "2".repeat(64), deployments: ["codex"] }, identical: false, diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,3 +1,3 @@\n # Code Review\n-User copy.\n+Project copy.\n" };
@@ -158,6 +163,83 @@ export const test = base.extend({
             case "mcp_server_disable": return { stage: "preview", preview: { change_set_id: "cs-visual-mcp-action", preview_id: "preview-visual-mcp-action", files: [{ agent: "claude_code", scope: "global", path: "/sandbox/home/.claude.json", additions: 0, deletions: 1, diff: "--- a/.claude.json\n+++ b/.claude.json\n" }], skipped_agents: [], warnings: [] } };
             case "mcp_server_delete": return { stage: "preview", preview: { change_set_id: "cs-visual-mcp-delete", preview_id: "preview-visual-mcp-delete", files: [{ agent: "AgenTuna", scope: "global", path: "/sandbox/global/mcp.json", additions: 0, deletions: 2, diff: "" }], skipped_agents: [], warnings: [] } };
             case "mcp_server_test": return { server_name: "Visual server", tools_count: 2, latency_ms: 3, tools: ["ping", "echo"] };
+            case "mcp_server_enable": return { stage: "preview", preview: { change_set_id: "cs-visual-mcp-enable", preview_id: "preview-visual-mcp-enable", files: [], skipped_agents: [], warnings: [] } };
+            case "mcp_server_detail": return {
+              item_id: "itm_visual_mcp",
+              name: "Visual server",
+              scope: "global",
+              description: "Visual test fixture MCP server",
+              transport: "stdio",
+              command: "npx",
+              args: ["-y", "@modelcontextprotocol/server-postgres"],
+              cwd: null,
+              url: null,
+              env: [
+                { key: "DB_HOST", value: "localhost", is_secret: false, keychain_account: null },
+              ],
+              defined_in: ["/sandbox/global/mcp.json"],
+              tools: ["query", "schema"],
+              health_status: "ok",
+              health_error_code: null,
+              health_error_text: null,
+              last_checks: [
+                { checked_at: "100", status: "ok", latency_ms: 3, trigger: "manual", error_text: null },
+              ],
+              cadence_text: "every 5 min",
+              is_oauth: false,
+              needs_auth: false,
+              locked: false,
+              locked_by: null,
+              lock_reason: null,
+              agents: [
+                { id: "claude_code", label: "Claude Code", presence: "installed", reason: null, enabled: true, state: "linked", config_path: "/sandbox/home/.claude.json" },
+              ],
+              why_summary: "Visual server is defined in global scope and active for 1 agent(s).",
+            };
+            case "skills_list": return {
+              rows: [
+                {
+                  item_id: "itm_visual_skill",
+                  name: "code-review",
+                  scope: "user",
+                  state: "active",
+                  shadowed_by: null,
+                  description: "Automated review guidance for pull requests",
+                  native: false,
+                  native_path: null,
+                  update_available: false,
+                  updated_at: "2026-11-06T12:00:00Z",
+                  agents: [
+                    { agent: "codex", state: "linked", enabled: true, config_path: "/sandbox/home/.codex/skills/code-review" },
+                    { agent: "omp", state: "linked", enabled: true, config_path: "/sandbox/home/.omp/skills/code-review" },
+                  ],
+                },
+                {
+                  item_id: "",
+                  name: "native-helper",
+                  scope: "project",
+                  state: null,
+                  shadowed_by: null,
+                  description: null,
+                  native: true,
+                  native_path: "/sandbox/project/.agents/skills/native-helper",
+                  update_available: false,
+                  updated_at: "2026-11-06T12:00:00Z",
+                  agents: [
+                    { agent: "codex", state: "native", enabled: true, config_path: "/sandbox/project/.agents/skills/native-helper" },
+                    { agent: "omp", state: "native", enabled: true, config_path: "/sandbox/project/.agents/skills/native-helper" },
+                  ],
+                },
+              ],
+              agents: [
+                { id: "claude_code", label: "Claude Code", presence: "installed" },
+                { id: "codex", label: "Codex", presence: "installed" },
+                { id: "omp", label: "omp", presence: "installed" },
+                { id: "cursor", label: "Cursor", presence: "not_installed" },
+              ],
+              project_id: "prj_visual_fixture",
+              project_name: "AgenTuna",
+            };
             case "effective_lock": return { locked: true, reason: String((args?.request as { reason?: string } | undefined)?.reason ?? "") };
             case "effective_unlock": return { locked: false, reason: "Approved version" };
             case "secrets_create": return null;

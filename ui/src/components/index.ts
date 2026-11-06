@@ -160,3 +160,5 @@ export type {
 } from "./table";
 export { ScopeSwitcher } from "./scope_switcher/ScopeSwitcher";
 export type { ScopeSelected, ScopeSwitcherProps } from "./scope_switcher/ScopeSwitcher";
+export { NativeBanner } from "./native/NativeBanner";
+export type { NativeBannerProps } from "./native/NativeBanner";

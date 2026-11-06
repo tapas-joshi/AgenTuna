@@ -191,6 +191,7 @@ export function InstructionsScreen() {
     toast.info("Reloaded the version on disk. Your buffer was replaced.");
   }
 
+
   // The screen registers its buffer so leaving with unsaved changes asks for a decision.
   useEffect(() => {
     if (selected === null || selected.read_error !== null) return;
@@ -255,7 +256,7 @@ export function InstructionsScreen() {
           <p className="mt-8 text-13 text-text-secondary">
             Create a rule file through the New rule action.
           </p>
-          <Button variant="primary" disabled={busy || activeProject === null} onClick={() => void createProjectRule()}>
+          <Button variant="primary" disabled={busy} onClick={() => setCreateOpen(true)}>
             New rule file
           </Button>
         </section>

@@ -30,8 +30,11 @@ fn write(path: &Path, contents: &str) {
 /// user store and index.
 fn seed_simple(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
     let home = sandbox.path("home");
-    let alpha = home.join(".claude/skills/alpha/SKILL.md");
-    write(&alpha, &skill_doc("alpha", "A plain native skill"));
+    let alpha = home.join(".claude/skills/alpha");
+    write(
+        &alpha.join("SKILL.md"),
+        &skill_doc("alpha", "A plain native skill"),
+    );
     let claude_json = home.join(".claude.json");
     write(
         &claude_json,
@@ -57,6 +60,7 @@ fn seed_conflict(sandbox: &Sandbox) {
 
 /// Initializes the user store the way `doctor` would.
 fn init_store(sandbox: &Sandbox) {
+    let _ = fs::create_dir_all(sandbox.support());
     at_store::layout::init_store(at_model::Scope::User, sandbox.user_store())
         .expect("initialize the sandbox user store");
 }
@@ -71,7 +75,8 @@ fn assert_exit(output: &std::process::Output, expected: i32) -> Value {
     let actual = exit_code(output);
     let envelope = json_envelope(output);
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "exit {expected} expected, got {actual}; stderr: {}\nstdout: {}",
         stderr(output),
         stdout(output)
@@ -94,10 +99,7 @@ fn snapshot(root: &Path) -> BTreeMap<String, String> {
             let metadata = fs::symlink_metadata(&path).expect("symlink_metadata");
             if metadata.file_type().is_symlink() {
                 let target = fs::read_link(&path).expect("read_link");
-                entries.insert(
-                    relative,
-                    format!("symlink:{}", target.display()),
-                );
+                entries.insert(relative, format!("symlink:{}", target.display()));
             } else if metadata.is_dir() {
                 entries.insert(relative, "dir".to_owned());
                 pending.push(path);
@@ -177,7 +179,14 @@ fn apply_dry_run_lists_operations_and_creates_no_file_lock_or_journal() {
     let before_support = snapshot(&sandbox.support());
     let output = agentuna(
         &sandbox,
-        &["migrate", "apply", "--plan", &plan_id, "--dry-run", "--json"],
+        &[
+            "migrate",
+            "apply",
+            "--plan",
+            &plan_id,
+            "--dry-run",
+            "--json",
+        ],
     );
     let envelope = assert_exit(&output, 0);
     assert_eq!(envelope["data"]["dry_run"], Value::Bool(true));
@@ -190,15 +199,20 @@ fn apply_dry_run_lists_operations_and_creates_no_file_lock_or_journal() {
         "the dry run lists the exact file operations"
     );
     for operation in &operations {
-        for field in ["seq", "action"] {
-            assert!(operation[field].is_i64(), "rows carry {field}: {operation}");
-        }
+        assert!(operation["seq"].is_i64(), "rows carry seq: {operation}");
+        assert!(
+            operation["action"].is_string(),
+            "rows carry action: {operation}"
+        );
     }
     let after = snapshot(&sandbox.path("home"));
     let after_store = snapshot(&sandbox.user_store());
     let after_support = snapshot(&sandbox.support());
     assert_eq!(before, after, "a dry run must not touch the home");
-    assert_eq!(before_store, after_store, "a dry run must not touch the store");
+    assert_eq!(
+        before_store, after_store,
+        "a dry run must not touch the store"
+    );
     assert_eq!(
         before_support, after_support,
         "a dry run must create no file, lock or journal"
@@ -230,14 +244,7 @@ fn ambiguous_conflict_without_keep_flag_exits_needs_resolution_and_writes_nothin
     // With an explicit choice the same scan plans cleanly.
     let output = agentuna(
         &sandbox,
-        &[
-            "migrate",
-            "plan",
-            "--keep-a",
-            "dup",
-            "--dry-run",
-            "--json",
-        ],
+        &["migrate", "plan", "--keep-a", "dup", "--dry-run", "--json"],
     );
     let envelope = assert_exit(&output, 0);
     assert_eq!(envelope["ok"], Value::Bool(true));
@@ -247,7 +254,7 @@ fn ambiguous_conflict_without_keep_flag_exits_needs_resolution_and_writes_nothin
 fn apply_needs_yes_then_apply_and_undo_round_trip() {
     let sandbox = Sandbox::new();
     let (alpha, claude_json) = seed_simple(&sandbox);
-    let original_alpha = fs::read(&alpha).expect("read alpha");
+    let original_alpha = fs::read(alpha.join("SKILL.md")).expect("read alpha");
     let original_claude_json = fs::read(&claude_json).expect("read .claude.json");
 
     let output = agentuna(&sandbox, &["migrate", "plan", "--json"]);
@@ -258,9 +265,15 @@ fn apply_needs_yes_then_apply_and_undo_round_trip() {
         .to_owned();
 
     // Without --yes the apply is refused and writes nothing.
-    let output = agentuna(&sandbox, &["migrate", "apply", "--plan", &plan_id, "--json"]);
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "apply", "--plan", &plan_id, "--json"],
+    );
     assert_eq!(exit_code(&output), 9, "confirmation required is exit 9");
-    assert_eq!(json_envelope(&output)["error"]["code"], "confirmation_required");
+    assert_eq!(
+        json_envelope(&output)["error"]["code"],
+        "confirmation_required"
+    );
 
     let output = agentuna(
         &sandbox,
@@ -282,11 +295,14 @@ fn apply_needs_yes_then_apply_and_undo_round_trip() {
     let output = agentuna(&sandbox, &["migrate", "undo", &operation_id, "--json"]);
     assert_eq!(exit_code(&output), 9, "undo also needs --yes or --force");
 
-    let output = agentuna(&sandbox, &["migrate", "undo", &operation_id, "--yes", "--json"]);
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "undo", &operation_id, "--yes", "--json"],
+    );
     let envelope = assert_exit(&output, 0);
     assert!(envelope["data"]["undo_operation_id"].is_string());
     assert_eq!(
-        fs::read(&alpha).expect("read restored alpha"),
+        fs::read(alpha.join("SKILL.md")).expect("read restored alpha"),
         original_alpha,
         "the original skill is restored byte-identically"
     );
@@ -331,8 +347,8 @@ fn undo_after_the_window_is_refused_with_undo_expired() {
         .expect("clock")
         .as_secs() as i64;
     {
-        let database = at_db::Database::open_file(sandbox.paths().db_path())
-            .expect("open the sandbox index");
+        let database =
+            at_db::Database::open_file(sandbox.paths().db_path()).expect("open the sandbox index");
         database
             .connection()
             .execute(
@@ -343,9 +359,12 @@ fn undo_after_the_window_is_refused_with_undo_expired() {
     }
 
     let before = snapshot(&sandbox.path("home"));
-    let before_store = snapshot(&sandbox.user_store());
-    let before_support = snapshot(&sandbox.support());
-    let output = agentuna(&sandbox, &["migrate", "undo", &operation_id, "--yes", "--json"]);
+    let _before_store = snapshot(&sandbox.user_store());
+    let _before_support = snapshot(&sandbox.support());
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "undo", &operation_id, "--yes", "--json"],
+    );
     assert_eq!(exit_code(&output), 6, "undo_expired is a user error exit");
     let envelope = json_envelope(&output);
     assert_eq!(envelope["error"]["code"], "undo_expired");
@@ -359,7 +378,7 @@ fn undo_after_the_window_is_refused_with_undo_expired() {
 fn adopt_previews_then_replaces_the_original_with_a_link() {
     let sandbox = Sandbox::new();
     let (alpha, _claude_json) = seed_simple(&sandbox);
-    let original_alpha = fs::read(&alpha).expect("read alpha");
+    let original_alpha = fs::read(alpha.join("SKILL.md")).expect("read alpha");
 
     let path_arg = alpha.display().to_string();
     let output = agentuna(&sandbox, &["adopt", &path_arg, "--dry-run", "--json"]);
@@ -380,7 +399,10 @@ fn adopt_previews_then_replaces_the_original_with_a_link() {
         .expect("operation_id")
         .to_owned();
     let metadata = fs::symlink_metadata(&alpha).expect("symlink_metadata");
-    assert!(metadata.file_type().is_symlink(), "adopt replaced with a link");
+    assert!(
+        metadata.file_type().is_symlink(),
+        "adopt replaced with a link"
+    );
     assert!(
         sandbox.user_store().join("skills/alpha/SKILL.md").exists(),
         "the store holds the adopted content"
@@ -392,10 +414,13 @@ fn adopt_previews_then_replaces_the_original_with_a_link() {
     assert_eq!(json_envelope(&output)["error"]["code"], "conflict");
 
     // The adoption is undoable like every migration operation.
-    let output = agentuna(&sandbox, &["migrate", "undo", &operation_id, "--yes", "--json"]);
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "undo", &operation_id, "--yes", "--json"],
+    );
     assert_exit(&output, 0);
     assert_eq!(
-        fs::read(&alpha).expect("read restored alpha"),
+        fs::read(alpha.join("SKILL.md")).expect("read restored alpha"),
         original_alpha,
         "undo of adopt restores the exact original bytes"
     );
@@ -427,11 +452,16 @@ fn status_lists_counts_pending_plans_and_recent_operations() {
 
     let output = agentuna(
         &sandbox,
-        &["migrate", "apply", "--plan",
+        &[
+            "migrate",
+            "apply",
+            "--plan",
             json_envelope(&output)["data"]["pending_plans"][0]["plan_id"]
                 .as_str()
                 .expect("plan id"),
-        "--yes", "--json"],
+            "--yes",
+            "--json",
+        ],
     );
     assert_exit(&output, 0);
 

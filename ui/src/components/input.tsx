@@ -1,5 +1,5 @@
 import { useId } from "react";
-import type { ComponentPropsWithoutRef, ReactNode } from "react";
+import type { ComponentPropsWithRef, ReactNode, Ref } from "react";
 import { cn } from "./cn";
 
 /** Height of the single-line box. Both sizes are at least 32px tall. */
@@ -10,7 +10,8 @@ const SIZE_CLASSES: Readonly<Record<InputSize, string>> = {
   lg: "h-32 px-12 text-14",
 };
 
-interface InputBaseProps extends Omit<ComponentPropsWithoutRef<"input">, "size"> {
+interface InputBaseProps extends Omit<ComponentPropsWithRef<"input">, "size"> {
+  readonly ref?: Ref<HTMLInputElement>;
   /** Visible label. Omit only together with `aria-label`. */
   readonly label?: string;
   /** Helper line below the field. */
@@ -48,6 +49,7 @@ export function Input({
   className,
   id,
   disabled,
+  ref,
   ...rest
 }: InputProps) {
   const generatedId = useId();
@@ -83,6 +85,7 @@ export function Input({
           </span>
         )}
         <input
+          ref={ref}
           {...rest}
           id={controlId}
           data-slot="input"

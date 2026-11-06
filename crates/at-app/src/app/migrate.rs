@@ -2,7 +2,6 @@
 use super::{
     bridge::{JobError, JobSpec},
     commands::{CommandError, CommandErrorCode},
-    paths::resolve_process_paths,
     state::AppState,
 };
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
@@ -689,7 +688,12 @@ fn apply_failure(error: at_migrate::apply::ApplyPlanError) -> MigrationApplyFail
             } else {
                 MigrationApplyFailureCode::PermissionDenied
             };
-            MigrationApplyFailure::new(code, format!("cannot write `{}`: {required}", path.display()), Some(&path), required)
+            MigrationApplyFailure::new(
+                code,
+                format!("cannot write `{}`: {required}", path.display()),
+                Some(&path),
+                required,
+            )
         }
         ApplyPlanError::SourceRead { path, source } => MigrationApplyFailure::new(
             MigrationApplyFailureCode::SourceRead,
@@ -730,7 +734,9 @@ fn apply_failure(error: at_migrate::apply::ApplyPlanError) -> MigrationApplyFail
         ApplyPlanError::Metadata(_) | ApplyPlanError::OperationKind(_) => {
             MigrationApplyFailure::internal("the migration metadata could not be recorded")
         }
-        ApplyPlanError::Clock => MigrationApplyFailure::internal("the system clock is before the Unix epoch"),
+        ApplyPlanError::Clock => {
+            MigrationApplyFailure::internal("the system clock is before the Unix epoch")
+        }
         _ => MigrationApplyFailure::internal("the migration could not be applied"),
     }
 }
@@ -916,11 +922,10 @@ pub async fn migrate_apply_inner(
 ) -> Result<super::bridge::JobId, CommandError> {
     let strategy = strategy_from_wire(&request.strategy)?;
     let inputs = migration_inputs(app, request.project_id.as_deref())?;
-    let authorized = migration_authorized_roots(&super::paths::resolve_command_paths(
-        app,
-        inputs.project.as_deref(),
-    )
-    .map_err(|_| CommandError::unavailable("application paths are unavailable"))?)?;
+    let authorized = migration_authorized_roots(
+        &super::paths::resolve_command_paths(app, inputs.project.as_deref())
+            .map_err(|_| CommandError::unavailable("application paths are unavailable"))?,
+    )?;
     let selected_paths = request
         .selected_paths
         .into_iter()
@@ -1047,8 +1052,7 @@ pub async fn migrate_apply_inner(
                 counts: MigratePlanCountsView {
                     items: i32::try_from(plan.counts.items).unwrap_or(i32::MAX),
                     files_created: i32::try_from(plan.counts.files_created).unwrap_or(i32::MAX),
-                    files_backed_up: i32::try_from(plan.counts.files_backed_up)
-                        .unwrap_or(i32::MAX),
+                    files_backed_up: i32::try_from(plan.counts.files_backed_up).unwrap_or(i32::MAX),
                     links_written: i32::try_from(plan.counts.links_written).unwrap_or(i32::MAX),
                     files_left_in_place: i32::try_from(plan.counts.files_left_in_place)
                         .unwrap_or(i32::MAX),
@@ -1070,23 +1074,15 @@ pub async fn migrate_apply_inner(
                             .as_ref()
                             .map(|path| path.display().to_string()),
                         bytes: step.bytes,
-                        agents: step
-                            .agents
-                            .iter()
-                            .map(|agent| agent.to_string())
-                            .collect(),
+                        agents: step.agents.iter().map(|agent| agent.to_string()).collect(),
                     })
                     .collect(),
             };
             Ok(Some(view))
         })
         .await
-        .map_err(|join| {
-            JobError::Migration {
-                failure: MigrationApplyFailure::internal(format!(
-                    "migration worker stopped: {join}"
-                )),
-            }
+        .map_err(|join| JobError::Migration {
+            failure: MigrationApplyFailure::internal(format!("migration worker stopped: {join}")),
         })?;
         let view = match worker {
             Ok(Some(view)) => view,
@@ -1097,17 +1093,14 @@ pub async fn migrate_apply_inner(
         progress.fraction(1.0, "Migration applied");
         Ok(())
     });
-    let handle = app
-        .bridge()
-        .spawn_job(job)
-        .map_err(CommandError::from)?;
+    let handle = app.bridge().spawn_job(job).map_err(CommandError::from)?;
     Ok(handle.id().clone())
 }
 
 /// Returns the recorded result of one completed migration apply job.
 ///
 /// # Errors
-/// [`CommandError::Conflict`] while the job is still running, [`CommandError::NotFound`]
+/// [`CommandErrorCode::Conflict`] while the job is still running, [`CommandErrorCode::NotFound`]
 /// when no result was recorded for the id.
 #[tauri::command]
 pub fn migrate_apply_result(
@@ -1171,7 +1164,7 @@ pub struct OperationUndoCheckView {
 /// Reads undo readiness for one recorded operation without writing anything.
 ///
 /// # Errors
-/// [`CommandError::Conflict`] when history cannot be read.
+/// [`CommandErrorCode::Conflict`] when history cannot be read.
 #[tauri::command]
 pub fn operation_undo_check(
     state: State<'_, AppState>,
@@ -1189,8 +1182,8 @@ pub fn operation_undo_check_inner(
     operation_id: &str,
 ) -> Result<OperationUndoCheckView, CommandError> {
     let database = app.database().map_err(CommandError::unavailable)?;
-    let readiness = at_migrate::undo::undo_readiness(database.connection(), operation_id)
-        .map_err(|error| {
+    let readiness =
+        at_migrate::undo::undo_readiness(database.connection(), operation_id).map_err(|error| {
             CommandError::new(
                 CommandErrorCode::Conflict,
                 format!("the operation history could not be read: {error}"),
@@ -1201,7 +1194,7 @@ pub fn operation_undo_check_inner(
         known: readiness.known,
         already_undone: readiness.already_undone,
         expired: readiness.expired,
-        window_days: i32::try_from(u32::from(readiness.window_days)).unwrap_or(i32::MAX),
+        window_days: i32::try_from(readiness.window_days).unwrap_or(i32::MAX),
         expires_at_unix_ms: readiness
             .expires_at_unix_seconds
             .and_then(|seconds| seconds.checked_mul(1000)),

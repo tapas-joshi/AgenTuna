@@ -18,6 +18,7 @@ import type { CliInstallLocation } from "../generated/CliInstallLocation";
 import type { RecoverySheetView } from "../generated/RecoverySheetView";
 import { RecoverySheet } from "./recovery/RecoverySheet";
 import { Modal } from "./dialogs/Modal";
+import { WhyTraceDialog } from "./dialogs/WhyTraceDialog";
 import type { AccountMenuAction } from "./menus/AccountMenu";
 import type { ScopeToken } from "../theme";
 import { ACTION_IDS, SHORTCUTS, routeForAction, shortcutHint } from "../shell/actions";
@@ -60,6 +61,7 @@ export function AppOverlays({ state, scope, route, hasProject, children }: {
   const [installingCli, setInstallingCli] = useState(false);
   const [doctorReport, setDoctorReport] = useState<string | null>(null);
   const [overwriteRefusal, setOverwriteRefusal] = useState<RefusedOverwriteDetails | null>(null);
+  const [whyPalette, setWhyPalette] = useState<{ itemId: string; scope: string; agent: string } | null>(null);
 
   const reloadProjects = async () => {
     try {
@@ -146,6 +148,12 @@ export function AppOverlays({ state, scope, route, hasProject, children }: {
       { id: ACTION_IDS.doctor, title: "Run Doctor", subtitle: "Export a diagnostics report", keywords: ["diagnostics", "health"], run: () => dispatch(ACTION_IDS.doctor) },
       { id: ACTION_IDS.rescan, title: "Rescan projects", subtitle: "Refresh the project registry", keywords: ["scan", "refresh"], run: () => dispatch(ACTION_IDS.rescan) },
       { id: ACTION_IDS.installCli, title: "Install CLI", subtitle: "Install the agentuna command-line tool", keywords: ["command line", "terminal"], run: () => dispatch(ACTION_IDS.installCli) },
+      { id: "action:why-trace", title: "Why is this on?", subtitle: "Trace scope decision for an item", keywords: ["trace", "why", "effective", "winner"], run: () => {
+        const snap: unknown = state.getSnapshot();
+        const sel = snap && typeof snap === "object" && "selectedItem" in snap ? snap.selectedItem : null;
+        const id = sel && typeof sel === "object" && "id" in sel && typeof sel.id === "string" ? sel.id : "active";
+        setWhyPalette({ itemId: id, scope, agent: "claude_code" });
+      } },
     ],
   }), [scope, state]);
 
@@ -227,6 +235,16 @@ export function AppOverlays({ state, scope, route, hasProject, children }: {
       state.toasts.show({ kind: "success", title: "Adoption undone", message: "The original tree was restored from its backup." });
     }} />}
     <Palette open={paletteOpen} index={paletteIndex} onClose={() => setPaletteOpen(false)} onRun={(entry) => entry.run?.()} />
+    {whyPalette !== null && (
+      <WhyTraceDialog
+        open={true}
+        itemId={whyPalette.itemId}
+        scope={whyPalette.scope}
+        agent={whyPalette.agent}
+        onClose={() => setWhyPalette(null)}
+        onOpenEffective={() => state.navigate("effective")}
+      />
+    )}
     {recovery ? <RecoverySheet recovery={recovery} onContinue={() => setRecovery(null)} onDiscard={(operationId) => {
       void invoke("recovery_discard", { operationId }).then(() => setRecovery((current) => current ? { ...current, operations: current.operations.filter((operation) => operation.id !== operationId), files: current.files.filter((file) => file.operation_id !== operationId) } : null), (error: unknown) => state.toasts.show({ kind: "error", title: "Could not discard pending changes", message: String(error) }));
     }} onRestore={(file) => {

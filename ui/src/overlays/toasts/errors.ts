@@ -55,8 +55,11 @@ export function toastFromCommandError(
  * @returns Toast input of kind `error`.
  */
 export function toastFromJobError(error: JobError, options: ToastMessageOptions = {}): ToastInput {
-  // Remote-backup failures carry a typed, secret-free failure instead of a bare message.
-  const message = error.kind === "remote_backup" ? error.failure.message : error.message;
+  // Remote-backup and migration failures carry a typed, secret-free failure instead of a bare message.
+  const message =
+    error.kind === "remote_backup" || error.kind === "migration"
+      ? error.failure.message
+      : error.message;
   return errorToast({
     message,
     title: options.title ?? (error.kind === "panic" ? "Background job crashed" : "Job failed"),

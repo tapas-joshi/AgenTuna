@@ -88,21 +88,33 @@ describe("AgentsScreen", () => {
   test("Set path sends the chosen folder to agent_path_set", async () => {
     ipc.reply = (command) => {
       if (command === "agents_list") return Promise.resolve([cursor]);
+      if (command === "agent_path_candidates") return Promise.resolve([]);
+      if (command === "agent_path_validate") {
+        return Promise.resolve({
+          exists: true,
+          is_directory: true,
+          structure_warning: null,
+          reason: null,
+        });
+      }
       if (command === "agent_path_choose") return Promise.resolve("/sandbox/Applications/Cursor.app");
       if (command === "agent_path_set") {
-        return Promise.resolve({ ...cursor, presence: "configured_only", primary_path: "/sandbox/Applications/Cursor.app" });
+        return Promise.resolve({ ...cursor, presence: "installed", primary_path: "/sandbox/Applications/Cursor.app" });
+      }
+      if (command === "agents_rescan") {
+        return Promise.resolve([{ ...cursor, presence: "installed", primary_path: "/sandbox/Applications/Cursor.app" }]);
       }
       return Promise.resolve(undefined);
     };
     renderScreen();
     fireEvent.click(await screen.findByRole("button", { name: "Set path…" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Choose folder|Browse/ }));
     await waitFor(() =>
       expect((screen.getByRole("textbox", { name: "Agent configuration path" }) as HTMLInputElement).value).toBe(
         "/sandbox/Applications/Cursor.app",
       ),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save path" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(ipc.calls.some((call) => call.command === "agent_path_set")).toBe(true),
     );

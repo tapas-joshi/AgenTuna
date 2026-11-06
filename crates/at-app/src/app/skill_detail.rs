@@ -663,13 +663,13 @@ struct CachedKeepPlan {
     authorized_roots: Vec<std::path::PathBuf>,
     drop_item_id: at_model::ItemId,
     drop_scope: at_model::Scope,
+    #[expect(dead_code)]
     project_id: Option<String>,
     drop_dir: std::path::PathBuf,
 }
 
-static KEEP_PLANS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, CachedKeepPlan>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static KEEP_PLANS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, CachedKeepPlan>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Reviews the exact package overwrite that keeps one copy and replaces the other.
 #[tauri::command]
@@ -809,7 +809,10 @@ pub fn skill_keep_copy_preview(
         .into_iter()
         .flatten()
     {
-        if !authorized_roots.iter().any(|allowed| root.starts_with(allowed)) {
+        if !authorized_roots
+            .iter()
+            .any(|allowed| root.starts_with(allowed))
+        {
             authorized_roots.push(root.to_path_buf());
         }
     }
@@ -862,22 +865,22 @@ pub fn skill_keep_copy_apply(
         backup_folder: &cached.backup_root,
         recorder: &mut recorder,
     };
-    let outcome = at_fs::changeset::apply_with_roots(&cached.set, &mut context, &roots).map_err(
-        |error| match error {
-            at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
-                CommandErrorCode::Conflict,
-                format!(
-                    "The replaced copy changed at {}. Compare the copies again.",
-                    path.display()
+    let outcome =
+        at_fs::changeset::apply_with_roots(&cached.set, &mut context, &roots).map_err(|error| {
+            match error {
+                at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
+                    CommandErrorCode::Conflict,
+                    format!(
+                        "The replaced copy changed at {}. Compare the copies again.",
+                        path.display()
+                    ),
                 ),
-            ),
-            other => CommandError::from(other),
-        },
-    )?;
+                other => CommandError::from(other),
+            }
+        })?;
     state.record_writes(&cached.set, &cached.store_root);
-    let updated = at_store::skill_package::SkillPackage::read(&cached.drop_dir).map_err(|_| {
-        CommandError::internal("the replaced skill package could not be re-read")
-    })?;
+    let updated = at_store::skill_package::SkillPackage::read(&cached.drop_dir)
+        .map_err(|_| CommandError::internal("the replaced skill package could not be re-read"))?;
     let operation_id = outcome.operation_id.clone();
     at_db::versions::record_skill_version(
         database.connection(),
@@ -934,9 +937,7 @@ fn shadow_copy_items(
 }
 
 /// Lists package-relative regular files beneath one skill folder, bounded.
-fn package_file_list(
-    dir: &std::path::Path,
-) -> Result<Vec<String>, CommandError> {
+fn package_file_list(dir: &std::path::Path) -> Result<Vec<String>, CommandError> {
     const MAX_FILES: usize = 500;
     const MAX_DEPTH: usize = 16;
     let mut out = Vec::new();

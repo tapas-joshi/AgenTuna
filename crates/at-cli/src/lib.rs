@@ -20,10 +20,10 @@
 //! [`CommandOutput`] and returns a [`CliError`]; the root maps them to the envelope
 //! and the exit status, so no group prints or exits on its own.
 
+mod adopt;
 mod agents;
 mod builtin;
 pub mod cli;
-mod adopt;
 pub mod doctor;
 mod effective;
 pub mod error;

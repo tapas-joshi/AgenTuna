@@ -13,10 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use ts_rs::TS;
 
-use super::{
-    commands::CommandError,
-    state::AppState,
-};
+use super::{commands::CommandError, state::AppState};
 
 /// One agent column with the presence the screen needs to grey cells out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -160,13 +157,11 @@ pub fn skills_list(
         let mut cells = Vec::with_capacity(row.deployed.len());
         let deployments = match &row.item_id {
             Some(item_id) => {
-                let deployments = at_db::deployments::list_deployments_for_item(
-                    database.connection(),
-                    item_id,
-                )
-                .map_err(|error| {
-                    CommandError::internal(format!("cannot read deployments: {error}"))
-                })?;
+                let deployments =
+                    at_db::deployments::list_deployments_for_item(database.connection(), item_id)
+                        .map_err(|error| {
+                        CommandError::internal(format!("cannot read deployments: {error}"))
+                    })?;
                 Some(deployments)
             }
             None => None,

@@ -199,6 +199,10 @@ pub struct AgentCardView {
 /// Loads agents and their configuration paths from the database.
 #[tauri::command]
 pub fn agents_list(state: State<'_, AppState>) -> Result<Vec<AgentCardView>, CommandError> {
+    agents_list_impl(&state)
+}
+
+pub(crate) fn agents_list_impl(state: &AppState) -> Result<Vec<AgentCardView>, CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
     let records = at_db::agents::list_agents_on_mac(database.connection())
         .map_err(|_| CommandError::internal("could not load agents"))?;
@@ -308,6 +312,9 @@ fn format_summary(formats: &[at_db::agents::AgentPathFormat]) -> String {
         })
         .collect::<Vec<_>>();
     if labels.is_empty() {
+        if formats.contains(&at_db::agents::AgentPathFormat::Dir) {
+            return String::from("MCP not supported");
+        }
         return String::from("—");
     }
     let has_skills = formats.contains(&at_db::agents::AgentPathFormat::Dir);

@@ -29,6 +29,7 @@ ModelRedaction,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek
 NetworkPolicy,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,26.3,132,158,263400,128083,0.1904,,,
 PrivilegedGlobal,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.1,95,106,157032,67970,0.0941,,,
 ProjectsResearch,1-3,devin,swe-2-flash,devin/swe-2-flash,max,21.0,23,37,160996,4063,0.2054,,,
+QuotaProbe,1-3,zai,glm-5.3-flash,zai/glm-5.3-flash,max,7.0,1,0,0,0,0.0,yes,,
 ScopeResolution,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.0,49,64,154817,59015,0.0746,,,
 SecretsKeychain,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,14.1,40,60,136395,56656,0.0654,,,
 StoreGitScan,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,21.5,88,96,195884,91542,0.1169,,,
@@ -64,11 +65,15 @@ W12MigrateApply,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,24.0,
 W12Screens,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,33.6,261,270,1833366,151361,0.8378,yes,B,backend good; UI tests left failing then quota
 W12UiRepair,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,16.9,113,128,250860,43853,0.1527,,A,found one-fixture root cause; TC-028 UI done
 W12Undo,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,32.8,208,228,365526,155475,0.4651,,A,TC-010/011/034/039 done
-W13CliMigrate,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,5.5,46,65,159993,13561,0.0998,,,
-W13Dialogs,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,6.0,47,58,118044,15430,0.0878,,,
-W13Lists,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,6.0,65,73,109727,13538,0.1268,,,
-W13MigrateScreens,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,5.3,62,71,154188,11387,0.1504,,,
-W13Partials,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,6.0,60,90,162266,14804,0.1433,,,
+W13CliMigrate,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.8,127,148,252359,59334,0.4446,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Dialogs-2,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,54.2,389,386,1654222,115407,7.4791,yes,B,TA-057/059/055/TS-010/038 done; left stale Playwright specs and missing mock commands; TA-060 partial; TS-033-037/041/044 not started (quota stop)
+W13Dialogs,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.5,157,191,212800,56876,0.5167,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Lists-2,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,53.3,352,349,1458285,123084,7.7304,,A,TS-028/TM-020/TM-021/TS-001/TM-033 done with Playwright
+W13Lists,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.6,175,185,194035,52221,0.5826,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13MigrateScreens-2,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,43.2,304,302,1749080,79512,5.6767,,A,TC-023/024/025 done with e2e test and Playwright; verified
+W13MigrateScreens,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.5,140,152,274792,54265,0.5847,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Partials,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.5,171,207,249593,50947,0.6581,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Stabilize,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,53.9,347,345,1157110,92932,5.8747,,B,TS-014/TC-030/TC-035/TC-013 done and verified; 3 failing tests left (CLI reference not updated; 2 tests written as no-ops); TC-031/040/036 not started (quota stop)
 W4AppLog,4,devin,swe-2-flash,devin/swe-2-flash,max,124.4,400,415,4554078,125008,7.1363,,B,TF-024 done after revival; broke at-cli doctor tests until told
 W4CliProjects,4,devin,swe-2-flash,devin/swe-2-flash,max,107.4,212,223,6357598,60937,6.665,,B,TU-027 done; scan report-only
 W4DbDeploy,4,devin,swe-2-flash,devin/swe-2-flash,max,93.5,300,309,6146533,65543,7.5937,,A,three DB stories verified

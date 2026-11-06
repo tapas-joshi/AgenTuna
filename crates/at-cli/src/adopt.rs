@@ -57,15 +57,7 @@ impl CommandGroup for AdoptGroup {
         globals: &GlobalArgs,
         matches: &ArgMatches,
     ) -> Result<CommandOutput, CliError> {
-        let (name, sub) = matches
-            .subcommand()
-            .ok_or_else(|| CliError::internal("adopt dispatch without a subcommand"))?;
-        if name != "adopt" {
-            return Err(CliError::internal(format!(
-                "adopt has no `{name}` subcommand"
-            )));
-        }
-        adopt(globals, sub)
+        adopt(globals, matches)
     }
 }
 
@@ -101,18 +93,26 @@ fn adopt(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, 
     }
     let handling = requested_handling(sub)?;
     let scan = run_scan(&paths)?;
-    let item = scan
-        .items
-        .iter()
-        .find(|item| item.path == target)
-        .ok_or_else(|| {
-            CliError::new(
+    let item = match scan.items.iter().find(|item| item.path == target) {
+        Some(item) => item.clone(),
+        None => {
+            let is_already_managed = target
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink());
+            if is_already_managed {
+                return Err(CliError::new(
+                    ErrorCode::Conflict,
+                    format!("{} is already managed by AgenTuna", target.display()),
+                    "nothing to adopt; inspect the item with `agentuna effective` instead",
+                ));
+            }
+            return Err(CliError::new(
                 ErrorCode::NotFound,
                 format!("no native item was found at {}", target.display()),
                 "run `agentuna migrate scan --json` and adopt one of the listed paths",
-            )
-        })?
-        .clone();
+            ));
+        }
+    };
     let (scope, store_root) = store_scope_for_item(&paths, item.scope)?;
     let authorized = authorized_roots(&paths)?;
 
@@ -276,9 +276,7 @@ fn store_scope_for_item(
     item_scope: at_model::Scope,
 ) -> Result<(at_model::Scope, PathBuf), CliError> {
     let scope = match item_scope {
-        at_model::Scope::Project | at_model::Scope::Local
-            if paths.project_store().is_some() =>
-        {
+        at_model::Scope::Project | at_model::Scope::Local if paths.project_store().is_some() => {
             at_model::Scope::Project
         }
         _ => at_model::Scope::User,

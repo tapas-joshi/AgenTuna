@@ -319,7 +319,6 @@ mod tests {
     #[test]
     fn a_missing_agent_is_refused_without_a_plan() {
         let request = base_request(true);
-        let item_id = request.intent.item_id.clone();
         let error = plan_skill_agent_change(SkillAgentPlanRequest {
             agent_installed: false,
             ..request
@@ -331,20 +330,22 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-        assert_eq!(item_id, item_id);
     }
 
     #[test]
     fn a_locked_item_is_refused_without_a_changeset() {
         let request = base_request(true);
-        let item_id = request.intent.item_id.clone();
+        let item_id = request.intent.item_id;
         let error = plan_skill_agent_change(SkillAgentPlanRequest {
             lock_reason: Some("pinned by policy".to_owned()),
             ..request
         })
         .expect_err("locked items cannot be planned");
         match error {
-            SkillAgentPlanError::Locked { item_id: locked, reason } => {
+            SkillAgentPlanError::Locked {
+                item_id: locked,
+                reason,
+            } => {
                 assert_eq!(locked, item_id);
                 assert_eq!(reason, "pinned by policy");
             }
@@ -377,8 +378,11 @@ mod tests {
 
     #[test]
     fn an_unmanaged_disable_target_is_a_native_conflict() {
-        let destination = PathBuf::from("/tmp/agentuna-test/skills/example");
-        let request = base_request(false);
+        let destination = std::env::temp_dir();
+        let request = SkillAgentPlanRequest {
+            already_enabled: true,
+            ..base_request(false)
+        };
         let error = plan_skill_agent_change(SkillAgentPlanRequest {
             disable_change_set: Some(reviewed_disable_change_set(&destination)),
             deployment: PlanRequest {
@@ -397,7 +401,10 @@ mod tests {
     #[test]
     fn disable_without_a_reviewed_manifest_plan_is_refused() {
         let destination = PathBuf::from("/tmp/agentuna-test/skills/example");
-        let request = base_request(false);
+        let request = SkillAgentPlanRequest {
+            already_enabled: true,
+            ..base_request(false)
+        };
         let error = plan_skill_agent_change(SkillAgentPlanRequest {
             deployment: PlanRequest {
                 destination_managed: true,

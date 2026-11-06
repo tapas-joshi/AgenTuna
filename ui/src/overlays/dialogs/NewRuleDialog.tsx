@@ -117,16 +117,15 @@ export function NewRuleDialog({ open, project, onClose, onCreated }: NewRuleDial
 
   const scopeDisabledReason = useCallback(
     (candidate: RuleScope): string | null => {
-      if (candidate === "global" && options !== null && !options.global_writable) {
+      if (candidate === "global" && options?.global_writable === false) {
         return options.global_reason ?? "Global is read-only";
       }
-      if (candidate === "local" && options !== null && !options.local_available) {
+      if (candidate === "local" && options?.local_available === false) {
         return options.local_reason ?? "Local needs a Git work tree";
       }
       if (
         (candidate === "project" || candidate === "local") &&
-        options !== null &&
-        !options.has_project
+        options?.has_project === false
       ) {
         return "Select a project first";
       }

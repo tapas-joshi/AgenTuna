@@ -130,7 +130,14 @@ agentuna rules list --help
 agentuna rules show --help
 agentuna rules save --help
 agentuna rules new --help
+agentuna migrate --help
+agentuna migrate scan --help
+agentuna migrate plan --help
+agentuna migrate apply --help
+agentuna migrate undo --help
+agentuna migrate status --help
+agentuna adopt --help
 ```
 
-Flags present in this command tree: `--agent`, `--depth`, `--dry-run`, `--fix`, `--flag`, `--force`, `--help`, `--json`, `--kind`, `--no-color`, `--project`, `--read-only`, `--reason`, `--scope`, `--stdin`, `--type`, `--verbose`, `--version`, `--yes`.
+Flags present in this command tree: `--agent`, `--depth`, `--dry-run`, `--fix`, `--flag`, `--force`, `--handling`, `--help`, `--json`, `--keep`, `--keep-a`, `--keep-b`, `--keep-both`, `--kind`, `--no-color`, `--plan`, `--project`, `--read-only`, `--reason`, `--scope`, `--select`, `--stdin`, `--strategy`, `--type`, `--verbose`, `--version`, `--yes`.
 <!-- END GENERATED COMMAND TREE -->

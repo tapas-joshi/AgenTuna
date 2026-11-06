@@ -531,7 +531,7 @@ fn apply_inner(
                 matches!(prior, FileOp::Delete { path: deleted, .. }
                     if Some(deleted.as_path()) == op.destination())
             });
-        validate_expected(op, path, root, replaced_by_prior_move)?;
+        validate_expected(op, path, root, context.store_root, replaced_by_prior_move)?;
     }
     if let Some(guard) = ownership_guard {
         for op in &set.ops {
@@ -967,12 +967,13 @@ fn same_expected(wanted: &ExpectedState, actual: &ExpectedState) -> bool {
 fn validate_expected(
     op: &FileOp,
     path: &Path,
+    path_root: &Path,
     store_root: &Path,
     replaced_by_prior_move: bool,
 ) -> Result<(), ChangeSetApplyError> {
     let mut parent = path.parent();
     while let Some(current) = parent {
-        if current == store_root {
+        if current == path_root {
             break;
         }
         if fs::symlink_metadata(current).is_ok_and(|meta| meta.file_type().is_symlink()) {

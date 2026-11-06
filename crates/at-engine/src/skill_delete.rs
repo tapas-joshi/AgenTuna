@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use at_db::shared::DeploymentCell;
-use at_model::{
-    ChangeSet, ExpectedState, FileOp, ItemId, ItemKind, OperationKind, Scope,
-};
+use at_model::{ChangeSet, ExpectedState, FileOp, ItemId, ItemKind, OperationKind, Scope};
 use at_store::layout::{Slug, StoreLayout};
 use at_store::manifest::StoreManifest;
 use thiserror::Error;
@@ -73,6 +71,12 @@ pub enum DeleteSkillError {
     /// The Global store requires explicit admin permission.
     #[error("permission denied: deleting from the Global skill store requires admin permission")]
     PermissionDenied,
+    /// The skill is locked and cannot be deleted.
+    #[error("skill is locked and cannot be deleted: {reason}")]
+    Locked {
+        /// Reason for the lock.
+        reason: String,
+    },
     /// The manifest has no such skill and no unmanaged folder exists at its path.
     #[error("skill {slug} is missing from the {scope} store manifest")]
     MissingSkill {
@@ -193,10 +197,19 @@ pub fn plan_delete_skill(
             scope: request.store.scope(),
         });
     };
-    let deployments = at_db::deployments::list_deployments_for_item(
-        request.connection,
-        &item.id,
-    )?;
+    let locks = at_db::locks::locks_for_item(request.connection, &item.id)?;
+    if let Some(lock) = locks
+        .iter()
+        .find(|l| l.scope == request.intent.scope || l.scope == Scope::Global)
+    {
+        return Err(DeleteSkillError::Locked {
+            reason: lock
+                .reason
+                .clone()
+                .unwrap_or_else(|| "locked by policy".to_owned()),
+        });
+    }
+    let deployments = at_db::deployments::list_deployments_for_item(request.connection, &item.id)?;
     let next_effective = remaining_effective_copy(
         request.connection,
         &slug,
@@ -369,13 +382,16 @@ fn remaining_effective_copy(
         "SELECT id, scope, source_path FROM items \
          WHERE kind = 'skill' AND slug = ?1 AND id != ?2",
     )?;
-    let rows = statement.query_map(rusqlite::params![slug.as_str(), deleted_id.to_string()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
-    })?;
+    let rows = statement.query_map(
+        rusqlite::params![slug.as_str(), deleted_id.to_string()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )?;
     let mut best: Option<(u8, ItemId, Scope, Option<String>)> = None;
     for row in rows {
         let (id_text, scope_text, path_text) = row?;
@@ -387,34 +403,38 @@ fn remaining_effective_copy(
         };
         // Copies belonging to a different project never shadow this project's resolution.
         if matches!(scope, Scope::Project | Scope::Local) {
-            let same_project = connection
+            let stored_project: Option<String> = connection
                 .query_row(
                     "SELECT project_id FROM items WHERE id = ?1",
                     [id.to_string()],
-                    |row| row.get::<_, Option<String>>(0),
+                    |row| row.get(0),
                 )
-                .map_err(at_db::DbError::Sqlite)?
-                .as_deref()
-                .zip(project_id)
-                .is_some_and(|(stored, requested)| stored == requested);
+                .map_err(at_db::DbError::Sqlite)?;
+            let same_project = match (stored_project.as_deref(), project_id) {
+                (Some(stored), Some(requested)) => stored == requested,
+                (None, _) | (_, None) => true,
+            };
             if !same_project {
                 continue;
             }
         }
         let candidate = (scope.precedence(), id, scope, path_text);
-        if best.as_ref().is_none_or(|(best_precedence, _, _, _)| {
-            candidate.0 > *best_precedence
-        }) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_precedence, _, _, _)| candidate.0 > *best_precedence)
+        {
             best = Some(candidate);
         }
     }
     let _ = deleted_scope;
-    Ok(best.map(|(_, item_id, scope, path_text)| NextEffectiveCopy {
-        item_id,
-        slug: slug.clone(),
-        scope,
-        path: PathBuf::from(path_text.unwrap_or_default()),
-    }))
+    Ok(
+        best.map(|(_, item_id, scope, path_text)| NextEffectiveCopy {
+            item_id,
+            slug: slug.clone(),
+            scope,
+            path: PathBuf::from(path_text.unwrap_or_default()),
+        }),
+    )
 }
 
 /// Computes the filesystem ChangeSet node digest used for directory preconditions.
@@ -453,7 +473,10 @@ mod tests {
     use super::*;
     use at_db::deployments::{DeploymentSpec, upsert_deployment};
     use at_model::{AgentId, ItemState};
-    use at_store::{layout::StoreId, manifest::{StorePath, hash_skill_folder}};
+    use at_store::{
+        layout::StoreId,
+        manifest::{StorePath, hash_skill_folder},
+    };
 
     const SKILL_MD: &[u8] = b"---\nname: review\ndescription: Review changes\n---\n";
 
@@ -465,6 +488,7 @@ mod tests {
         manifest_bytes: Vec<u8>,
         id: ItemId,
         slug: Slug,
+        backup_dir: PathBuf,
     }
 
     /// Creates one store with a managed `review` skill and its item row.
@@ -503,6 +527,9 @@ mod tests {
             )
             .expect("item row");
         let manifest_bytes = manifest.to_bytes().expect("manifest bytes");
+        std::fs::write(store.manifest_path(), &manifest_bytes).expect("manifest write");
+        let backup_dir = store.backups_dir();
+        std::fs::create_dir_all(&backup_dir).expect("backup directory");
         Fixture {
             _temp: temp,
             database,
@@ -511,6 +538,7 @@ mod tests {
             manifest_bytes,
             id,
             slug,
+            backup_dir,
         }
     }
 
@@ -534,15 +562,13 @@ mod tests {
         }
     }
 
-    fn apply_context<'a, 'b>(
+    fn apply_context<'a>(
         fixture: &'a Fixture,
-        recorder: &'b mut at_fs::DbOperationRecorder<'a>,
-    ) -> (at_fs::ApplyContext<'b>, at_fs::ApplyRoots) {
-        std::fs::create_dir_all(fixture.store.backups_dir()).expect("backup directory");
-        let backup_folder = fixture.store.backups_dir();
+        recorder: &'a mut at_fs::DbOperationRecorder<'a>,
+    ) -> (at_fs::ApplyContext<'a>, at_fs::ApplyRoots) {
         let context = at_fs::ApplyContext {
             store_root: fixture.store.root(),
-            backup_folder: &backup_folder,
+            backup_folder: &fixture.backup_dir,
             recorder,
         };
         let root = fixture._temp.path().canonicalize().expect("canonical root");
@@ -552,15 +578,11 @@ mod tests {
 
     fn deployment_row(fixture: &Fixture, agent: &AgentId, mode: &str, target: &Path) {
         let target_text = target.to_string_lossy().into_owned();
-        let spec = DeploymentSpec::new(
-            &fixture.id,
-            agent,
-            fixture.store.scope(),
-            ItemState::Linked,
-        )
-        .with_mode(mode)
-        .with_target_path(&target_text)
-        .with_operation("op_seed");
+        let spec =
+            DeploymentSpec::new(&fixture.id, agent, fixture.store.scope(), ItemState::Linked)
+                .with_mode(mode)
+                .with_target_path(&target_text)
+                .with_operation("op_seed");
         upsert_deployment(fixture.database.connection(), &spec).expect("deployment row");
     }
 
@@ -570,7 +592,13 @@ mod tests {
         let error = plan_delete_skill(request(&fixture, false, None))
             .expect_err("unconfirmed delete must refuse");
         assert!(matches!(error, DeleteSkillError::ConfirmationRequired));
-        assert!(fixture.store.skill_dir(&fixture.slug).join("SKILL.md").exists());
+        assert!(
+            fixture
+                .store
+                .skill_dir(&fixture.slug)
+                .join("SKILL.md")
+                .exists()
+        );
     }
 
     #[test]
@@ -578,7 +606,7 @@ mod tests {
         let fixture = fixture(Scope::User);
         let unmanaged = fixture.store.skill_dir(&fixture.slug);
         // Remove the manifest entry so the on-disk folder is unmanaged.
-        let mut bare = StoreManifest::new(Scope::User, StoreId::new());
+        let bare = StoreManifest::new(Scope::User, StoreId::new());
         let bytes = bare.to_bytes().expect("manifest bytes");
         let error = plan_delete_skill(DeleteSkillRequest {
             manifest: &bare,
@@ -586,7 +614,9 @@ mod tests {
             ..request(&fixture, true, None)
         })
         .expect_err("unmanaged folder");
-        assert!(matches!(error, DeleteSkillError::RefusedUnmanaged(ref path) if path == &unmanaged));
+        assert!(
+            matches!(error, DeleteSkillError::RefusedUnmanaged(ref path) if path == &unmanaged)
+        );
     }
 
     #[test]
@@ -600,6 +630,24 @@ mod tests {
             plan_delete_skill(request),
             Err(DeleteSkillError::PermissionDenied)
         ));
+    }
+    #[test]
+    fn locked_skill_refuses_delete() {
+        let fixture = fixture(Scope::User);
+        at_db::locks::upsert_lock(
+            fixture.database.connection(),
+            &at_db::locks::LockSpec {
+                item_id: &fixture.id,
+                scope: Scope::User,
+                reason: Some("locked by team"),
+                locked_by: Some("admin"),
+            },
+        )
+        .expect("upsert lock");
+        let error = plan_delete_skill(request(&fixture, true, None)).expect_err("locked skill");
+        assert!(
+            matches!(error, DeleteSkillError::Locked { ref reason } if reason == "locked by team")
+        );
     }
 
     #[test]
@@ -623,12 +671,18 @@ mod tests {
             .iter()
             .find(|backup| backup.original_path.as_deref() == Some("skills/review"))
             .or_else(|| {
-                backups
-                    .iter()
-                    .find(|backup| backup.original_path.as_deref().is_some_and(|path| path.ends_with("skills/review")))
+                backups.iter().find(|backup| {
+                    backup
+                        .original_path
+                        .as_deref()
+                        .is_some_and(|path| path.ends_with("skills/review"))
+                })
             })
             .expect("a backups row for the canonical folder");
-        let backup_blob = canonical_backup.backup_path.as_deref().expect("backup blob");
+        let backup_blob = canonical_backup
+            .backup_path
+            .as_deref()
+            .expect("backup blob");
         let restored_bytes =
             std::fs::read(Path::new(backup_blob).join("SKILL.md")).expect("backup content");
         assert_eq!(restored_bytes, SKILL_MD);
@@ -646,14 +700,12 @@ mod tests {
             &outcome.operation_id,
         )
         .expect("undo");
-        assert!(matches!(undo, at_migrate::undo::UndoOutcome::Restored { .. }));
-        let restored = std::fs::read(
-            fixture
-                .store
-                .skill_dir(&fixture.slug)
-                .join("SKILL.md"),
-        )
-        .expect("restored skill file");
+        assert!(matches!(
+            undo,
+            at_migrate::undo::UndoOutcome::Restored { .. }
+        ));
+        let restored = std::fs::read(fixture.store.skill_dir(&fixture.slug).join("SKILL.md"))
+            .expect("restored skill file");
         assert_eq!(restored, SKILL_MD);
     }
 
@@ -672,8 +724,7 @@ mod tests {
         deployment_row(&fixture, &AgentId::Codex, "symlink", &deployed_link);
         deployment_row(&fixture, &AgentId::ClaudeCode, "copy", &deployed_copy);
 
-        let plan =
-            plan_delete_skill(request(&fixture, true, None)).expect("delete plan");
+        let plan = plan_delete_skill(request(&fixture, true, None)).expect("delete plan");
         assert_eq!(plan.deployments.len(), 2);
         let mut recorder = at_fs::DbOperationRecorder::new(fixture.database.connection(), 30);
         let (mut context, roots) = apply_context(&fixture, &mut recorder);
@@ -723,8 +774,7 @@ mod tests {
             (&project_store, &project_id, &mut project_manifest),
         ] {
             std::fs::create_dir_all(store.skill_dir(&slug)).expect("skill dirs");
-            std::fs::write(store.skill_dir(&slug).join("SKILL.md"), SKILL_MD)
-                .expect("skill file");
+            std::fs::write(store.skill_dir(&slug).join("SKILL.md"), SKILL_MD).expect("skill file");
             let hash = hash_skill_folder(&store.skill_dir(&slug)).expect("hash");
             manifest
                 .insert_item(at_store::manifest::ManifestItem::new(
@@ -747,6 +797,9 @@ mod tests {
                 .expect("item row");
         }
         let user_bytes = user_manifest.to_bytes().expect("manifest bytes");
+        std::fs::write(user_store.manifest_path(), &user_bytes).expect("manifest write");
+        let project_bytes = project_manifest.to_bytes().expect("manifest bytes");
+        std::fs::write(project_store.manifest_path(), &project_bytes).expect("manifest write");
         let plan = plan_delete_skill(DeleteSkillRequest {
             intent: DeleteSkill {
                 slug: slug.clone(),
@@ -787,8 +840,7 @@ mod tests {
                 rusqlite::params![fixture.id.to_string()],
             )
             .expect("link source");
-        let plan =
-            plan_delete_skill(request(&fixture, true, None)).expect("delete plan");
+        let plan = plan_delete_skill(request(&fixture, true, None)).expect("delete plan");
         let mut recorder = at_fs::DbOperationRecorder::new(fixture.database.connection(), 30);
         let (mut context, roots) = apply_context(&fixture, &mut recorder);
         apply_delete_skill(fixture.database.connection(), &plan, &mut context, &roots)

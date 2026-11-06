@@ -148,7 +148,7 @@ export function ConnectAgentDialog({ agent, onClose, onSaved }: ConnectAgentDial
             Cancel
           </Button>
           <Button variant="secondary" onClick={() => void browse()}>
-            Browse…
+            Choose folder…
           </Button>
           <Button
             variant="primary"

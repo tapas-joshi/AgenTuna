@@ -26,13 +26,13 @@ pub fn resolve_process_paths(project_root: Option<&Path>) -> Result<AppPaths, Pa
 
 /// Resolves the paths one command operates on.
 ///
-/// An [`AppPaths`] injected into the [`AppState`] wins over process resolution, so a test or
+/// An [`AppPaths`] injected into the [`super::state::AppState`] wins over process resolution, so a test or
 /// recovery session never reads a developer's real home; the selected project root is
 /// re-resolved through the same central path policy either way. Production resolves from the
 /// process environment exactly like the CLI.
 ///
 /// # Errors
-/// [`CommandError::Unavailable`] when no home can be resolved or the project root is invalid.
+/// Returns [`CommandError`] when no home can be resolved or the project root is invalid.
 pub fn resolve_command_paths(
     state: &super::state::AppState,
     project_root: Option<&Path>,

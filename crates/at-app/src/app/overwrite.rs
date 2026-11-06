@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use super::commands::{CommandError, CommandErrorCode};
-use super::paths::resolve_process_paths;
 use super::state::AppState;
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_fs::MoveAsideOutcome;
@@ -520,7 +519,7 @@ pub fn operation_undo_inner(
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let authorized = adopt_authorized_roots(&paths)?;
     let database = state.database().map_err(CommandError::unavailable)?;
-    let detail = at_db::ops::operation_detail(database.connection(), &operation_id)
+    let detail = at_db::ops::operation_detail(database.connection(), operation_id)
         .map_err(|_| CommandError::internal("operation history is unavailable"))?
         .ok_or_else(|| {
             CommandError::new(
@@ -543,7 +542,7 @@ pub fn operation_undo_inner(
             actor: at_db::ops::OperationActor::Ui,
             force,
         },
-        &operation_id,
+        operation_id,
     )
     .map_err(|error| {
         CommandError::new(
