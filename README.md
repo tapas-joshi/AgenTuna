@@ -37,4 +37,8 @@ pnpm --dir ui test              # Vitest + Testing Library
 pnpm --dir ui build             # typecheck + production bundle
 ```
 
+### UI visual snapshots
+
+Playwright runs the production Vite preview at 1x and 2x scale. Install the Chromium browser outside the repository with `pnpm --dir ui exec playwright install chromium`, then run `pnpm --dir ui run visual`. Review changed images under `ui/e2e/snapshots/`; update the baselines deliberately with `pnpm --dir ui run visual:update`.
+
 Commit changes to `ui/src/generated/`; do not edit those files by hand.

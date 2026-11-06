@@ -246,6 +246,10 @@ fn http_error(kind: HttpErrorKind, message: &str, initializing: bool) -> McpErro
     let (kind, suggested_action) = match kind {
         HttpErrorKind::SignInRequired => (McpErrorKind::SignInRequired, "Sign in to this server."),
         HttpErrorKind::TlsError => (McpErrorKind::TlsError, "Review the server certificate."),
+        HttpErrorKind::ProtocolVersionMismatch => (
+            McpErrorKind::ProtocolVersionMismatch,
+            "Update the server to a supported MCP protocol version.",
+        ),
         HttpErrorKind::Timeout if initializing => (
             McpErrorKind::HandshakeTimeout,
             "Check whether the endpoint completes MCP initialization.",
@@ -320,7 +324,12 @@ mod tests {
     }
 
     #[test]
-    fn injected_failures_cover_connection_error_taxonomy() {
+    fn injected_failures_cover_every_connection_error_kind() {
+        let consent_required = super::McpError {
+            kind: McpErrorKind::ConsentRequired,
+            message: "approval required".to_owned(),
+            suggested_action: "approve".to_owned(),
+        };
         let cases = [
             (
                 session_error(SessionErrorKind::UnresolvedCommand, "missing"),
@@ -347,9 +356,22 @@ mod tests {
                 McpErrorKind::ProtocolVersionMismatch,
             ),
             (
+                http_error(
+                    HttpErrorKind::ProtocolVersionMismatch,
+                    "unsupported protocol version",
+                    true,
+                ),
+                McpErrorKind::ProtocolVersionMismatch,
+            ),
+            (
+                session_error(SessionErrorKind::NotStdio, "transport"),
+                McpErrorKind::TransportUnsupported,
+            ),
+            (
                 session_error(SessionErrorKind::Cancelled, "cancelled"),
                 McpErrorKind::Cancelled,
             ),
+            (consent_required, McpErrorKind::ConsentRequired),
             (
                 session_error(SessionErrorKind::SpawnFailed, "spawn"),
                 McpErrorKind::ConnectionFailed,
@@ -390,12 +412,29 @@ mod tests {
                 },
             ),
         ];
-        assert!(
-            cases
-                .iter()
-                .all(|(error, expected)| error.kind() == expected)
+        let covered: HashSet<_> = cases.iter().map(|(_, kind)| kind).collect();
+        assert_eq!(
+            covered,
+            HashSet::from([
+                &McpErrorKind::UnresolvedCommand,
+                &McpErrorKind::NotExecutable,
+                &McpErrorKind::PermissionDenied,
+                &McpErrorKind::StartupTimeout,
+                &McpErrorKind::HandshakeTimeout,
+                &McpErrorKind::ToolListTimeout,
+                &McpErrorKind::ProtocolVersionMismatch,
+                &McpErrorKind::Unauthorized401,
+                &McpErrorKind::SignInRequired,
+                &McpErrorKind::TlsError,
+                &McpErrorKind::ServerError {
+                    code: 503,
+                    message: "The server returned HTTP 503.".to_owned(),
+                },
+                &McpErrorKind::TransportUnsupported,
+                &McpErrorKind::ConsentRequired,
+                &McpErrorKind::Cancelled,
+                &McpErrorKind::ConnectionFailed,
+            ])
         );
-        let covered: HashSet<_> = cases.iter().map(|(_, expected)| expected).collect();
-        assert!(covered.len() >= 10);
     }
 }

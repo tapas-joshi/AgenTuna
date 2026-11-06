@@ -41,6 +41,57 @@ describe("AppState", () => {
     expect(state.getSnapshot().route).toBe("skills");
     expect(state.getSnapshot().editors.overview).toBeUndefined();
   });
+  test("back pops one route and requests a dirty-navigation decision", () => {
+    const effects: AppEffect[] = [];
+    const state = createAppState({ effects: (effect) => effects.push(effect) });
+    state.navigate("skills");
+    state.navigate("mcp-list");
+    state.setEditorBuffer("mcp-list", { route: "mcp-list", value: "edited", savedValue: "saved" });
+    expect(state.back()).toBe(false);
+    expect(state.getSnapshot().route).toBe("mcp-list");
+    expect(effects.at(-1)).toEqual({ type: "dirty-navigation", from: "mcp-list", to: "skills" });
+    expect(state.back("discard")).toBe(true);
+    expect(state.getSnapshot().route).toBe("skills");
+    expect(state.getSnapshot().routeStack).toEqual(["overview", "skills"]);
+  });
+  test("Save invokes the active buffer handler before leaving", async () => {
+    const save = vi.fn(async () => undefined);
+    const state = createAppState();
+    state.setEditorBuffer("overview", {
+      route: "overview",
+      value: "updated",
+      savedValue: "old",
+      onSave: save,
+    });
+    expect(state.navigate("skills")).toBe(false);
+    expect(state.navigate("skills", "save")).toBe(false);
+    await vi.waitFor(() => expect(state.getSnapshot().route).toBe("skills"));
+    expect(save).toHaveBeenCalledOnce();
+  });
+  test("restores project and scope before the app shell is shown", () => {
+    const state = createAppState();
+    state.restore("project-42", "project");
+    expect(state.getSnapshot().activeProject).toBe("project-42");
+    expect(state.getSnapshot().scope).toBe("project");
+    expect(state.getSnapshot().route).toBe("overview");
+  });
+  test("persists changed scope for active project", async () => {
+    const effects: AppEffect[] = [];
+    const state = createAppState({ effects: (effect) => effects.push(effect) });
+    await state.selectProject("project-7");
+    state.receiveScope("local");
+    expect(effects).toContainEqual({ type: "persist-last-scope", projectId: "project-7", scope: "local" });
+    expect(state.getSnapshot().route).toBe("effective");
+  });
+  test("item deep links route by kind and unknown items toast without navigation", () => {
+    const state = createAppState();
+    state.openItem("itm_bad", null);
+    expect(state.getSnapshot().route).toBe("overview");
+    expect(state.toasts.getSnapshot().visible[0]?.message).toBe("Item not found");
+    state.openItem("itm_mcp", { kind: "mcp_server", scope: "user", project_id: null });
+    expect(state.getSnapshot().route).toBe("mcp-detail");
+    expect(state.getSnapshot().screenState["detail:itemId"]).toBe("itm_mcp");
+  });
 
   test("a burst of external changes produces one trailing-edge reload", () => {
     vi.useFakeTimers();
@@ -71,6 +122,7 @@ describe("AppState", () => {
 
   test("tracks route changes and background job handles", () => {
     const state = createAppState();
+    state.restore("project-1", "user");
     for (const route of ["skills", "mcp-list", "instructions", "agents", "effective", "drift"] as const) {
       state.navigate(route);
     }

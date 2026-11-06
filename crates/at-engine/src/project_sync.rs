@@ -4,13 +4,16 @@
 //! maps each reported label to the action permitted by the product contract.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::state::{DeploymentFacts, DerivedState, classify};
 use at_db::deployments::list_deployments_for_item;
 use at_db::{Database, DbError};
-use at_model::{ItemId, Scope, SyncLabel};
-
-use crate::state::{DeploymentFacts, DerivedState, classify};
+use at_fs::changeset::{ApplyContext, ApplyOutcome, ChangeSetApplyError};
+use at_model::{
+    ChangeSet, ExpectedState as ModelExpectedState, FileOp, ItemId, OperationKind, Scope, SyncLabel,
+};
 
 /// The UI action allowed for a project/library relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +105,184 @@ impl ProjectSyncProvider for DatabaseProjectSyncProvider<'_> {
                 SyncRecord::from_derived(classify(facts))
             }))
     }
+}
+
+/// Direction of a reviewed project/library synchronization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SyncDirection {
+    /// Copy the Project item into the User library.
+    Push,
+    /// Copy the User library item into the Project store.
+    Pull,
+}
+
+/// Inputs needed to preview one file-level sync replacement.
+///
+/// Paths are relative to the shared root supplied to [`apply_sync_plan`]. The caller provides
+/// hashes classified by TA-005 and exact file bytes from the selected source and destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncCopyRequest {
+    /// Stable identity of the item being synchronized.
+    pub item_id: ItemId,
+    /// Registry id of the project whose copy participates in this sync.
+    pub project_id: String,
+    /// Direction requested by the caller.
+    pub direction: SyncDirection,
+    /// Unmodified classification from TA-005.
+    pub label: SyncLabel,
+    /// Last common base hash used by TA-005.
+    pub base_hash: Option<String>,
+    /// Current destination hash, or `None` when the destination is absent.
+    pub destination_hash: Option<String>,
+    /// Source content hash.
+    pub source_hash: String,
+    /// Hash of the destination file at `destination_path`, or `None` when absent.
+    pub destination_file_hash: Option<String>,
+    /// Caller explicitly reviewed the destination diff for a target-changed case.
+    pub force_reviewed: bool,
+    /// Hash of source file bytes (distinct from the item's aggregate hash for skill trees).
+    pub source_file_hash: String,
+    /// Destination path relative to the root passed to apply.
+    pub destination_path: PathBuf,
+    /// Whether the destination store root exists; pull must never recreate a missing project.
+    pub destination_root_exists: bool,
+    /// Exact source bytes shown in the reviewed preview.
+    pub source_bytes: Vec<u8>,
+}
+
+/// Result of planning a sync action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SyncPlan {
+    /// The exact source and destination contents already agree.
+    AlreadyInSync,
+    /// Reviewed file replacement, to apply without rebuilding.
+    Change(ChangeSet),
+}
+
+/// Errors encountered while planning a project/library synchronization.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SyncPlanError {
+    /// The TA-005 label does not permit the requested direction.
+    #[error("sync label {label:?} does not permit {direction:?}")]
+    DirectionNotAllowed {
+        /// Supplied TA-005 label.
+        label: SyncLabel,
+        /// Requested direction.
+        direction: SyncDirection,
+    },
+    /// Both copies changed from the recorded base; compare them instead of overwriting.
+    #[error("project and library copies conflict; compare before synchronizing")]
+    Conflict,
+    /// The destination changed after the common base was recorded.
+    #[error("sync destination changed from the recorded base")]
+    TargetChanged,
+    /// Pull cannot create a project store whose root is missing.
+    #[error("project store is missing; sync does not recreate it")]
+    MissingProjectStore,
+    /// Source content does not match its claimed hash.
+    #[error("sync source bytes do not match the supplied content hash")]
+    SourceHashMismatch,
+    /// Invalid content hash or change-set structure.
+    #[error("invalid sync change set: {0}")]
+    ChangeSet(#[from] at_model::ChangeSetError),
+    /// The filesystem apply pipeline rejected the reviewed plan.
+    #[error(transparent)]
+    Apply(#[from] ChangeSetApplyError),
+}
+
+/// Builds a reviewed ChangeSet for a single-file project/library copy.
+///
+/// The plan contains a hash precondition for the current destination, so changes made after
+/// preview are rejected by at-fs. Conflicts and drift are always refused. The `base_hash`
+/// comparison prevents replacing an externally edited destination.
+///
+/// # Errors
+/// Returns a typed refusal when the label/direction is incompatible, the copies conflict, or
+/// the destination no longer matches the recorded base; invalid paths/hashes are also refused.
+pub fn plan_sync_copy(request: SyncCopyRequest) -> Result<SyncPlan, SyncPlanError> {
+    if matches!(request.label, SyncLabel::Conflict | SyncLabel::Drifted) {
+        return Err(SyncPlanError::Conflict);
+    }
+    let permitted = matches!(
+        (request.direction, request.label),
+        (
+            SyncDirection::Push,
+            SyncLabel::ProjectOnly | SyncLabel::ProjectNewer | SyncLabel::InSync,
+        ) | (
+            SyncDirection::Pull,
+            SyncLabel::LibraryOnly | SyncLabel::LibraryNewer | SyncLabel::InSync,
+        )
+    );
+    if !permitted {
+        return Err(SyncPlanError::DirectionNotAllowed {
+            label: request.label,
+            direction: request.direction,
+        });
+    }
+    if request.direction == SyncDirection::Pull && !request.destination_root_exists {
+        return Err(SyncPlanError::MissingProjectStore);
+    }
+    if at_model::ContentHash::parse(&request.source_hash).is_err()
+        || at_fs::sha256_hex(&request.source_bytes) != request.source_file_hash
+    {
+        return Err(SyncPlanError::SourceHashMismatch);
+    }
+    if let Some(hash) = &request.destination_hash {
+        at_model::ContentHash::parse(hash)?;
+    }
+    if let Some(hash) = &request.destination_file_hash {
+        at_model::ContentHash::parse(hash)?;
+    }
+    if request.source_hash == request.destination_hash.as_deref().unwrap_or_default() {
+        return Ok(SyncPlan::AlreadyInSync);
+    }
+    if request.destination_hash != request.base_hash && !request.force_reviewed {
+        return Err(SyncPlanError::TargetChanged);
+    }
+    let expected = match request.destination_file_hash {
+        Some(hash) => ModelExpectedState::hash(hash)?,
+        None => ModelExpectedState::absent(),
+    };
+    let action = match request.direction {
+        SyncDirection::Push => "sync_push",
+        SyncDirection::Pull => "sync_pull",
+    };
+    let now = time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64;
+    let change_set = ChangeSet {
+        id: uuid::Uuid::now_v7().to_string(),
+        preview_id: uuid::Uuid::now_v7().to_string(),
+        operation_kind: OperationKind::parse(action)?,
+        scope: Some(match request.direction {
+            SyncDirection::Push => Scope::User,
+            SyncDirection::Pull => Scope::Project,
+        }),
+        project_id: Some(request.project_id),
+        summary: format!("{action} item {}", request.item_id),
+        ops: vec![FileOp::Write {
+            path: request.destination_path,
+            bytes: request.source_bytes,
+            expected,
+            follow_symlink: false,
+            backup: true,
+        }],
+        created_at_unix_seconds: now,
+    };
+    change_set.validate()?;
+    Ok(SyncPlan::Change(change_set))
+}
+
+/// Applies the exact ChangeSet returned from [`plan_sync_copy`].
+///
+/// # Errors
+/// Returns an at-fs error if the reviewed destination changed or the journaled write fails.
+pub fn apply_sync_plan(
+    change_set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+) -> Result<ApplyOutcome, SyncPlanError> {
+    Ok(at_fs::changeset::apply(change_set, context)?)
 }
 
 /// Failure reading a project sync record or using its cache.

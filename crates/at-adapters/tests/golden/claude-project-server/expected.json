@@ -1,0 +1,19 @@
+{
+  // Claude-owned state must remain byte-identical.
+  "theme": "dark",
+  "projects": {
+    "/workspace/demo": {
+      "hasTrustDialogAccepted": true,
+      "mcpServers": {
+        "native-server": { "command": "native", "args": [] },
+        "project-server": {
+          "type": "stdio",
+          "command": "python"
+        }
+      }
+    }
+  },
+  "mcpServers": {
+    "existing": { "command": "old", "args": [], "env": {"MODE": "dev"} }
+  }
+}

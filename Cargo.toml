@@ -55,6 +55,7 @@ at-app = { path = "crates/at-app" }
 
 # Third-party shared dependencies
 tauri = { version = "2.12", default-features = false, features = ["wry", "compression"] }
+tauri-plugin-dialog = "2"
 tauri-build = "2.7"
 ts-rs = "12"
 tokio = { version = "1", features = ["full"] }

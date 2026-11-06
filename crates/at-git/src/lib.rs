@@ -6,8 +6,10 @@
 
 pub mod import;
 pub mod local;
+pub mod marketplace;
 pub mod policy;
 pub mod remote;
+pub mod source_check;
 
 pub use local::{
     IgnoreRule, LOCAL_GIT_TIMEOUT, LocalGitCall, LocalGitError, LocalGitRunner,

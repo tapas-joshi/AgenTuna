@@ -221,6 +221,27 @@ fn servers_sorted_by_slug() {
 }
 
 #[test]
+fn empty_mcp_document_matches_byte_golden_and_round_trips() {
+    let (_dir, layout) = initialized();
+    let path = layout.mcp_file();
+    fs::remove_file(&path).expect("remove initialized file");
+
+    McpStore::empty()
+        .save(&layout, ExpectedState::Absent, BackupPolicy::None)
+        .expect("save empty store");
+    let first = fs::read(&path).expect("read saved mcp.json");
+    assert_eq!(first, include_bytes!("fixtures/mcp-empty.json"));
+
+    let loaded = McpStore::load(&layout).expect("reload");
+    let expected = expected_state(&loaded);
+    loaded
+        .store
+        .save(&layout, expected, BackupPolicy::None)
+        .expect("save reloaded store");
+    assert_eq!(fs::read(path).expect("second read"), first);
+}
+
+#[test]
 fn concurrent_save_is_refused() {
     let (_dir, layout) = initialized();
     let path = layout.mcp_file();

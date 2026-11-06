@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use at_model::{EnvValue, McpServer, McpServerId, McpTransport, NetworkPolicy, OAuthProfile};
 use at_secrets::SecretStore;
-use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, PaginatedRequestParams, Tool};
+use rmcp::model::{
+    ClientCapabilities, ClientConfig, Implementation, PaginatedRequestParams, ProtocolVersion, Tool,
+};
 use rmcp::service::{RoleClient, RunningService, serve_client_with_ct};
 use rmcp::transport::auth::{AuthClient, AuthError, AuthorizationManager};
 use rmcp::transport::streamable_http_client::{
@@ -54,6 +56,8 @@ pub enum HttpErrorKind {
     SignInRequired,
     /// TLS validation failed.
     TlsError,
+    /// The server selected a protocol version this client does not support.
+    ProtocolVersionMismatch,
     /// The handshake or a request timed out.
     Timeout,
     /// The peer answered with something that is not a valid MCP message.
@@ -224,6 +228,40 @@ impl HttpClient {
         server: &McpServer,
         cancel: &CancellationToken,
     ) -> Result<HttpSession, HttpError> {
+        self.open_with_intent(
+            server,
+            cancel,
+            ConnectIntent::UserTest,
+            at_model::NetworkAction::McpRemoteConnect,
+        )
+        .await
+    }
+
+    /// Opens an HTTP session for a scheduled health check through its dedicated policy action.
+    ///
+    /// # Errors
+    /// [`HttpError`] on policy denial, TLS failure, timeout, protocol error or auth failure.
+    pub async fn open_scheduled_health(
+        &self,
+        server: &McpServer,
+        cancel: &CancellationToken,
+    ) -> Result<HttpSession, HttpError> {
+        self.open_with_intent(
+            server,
+            cancel,
+            ConnectIntent::Scheduled,
+            at_model::NetworkAction::ScheduledHttpHealthCheck,
+        )
+        .await
+    }
+
+    async fn open_with_intent(
+        &self,
+        server: &McpServer,
+        cancel: &CancellationToken,
+        intent: ConnectIntent,
+        action: at_model::NetworkAction,
+    ) -> Result<HttpSession, HttpError> {
         if cancel.is_cancelled() {
             return Err(HttpError::cancelled());
         }
@@ -241,13 +279,8 @@ impl HttpClient {
         };
 
         // Policy gate: no socket opens before this passes.
-        let authorized = authorize_connect(
-            self.policy.as_ref(),
-            server,
-            ConnectIntent::UserTest,
-            at_model::NetworkAction::McpRemoteConnect,
-        )
-        .map_err(HttpError::denied)?;
+        let authorized = authorize_connect(self.policy.as_ref(), server, intent, action)
+            .map_err(HttpError::denied)?;
         let McpAccess::Http(authorized) = authorized else {
             return Err(HttpError::new(
                 HttpErrorKind::Transport,
@@ -311,6 +344,24 @@ impl HttpClient {
                 },
             }
         };
+        let version = running
+            .peer_info()
+            .map(|info| info.protocol_version.clone());
+        match version {
+            Some(version) if ProtocolVersion::KNOWN_VERSIONS.contains(&version) => {}
+            Some(version) => {
+                return Err(HttpError::new(
+                    HttpErrorKind::ProtocolVersionMismatch,
+                    format!("The server selected unsupported protocol version `{version}`."),
+                ));
+            }
+            None => {
+                return Err(HttpError::new(
+                    HttpErrorKind::ProtocolVersionMismatch,
+                    "The server did not report a protocol version.",
+                ));
+            }
+        }
 
         Ok(HttpSession {
             running,
@@ -473,6 +524,10 @@ fn map_initialize_error(error: &rmcp::service::ClientInitializeError) -> HttpErr
     }
     match error {
         ClientInitializeError::Cancelled => HttpError::cancelled(),
+        ClientInitializeError::NoCompatibleProtocolVersion { .. } => HttpError::new(
+            HttpErrorKind::ProtocolVersionMismatch,
+            "The server and client do not share a supported MCP protocol version.",
+        ),
         ClientInitializeError::ConflictInitResponseId(expected, got) => HttpError::protocol(
             format!("conflict initialized response id: expected {expected}, got {got}"),
         ),
@@ -532,5 +587,51 @@ fn map_auth_error(error: &AuthError) -> HttpError {
                 HttpError::transport(error.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpClient, HttpErrorKind, map_initialize_error};
+    use at_model::{McpServer, McpServerDef, McpServerId, McpTransport, NetworkPolicy, Scope};
+    use std::sync::Arc;
+
+    #[test]
+    fn no_shared_protocol_version_has_its_own_http_error_kind() {
+        let error = rmcp::service::ClientInitializeError::NoCompatibleProtocolVersion {
+            client_supported: Vec::new(),
+            server_supported: Vec::new(),
+        };
+        assert_eq!(
+            map_initialize_error(&error).kind(),
+            HttpErrorKind::ProtocolVersionMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_health_client_requires_background_health_policy() {
+        let server = McpServer::from_def(
+            McpServerId::new(),
+            Scope::User,
+            McpServerDef {
+                display_name: "remote".to_owned(),
+                description: None,
+                transport: McpTransport::Http {
+                    url: "https://mcp.example.test".parse().unwrap(),
+                    headers: Default::default(),
+                    oauth: None,
+                },
+                extra: Default::default(),
+            },
+        );
+        let client = HttpClient::new(
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(at_secrets::MemoryStore::default()),
+        );
+        let error = client
+            .open_scheduled_health(&server, &tokio_util::sync::CancellationToken::new())
+            .await
+            .expect_err("background health is off by default");
+        assert_eq!(error.kind(), HttpErrorKind::Denied);
     }
 }

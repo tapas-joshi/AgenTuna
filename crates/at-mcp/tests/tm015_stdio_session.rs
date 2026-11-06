@@ -175,7 +175,67 @@ async fn handshake_completes_and_tools_paginate() {
     assert_eq!(report.steps.first(), Some(&ShutdownStep::CloseTransport));
     assert!(session.list_tools(&cancel).await.is_err(), "closed session");
 }
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_listing_caps_at_500_and_marks_truncation() {
+    let launch = launch(&["--tools", "501", "--page-size", "100"]);
+    let mut session = open(&launch, Arc::new(MemoryStore::new()), fast_policy())
+        .await
+        .expect("handshake");
+    let listing = session
+        .list_tools(&CancellationToken::new())
+        .await
+        .expect("tools");
+    assert_eq!(listing.tools.len(), 500);
+    assert!(
+        listing.truncated,
+        "the result identifies the hidden 501st tool"
+    );
+    session.shutdown(&CancellationToken::new()).await;
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_protocol_version_maps_to_the_stable_error_kind() {
+    let launch = launch(&["--protocol-version", "unsupported-protocol-version"]);
+    let error = open(&launch, Arc::new(MemoryStore::new()), fast_policy())
+        .await
+        .expect_err("the server reports an unsupported protocol version");
+    assert_eq!(error.kind(), SessionErrorKind::ProtocolVersionMismatch);
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_exit_during_tools_list_maps_to_connection_failed() {
+    let temp = TempDir::new().expect("temp dir");
+    let server = McpServer {
+        id: McpServerId::new(),
+        display_name: "exiting fixture".to_owned(),
+        description: None,
+        transport: McpTransport::Stdio {
+            command: fake_server().display().to_string(),
+            args: vec!["--exit-after-init".to_owned(), "1".to_owned()],
+            cwd: Some(temp.path().to_path_buf()),
+            env: BTreeMap::new(),
+        },
+        scope: Scope::User,
+        extra: BTreeMap::new(),
+    };
+    let stdio = client_with(Arc::new(MemoryStore::new()), Some(fast_policy()));
+    let http = HttpClient::new(
+        Arc::new(NetworkPolicy::default()),
+        Arc::new(MemoryStore::new()),
+    );
+    let launch = StdioLaunch::from_server(&server).expect("stdio launch");
+    let result = test_connection(
+        &server,
+        &stdio,
+        &http,
+        Some(&LaunchConsent::user_approved(&launch)),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        result.error.as_ref().map(|error| error.kind()),
+        Some(&McpErrorKind::ConnectionFailed)
+    );
+}
 #[tokio::test(flavor = "multi_thread")]
 async fn a_megabyte_of_stderr_does_not_block_the_handshake() {
     let launch = launch(&["--stderr-bytes", "1048576", "--tools", "2"]);
@@ -251,7 +311,9 @@ async fn shutdown_ignores_sigint_and_stops_on_sigterm() {
         .await
         .expect("handshake");
 
+    let started = Instant::now();
     let report = session.shutdown(&CancellationToken::new()).await;
+    assert!(started.elapsed() < Duration::from_secs(3));
 
     assert!(report.ran(ShutdownStep::Interrupt));
     assert!(report.ran(ShutdownStep::Terminate));

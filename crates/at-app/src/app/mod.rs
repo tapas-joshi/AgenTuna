@@ -4,22 +4,28 @@ pub mod bridge;
 pub mod cli_install;
 pub mod commands;
 pub mod config;
+pub mod diagnostics;
+pub mod dialogs;
 pub mod instance;
+pub mod jobs;
 pub mod linux;
+pub mod logs;
 pub mod menu;
 pub mod network;
 pub mod paths;
 pub mod privilege;
+pub mod projects;
 pub mod recovery;
 pub mod settings;
 pub mod state;
 pub mod updater;
+pub mod window_state;
 
 use at_store::config::LogLevel;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use bridge::{JobBridge, TauriEventSink, TracingOperationsLog};
 use cli_install::CliInstaller;
@@ -100,36 +106,91 @@ pub fn run() -> tauri::Result<()> {
     let setup_instance = Arc::clone(&instance_state);
     let setup_config = Arc::clone(&config);
     let setup_logging = logging.clone();
-
-    let builder = tauri::Builder::default().setup(move |app| {
-        let focus_handle = app.handle().clone();
-        if let Err(error) =
-            setup_instance.start_activation(move || focus_main_window(&focus_handle))
-        {
-            tracing::warn!(
-                %error,
-                "activation listener unavailable; a second launch cannot focus this window"
-            );
+    let setup_paths = paths.clone();
+    let database = match at_db::Database::open_file(paths.db_path()) {
+        Ok(database) => Some(database),
+        Err(error) => {
+            tracing::error!(%error, "application database unavailable");
+            None
         }
-        let sink = Arc::new(TauriEventSink::new(app.handle().clone()));
-        let bridge = Arc::new(JobBridge::new(sink, Arc::new(TracingOperationsLog)));
-        let cli = match CliInstaller::for_current_app() {
-            Ok(installer) => Some(installer),
-            Err(error) => {
-                tracing::warn!(error = %error, "packaged CLI installer unavailable");
-                None
+    };
+
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .setup(move |app| {
+            app.set_menu(menu::build(app.handle())?)?;
+            app.handle().on_menu_event(|handle, event| {
+            if let Some(action) = menu::MenuAction::from_id(event.id().as_ref())
+                && let Err(error) = handle.emit("menu-action", action.id())
+            {
+                tracing::warn!(%error, action = action.id(), "native menu action dispatch failed");
             }
-        };
-        app.manage(
-            AppState::new(bridge, cli)
+        });
+            let focus_handle = app.handle().clone();
+            if let Err(error) =
+                setup_instance.start_activation(move || focus_main_window(&focus_handle))
+            {
+                tracing::warn!(
+                    %error,
+                    "activation listener unavailable; a second launch cannot focus this window"
+                );
+            }
+            let sink = Arc::new(TauriEventSink::new(app.handle().clone()));
+            let bridge = Arc::new(JobBridge::new(sink, Arc::new(TracingOperationsLog)));
+            let cli = match CliInstaller::for_current_app() {
+                Ok(installer) => Some(installer),
+                Err(error) => {
+                    tracing::warn!(error = %error, "packaged CLI installer unavailable");
+                    None
+                }
+            };
+            let state = AppState::new(bridge, cli)
                 .with_config(setup_config)
                 .with_instance(instance_state)
-                .with_logging(setup_logging),
-        );
-        // One process-wide policy: nothing reaches the network without its permission.
-        app.manage(NetworkState::default());
-        Ok(())
-    });
+                .with_logging(setup_logging);
+            let state = match database {
+                Some(database) => state.with_database(database),
+                None => state,
+            };
+            app.manage(state);
+            if let Some(window) = app.get_webview_window("main") {
+                window_state::restore_window(&window, app.state::<AppState>().inner());
+            }
+            // One process-wide policy: nothing reaches the network without its permission.
+            let jobs = jobs::JobsControl::default();
+            app.manage(jobs.clone());
+            let network = NetworkState::default();
+            app.manage(network.clone());
+            let event_sink = jobs::TauriHealthEventSink::new(app.handle().clone());
+            if let Ok(database) = app.state::<AppState>().database_handle() {
+                let paths = setup_paths.clone();
+                let network = network.clone();
+                let jobs = jobs.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut scheduler = jobs::HealthScheduler::new();
+                    let runner = jobs::McpHealthRunner::default();
+                    let clock = jobs::SystemClock;
+                    let jitter = jobs::SystemJitter::default();
+                    let timer = jobs::TokioSchedulerTimer;
+                    let environment = jobs::SchedulerEnvironment {
+                        paths: &paths,
+                        database: &database,
+                        network: &network,
+                        clock: &clock,
+                        jitter: &jitter,
+                        runner: &runner,
+                        timer: &timer,
+                        event_sink: Some(&event_sink),
+                    };
+                    if let Err(error) =
+                        jobs::run_scheduler(&mut scheduler, &jobs, &environment).await
+                    {
+                        tracing::warn!(%error, "MCP health scheduler stopped");
+                    }
+                });
+            }
+            Ok(())
+        });
 
     #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -139,11 +200,26 @@ pub fn run() -> tauri::Result<()> {
         commands::cli_install_status,
         commands::cli_install,
         commands::cli_uninstall,
+        commands::settings_load,
+        commands::app_paths,
+        commands::settings_set,
+        commands::item_lookup,
+        window_state::window_state_load,
+        window_state::window_state_save,
+        window_state::window_state_reset,
+        logs::logs_tail,
+        logs::logs_reveal,
+        diagnostics::diagnostics_export,
+        projects::projects_list,
+        projects::projects_add,
+        projects::projects_choose_folder,
+        projects::projects_scan,
         network::network_policy,
         network::network_events,
         network::network_clear_events,
         network::network_set_offline,
         config::config_report,
+        commands::mcp_test_connection,
         commands::dev_run_job
     ]);
     #[cfg(not(debug_assertions))]
@@ -154,18 +230,65 @@ pub fn run() -> tauri::Result<()> {
         commands::cli_install_status,
         commands::cli_install,
         commands::cli_uninstall,
+        commands::app_paths,
+        commands::settings_load,
+        commands::settings_set,
+        commands::item_lookup,
+        window_state::window_state_load,
+        window_state::window_state_save,
+        window_state::window_state_reset,
+        logs::logs_tail,
+        logs::logs_reveal,
+        diagnostics::diagnostics_export,
         network::network_policy,
         network::network_events,
+        projects::projects_list,
+        projects::projects_add,
+        projects::projects_choose_folder,
+        projects::projects_scan,
         network::network_clear_events,
         network::network_set_offline,
-        config::config_report
+        config::config_report,
+        commands::mcp_test_connection
     ]);
 
     let exit_paths = paths.clone();
     let app = builder.build(tauri::generate_context!())?;
     app.run(move |handle, event| {
+        if let tauri::RunEvent::WindowEvent { label, event, .. } = &event
+            && label == "main"
+            && matches!(
+                event,
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+            )
+            && let (Some(window), Some(state)) = (
+                handle.get_webview_window("main"),
+                handle.try_state::<AppState>(),
+            )
+        {
+            window_state::persist_window(&window, &state);
+        }
+        if let tauri::RunEvent::WindowEvent { label, .. } = &event
+            && label == "main"
+            && let (Some(window), Some(jobs)) = (
+                handle.get_webview_window("main"),
+                handle.try_state::<jobs::JobsControl>(),
+            )
+        {
+            let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+            let paused = jobs.update_window(
+                window.is_visible().unwrap_or(false),
+                window.is_minimized().unwrap_or(false),
+                window.is_focused().unwrap_or(false),
+                now_ms as i64,
+            );
+            tracing::debug!(paused, "updated health scheduler visibility state");
+        }
         if !matches!(event, tauri::RunEvent::Exit) {
             return;
+        }
+        if let Some(jobs) = handle.try_state::<jobs::JobsControl>() {
+            jobs.shutdown();
         }
         if let Some(state) = handle.try_state::<AppState>() {
             if let Some(instance) = state.instance() {

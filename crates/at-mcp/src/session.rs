@@ -47,7 +47,8 @@ use at_model::{EnvValue, McpServer, McpTransport};
 use at_secrets::{KeychainId, Redactor, SecretStore, SecretString};
 use rmcp::ServiceError;
 use rmcp::model::{
-    ClientCapabilities, ClientConfig, Implementation, PaginatedRequestParams, ServerPeerInfo, Tool,
+    ClientCapabilities, ClientConfig, Implementation, PaginatedRequestParams, ProtocolVersion,
+    ServerPeerInfo, Tool,
 };
 use rmcp::service::{RoleClient, RunningService, serve_client_with_ct};
 use rmcp::transport::async_rw::AsyncRwTransport;
@@ -1111,7 +1112,22 @@ impl StdioClient {
             biased;
             () = cancel.cancelled() => Outcome::Failed(SessionError::cancelled()),
             result = tokio::time::timeout(budget, handshake) => match result {
-                Ok(Ok(running)) => Outcome::Ready(running),
+                Ok(Ok(running)) => {
+                    let version = running
+                        .peer_info()
+                        .map(|info| info.protocol_version.clone());
+                    match version {
+                        Some(version) if ProtocolVersion::KNOWN_VERSIONS.contains(&version) => {
+                            Outcome::Ready(running)
+                        }
+                        Some(version) => Outcome::Failed(SessionError::protocol_version_mismatch(
+                            &format!("The server selected unsupported version `{version}`."),
+                        )),
+                        None => Outcome::Failed(SessionError::protocol_version_mismatch(
+                            "The server did not report a protocol version.",
+                        )),
+                    }
+                }
                 Ok(Err(error)) => Outcome::Failed(map_initialize_error(&error)),
                 Err(_elapsed) => Outcome::Failed(SessionError::startup_timeout(budget)),
             },

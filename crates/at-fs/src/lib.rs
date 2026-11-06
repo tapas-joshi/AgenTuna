@@ -30,6 +30,7 @@ pub mod platform;
 pub mod privilege;
 pub mod recovery;
 pub mod remedies;
+pub mod restore;
 pub mod strategy;
 pub mod symlink;
 /// Shared test fixtures. Compiled only with the `testkit` cargo feature.
@@ -72,6 +73,7 @@ pub use remedies::{
     MoveOperationId, MoveRecord, MoveStrategy, RefusalRemedies, RefusalRemedy, UndoMoveOutcome,
     encode_path, undo_move,
 };
+pub use restore::{RestoreError, RestoreOutcome, RestoreRequest, restore_backup};
 #[doc(hidden)]
 pub use strategy::deploy_skill_with;
 pub use strategy::{

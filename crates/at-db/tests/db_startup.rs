@@ -41,7 +41,15 @@ fn pending_migration_keeps_a_fsynced_copy_of_the_prior_schema() {
 fn failed_migration_restores_the_pre_migration_database() {
     let dir = TempDir::new().expect("temp dir");
     let db_path = path(&dir);
-    drop(Database::open_file_with(&db_path, one_version(V1)).expect("create v1"));
+    let initial = Database::open_file_with(&db_path, one_version(V1)).expect("create v1");
+    initial
+        .connection()
+        .execute_batch(
+            "CREATE TABLE operations (id TEXT PRIMARY KEY, summary TEXT NOT NULL);
+             INSERT INTO operations (id, summary) VALUES ('op-1', 'durable history');",
+        )
+        .expect("seed durable history");
+    drop(initial);
     let migrations = Migrations::new(&[
         Migration::new(1, V1),
         Migration::new(
@@ -65,6 +73,15 @@ fn failed_migration_restores_the_pre_migration_database() {
         )
         .expect("check rollback");
     assert!(!transient);
+    let history: String = reopened
+        .connection()
+        .query_row(
+            "SELECT summary FROM operations WHERE id = 'op-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pre-migration history restored");
+    assert_eq!(history, "durable history");
 }
 
 #[test]

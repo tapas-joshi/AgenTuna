@@ -280,6 +280,46 @@ fn parse_text(text: &str) -> Result<SkillDoc, SkillError> {
     })
 }
 
+/// Canonical bytes used only for skill content hashing.
+///
+/// CRLF is normalized, and simple valid top-level frontmatter mappings are sorted by key. If
+/// comments or other formatting cannot be assigned to a mapping entry without loss, raw
+/// frontmatter order is retained.
+pub(crate) fn canonical_hash_bytes(bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    let normalized = text.replace("\r\n", "\n");
+    let Ok(document) = parse_text(&normalized) else {
+        return normalized.into_bytes();
+    };
+    let start = document.frontmatter_span.start();
+    let end = document.frontmatter_span.end();
+    let entries = scan_entries(&normalized, start, end);
+    if entries.is_empty()
+        || entries.first().is_none_or(|entry| entry.key_start != start)
+        || entries
+            .windows(2)
+            .any(|pair| normalized[pair[0].entry_end..pair[1].key_start].trim() != "")
+        || entries
+            .last()
+            .is_some_and(|entry| !normalized[entry.entry_end..end].trim().is_empty())
+    {
+        return normalized.into_bytes();
+    }
+
+    let mut ordered = entries;
+    ordered.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut canonical = String::with_capacity(normalized.len());
+    canonical.push_str(&normalized[..start]);
+    for entry in ordered {
+        canonical.push_str(normalized[entry.key_start..entry.entry_end].trim_end());
+        canonical.push('\n');
+    }
+    canonical.push_str(&normalized[end..]);
+    canonical.into_bytes()
+}
+
 fn invalid_yaml(line: usize, column: usize, message: &str) -> SkillError {
     SkillError::InvalidFrontmatter {
         line,

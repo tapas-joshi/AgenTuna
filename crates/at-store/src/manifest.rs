@@ -1631,8 +1631,8 @@ pub fn mcp_identity_key(value: &serde_json::Value) -> Option<&'static str> {
 ///
 /// The digest is SHA-256 over one line per file, sorted by relative path:
 /// `<rel_path>\0<size>\0<sha256(bytes)>\n`. Names, sizes and bytes are content; mtimes,
-/// inode numbers and the folder name are not, so copying a folder or touching mtimes keeps
-/// the hash and editing any byte changes it.
+/// inode numbers and the folder name are not. `SKILL.md` hashes normalize CRLF and sort
+/// straightforward valid frontmatter fields; other files retain byte-exact content.
 ///
 /// The walk never follows a symlink and refuses one inside the tree. It bounds the number
 /// of files, each file's size, the total content and the nesting depth.
@@ -1742,8 +1742,13 @@ fn walk_skill(
             return Err(HashError::NonUtf8Name { path });
         };
         let relative = relative.replace('\\', "/");
-        let bytes = read_skill_file(&path, &meta)?;
-        files.push((relative, meta.len(), sha256_hex(&bytes)));
+        let raw_bytes = read_skill_file(&path, &meta)?;
+        let bytes = if relative == "SKILL.md" {
+            crate::skill::canonical_hash_bytes(&raw_bytes)
+        } else {
+            raw_bytes
+        };
+        files.push((relative, bytes.len() as u64, sha256_hex(&bytes)));
     }
     Ok(())
 }

@@ -27,6 +27,7 @@ at-fs.workspace = true
 at-store.workspace = true
 at-db.workspace = true
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -41,9 +42,13 @@ url.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 time.workspace = true
+at-secrets.workspace = true
+tokio-util.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
+rusqlite.workspace = true
 # TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
 at-fs = { workspace = true, features = ["testkit"] }

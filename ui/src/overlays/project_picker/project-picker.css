@@ -1,0 +1,26 @@
+.at-project-picker {
+  inline-size: min(920px, calc(100vw - 32px));
+  block-size: min(960px, calc(100vh - 32px));
+}
+
+.at-project-picker .at-modal__header {
+  display: none;
+}
+
+.at-project-picker .at-modal__body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.at-project-picker .at-modal__body > div {
+  block-size: 100%;
+  gap: 12px;
+  padding: 24px;
+}
+
+.at-project-picker [role="listbox"] {
+  max-block-size: none;
+  flex: 1;
+}
