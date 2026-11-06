@@ -27,6 +27,13 @@ fn next_batch(service: &WatchService, timeout: Duration) -> Option<WatchBatch> {
 }
 
 /// Collects events until `window` passes without a new one.
+/// FSEvents coalesces and replays events for directories created moments before a stream
+/// starts. Fixtures are created, then given this long to settle, before watching begins, so
+/// assertions only see events caused after `start`.
+fn settle_fixture() {
+    std::thread::sleep(Duration::from_millis(1500));
+}
+
 fn drain(service: &WatchService, window: Duration) -> Vec<WatchEvent> {
     let deadline = Instant::now() + window;
     let mut events = Vec::new();
@@ -54,6 +61,7 @@ fn fifty_writes_to_one_file_produce_exactly_one_batch() {
     assert_eq!(config.debounce, at_fs::DEFAULT_DEBOUNCE);
     assert_eq!(config.debounce, Duration::from_millis(300));
     let service = WatchService::new(config);
+    settle_fixture();
     service.start().expect("start");
 
     let began = Instant::now();
@@ -105,6 +113,7 @@ fn a_write_recorded_in_the_registry_is_not_reported() {
         WatchConfig::new([WatchRoot::file(&file, WatchRootKind::McpFile)])
             .with_registry(Arc::clone(&registry)),
     );
+    settle_fixture();
     service.start().expect("start");
 
     let outcome = apply(&WriteRequest::create(&file, b"hello".to_vec())).expect("write");
@@ -137,6 +146,7 @@ fn ignored_trees_and_editor_litter_never_reach_a_batch() {
         &root,
         WatchRootKind::UserStore,
     )]));
+    settle_fixture();
     service.start().expect("start");
 
     let ignored = [
@@ -186,6 +196,7 @@ fn a_rename_is_reported_once_with_both_paths() {
         &root,
         WatchRootKind::SkillsDir,
     )]));
+    settle_fixture();
     service.start().expect("start");
 
     let before = root.join("skill-a/SKILL.md");
@@ -231,6 +242,7 @@ fn a_ten_thousand_file_burst_emits_one_rescan_and_the_service_keeps_running() {
             .with_max_batch_paths(256)
             .with_burst_quiet(Duration::from_secs(2)),
     );
+    settle_fixture();
     service.start().expect("start");
 
     for index in 0..10_000 {
@@ -276,6 +288,7 @@ fn start_twice_is_refused_and_stop_joins_quickly() {
         WatchRootKind::UserStore,
     )]));
 
+    settle_fixture();
     service.start().expect("start");
     assert!(service.is_running());
     assert!(matches!(service.start(), Err(WatchError::AlreadyRunning)));
@@ -318,6 +331,7 @@ fn deleting_a_watched_store_yields_path_gone_and_resumes_when_it_returns() {
         &store,
         WatchRootKind::ProjectStore,
     )]));
+    settle_fixture();
     service.start().expect("start");
 
     fs::remove_dir_all(&store).expect("delete store");
@@ -390,6 +404,7 @@ fn replacing_a_file_through_the_write_pipeline_updates_the_index() {
         WatchConfig::new([WatchRoot::dir(&root, WatchRootKind::UserStore)])
             .with_registry(Arc::clone(&registry)),
     );
+    settle_fixture();
     service.start().expect("start");
 
     let expected = ExpectedState::Hash(at_fs::sha256_hex(b"one"));
@@ -431,6 +446,7 @@ fn a_full_queue_collapses_into_one_rescan_and_stays_bounded() {
             .with_max_batch_paths(0)
             .with_debounce(Duration::from_millis(100)),
     );
+    settle_fixture();
     service.start().expect("start");
 
     fn produced(service: &WatchService) -> u64 {
