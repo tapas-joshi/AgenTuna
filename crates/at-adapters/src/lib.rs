@@ -1,8 +1,12 @@
 //! Agent detection, native paths, capabilities, and adapters.
 
+pub mod adapter;
 pub mod claude_mcp;
 pub mod codex_mcp;
+pub mod generic_mcp;
+pub mod mcp_capabilities;
 pub mod omp_mcp;
+pub mod paths;
 
 /// Golden-file round-trip harness for the format-preserving adapters.
 ///

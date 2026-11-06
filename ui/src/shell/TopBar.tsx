@@ -30,6 +30,10 @@ export interface TopBarProps {
   readonly projectLabel: string | null;
   /** Called when the project picker trigger is activated. */
   readonly onProjectPicker: () => void;
+  /** Whether a previous route is available. */
+  readonly canGoBack?: boolean;
+  /** Navigate to the previous route in AppState's bounded history. */
+  readonly onBack?: () => void;
   /**
    * The TU-040 scope switcher widget, rendered as-is. The shell does not
    * construct it: scope state, routing and persistence belong to TA-053.
@@ -73,6 +77,8 @@ export function TopBar({
   addControl,
   paletteModifier = "meta",
   className,
+  canGoBack = false,
+  onBack,
 }: TopBarProps): JSX.Element {
   const paletteHint = paletteModifier === "meta" ? "⌘K" : "Ctrl+K";
   const scopeColor =
@@ -86,6 +92,17 @@ export function TopBar({
         className,
       )}
     >
+      <button
+        type="button"
+        aria-label="Back"
+        aria-keyshortcuts="Meta+["
+        disabled={!canGoBack}
+        onClick={onBack}
+        className="inline-flex h-[28px] shrink-0 items-center rounded-6 border border-border px-8 text-12 text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <span aria-hidden="true">←</span>
+        <span className="sr-only">Back</span>
+      </button>
       {/* Window/screen title */}
       <span className="min-w-0 shrink truncate text-14 font-medium text-text" data-slot="shell-title">
         {title}

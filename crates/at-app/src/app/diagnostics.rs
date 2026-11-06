@@ -44,7 +44,7 @@ pub async fn diagnostics_export(
         .logging()
         .cloned()
         .ok_or_else(|| CommandError::unavailable("application logging is unavailable"))?;
-    let report = diagnostics_report(&state)?;
+    let report = build_diagnostics_report(&state)?;
     let schema_version = report
         .get("schema_version")
         .and_then(Value::as_i64)
@@ -71,7 +71,17 @@ pub async fn diagnostics_export(
     .map_err(|_| CommandError::internal("diagnostics export task failed"))?
 }
 
-fn diagnostics_report(state: &AppState) -> Result<Value, CommandError> {
+/// Returns the redacted local diagnostics report for the copyable Doctor dialog.
+///
+/// # Errors
+/// Returns [`CommandError`] when the database or diagnostics snapshot is unavailable.
+#[tauri::command]
+pub fn diagnostics_report_copy(state: State<'_, AppState>) -> Result<String, CommandError> {
+    serde_json::to_string_pretty(&build_diagnostics_report(&state)?)
+        .map_err(|_| CommandError::internal("could not serialize the diagnostics report"))
+}
+
+fn build_diagnostics_report(state: &AppState) -> Result<Value, CommandError> {
     let database = state
         .database()
         .map_err(|_| CommandError::unavailable("application database is unavailable"))?;

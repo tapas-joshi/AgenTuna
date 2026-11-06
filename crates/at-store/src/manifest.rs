@@ -439,6 +439,9 @@ pub struct ItemSource {
     /// Version reported by the source, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// How this library package is materialized in the target store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_mode: Option<at_model::LinkMode>,
 }
 
 impl ItemSource {
@@ -452,6 +455,7 @@ impl ItemSource {
             commit_sha: None,
             subpath: None,
             version: None,
+            link_mode: None,
         }
     }
 }

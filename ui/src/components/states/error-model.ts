@@ -256,6 +256,7 @@ const CODE_CLASSES: Readonly<Record<string, ErrorClass>> = {
   bridge: "unavailable",
   cli_install: "cli_install",
   unavailable: "unavailable",
+  refused_overwrite: "conflict",
   internal: "unknown",
 };
 

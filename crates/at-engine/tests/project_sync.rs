@@ -2,9 +2,11 @@
 use std::cell::Cell;
 
 use at_engine::project_sync::{
-    ProjectSyncCache, ProjectSyncProvider, SyncCopyRequest, SyncDirection, SyncEvidence, SyncPlan,
-    SyncPlanError, SyncRecord, plan_sync_copy,
+    ProjectSyncCache, ProjectSyncProvider, SyncCopyRequest, SyncDirection, SyncEvidence,
+    SyncNamedHash, SyncPlan, SyncPlanError, SyncRecord, SyncTreeRequest, detect_sync_renames,
+    plan_sync_copy, plan_sync_tree,
 };
+use at_engine::project_sync::{SyncBaselineTarget, apply_sync_plan_and_update_baseline};
 use at_model::{FileOp, ItemId, SyncLabel};
 
 fn sync_request(label: SyncLabel) -> SyncCopyRequest {
@@ -227,4 +229,202 @@ fn in_sync_copy_is_a_noop_and_direction_is_enforced() {
         plan_sync_copy(invalid).expect("pull plan"),
         SyncPlan::Change(_)
     ));
+}
+
+#[test]
+fn tree_sync_plans_skill_mcp_and_rule_files_as_one_reviewed_change() {
+    let item_id = ItemId::new();
+    let files = [
+        ("skills/demo/SKILL.md", b"skill".as_slice()),
+        ("mcp.json", b"{\"servers\":{}}".as_slice()),
+        ("rules/AGENTS.md", b"rule".as_slice()),
+    ];
+    let source_files = files
+        .iter()
+        .map(|(path, bytes)| (std::path::PathBuf::from(path), bytes.to_vec()))
+        .collect();
+    let source_file_hashes = files
+        .iter()
+        .map(|(path, bytes)| (std::path::PathBuf::from(path), at_fs::sha256_hex(bytes)))
+        .collect();
+    let plan = plan_sync_tree(SyncTreeRequest {
+        item_id,
+        project_id: "project-test".to_owned(),
+        direction: SyncDirection::Pull,
+        label: SyncLabel::LibraryNewer,
+        base_hash: Some("a".repeat(64)),
+        destination_hash: Some("a".repeat(64)),
+        source_hash: "b".repeat(64),
+        force_reviewed: false,
+        destination_root_exists: true,
+        source_files,
+        source_file_hashes,
+        destination_files: [
+            ("skills/demo/SKILL.md", at_fs::sha256_hex(b"old skill")),
+            ("skills/demo/old.txt", at_fs::sha256_hex(b"remove")),
+            ("mcp.json", at_fs::sha256_hex(b"old mcp")),
+        ]
+        .into_iter()
+        .map(|(path, hash)| (std::path::PathBuf::from(path), hash))
+        .collect(),
+    })
+    .expect("tree plan");
+    let SyncPlan::ChangeWithMissing {
+        change_set,
+        missing_source_paths,
+    } = plan
+    else {
+        panic!("tree changes and missing paths should be reported");
+    };
+    assert_eq!(change_set.ops.len(), 3);
+    assert_eq!(
+        missing_source_paths,
+        [std::path::PathBuf::from("skills/demo/old.txt")]
+    );
+    assert!(
+        change_set
+            .ops
+            .iter()
+            .all(|op| !matches!(op, FileOp::Delete { .. }))
+    );
+    change_set.validate().expect("tree changeset validates");
+}
+
+#[test]
+fn rename_detection_requires_same_identity_and_content() {
+    let id = ItemId::new();
+    let candidates = detect_sync_renames(
+        &[SyncNamedHash {
+            item_id: id,
+            name: "new-name".to_owned(),
+            hash: "a".repeat(64),
+        }],
+        &[SyncNamedHash {
+            item_id: id,
+            name: "old-name".to_owned(),
+            hash: "a".repeat(64),
+        }],
+    );
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].project_name, "new-name");
+    assert_eq!(candidates[0].library_name, "old-name");
+    assert!(
+        detect_sync_renames(
+            &[SyncNamedHash {
+                item_id: id,
+                name: "new-name".to_owned(),
+                hash: "b".repeat(64),
+            }],
+            &[SyncNamedHash {
+                item_id: id,
+                name: "old-name".to_owned(),
+                hash: "a".repeat(64),
+            }],
+        )
+        .is_empty()
+    );
+}
+
+#[derive(Default)]
+struct SyncRecorder;
+
+impl at_fs::changeset::OperationRecorder for SyncRecorder {
+    fn begin(&mut self, _: &at_model::ChangeSet) -> Result<String, String> {
+        Ok("sync-operation".to_owned())
+    }
+
+    fn file_completed(
+        &mut self,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&std::path::Path>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn finish(&mut self, _: &str, _: bool, _: bool) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn successful_apply_updates_the_existing_project_sync_baseline() {
+    let sandbox = tempfile::tempdir().expect("temporary sandbox");
+    let db = at_db::Database::open_in_memory().expect("in-memory database");
+    let item_id = ItemId::new();
+    let project_id = "project-sync";
+    db.connection()
+        .execute(
+            "INSERT INTO items (id, kind, scope, project_id, slug, name) \
+             VALUES (?1, 'skill', 'project', ?2, 'demo', 'Demo')",
+            rusqlite::params![item_id.to_string(), project_id],
+        )
+        .expect("seed item");
+    db.connection()
+        .execute(
+            "INSERT INTO agents (id, display_name, installed, managed) \
+             VALUES ('claude_code', 'Claude Code', 1, 1)",
+            [],
+        )
+        .expect("seed agent");
+    let initial_baseline = "b".repeat(64);
+    let spec = at_db::deployments::DeploymentSpec::new(
+        &item_id,
+        &at_model::AgentId::ClaudeCode,
+        at_model::Scope::Project,
+        at_model::ItemState::Linked,
+    )
+    .with_project(project_id)
+    .with_hashes(None, None, Some(&initial_baseline));
+    at_db::deployments::upsert_deployment(db.connection(), &spec).expect("seed deployment");
+
+    let mut request = sync_request(SyncLabel::ProjectNewer);
+    request.item_id = item_id;
+    request.project_id = project_id.to_owned();
+    request.destination_file_hash = None;
+    let baseline = request.source_hash.clone();
+    let SyncPlan::Change(mut change_set) = plan_sync_copy(request).expect("plan sync") else {
+        panic!("project change requires an apply plan");
+    };
+    let root = sandbox.path().join("store");
+    at_store::layout::StoreLayout::new(at_model::Scope::Project, root.clone())
+        .init()
+        .expect("initialize project store");
+    std::fs::create_dir_all(root.join("skills/demo")).expect("create item directory");
+    change_set.preview_id = at_engine::preview::preview(&change_set, &root)
+        .expect("review preview")
+        .id;
+    assert_eq!(
+        at_engine::preview::preview(&change_set, &root)
+            .expect("unchanged preview")
+            .id,
+        change_set.preview_id
+    );
+    let backup_root = root.join("backups");
+    let mut recorder = SyncRecorder;
+    let mut context = at_fs::changeset::ApplyContext {
+        store_root: &root,
+        backup_folder: &backup_root,
+        recorder: &mut recorder,
+    };
+    apply_sync_plan_and_update_baseline(
+        &change_set,
+        &mut context,
+        SyncBaselineTarget {
+            database: &db,
+            item_id: &item_id,
+            project_id,
+            hash: &baseline,
+        },
+    )
+    .expect("apply and record baseline");
+    let rows = at_db::deployments::list_deployments_for_item(db.connection(), &item_id)
+        .expect("read deployment");
+    assert_eq!(rows[0].baseline_hash.as_deref(), Some(baseline.as_str()));
+    assert_eq!(
+        std::fs::read(root.join("skills/demo/SKILL.md")).expect("read applied content"),
+        b"new content"
+    );
 }

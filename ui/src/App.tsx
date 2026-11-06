@@ -11,10 +11,14 @@ import { ToastProvider } from "./overlays/toasts";
 import { createAppState } from "./state/AppState";
 import { AppStateProvider } from "./state/context";
 import { Shell } from "./shell";
-import { SHELL_SECTION_LABEL, parseRouteId, sectionForRoute } from "./shell/routes";
+import { SHELL_SECTION_LABEL, sectionForRoute } from "./shell/routes";
 
 import { PreferencesScreen } from "./screens/preferences/PreferencesScreen";
 import { AppOverlays } from "./overlays/AppOverlays";
+import { OverviewScreen } from "./screens/overview/OverviewScreen";
+import { AddSkillWizard } from "./screens/add_skill/AddSkillWizard";
+import { SecretInventoryScreen } from "./screens/secrets/SecretInventoryScreen";
+import { SkillDetailScreen } from "./screens/skill_detail/SkillDetailScreen";
 
 /**
  * Subscribes to a Tauri event and returns the cleanup for `useEffect`.
@@ -39,8 +43,12 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
   };
 }
 /** Placeholder routed body; real screen contents are supplied by their stories. */
-function RouteBody({ route }: { readonly route: StateRouteId }) {
+function RouteBody({ route, onClose }: { readonly route: StateRouteId; readonly onClose: () => void }) {
   const section = sectionForRoute(route);
+  if (route === "overview") return <OverviewScreen />;
+  if (route === "skill-detail") return <SkillDetailScreen />;
+  if (route === "add-skill") return <AddSkillWizard onClose={onClose} />;
+  if (route === "secrets") return <SecretInventoryScreen />;
   if (route === "settings") return <PreferencesScreen />;
   const empty = SURFACE_STATE_FIXTURES[route].empty;
   return (
@@ -84,6 +92,7 @@ export function App() {
   }));
   const appSnapshot = useSyncExternalStore(appState.subscribe, appState.getSnapshot, appState.getSnapshot);
   const [info, setInfo] = useState<AppInfo | null>(null);
+  const [projects, setProjects] = useState<readonly ProjectView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [bootstrapped, setBootstrapped] = useState(false);
   const route = appSnapshot.route;
@@ -98,6 +107,7 @@ export function App() {
       invoke<ProjectView[]>("projects_list"),
     ]).then(([document, projects]) => {
       if (!active) return;
+      setProjects(projects);
       const values = document.values ?? {};
       const savedProject = typeof values.last_project_id === "string" ? values.last_project_id : null;
       const projectId = savedProject !== null && projects.some((project) => project.id === savedProject) ? savedProject : null;
@@ -135,11 +145,9 @@ export function App() {
   useEffect(
     () =>
       subscribe<string>("menu-action", (payload) => {
-        if (!payload.startsWith("navigate:")) return;
-        const target = parseRouteId(payload.slice("navigate:".length));
-        if (target !== null) appState.navigate(target);
+        window.dispatchEvent(new CustomEvent("agentuna:menu-action", { detail: payload }));
       }),
-    [appState],
+    [],
   );
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -160,6 +168,7 @@ export function App() {
   }, [appState]);
 
   const versionLabel = info === null ? "v… · local" : `v${info.version} · local`;
+  const projectLabel = projects.find((project) => project.id === appSnapshot.activeProject)?.name ?? appSnapshot.activeProject;
   const section = sectionForRoute(route);
   const title = section === null ? "Settings" : SHELL_SECTION_LABEL[section];
 
@@ -175,7 +184,7 @@ export function App() {
             <Shell
               route={route}
               title={title}
-              projectLabel={appSnapshot.activeProject}
+              projectLabel={projectLabel}
               scope={appSnapshot.scope}
               scopeSwitcher={
                 <ScopeSwitcher
@@ -186,14 +195,17 @@ export function App() {
                 />
               }
               versionLabel={versionLabel}
+              canGoBack={appSnapshot.routeStack.length > 1}
+              onBack={() => { appState.back(); }}
               onNavigate={(next) => appState.navigate(next)}
               onProjectPicker={overlaySlots.onProjectPicker}
               onPalette={overlaySlots.onPalette}
               addControl={overlaySlots.addControl}
+              onAccountAction={overlaySlots.onAccountAction}
               overlays={overlaySlots.overlays}
             >
               {error === null ? (
-                <RouteBody route={route} />
+                <RouteBody route={route} onClose={() => appState.navigate("overview", "discard")} />
               ) : (
                 <div className="p-24 text-danger">Backend error: {error}</div>
               )}

@@ -1,8 +1,9 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App";
 
 // A plain function, not vi.fn(): the spy wrapper reports rejected results as unhandled.
+const tauriEvents = vi.hoisted(() => ({ handlers: new Map<string, (event: { payload: unknown }) => void>() }));
 const ipc = vi.hoisted(() => ({
   calls: [] as string[],
   reply: (_cmd: string): Promise<unknown> => Promise.resolve(undefined),
@@ -15,28 +16,48 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  // Outside a Tauri runtime `listen` rejects; the app must carry on without native events.
-  listen: () => Promise.reject(new Error("no tauri runtime")),
+  listen: (event: string, handler: (event: { payload: unknown }) => void) => {
+    tauriEvents.handlers.set(event, handler);
+    return Promise.resolve(() => { tauriEvents.handlers.delete(event); });
+  },
 }));
 
 afterEach(() => {
   cleanup();
   ipc.calls.length = 0;
+  tauriEvents.handlers.clear();
 });
 
 test("shows name and version returned by the app_info command", async () => {
   ipc.reply = (cmd) =>
     Promise.resolve(
-      cmd === "app_info" ? { name: "AgenTuna", version: "1.2.3" } : cmd === "projects_list" ? [] : { values: {} },
-    );
+    cmd === "app_info" ? { name: "AgenTuna", version: "1.2.3" } :
+    cmd === "projects_list" ? [] :
+    cmd === "settings_load" ? { schema_version: 1, values: {} } :
+    cmd === "recovery_sheet" ? null :
+    { values: {} },
+  );
   render(<App />);
   expect(await screen.findByText("v1.2.3 · local")).toBeTruthy();
-  // Startup reads the app info and restores persisted settings and projects; nothing writes.
-  expect(new Set(ipc.calls)).toEqual(new Set(["app_info", "settings_load", "projects_list"]));
+  // Startup restores settings and project state and checks for pending recovery.
+  expect(new Set(ipc.calls)).toEqual(new Set(["app_info", "settings_load", "projects_list", "overview_load", "recovery_sheet"]));
 });
 
 test("shows the backend error instead of a blank screen", async () => {
   ipc.reply = () => Promise.reject("boom");
   render(<App />);
   expect(await screen.findByText("Backend error: boom")).toBeTruthy();
+});
+test("native Preferences menu action is handed to the UI dispatcher", async () => {
+  ipc.reply = (cmd) => Promise.resolve(
+    cmd === "app_info" ? { name: "AgenTuna", version: "0.1.0" } :
+    cmd === "projects_list" ? [] :
+    cmd === "settings_load" ? { schema_version: 1, values: {} } :
+    null,
+  );
+  render(<App />);
+  await screen.findByRole("navigation", { name: "Workspace" });
+  await waitFor(() => expect(tauriEvents.handlers.has("menu-action")).toBe(true));
+  act(() => tauriEvents.handlers.get("menu-action")?.({ payload: "preferences" }));
+  expect(await screen.findByRole("heading", { name: "Preferences" })).toBeTruthy();
 });

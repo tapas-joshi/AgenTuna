@@ -276,6 +276,7 @@ name = "at-app"
 version = "0.1.0"
 dependencies = [
  "at-db",
+ "at-engine",
  "at-fs",
  "at-mcp",
  "at-model",
@@ -344,6 +345,7 @@ dependencies = [
 name = "at-engine"
 version = "0.1.0"
 dependencies = [
+ "at-adapters",
  "at-db",
  "at-fs",
  "at-git",
@@ -356,6 +358,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "ts-rs",
  "unicode-normalization",
  "uuid",
  "zip",

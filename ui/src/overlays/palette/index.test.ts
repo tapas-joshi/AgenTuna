@@ -24,6 +24,22 @@ describe("palette index", () => {
     expect(results.map(({ id }) => id)).toEqual(["prefix", "boundary", "subsequence"]);
   });
 
+
+  it("ranks and searches a 10,000-entry inventory without losing ordering", () => {
+    const entries = Array.from({ length: 10_000 }, (_, index) => ({
+      id: `skill:${index}`,
+      kind: "skill" as const,
+      title: index === 9_999 ? "MCP Alpha" : `Generated skill ${index}`,
+      subtitle: `Library entry ${index}`,
+      keywords: [],
+    }));
+    const started = performance.now();
+    const result = searchPalette(entries, "mcp");
+    const elapsed = performance.now() - started;
+    expect(result[0]?.id).toBe("skill:9999");
+    expect(result).toHaveLength(1);
+    expect(elapsed).toBeLessThan(250); // CI bound; target is a few ms on a quiet machine
+  });
   it("returns recent entries and action shortcuts for an empty query", () => {
     expect(idlePaletteEntries(index, ["server:db", "missing"]).map(({ id }) => id)).toEqual(["server:db", "action:mcp", "action:skills"]);
   });

@@ -25,6 +25,7 @@ import type { ShellAccount, ShellAgentStatus, ShellSectionId } from "./routes";
 import { sectionForRoute } from "./routes";
 import type { StateRouteId } from "../components/states";
 
+import type { AccountMenuAction } from "../overlays/menus/AccountMenu";
 /** Props accepted by {@link Shell}. */
 export interface ShellProps {
   /** Active TU-010 route id; drives the highlighted sidebar section. */
@@ -35,6 +36,10 @@ export interface ShellProps {
   readonly children: ReactNode;
   /** Called with the section's landing route id when a nav item activates. */
   readonly onNavigate: (route: StateRouteId) => void;
+  /** Whether route history has an entry to return to. */
+  readonly canGoBack?: boolean;
+  /** Returns to the previous route. */
+  readonly onBack?: () => void;
   /** Called when the project picker trigger is activated. */
   readonly onProjectPicker: () => void;
   /** Active project label for the picker trigger; `null` = no project. */
@@ -51,7 +56,8 @@ export interface ShellProps {
   readonly agents?: readonly ShellAgentStatus[];
   /** Account identity for the sidebar footer card. */
   readonly account?: ShellAccount;
-  /** App version line under the logo. */
+  /** Action from the account block, handled by the shared application dispatcher. */
+  readonly onAccountAction?: (action: AccountMenuAction) => void;
   readonly versionLabel?: string;
   /** Theme mode for scope dots. */
   readonly themeMode?: ThemeMode;
@@ -85,6 +91,8 @@ export function Shell({
   title,
   children,
   onNavigate,
+  canGoBack = false,
+  onBack,
   onProjectPicker,
   projectLabel = null,
   scopeSwitcher,
@@ -93,6 +101,7 @@ export function Shell({
   onPalette,
   agents = [],
   account,
+  onAccountAction,
   versionLabel,
   themeMode = "dark",
   paletteModifier = "meta",
@@ -124,6 +133,7 @@ export function Shell({
         onNavigate={onNavigate}
         agents={agents}
         account={account}
+        onAccountAction={onAccountAction}
         versionLabel={versionLabel}
         themeMode={themeMode}
       />
@@ -139,6 +149,8 @@ export function Shell({
           onPalette={onPalette}
           addControl={addControl}
           paletteModifier={paletteModifier}
+          canGoBack={canGoBack}
+          onBack={onBack}
         />
         {/*
          * `min-h-0` + `overflow-y-auto` keeps the body scrollable inside the

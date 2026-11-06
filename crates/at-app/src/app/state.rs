@@ -17,6 +17,8 @@ pub struct AppState {
     instance: Option<Arc<InstanceState>>,
     database: Option<Arc<Mutex<Database>>>,
     logging: Option<at_store::logging::Logging>,
+    recovery: Option<Arc<super::recovery::RecoveryService>>,
+    recovery_outcome: Option<super::recovery::RecoveryOutcome>,
 }
 
 impl AppState {
@@ -30,6 +32,8 @@ impl AppState {
             instance: None,
             database: None,
             logging: None,
+            recovery: None,
+            recovery_outcome: None,
         }
     }
 
@@ -74,6 +78,29 @@ impl AppState {
     pub fn with_instance(mut self, instance: Arc<InstanceState>) -> Self {
         self.instance = Some(instance);
         self
+    }
+    /// Attaches the startup recovery service and its first-run result.
+    #[must_use]
+    pub fn with_recovery(
+        mut self,
+        service: Arc<super::recovery::RecoveryService>,
+        outcome: super::recovery::RecoveryOutcome,
+    ) -> Self {
+        self.recovery = Some(service);
+        self.recovery_outcome = Some(outcome);
+        self
+    }
+
+    /// Startup recovery state, when the service was configured.
+    #[must_use]
+    pub fn recovery_outcome(&self) -> Option<&super::recovery::RecoveryOutcome> {
+        self.recovery_outcome.as_ref()
+    }
+
+    /// The recovery service used by Restore and Discard commands.
+    #[must_use]
+    pub fn recovery(&self) -> Option<&super::recovery::RecoveryService> {
+        self.recovery.as_deref()
     }
 
     /// The async job bridge used by long-running commands.

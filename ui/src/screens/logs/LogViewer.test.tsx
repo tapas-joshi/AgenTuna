@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { LogViewer } from "./LogViewer";
 
@@ -38,4 +39,10 @@ describe("LogViewer", () => {
     expect(await screen.findByText("No log entries yet")).toBeTruthy();
     expect(screen.getByText("Log file: /sandbox/logs/agentuna-*.log")).toBeTruthy();
   });
+});
+test("populated Logs screen has no axe accessibility violations", async () => {
+  ipc.reply = () => Promise.resolve(fixture);
+  const { container } = render(<LogViewer />);
+  await screen.findByRole("region", { name: "Application log entries" });
+  expect((await axe(container)).violations).toEqual([]);
 });
