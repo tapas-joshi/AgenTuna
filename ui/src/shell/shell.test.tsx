@@ -15,10 +15,25 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { StateView, SURFACE_STATE_FIXTURES } from "../components/states";
 import type { StateRouteId } from "../components/states";
 import { Shell } from "./Shell";
-import { SHELL_SECTION_LABEL, SHELL_SECTIONS, sectionForRoute } from "./routes";
+import { displayRouteId, parseItemDeepLink, parseRouteId, ROUTE_IDS, routeRequiresProject, SHELL_SECTION_LABEL, SHELL_SECTIONS, sectionForRoute } from "./routes";
 import type { ShellAgentStatus } from "./routes";
 
 afterEach(cleanup);
+describe("stable route identifiers", () => {
+  test("every route id round-trips through parsing and display", () => {
+    for (const route of ROUTE_IDS) {
+      expect(parseRouteId(displayRouteId(route))).toBe(route);
+    }
+    expect(parseRouteId("unknown")).toBeNull();
+  });
+
+  test("parses item deep links and identifies project-scoped routes", () => {
+    expect(parseItemDeepLink("agentuna://item/itm_example")).toBe("itm_example");
+    expect(parseItemDeepLink("agentuna://item/")).toBeNull();
+    expect(routeRequiresProject("mcp-detail")).toBe(true);
+    expect(routeRequiresProject("overview")).toBe(false);
+  });
+});
 
 const AGENTS: readonly ShellAgentStatus[] = [
   { id: "claude-code", label: "Claude Code", detected: true },

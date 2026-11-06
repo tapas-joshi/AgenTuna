@@ -1,6 +1,8 @@
 //! Managed application state shared by Tauri commands.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use at_db::Database;
 
 use super::bridge::JobBridge;
 use super::cli_install::CliInstaller;
@@ -13,6 +15,7 @@ pub struct AppState {
     cli: Option<CliInstaller>,
     config: Option<Arc<AppConfig>>,
     instance: Option<Arc<InstanceState>>,
+    database: Option<Arc<Mutex<Database>>>,
     logging: Option<at_store::logging::Logging>,
 }
 
@@ -25,6 +28,7 @@ impl AppState {
             cli,
             config: None,
             instance: None,
+            database: None,
             logging: None,
         }
     }
@@ -41,6 +45,28 @@ impl AppState {
     pub fn with_logging(mut self, logging: at_store::logging::Logging) -> Self {
         self.logging = Some(logging);
         self
+    }
+    /// Attaches the shared SQLite database service.
+    #[must_use]
+    pub fn with_database(mut self, database: Database) -> Self {
+        self.database = Some(Arc::new(Mutex::new(database)));
+        self
+    }
+
+    /// Locks the shared database for a typed command operation.
+    ///
+    /// # Errors
+    /// Returns an error when the database was not configured or its mutex was poisoned.
+    pub fn database(&self) -> Result<MutexGuard<'_, Database>, &'static str> {
+        let database = self.database.as_ref().ok_or("database unavailable")?;
+        database.lock().map_err(|_| "database lock poisoned")
+    }
+    /// Clones the shared database handle for a background job.
+    ///
+    /// # Errors
+    /// Returns an error when the database was not configured.
+    pub fn database_handle(&self) -> Result<Arc<Mutex<Database>>, &'static str> {
+        self.database.clone().ok_or("database unavailable")
     }
 
     /// Attaches the single-instance state that owns the record and activation listener.

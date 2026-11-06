@@ -43,6 +43,8 @@ pub enum FaultPoint {
     DeployRename,
     /// Writing one file of a staged copy tree.
     DeployCopyWrite,
+    /// Immediately before an individual ChangeSet operation executes.
+    ChangeSetOperation,
 }
 
 /// What an injector does when its point is hit. Test and `faults`/`testkit` features only.

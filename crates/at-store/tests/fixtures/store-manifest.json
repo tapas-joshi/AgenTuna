@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "store_id": "<STORE>",
+  "scope": "user",
+  "updated_at": "2026-11-05T00:00:00Z",
+  "items": [
+    {
+      "id": "<SKILL>",
+      "kind": "skill",
+      "slug": "alpha",
+      "path": "skills/alpha",
+      "hash": "<ZERO>"
+    },
+    {
+      "id": "<MCP>",
+      "kind": "mcp_server",
+      "slug": "zeta",
+      "path": "mcp.json",
+      "hash": "<ONE>",
+      "name": "Zeta"
+    }
+  ],
+  "disabled": [
+    {
+      "item_id": "<SKILL>",
+      "kind": "skill",
+      "agents": null
+    }
+  ]
+}

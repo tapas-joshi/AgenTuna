@@ -1,8 +1,29 @@
 //! TC-015 sync-label consumption and allowed-action tests.
 use std::cell::Cell;
 
-use at_engine::project_sync::{ProjectSyncCache, ProjectSyncProvider, SyncEvidence, SyncRecord};
-use at_model::{ItemId, SyncLabel};
+use at_engine::project_sync::{
+    ProjectSyncCache, ProjectSyncProvider, SyncCopyRequest, SyncDirection, SyncEvidence, SyncPlan,
+    SyncPlanError, SyncRecord, plan_sync_copy,
+};
+use at_model::{FileOp, ItemId, SyncLabel};
+
+fn sync_request(label: SyncLabel) -> SyncCopyRequest {
+    SyncCopyRequest {
+        item_id: ItemId::new(),
+        project_id: "project-test".to_owned(),
+        direction: SyncDirection::Push,
+        label,
+        base_hash: Some("b".repeat(64)),
+        destination_hash: Some("b".repeat(64)),
+        source_hash: at_fs::sha256_hex(b"new content"),
+        destination_file_hash: Some("b".repeat(64)),
+        force_reviewed: false,
+        source_file_hash: at_fs::sha256_hex(b"new content"),
+        destination_path: "skills/demo/SKILL.md".into(),
+        destination_root_exists: true,
+        source_bytes: b"new content".to_vec(),
+    }
+}
 
 struct Provider {
     version: Cell<u64>,
@@ -123,4 +144,87 @@ fn explicit_invalidation_refreshes_after_push_or_pull() {
         SyncLabel::InSync
     );
     assert_eq!(provider.calls.get(), 2);
+}
+
+#[test]
+fn sync_planning_refuses_conflict_drift_and_changed_destination() {
+    for label in [SyncLabel::Conflict, SyncLabel::Drifted] {
+        assert!(matches!(
+            plan_sync_copy(sync_request(label)),
+            Err(SyncPlanError::Conflict)
+        ));
+    }
+
+    let mut changed = sync_request(SyncLabel::ProjectNewer);
+    changed.destination_hash = Some("c".repeat(64));
+    changed.destination_file_hash = Some("c".repeat(64));
+    assert!(matches!(
+        plan_sync_copy(changed.clone()),
+        Err(SyncPlanError::TargetChanged)
+    ));
+    changed.force_reviewed = true;
+    let SyncPlan::Change(set) = plan_sync_copy(changed).expect("reviewed force plan") else {
+        panic!("forced change requires a reviewed ChangeSet");
+    };
+    assert!(matches!(
+        &set.ops[0],
+        FileOp::Write {
+            expected: at_model::ExpectedState::Hash { hash },
+            ..
+        } if hash.as_str().bytes().all(|byte| byte == b'c')
+    ));
+}
+
+#[test]
+fn sync_planning_uses_label_and_produces_reviewed_write_changeset() {
+    let plan = plan_sync_copy(sync_request(SyncLabel::ProjectNewer)).expect("plan push");
+    let SyncPlan::Change(set) = plan else {
+        panic!("changed copies require a change set");
+    };
+    assert_eq!(set.operation_kind.as_str(), "sync_push");
+    assert_eq!(set.ops.len(), 1);
+    assert!(matches!(
+        &set.ops[0],
+        FileOp::Write {
+            path,
+            bytes,
+            expected: at_model::ExpectedState::Hash { hash },
+            backup: true,
+            ..
+        } if path == &std::path::PathBuf::from("skills/demo/SKILL.md")
+            && bytes == b"new content"
+            && hash.as_str().bytes().all(|byte| byte == b'b')
+    ));
+    set.validate().expect("valid reviewed plan");
+}
+
+#[test]
+fn in_sync_copy_is_a_noop_and_direction_is_enforced() {
+    let mut request = sync_request(SyncLabel::InSync);
+    request.source_hash = at_fs::sha256_hex(b"new content");
+    request.destination_hash = Some(request.source_hash.clone());
+    assert_eq!(
+        plan_sync_copy(request).expect("no-op"),
+        SyncPlan::AlreadyInSync
+    );
+
+    let mut invalid = sync_request(SyncLabel::LibraryNewer);
+    assert!(matches!(
+        plan_sync_copy(invalid.clone()),
+        Err(SyncPlanError::DirectionNotAllowed { .. })
+    ));
+    invalid.direction = SyncDirection::Pull;
+    invalid.destination_hash = None;
+    invalid.base_hash = None;
+    invalid.destination_file_hash = None;
+    invalid.destination_root_exists = false;
+    assert!(matches!(
+        plan_sync_copy(invalid.clone()),
+        Err(SyncPlanError::MissingProjectStore)
+    ));
+    invalid.destination_root_exists = true;
+    assert!(matches!(
+        plan_sync_copy(invalid).expect("pull plan"),
+        SyncPlan::Change(_)
+    ));
 }

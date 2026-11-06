@@ -45,6 +45,7 @@ struct Options {
     init_delay: Duration,
     signals: SignalMode,
     grandchild: bool,
+    protocol_version: Option<String>,
     exit_after_init: Option<i32>,
     exit_before_init: Option<i32>,
     ignore_eof: bool,
@@ -64,6 +65,7 @@ impl Default for Options {
             grandchild: false,
             exit_after_init: None,
             exit_before_init: None,
+            protocol_version: None,
             ignore_eof: false,
         }
     }
@@ -96,6 +98,7 @@ fn parse_options() -> Options {
             "--exit-after-init" => {
                 options.exit_after_init = Some(value().parse().expect("exit code"));
             }
+            "--protocol-version" => options.protocol_version = Some(value()),
             "--exit-before-init" => {
                 options.exit_before_init = Some(value().parse().expect("exit code"));
             }
@@ -234,10 +237,12 @@ fn serve(options: &Options) {
                 if !options.init_delay.is_zero() {
                     std::thread::sleep(options.init_delay);
                 }
-                let version = message
-                    .pointer("/params/protocolVersion")
-                    .and_then(Value::as_str)
-                    .unwrap_or("2025-06-18");
+                let version = options.protocol_version.as_deref().unwrap_or_else(|| {
+                    message
+                        .pointer("/params/protocolVersion")
+                        .and_then(Value::as_str)
+                        .unwrap_or("2025-06-18")
+                });
                 respond(
                     &mut stdout,
                     id,

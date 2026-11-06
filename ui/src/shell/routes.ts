@@ -11,6 +11,48 @@
  */
 
 import type { StateRouteId } from "../components/states";
+/** Stable URL-safe ids accepted by the application router. */
+export const ROUTE_IDS = [
+  "overview",
+  "skills",
+  "skill-detail",
+  "mcp-list",
+  "mcp-detail",
+  "mcp-form",
+  "effective",
+  "drift",
+  "instructions",
+  "agents",
+  "add-skill",
+  "migrate",
+  "settings",
+] as const;
+
+/** A stable route id used by deep links and route history. */
+export type RouteId = (typeof ROUTE_IDS)[number];
+
+/** Parses a stable route id without accepting arbitrary webview strings. */
+export function parseRouteId(value: string): RouteId | null {
+  return (ROUTE_IDS as readonly string[]).includes(value) ? value as RouteId : null;
+}
+
+/** Returns the display id for a route; ids round-trip through {@link parseRouteId}. */
+export function displayRouteId(route: RouteId): string {
+  return route;
+}
+
+/** Parses supported AgenTuna item deep links. */
+export function parseItemDeepLink(value: string): string | null {
+  const match = /^agentuna:\/\/item\/([^/?#]+)$/.exec(value);
+  return match?.[1] ?? null;
+}
+
+/** Routes which require an active project context. */
+export function routeRequiresProject(route: RouteId): boolean {
+  return route === "skill-detail" || route === "mcp-detail" || route === "mcp-form" ||
+    route === "effective" || route === "drift" || route === "instructions" ||
+    route === "add-skill" || route === "migrate";
+}
 
 /** The seven F01 sidebar sections, in display order. */
 export const SHELL_SECTIONS = [

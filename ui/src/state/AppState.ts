@@ -2,12 +2,15 @@ import type { ToastStore } from "../overlays/toasts/store";
 import { createToastStore } from "../overlays/toasts/store";
 import type { ScopeToken } from "../theme";
 import type { StateRouteId } from "../components/states";
+import { routeRequiresProject } from "../shell/routes";
 
 /** One dirty editor buffer owned by the app state rather than by a screen. */
 export interface EditorBuffer {
   readonly route: StateRouteId;
   readonly value: string;
   readonly savedValue: string;
+  /** Saves this buffer through its owning screen command. */
+  readonly onSave?: () => void | Promise<void>;
 }
 
 /** Presentation-only snapshot for the whole webview. */
@@ -29,7 +32,10 @@ export interface AppSnapshot {
 export type AppEffect =
   | { readonly type: "reload-route"; readonly route: StateRouteId; readonly reason: "project" | "scope" | "external" }
   | { readonly type: "persist-last-project"; readonly projectId: string }
-  | { readonly type: "dirty-navigation"; readonly from: StateRouteId; readonly to: StateRouteId };
+  | { readonly type: "dirty-navigation"; readonly from: StateRouteId; readonly to: StateRouteId }
+  | { readonly type: "project-picker-required"; readonly route: StateRouteId }
+  | { readonly type: "persist-last-scope"; readonly projectId: string; readonly scope: ScopeToken }
+  | { readonly type: "restore-project-scope"; readonly projectId: string };
 
 /** Effect sink; injected so tests never call Tauri or the filesystem. */
 export interface AppStatePorts {
@@ -45,12 +51,18 @@ export interface AppState {
   readonly toasts: ToastStore;
   getSnapshot(): AppSnapshot;
   subscribe(listener: () => void): () => void;
-  /** Project-selection event clears project-bound caches and schedules one route reload. */
+  /** Project selection clears project-bound caches and schedules one reload. */
   selectProject(projectId: string | null): Promise<void>;
+  /** Hydrates durable startup selections before the shell is shown. */
+  restore(projectId: string | null, scope: ScopeToken): void;
   /** Scope-authority event from TA-053 schedules exactly one route reload. */
   receiveScope(scope: ScopeToken): void;
   /** Route change with an explicit dirty-buffer decision. */
   navigate(route: StateRouteId, decision?: DirtyDecision): boolean;
+  /** Navigates back to the previous route without adding a history entry. */
+  back(decision?: DirtyDecision): boolean;
+  /** Handles an item deep link after the backend has resolved its id. */
+  openItem(itemId: string, item: { readonly kind: string; readonly scope: string; readonly project_id: string | null } | null): void;
   /** CLI/agent watcher events coalesce throughout the debounce interval. */
   requestExternalReload(): void;
   /** Marks a dirty screen's file as changed externally. */
@@ -68,6 +80,7 @@ export interface AppState {
 export function createAppState(ports: AppStatePorts = {}): AppState {
   const listeners = new Set<() => void>();
   const effects = ports.effects ?? (() => undefined);
+  const toasts = ports.toasts ?? createToastStore();
   let snapshot: AppSnapshot = {
     activeProject: null,
     scope: "user",
@@ -97,11 +110,14 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
   }
 
   return {
-    toasts: ports.toasts ?? createToastStore(),
+    toasts,
     getSnapshot: () => snapshot,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    restore(projectId, scope) {
+      update({ activeProject: projectId, scope });
     },
     async selectProject(projectId) {
       if (projectId === snapshot.activeProject) return;
@@ -114,28 +130,105 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
         overlay: null,
       });
       if (projectId !== null) effects({ type: "persist-last-project", projectId });
+      if (projectId !== null) effects({ type: "restore-project-scope", projectId });
       reload("project");
     },
     receiveScope(scope) {
+      if (scope === "local" && snapshot.activeProject === null) return;
       if (scope === snapshot.scope) return;
-      update({ scope });
+      if (snapshot.activeProject !== null) {
+        effects({ type: "persist-last-scope", projectId: snapshot.activeProject, scope });
+      }
+      const route = scope === "local" ? "effective" : snapshot.route;
+      update({ scope, route, routeStack: route === snapshot.route ? snapshot.routeStack : [...snapshot.routeStack, route].slice(-50) });
       reload("scope");
     },
-    navigate(route, decision = "cancel") {
+    navigate(route, decision) {
+      if (routeRequiresProject(route) && snapshot.activeProject === null) {
+        effects({ type: "project-picker-required", route });
+        return false;
+      }
       const buffer = snapshot.editors[snapshot.route];
       const dirty = buffer !== undefined && buffer.value !== buffer.savedValue;
-      if (dirty && decision === "cancel") {
+      if (dirty && (decision === undefined || decision === "cancel")) {
         effects({ type: "dirty-navigation", from: snapshot.route, to: route });
         return false;
       }
       const editors = { ...snapshot.editors };
       if (dirty && decision === "discard") delete editors[snapshot.route];
-      if (dirty && decision === "save") {
-        editors[snapshot.route] = { ...buffer, savedValue: buffer.value };
+      if (dirty && decision === "save" && buffer.onSave !== undefined) {
+        void Promise.resolve(buffer.onSave()).then(() => {
+          if (snapshot.route !== buffer.route) return;
+          const editors = { ...snapshot.editors, [buffer.route]: { ...buffer, savedValue: buffer.value } };
+          if (route === buffer.route) {
+            update({ editors });
+          } else {
+            update({ route, routeStack: [...snapshot.routeStack, route].slice(-50), editors, overlay: null });
+          }
+        }).catch(() => {
+          toasts.show({ kind: "error", title: "Save failed", message: "Changes were not saved." });
+        });
+        return false;
+      }
+      if (dirty && decision === "save" && buffer.onSave === undefined) {
+        toasts.show({ kind: "error", title: "Save unavailable", message: "This screen has no save handler." });
+        return false;
       }
       if (route === snapshot.route) return true;
       update({ route, routeStack: [...snapshot.routeStack, route].slice(-50), editors, overlay: null });
       return true;
+    },
+    back(decision) {
+      if (snapshot.routeStack.length < 2) return false;
+      const target = snapshot.routeStack[snapshot.routeStack.length - 2];
+      if (target === undefined) return false;
+      const current = snapshot.route;
+      const buffer = snapshot.editors[current];
+      const dirty = buffer !== undefined && buffer.value !== buffer.savedValue;
+      if (dirty && decision === undefined) {
+        effects({ type: "dirty-navigation", from: current, to: target });
+        return false;
+      }
+      if (dirty && decision === "cancel") return false;
+      if (dirty && decision === "save") {
+        if (buffer?.onSave === undefined) {
+          toasts.show({ kind: "error", title: "Save unavailable", message: "This screen has no save handler." });
+          return false;
+        }
+        void Promise.resolve(buffer.onSave()).then(() => {
+          if (snapshot.route !== current) return;
+          const editors = { ...snapshot.editors, [current]: { ...buffer, savedValue: buffer.value } };
+          update({ route: target, routeStack: snapshot.routeStack.slice(0, -1), editors, overlay: null });
+        }).catch(() => toasts.show({ kind: "error", title: "Save failed", message: "Changes were not saved." }));
+        return false;
+      }
+      const editors = { ...snapshot.editors };
+      if (dirty && decision === "discard") delete editors[current];
+      update({ route: target, routeStack: snapshot.routeStack.slice(0, -1), editors, overlay: null });
+      return true;
+    },
+    openItem(itemId, item) {
+      if (item === null) {
+        toasts.show({ kind: "warning", title: "Item not found", message: "Item not found" });
+        return;
+      }
+      const target: StateRouteId = item.kind === "mcp_server" ? "mcp-detail" : item.kind === "rule" ? "instructions" : "skill-detail";
+      if ((item.scope === "project" || item.scope === "local") && item.project_id === null) {
+        effects({ type: "project-picker-required", route: target });
+        return;
+      }
+      const projectId = item.project_id ?? snapshot.activeProject;
+      const scope = item.scope === "global" || item.scope === "user" || item.scope === "project" || item.scope === "local"
+        ? item.scope : snapshot.scope;
+      if (projectId !== null) effects({ type: "persist-last-scope", projectId, scope });
+      update({
+        activeProject: projectId,
+        scope,
+        route: target,
+        routeStack: [...snapshot.routeStack, target].slice(-50),
+        screenState: { ...snapshot.screenState, "detail:itemId": itemId },
+      });
+      effects({ type: "reload-route", route: target, reason: "project" });
     },
     requestExternalReload() {
       window.clearTimeout(externalReloadTimer);

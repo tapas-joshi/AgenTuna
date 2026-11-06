@@ -15,10 +15,16 @@ export {
   SHELL_SECTION_LABEL,
   SHELL_SECTION_ROUTE,
   SHELL_SECTIONS,
+  ROUTE_IDS,
+  displayRouteId,
+  parseItemDeepLink,
+  parseRouteId,
+  routeRequiresProject,
   sectionForRoute,
 } from "./routes";
 export type {
   ShellAccount,
   ShellAgentStatus,
   ShellSectionId,
+  RouteId,
 } from "./routes";

@@ -35,6 +35,8 @@ export interface TopBarProps {
    * construct it: scope state, routing and persistence belong to TA-053.
    */
   readonly scopeSwitcher?: ReactNode;
+  /** Optional Add menu trigger supplied by the app action registry. */
+  readonly addControl?: ReactNode;
   /** Current scope, used to tint its dot when `scopeSwitcher` is absent. */
   readonly scope?: ScopeToken;
   /** Theme mode for the scope dot; defaults to `dark`. */
@@ -68,6 +70,7 @@ export function TopBar({
   scope,
   themeMode = "dark",
   onPalette,
+  addControl,
   paletteModifier = "meta",
   className,
 }: TopBarProps): JSX.Element {
@@ -134,6 +137,8 @@ export function TopBar({
             </span>
           ))}
       </div>
+      {addControl}
+
 
       {/* Palette hint */}
       <button

@@ -45,6 +45,8 @@ export interface ShellProps {
   readonly scope?: ScopeToken;
   /** Called when the palette hint is activated. */
   readonly onPalette: () => void;
+  /** Optional Add menu trigger wired to the shared action dispatcher. */
+  readonly addControl?: ReactNode;
   /** Agents detected on this machine for the sidebar block. */
   readonly agents?: readonly ShellAgentStatus[];
   /** Account identity for the sidebar footer card. */
@@ -87,6 +89,7 @@ export function Shell({
   projectLabel = null,
   scopeSwitcher,
   scope,
+  addControl,
   onPalette,
   agents = [],
   account,
@@ -134,6 +137,7 @@ export function Shell({
           scope={scope}
           themeMode={themeMode}
           onPalette={onPalette}
+          addControl={addControl}
           paletteModifier={paletteModifier}
         />
         {/*

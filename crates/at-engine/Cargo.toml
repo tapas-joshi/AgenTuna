@@ -22,6 +22,7 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 
+serde_json.workspace = true
 [dev-dependencies]
 at-fs = { workspace = true, features = ["testkit"] }
 serde_json.workspace = true

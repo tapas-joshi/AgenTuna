@@ -119,6 +119,40 @@ fn seed_durable_history(conn: &rusqlite::Connection) -> HistoryCounts {
     snapshot_history_counts(conn).expect("snapshot history")
 }
 
+fn durable_history_dump(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+    let tables = [
+        "operations",
+        "operation_files",
+        "backups",
+        "health_checks",
+        "drift_events",
+        "preset_applications",
+        "preset_application_members",
+        "settings",
+    ];
+    tables
+        .iter()
+        .map(|table| {
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .expect("prepare durable table snapshot");
+            let column_count = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..column_count)
+                        .map(|index| row.get(index))
+                        .collect::<Result<Vec<rusqlite::types::Value>, _>>()
+                })
+                .expect("query durable table")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read durable table");
+            ((*table).to_owned(), rows)
+        })
+        .collect()
+}
+
 /// Creates a populated filesystem fixture on disk with 3 scopes (global, user, project),
 /// 40 items across them, and 3 agent directories (Claude Code, Codex, omp).
 fn setup_fixture_tree(temp: &TempDir) -> RebuildPaths {
@@ -570,6 +604,68 @@ fn deleting_db_file_and_rebuilding_reproduces_derived_rows() {
             "recovered dump after db deletion must match original baseline"
         );
     }
+}
+
+#[test]
+fn corrupt_database_is_quarantined_then_derived_rows_rebuild_from_store() {
+    let temp = TempDir::new().expect("tempdir");
+    let paths = setup_fixture_tree(&temp);
+    let db_path = temp.path().join("agentuna.db");
+
+    {
+        let mut database = open_file_db(&db_path);
+        rebuild(database.connection_mut(), &paths, None).expect("initial rebuild");
+    }
+
+    let corrupt_bytes = b"invalid sqlite bytes";
+    fs::write(&db_path, corrupt_bytes).expect("corrupt db fixture");
+    let mut recovered = open_file_db(&db_path);
+    let quarantine = recovered
+        .startup_warning()
+        .expect("startup reports quarantined file");
+    assert_eq!(
+        fs::read(quarantine).expect("read quarantined file"),
+        corrupt_bytes
+    );
+    assert!(quarantine.exists());
+    assert!(
+        quarantine
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("agentuna.db.corrupt-"))
+    );
+
+    let report = rebuild(recovered.connection_mut(), &paths, None).expect("rebuild");
+    assert_eq!(report.counts.items, 40);
+    assert_eq!(
+        normalized_derived_dump(recovered.connection())
+            .expect("recovered dump")
+            .items
+            .len(),
+        40
+    );
+}
+
+#[test]
+fn readable_database_rebuild_preserves_durable_history_contents() {
+    let temp = TempDir::new().expect("tempdir");
+    let paths = setup_fixture_tree(&temp);
+    let mut database = open_file_db(&temp.path().join("agentuna.db"));
+    let connection = database.connection_mut();
+    seed_durable_history(connection);
+    rebuild(connection, &paths, None).expect("initial rebuild");
+    let baseline = normalized_derived_dump(connection).expect("baseline dump");
+    let history_before = durable_history_dump(connection);
+
+    connection
+        .execute("DELETE FROM items", [])
+        .expect("simulate damaged derived rows");
+    rebuild(connection, &paths, None).expect("rebuild damaged readable db");
+
+    assert_eq!(
+        normalized_derived_dump(connection).expect("rebuilt dump"),
+        baseline
+    );
+    assert_eq!(durable_history_dump(connection), history_before);
 }
 
 // =========================================================================

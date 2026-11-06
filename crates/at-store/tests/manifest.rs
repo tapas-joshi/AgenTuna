@@ -110,6 +110,29 @@ fn skill_hash_ignores_mtime_and_copy_but_not_a_byte() {
 }
 
 #[test]
+fn skill_hash_ignores_frontmatter_order_and_crlf_conversion() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let skill = sandbox.path().join("demo");
+    fs::create_dir_all(&skill).expect("skill folder");
+    fs::write(
+        skill.join("SKILL.md"),
+        b"---\nname: demo\ndescription: A demo\nlicense: MIT\n---\n# body\n",
+    )
+    .expect("write LF frontmatter");
+    let first = hash_skill_folder(&skill).expect("first hash");
+
+    fs::write(
+        skill.join("SKILL.md"),
+        b"---\r\nlicense: MIT\r\ndescription: A demo\r\nname: demo\r\n---\r\n# body\r\n",
+    )
+    .expect("write reordered CRLF frontmatter");
+    assert_eq!(
+        hash_skill_folder(&skill).expect("hash normalized frontmatter"),
+        first
+    );
+}
+
+#[test]
 fn mcp_hash_ignores_key_order_and_whitespace_but_not_values() {
     let first: Value = serde_json::from_str(
         r#"{"command":"node","args":["server.js"],"env":{"TOKEN":"${GITHUB_TOKEN}","MODE":"dev"},"meta":{"z":1,"a":2}}"#,
@@ -842,37 +865,7 @@ fn canonical_bytes_have_fixed_key_order_and_sorting() {
     let manifest = manifest.with_updated_at(fixed_time());
     let bytes = manifest.to_bytes().expect("canonical bytes");
 
-    let template = r#"{
-  "schema_version": 1,
-  "store_id": "<STORE>",
-  "scope": "user",
-  "updated_at": "2026-11-05T00:00:00Z",
-  "items": [
-    {
-      "id": "<SKILL>",
-      "kind": "skill",
-      "slug": "alpha",
-      "path": "skills/alpha",
-      "hash": "<ZERO>"
-    },
-    {
-      "id": "<MCP>",
-      "kind": "mcp_server",
-      "slug": "zeta",
-      "path": "mcp.json",
-      "hash": "<ONE>",
-      "name": "Zeta"
-    }
-  ],
-  "disabled": [
-    {
-      "item_id": "<SKILL>",
-      "kind": "skill",
-      "agents": null
-    }
-  ]
-}
-"#;
+    let template = include_str!("fixtures/store-manifest.json");
     let expected = template
         .replace("<STORE>", &manifest.store_id().to_string())
         .replace("<SKILL>", &skill_id.to_string())

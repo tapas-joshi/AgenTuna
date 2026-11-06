@@ -17,6 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use at_adapters::claude_mcp::{ClaudeConfigScope, ClaudeMcpAdapter, ClaudeMcpConfig, ClaudeServer};
 use at_adapters::codex_mcp::{CodexConfigFile, CodexServerEntry};
 use at_adapters::omp_mcp::{OmpMcpAdapter, OmpMcpConfig, OmpServer};
 use at_fs::BackupPolicy;
@@ -25,9 +26,111 @@ use at_model::mcp::{EnvValue, McpTransport, SecretRef};
 use harness::{Format, GoldenCase, Suite, single_edit_span};
 use url::Url;
 
+const CLAUDE_GOLDEN: &str = include_str!("fixtures/claude/golden.json");
 const CODEX_GOLDEN: &str = include_str!("fixtures/codex/golden.toml");
 const OMP_GOLDEN: &str = include_str!("fixtures/omp/golden_mcp.json");
 
+// ---------------------------------------------------------------------------------------------
+// Claude Code JSONC cases
+// ---------------------------------------------------------------------------------------------
+
+fn apply_claude_noop(path: &Path) -> Result<(), String> {
+    let config = ClaudeMcpAdapter::read(path, ClaudeConfigScope::User)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing Claude config")?;
+    config
+        .save_edit(path, config.render_unchanged(), BackupPolicy::None)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn check_claude_noop(text: &str) -> Result<(), String> {
+    if text == CLAUDE_GOLDEN {
+        Ok(())
+    } else {
+        Err("Claude no-op changed bytes".to_owned())
+    }
+}
+
+fn apply_claude_unicode_server(path: &Path) -> Result<(), String> {
+    let config = ClaudeMcpAdapter::read(path, ClaudeConfigScope::User)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing Claude config")?;
+    let server = ClaudeServer {
+        name: "mcp.测试-server".to_owned(),
+        transport: McpTransport::Stdio {
+            command: "node".to_owned(),
+            args: vec!["server.js".to_owned()],
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        extra: BTreeMap::new(),
+    };
+    let edited = config.upsert(&server).map_err(|error| error.to_string())?;
+    config
+        .save_edit(path, &edited, BackupPolicy::None)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn check_claude_unicode(text: &str) -> Result<(), String> {
+    let config =
+        ClaudeMcpConfig::parse(text, ClaudeConfigScope::User).map_err(|error| error.to_string())?;
+    if config.servers().contains_key("mcp.测试-server") {
+        Ok(())
+    } else {
+        Err("Unicode server name was not retained".to_owned())
+    }
+}
+
+fn apply_claude_project_server(path: &Path) -> Result<(), String> {
+    let scope = ClaudeConfigScope::Project {
+        project_path: "/workspace/demo".to_owned(),
+    };
+    let config = ClaudeMcpAdapter::read(path, scope)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing Claude config")?;
+    let server = ClaudeServer {
+        name: "project-server".to_owned(),
+        transport: McpTransport::Stdio {
+            command: "python".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        extra: BTreeMap::new(),
+    };
+    let edited = config.upsert(&server).map_err(|error| error.to_string())?;
+    config
+        .save_edit(path, &edited, BackupPolicy::None)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn check_claude_project(text: &str) -> Result<(), String> {
+    let config = ClaudeMcpConfig::parse(
+        text,
+        ClaudeConfigScope::Project {
+            project_path: "/workspace/demo".to_owned(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if config.servers().contains_key("project-server") {
+        Ok(())
+    } else {
+        Err("project server missing from project-specific map".to_owned())
+    }
+}
+
+fn apply_claude_project_file_noop(path: &Path) -> Result<(), String> {
+    let config = ClaudeMcpAdapter::read(path, ClaudeConfigScope::ProjectFile)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing project MCP config")?;
+    config
+        .save_edit(path, config.render_unchanged(), BackupPolicy::None)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
 // ---------------------------------------------------------------------------------------------
 // Codex TOML cases
 // ---------------------------------------------------------------------------------------------
@@ -471,7 +574,39 @@ fn case(id: &str) -> &'static GoldenCase {
 // Corpus
 // ---------------------------------------------------------------------------------------------
 
-const CASES: [GoldenCase; 12] = [
+const CASES: [GoldenCase; 16] = [
+    GoldenCase {
+        id: "claude-project-file-noop",
+        fixture: "claude/golden.json",
+        format: Format::Jsonc,
+        apply: apply_claude_project_file_noop,
+        check: check_claude_noop,
+        unchanged: true,
+    },
+    GoldenCase {
+        id: "claude-project-server",
+        fixture: "claude/golden.json",
+        format: Format::Jsonc,
+        apply: apply_claude_project_server,
+        check: check_claude_project,
+        unchanged: false,
+    },
+    GoldenCase {
+        id: "claude-noop",
+        fixture: "claude/golden.json",
+        format: Format::Jsonc,
+        apply: apply_claude_noop,
+        check: check_claude_noop,
+        unchanged: true,
+    },
+    GoldenCase {
+        id: "claude-unicode-server",
+        fixture: "claude/golden.json",
+        format: Format::Jsonc,
+        apply: apply_claude_unicode_server,
+        check: check_claude_unicode,
+        unchanged: false,
+    },
     GoldenCase {
         id: "codex-add-server",
         fixture: "codex/golden.toml",
@@ -582,7 +717,7 @@ fn golden_corpus_matches_expected_bytes() {
         .run(&CASES)
         .unwrap_or_else(|failures| panic!("{failures}"));
     let elapsed = started.elapsed();
-    assert_eq!(outcome.cases, 12);
+    assert_eq!(outcome.cases, 16);
     assert_eq!(outcome.cases, CASES.len());
     if !harness::update_requested() {
         assert!(outcome.updated.is_empty(), "compare mode rewrote a file");
@@ -597,6 +732,8 @@ fn golden_corpus_matches_expected_bytes() {
 fn additions_only_insert_bytes() {
     let suite = Suite::workspace().expect("sandbox");
     for id in [
+        "claude-project-server",
+        "claude-unicode-server",
         "codex-add-server",
         "codex-add-quoted-id",
         "codex-crlf-add-server",
@@ -618,6 +755,15 @@ fn additions_only_insert_bytes() {
             "{id} byte length delta does not equal the inserted text length"
         );
         assert_eq!(span.length_delta(), span.inserted.len() as isize);
+        if id.starts_with("claude-") {
+            let map_start = if id == "claude-project-server" {
+                source.find("\"mcpServers\"")
+            } else {
+                source.rfind("\"mcpServers\"")
+            }
+            .expect("Claude MCP map");
+            assert!(span.start >= map_start, "{id} inserted outside its MCP map");
+        }
     }
 }
 
@@ -783,4 +929,130 @@ fn five_megabyte_jsonc_document_round_trips_under_200_ms() {
         elapsed < budget,
         "a 5 MB document took {elapsed:?}, budget {budget:?}"
     );
+}
+
+#[test]
+fn claude_rebases_unrelated_external_edits_and_preserves_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("temp directory");
+    let target = dir.path().join("target.json");
+    let link = dir.path().join("claude.json");
+    fs::write(&target, CLAUDE_GOLDEN).expect("fixture");
+    symlink(&target, &link).expect("symlink");
+
+    let config = ClaudeMcpConfig::parse(CLAUDE_GOLDEN, ClaudeConfigScope::User).expect("parse");
+    let server = ClaudeServer {
+        name: "mcp-new".to_owned(),
+        transport: McpTransport::Stdio {
+            command: "node".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        extra: BTreeMap::new(),
+    };
+    let desired = config.upsert(&server).expect("patch");
+    let request = config.replacement_request(&link, &desired, BackupPolicy::None);
+    let changes = config
+        .change_set(Path::new("claude.json"), &desired)
+        .expect("change set");
+    assert!(matches!(
+        changes.ops.as_slice(),
+        [at_model::FileOp::Write {
+            follow_symlink: true,
+            ..
+        }]
+    ));
+    assert!(request.follow_symlink);
+
+    let external = CLAUDE_GOLDEN.replace("\"theme\": \"dark\"", "\"theme\": \"light\"");
+    fs::write(&target, &external).expect("external unrelated edit");
+    let external_config =
+        ClaudeMcpConfig::parse(&external, ClaudeConfigScope::User).expect("external parse");
+    assert_eq!(external_config.servers(), config.servers());
+    config
+        .save_edit(&link, &desired, BackupPolicy::None)
+        .expect("rebase");
+    assert!(
+        link.symlink_metadata()
+            .expect("link metadata")
+            .file_type()
+            .is_symlink()
+    );
+    let result = fs::read_to_string(&target).expect("target");
+    assert!(result.contains("\"theme\": \"light\""));
+    assert!(result.contains("\"mcp-new\""));
+}
+
+#[test]
+fn claude_refuses_to_rebase_when_server_subtree_changed() {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let path = dir.path().join("claude.json");
+    fs::write(&path, CLAUDE_GOLDEN).expect("fixture");
+    let config = ClaudeMcpConfig::parse(CLAUDE_GOLDEN, ClaudeConfigScope::User).expect("parse");
+    let desired = config
+        .upsert(&ClaudeServer {
+            name: "new-server".to_owned(),
+            transport: McpTransport::Stdio {
+                command: "node".to_owned(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+            },
+            extra: BTreeMap::new(),
+        })
+        .expect("patch");
+    let external = CLAUDE_GOLDEN.replace("\"command\": \"old\"", "\"command\": \"external\"");
+    fs::write(&path, &external).expect("external server edit");
+    let error = config
+        .save_edit(&path, &desired, BackupPolicy::None)
+        .expect_err("server subtree conflict must be returned");
+    assert!(matches!(
+        error,
+        at_adapters::claude_mcp::ClaudeMcpError::Fs(at_fs::FsError::ConcurrentModification { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(path).expect("read external config"),
+        external
+    );
+}
+
+#[test]
+fn claude_maps_only_referenced_variable_values_to_secrets() {
+    let source = r#"{"mcpServers":{"server":{"command":"node","env":{"TOKEN":"${TOKEN}","MODE":"${MODE}"}}}}"#;
+    let refs = BTreeMap::from([("TOKEN".to_owned(), "account-token".to_owned())]);
+    let config = ClaudeMcpConfig::parse_with_secret_refs(source, ClaudeConfigScope::User, &refs)
+        .expect("parse");
+    let server = config.servers().get("server").expect("server");
+    let McpTransport::Stdio { env, .. } = &server.transport else {
+        panic!("expected stdio");
+    };
+    assert!(matches!(env.get("TOKEN"), Some(EnvValue::Secret(_))));
+    assert_eq!(
+        env.get("MODE"),
+        Some(&EnvValue::Literal("${MODE}".to_owned()))
+    );
+}
+
+#[test]
+fn claude_span_patch_preserves_crlf() {
+    let source = CLAUDE_GOLDEN.replace('\n', "\r\n");
+    let config = ClaudeMcpConfig::parse(&source, ClaudeConfigScope::User).expect("parse");
+    let output = config
+        .upsert(&ClaudeServer {
+            name: "a.b-测试".to_owned(),
+            transport: McpTransport::Stdio {
+                command: "node".to_owned(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+            },
+            extra: BTreeMap::new(),
+        })
+        .expect("patch");
+    assert_no_lone_lf(&source).expect("CRLF fixture");
+    assert_no_lone_lf(&output).expect("CRLF output");
+    let span = single_edit_span(&source, &output);
+    assert_eq!(span.removed, 0);
 }

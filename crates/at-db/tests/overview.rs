@@ -472,3 +472,25 @@ fn needs_attention_merges_all_candidate_kinds() {
     assert!(warning_count > 0);
     assert!(info_count > 0);
 }
+
+#[test]
+fn shadowed_skill_rows_report_effective_winner_and_navigation() {
+    let db = open_with_all();
+    let connection = db.connection();
+    let user = seed_item(connection, "same-skill", ItemKind::Skill, Scope::User);
+    let project = seed_item(connection, "same-skill", ItemKind::Skill, Scope::Project);
+    let rows = at_db::overview::shadowed_skills(connection, 20).expect("shadow query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].item_id, user);
+    assert_eq!(rows[0].winner_scope, Scope::Project);
+    let candidates = at_db::overview::shadowed_skill_candidates(connection, 20).expect("attention");
+    assert_eq!(candidates[0].item_id, Some(user));
+    assert_eq!(
+        candidates[0]
+            .navigation
+            .as_ref()
+            .and_then(|target| target.row_id.as_deref()),
+        Some(user.to_string().as_str())
+    );
+    assert_ne!(user, project);
+}

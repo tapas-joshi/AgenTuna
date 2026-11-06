@@ -85,3 +85,21 @@ pub(crate) fn read_bounded(
     }
     Ok(bytes)
 }
+
+/// Reads a regular file without following its final path component.
+///
+/// # Errors
+/// Returns [`FsError::SymlinkRefused`] for a symbolic link and the usual IO or size error for
+/// other invalid or unreadable targets.
+pub fn read_nofollow(path: &Path) -> Result<Vec<u8>, FsError> {
+    let mut file = open_nofollow(path)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| FsError::from_io(path, error))?;
+    if !metadata.is_file() {
+        return Err(FsError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    read_bounded(path, &mut file, &metadata)
+}

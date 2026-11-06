@@ -14,7 +14,7 @@
 //! reason, and the last twenty events with their time, action, host and byte count. No payload,
 //! URL path or header ever enters this module.
 
-use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use at_model::network::{
     BackgroundHealth, NETWORK_EVENT_CAPACITY, NetworkAction, NetworkActionState, NetworkDenied,
@@ -36,9 +36,10 @@ pub const UPDATE_ACTIONS: [NetworkAction; 2] =
 /// value; the policy is read often, the log is written rarely, so the policy sits behind a
 /// read-write lock and the log behind a mutex. Poisoning is recovered rather than propagated: a
 /// stale lock must not disable offline mode.
+#[derive(Clone)]
 pub struct NetworkState {
-    policy: RwLock<NetworkPolicy>,
-    events: Mutex<NetworkEventLog>,
+    policy: Arc<RwLock<NetworkPolicy>>,
+    events: Arc<Mutex<NetworkEventLog>>,
 }
 
 impl Default for NetworkState {
@@ -52,8 +53,8 @@ impl NetworkState {
     #[must_use]
     pub fn new(policy: NetworkPolicy) -> Self {
         Self {
-            policy: RwLock::new(policy),
-            events: Mutex::new(NetworkEventLog::new()),
+            policy: Arc::new(RwLock::new(policy)),
+            events: Arc::new(Mutex::new(NetworkEventLog::new())),
         }
     }
 

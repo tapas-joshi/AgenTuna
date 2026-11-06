@@ -181,6 +181,8 @@ pub enum SettingsKey {
     LastProjectId,
     /// `remote_backup.device_name`.
     RemoteBackupDevice,
+    /// Serialized desktop window layout, private to the app shell.
+    WindowState,
 }
 
 impl SettingsKey {
@@ -196,6 +198,7 @@ impl SettingsKey {
         Self::AutoUpdateSkills,
         Self::LastProjectId,
         Self::RemoteBackupDevice,
+        Self::WindowState,
     ];
 
     /// The exact string stored in `settings.key`.
@@ -215,6 +218,7 @@ impl SettingsKey {
             Self::LastScope(project_id) => format!("{LAST_SCOPE_PREFIX}{project_id}"),
             Self::LastProjectId => "last_project_id".to_owned(),
             Self::RemoteBackupDevice => "remote_backup.device_name".to_owned(),
+            Self::WindowState => "window_state".to_owned(),
         }
     }
 
@@ -282,6 +286,7 @@ impl SettingsKey {
                 | Self::NativeBannerHidden(_)
                 | Self::LastScope(_)
                 | Self::LastProjectId
+                | Self::WindowState
         )
     }
 }
@@ -1043,7 +1048,7 @@ fn decode(key: &SettingsKey, value_json: &str) -> Result<Decoded, SettingsError>
                 .map(|scope| Decoded::Scope(Some(scope)))
                 .ok_or_else(|| invalid(key, "expected global, user, project, local or empty"))
         }
-        SettingsKey::LastProjectId | SettingsKey::RemoteBackupDevice => {
+        SettingsKey::LastProjectId | SettingsKey::RemoteBackupDevice | SettingsKey::WindowState => {
             Ok(Decoded::Text(Some(string(key, &value)?.to_owned())))
         }
     }

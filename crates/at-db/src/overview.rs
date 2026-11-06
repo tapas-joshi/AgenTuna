@@ -68,6 +68,17 @@ pub struct AttentionCandidate {
     pub title: String,
     /// One-line subtitle.
     pub subtitle: Option<String>,
+    /// Navigation destination for the exact row.
+    pub navigation: Option<NavigationTarget>,
+}
+
+/// Destination the UI can route to from an attention row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavigationTarget {
+    /// Screen identifier (skills, mcp, drift or agents).
+    pub screen: String,
+    /// Exact row identifier, when one exists.
+    pub row_id: Option<String>,
 }
 
 /// The kind of needs-attention candidate.
@@ -82,6 +93,93 @@ pub enum AttentionKind {
     NativeDeployment,
     /// An agent row is missing or unmanaged.
     MissingAgent,
+    /// A lower-precedence skill copy is shadowed.
+    ShadowedSkill,
+}
+
+/// An indexed shadowed skill for Overview attention rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShadowedSkillRow {
+    /// Stable item identity.
+    pub item_id: ItemId,
+    /// Display name.
+    pub name: String,
+    /// Lower-scope copy.
+    pub scope: Scope,
+    /// Effective winning scope.
+    pub winner_scope: Scope,
+}
+
+/// Lists skills that are shadowed by a higher-precedence canonical scope copy.
+///
+/// # Errors
+/// Returns [`DbError`] when a query fails or stored scope/item identifiers are invalid.
+pub fn shadowed_skills(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<ShadowedSkillRow>, DbError> {
+    let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(i64::MAX);
+    let mut statement = connection.prepare(
+        "SELECT i.id, i.name, i.scope, (SELECT i2.scope FROM items i2 \
+           WHERE i2.kind='skill' AND i2.slug=i.slug AND i2.scope != i.scope \
+             AND (i2.scope NOT IN ('project','local') OR i2.project_id IS i.project_id) \
+             AND CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END > \
+                 CASE i.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END \
+           ORDER BY CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END DESC LIMIT 1) \
+         FROM items i WHERE i.kind='skill' \
+           AND EXISTS (SELECT 1 FROM items i2 WHERE i2.kind='skill' AND i2.slug=i.slug AND i2.scope != i.scope \
+             AND (i2.scope NOT IN ('project','local') OR i2.project_id IS i.project_id) \
+             AND CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END > \
+                 CASE i.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END) \
+         ORDER BY i.name COLLATE NOCASE, i.scope LIMIT ?1"
+    )?;
+    let rows = statement
+        .query_map([limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, name, scope, winner_scope)| {
+            Ok(ShadowedSkillRow {
+                item_id: id.parse().map_err(DbError::from)?,
+                name,
+                scope: scope.parse().map_err(DbError::from)?,
+                winner_scope: winner_scope.parse().map_err(DbError::from)?,
+            })
+        })
+        .collect()
+}
+
+/// Converts indexed shadowed skill copies into attention candidates.
+///
+/// # Errors
+/// Returns [`DbError`] when either query fails.
+pub fn shadowed_skill_candidates(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<AttentionCandidate>, DbError> {
+    shadowed_skills(connection, limit).map(|rows| {
+        rows.into_iter()
+            .map(|row| AttentionCandidate {
+                kind: AttentionKind::ShadowedSkill,
+                severity: AttentionSeverity::Warning,
+                item_id: Some(row.item_id),
+                agent_id: None,
+                scope: Some(row.scope),
+                title: format!("Skill shadowed: {}", row.name),
+                subtitle: Some(format!("Winning copy is at {}", row.winner_scope)),
+                navigation: Some(NavigationTarget {
+                    screen: "skills".into(),
+                    row_id: Some(row.item_id.to_string()),
+                }),
+            })
+            .collect()
+    })
 }
 
 /// Severity ordering for needs-attention candidates.
@@ -259,6 +357,10 @@ pub fn failing_health_checks(
     let mut out = Vec::with_capacity(rows.len());
     for (item_id, agent_id, scope, server_name, error_code) in rows {
         out.push(AttentionCandidate {
+            navigation: Some(NavigationTarget {
+                screen: "mcp".into(),
+                row_id: item_id.clone(),
+            }),
             kind: AttentionKind::FailingHealthCheck,
             severity: AttentionSeverity::Warning,
             item_id: item_id
@@ -273,7 +375,7 @@ pub fn failing_health_checks(
                 .map_err(DbError::from)?,
             scope: Some(scope.parse::<Scope>().map_err(DbError::from)?),
             title: format!("Health check failed: {server_name}"),
-            subtitle: error_code,
+            subtitle: error_code.clone(),
         });
     }
     Ok(out)
@@ -311,6 +413,10 @@ pub fn drift_candidates(
     let mut out = Vec::with_capacity(rows.len());
     for (_id, item_id, agent_id, scope, path, detected_at) in rows {
         out.push(AttentionCandidate {
+            navigation: Some(NavigationTarget {
+                screen: "drift".into(),
+                row_id: Some(_id.to_string()),
+            }),
             kind: AttentionKind::DriftEvent,
             severity: AttentionSeverity::Warning,
             item_id: item_id
@@ -321,7 +427,7 @@ pub fn drift_candidates(
             agent_id: Some(agent_id.parse::<AgentId>().map_err(DbError::from)?),
             scope: Some(scope.parse::<Scope>().map_err(DbError::from)?),
             title: format!("Drift detected: {path}"),
-            subtitle: Some(detected_at),
+            subtitle: Some(detected_at.clone()),
         });
     }
     Ok(out)
@@ -365,7 +471,11 @@ pub fn native_deployment_candidates(
             agent_id: Some(agent_id.parse::<AgentId>().map_err(DbError::from)?),
             scope: Some(scope.parse::<Scope>().map_err(DbError::from)?),
             title: format!("Native item: {name}"),
-            subtitle: project_id,
+            subtitle: project_id.clone(),
+            navigation: Some(NavigationTarget {
+                screen: "skills".into(),
+                row_id: Some(item_id.clone()),
+            }),
         });
     }
     Ok(out)
@@ -409,7 +519,11 @@ pub fn missing_agent_candidates(
                 "Agent not managed: {}",
                 display_name.unwrap_or_else(|| id.clone())
             ),
-            subtitle: version,
+            subtitle: version.clone(),
+            navigation: Some(NavigationTarget {
+                screen: "agents".into(),
+                row_id: Some(id.clone()),
+            }),
         });
     }
     Ok(out)
@@ -429,6 +543,7 @@ pub fn needs_attention(
 ) -> Result<Vec<AttentionCandidate>, DbError> {
     let mut all = Vec::new();
     all.extend(failing_health_checks(connection, limit)?);
+    all.extend(shadowed_skill_candidates(connection, limit)?);
     all.extend(drift_candidates(connection, limit)?);
     all.extend(native_deployment_candidates(connection, limit)?);
     all.extend(missing_agent_candidates(connection, limit)?);
