@@ -24,6 +24,9 @@
 //! [`IndexIntegrity`]. Both are `Send + Sync` and injected, so the shell wires the real
 //! implementations once and tests inject recording fakes.
 
+use std::sync::Mutex;
+
+use at_db::Database;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -275,6 +278,266 @@ pub trait RecoveryOperations: Send + Sync {
     /// # Errors
     /// [`RecoveryError::Operations`] when the row cannot be written.
     fn record_restore(&self, files: &[PathBuf]) -> Result<String, RecoveryError>;
+
+    /// Loads the original bytes for a completed operation from its verified backup.
+    ///
+    /// # Errors
+    /// Returns [`RecoveryError::Operations`] when backup history cannot be queried.
+    fn before_bytes(
+        &self,
+        _journal: &fs_recovery::PendingJournal,
+        _index: usize,
+        _entry: &fs_recovery::JournalEntry,
+    ) -> Result<Option<Vec<u8>>, RecoveryError> {
+        Ok(None)
+    }
+
+    /// Records the terminal state of startup journal recovery.
+    fn finish_journal(
+        &self,
+        _operation_id: &str,
+        _succeeded: bool,
+        _manual_review: bool,
+    ) -> Result<(), RecoveryError> {
+        Ok(())
+    }
+}
+
+/// Production operations-history adapter for startup recovery.
+pub struct DatabaseRecoveryOperations {
+    database: Arc<Mutex<Database>>,
+    backup_root: Option<PathBuf>,
+}
+
+impl DatabaseRecoveryOperations {
+    /// Creates the adapter over the app's shared SQLite handle.
+    #[must_use]
+    pub fn new(database: Arc<Mutex<Database>>) -> Self {
+        Self {
+            database,
+            backup_root: None,
+        }
+    }
+    /// Sets the on-disk backup root used when a crash preceded backup catalogue insertion.
+    #[must_use]
+    pub fn with_backup_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.backup_root = Some(path.into());
+        self
+    }
+}
+
+impl RecoveryOperations for DatabaseRecoveryOperations {
+    fn mark_interrupted(&self, operation: &InterruptedOperation) -> Result<(), RecoveryError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RecoveryError::Operations {
+                message: "database lock poisoned".to_owned(),
+            })?;
+        let kind = operation.kind.parse().ok();
+        let started_at = operation
+            .started_at
+            .map(|value| value.unix_timestamp_nanos() / 1_000_000)
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or(0);
+        at_db::ops::record_interrupted(
+            database.connection(),
+            &operation.id,
+            kind,
+            Some("Recovered interrupted filesystem operation"),
+            started_at,
+        )
+        .map_err(|error| RecoveryError::Operations {
+            message: error.to_string(),
+        })
+    }
+
+    fn record_restore(&self, _files: &[PathBuf]) -> Result<String, RecoveryError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RecoveryError::Operations {
+                message: "database lock poisoned".to_owned(),
+            })?;
+        at_db::ops::record_completed(
+            database.connection(),
+            at_db::ops::OperationKind::Restore,
+            at_db::ops::OperationActor::Ui,
+            Some("Restore interrupted file"),
+        )
+        .map(|id| id.to_string())
+        .map_err(|error| RecoveryError::Operations {
+            message: error.to_string(),
+        })
+    }
+    fn before_bytes(
+        &self,
+        journal: &fs_recovery::PendingJournal,
+        _index: usize,
+        entry: &fs_recovery::JournalEntry,
+    ) -> Result<Option<Vec<u8>>, RecoveryError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RecoveryError::Operations {
+                message: "database lock poisoned".to_owned(),
+            })?;
+        let backups =
+            at_db::backups::backups_for_operation(database.connection(), &journal.operation_id)
+                .map_err(|error| RecoveryError::Operations {
+                    message: error.to_string(),
+                })?;
+        let entry_path = entry.path.to_string_lossy();
+        if let Some(backup) = backups.into_iter().find(|backup| {
+            backup.original_path.as_deref() == Some(entry_path.as_ref())
+                && backup.content_hash.as_deref() == entry.before_hash.as_deref()
+        }) {
+            let path =
+                backup
+                    .backup_path
+                    .map(PathBuf::from)
+                    .ok_or_else(|| RecoveryError::Operations {
+                        message: "backup catalogue row has no path".to_owned(),
+                    })?;
+            return fs::read(&path)
+                .map(Some)
+                .map_err(|error| io_error(&path, error));
+        }
+        drop(database);
+        let Some(root) = &self.backup_root else {
+            return Ok(None);
+        };
+        find_backup_bytes(
+            root,
+            &journal.operation_id,
+            &entry.path,
+            entry.before_hash.as_deref(),
+        )
+    }
+
+    fn finish_journal(
+        &self,
+        operation_id: &str,
+        succeeded: bool,
+        manual_review: bool,
+    ) -> Result<(), RecoveryError> {
+        let operation_id = operation_id
+            .parse::<at_db::ops::OperationId>()
+            .map_err(|error| RecoveryError::Operations {
+                message: error.to_string(),
+            })?;
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RecoveryError::Operations {
+                message: "database lock poisoned".to_owned(),
+            })?;
+        let status = if succeeded {
+            at_db::ops::OperationStatus::Succeeded
+        } else {
+            at_db::ops::OperationStatus::Failed
+        };
+        at_db::ops::finish(
+            database.connection(),
+            &operation_id,
+            status,
+            manual_review.then_some("manual_review_required"),
+        )
+        .map(|_| ())
+        .map_err(|error| RecoveryError::Operations {
+            message: error.to_string(),
+        })
+    }
+}
+
+fn find_backup_bytes(
+    root: &Path,
+    operation_id: &str,
+    original_path: &Path,
+    expected_hash: Option<&str>,
+) -> Result<Option<Vec<u8>>, RecoveryError> {
+    let Some(expected_hash) = expected_hash else {
+        return Ok(None);
+    };
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&directory, error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| io_error(&directory, error))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(blob_name) = name.strip_suffix(".json") else {
+                continue;
+            };
+            let sidecar: at_fs::backup::BackupSidecar = match fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            {
+                Some(sidecar) => sidecar,
+                None => continue,
+            };
+            if sidecar.operation_id.as_deref() != Some(operation_id)
+                || sidecar.original_path != original_path
+                || sidecar.content_hash != expected_hash
+            {
+                continue;
+            }
+            let Some(parent) = path.parent() else {
+                continue;
+            };
+            let blob = parent.join(blob_name);
+            let bytes = fs::read(&blob).map_err(|error| io_error(&blob, error))?;
+            if at_fs::sha256_hex(&bytes) == expected_hash {
+                return Ok(Some(bytes));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Runs the production database integrity check used after an unclean exit.
+pub struct DatabaseIndexIntegrity {
+    database: Arc<Mutex<Database>>,
+}
+
+impl DatabaseIndexIntegrity {
+    /// Creates the check over the app's shared SQLite handle.
+    #[must_use]
+    pub fn new(database: Arc<Mutex<Database>>) -> Self {
+        Self { database }
+    }
+}
+
+impl IndexIntegrity for DatabaseIndexIntegrity {
+    fn check(&self) -> Result<IntegrityReport, RecoveryError> {
+        let database = self.database.lock().map_err(|_| RecoveryError::Integrity {
+            detail: "database lock poisoned".to_owned(),
+        })?;
+        let detail = database
+            .connection()
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .map_err(|error| RecoveryError::Integrity {
+                detail: error.to_string(),
+            })?;
+        Ok(IntegrityReport {
+            ok: detail.eq_ignore_ascii_case("ok"),
+            detail,
+        })
+    }
 }
 
 /// What an index integrity check found.
@@ -460,6 +723,32 @@ fn io_error(path: &Path, error: io::Error) -> RecoveryError {
     }
 }
 
+struct AppJournalCallbacks<'a>(&'a dyn RecoveryOperations);
+
+impl fs_recovery::RecoveryCallbacks for AppJournalCallbacks<'_> {
+    fn before_bytes(
+        &mut self,
+        journal: &fs_recovery::PendingJournal,
+        index: usize,
+        entry: &fs_recovery::JournalEntry,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.0
+            .before_bytes(journal, index, entry)
+            .map_err(|error| error.to_string())
+    }
+
+    fn finish(
+        &mut self,
+        operation_id: &str,
+        succeeded: bool,
+        manual_review: bool,
+    ) -> Result<(), String> {
+        self.0
+            .finish_journal(operation_id, succeeded, manual_review)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Detects and repairs what an unclean shutdown left behind.
 pub struct RecoveryService {
     locations: RecoveryLocations,
@@ -562,6 +851,23 @@ impl RecoveryService {
             return Err(RecoveryError::Integrity {
                 detail: integrity.detail,
             });
+        }
+        for journal_dir in &self.locations.journal_dirs {
+            if journal_dir
+                .file_name()
+                .is_none_or(|name| name != JOURNALS_DIR)
+                || journal_dir
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_none_or(|name| name != STATE_DIR)
+            {
+                continue;
+            }
+            let Some(store_root) = journal_dir.parent().and_then(Path::parent) else {
+                continue;
+            };
+            let mut callbacks = AppJournalCallbacks(self.operations.as_ref());
+            fs_recovery::recover_journals(journal_dir, store_root, &mut callbacks)?;
         }
         let mut sheet = RecoverySheet {
             interrupted: Vec::new(),
@@ -770,5 +1076,60 @@ impl RecoveryService {
         Err(RecoveryError::UnknownOperation {
             operation_id: operation_id.to_owned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod database_adapter_tests {
+    use std::sync::{Arc, Mutex};
+
+    use time::OffsetDateTime;
+
+    use super::{
+        DatabaseIndexIntegrity, DatabaseRecoveryOperations, IndexIntegrity, IntegrityReport,
+        InterruptedOperation, RecoveryOperations,
+    };
+
+    #[test]
+    fn database_adapters_record_interruption_restore_and_check_integrity() {
+        let database = Arc::new(Mutex::new(
+            at_db::Database::open_in_memory().expect("database"),
+        ));
+        let operations = DatabaseRecoveryOperations::new(Arc::clone(&database));
+        let interrupted = InterruptedOperation {
+            id: "job-recovery-test".to_owned(),
+            kind: "deploy".to_owned(),
+            paths: vec![std::path::PathBuf::from("sandbox/skill")],
+            started_at: Some(OffsetDateTime::now_utc()),
+        };
+
+        operations
+            .mark_interrupted(&interrupted)
+            .expect("record interrupted operation");
+        let restore_id = operations
+            .record_restore(&interrupted.paths)
+            .expect("record restore operation");
+        let integrity = DatabaseIndexIntegrity::new(Arc::clone(&database))
+            .check()
+            .expect("integrity check");
+
+        assert_eq!(restore_id.len(), 26);
+        assert_eq!(
+            integrity,
+            IntegrityReport {
+                ok: true,
+                detail: "ok".to_owned(),
+            }
+        );
+        let database = database.lock().expect("database lock");
+        let status = database
+            .connection()
+            .query_row(
+                "SELECT status FROM operations WHERE id = ?1",
+                ["job-recovery-test"],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("interrupted status");
+        assert_eq!(status, "interrupted");
     }
 }

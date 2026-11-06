@@ -91,6 +91,9 @@ describe("AppState", () => {
     state.openItem("itm_mcp", { kind: "mcp_server", scope: "user", project_id: null });
     expect(state.getSnapshot().route).toBe("mcp-detail");
     expect(state.getSnapshot().screenState["detail:itemId"]).toBe("itm_mcp");
+    state.openItem("itm_missing", null);
+    expect(state.getSnapshot().route).toBe("mcp-detail");
+    expect(state.getSnapshot().screenState["detail:itemId"]).toBe("itm_mcp");
   });
 
   test("a burst of external changes produces one trailing-edge reload", () => {
@@ -131,5 +134,16 @@ describe("AppState", () => {
     expect(state.getSnapshot().backgroundJobs).toEqual(["job-1"]);
     state.setJob("job-1", false);
     expect(state.getSnapshot().backgroundJobs).toEqual([]);
+  });
+  test("route history is bounded to the newest 50 entries", () => {
+    const state = createAppState();
+    state.restore("project-1", "user");
+    const routes = ["overview", "skills", "mcp-list", "agents", "settings"] as const;
+    for (let index = 0; index < 60; index += 1) {
+      const route = routes[index % routes.length];
+      if (route) state.navigate(route);
+    }
+    expect(state.getSnapshot().routeStack).toHaveLength(50);
+    expect(state.getSnapshot().routeStack.at(-1)).toBe(state.getSnapshot().route);
   });
 });

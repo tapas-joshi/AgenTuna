@@ -12,11 +12,16 @@ pub mod linux;
 pub mod logs;
 pub mod menu;
 pub mod network;
+pub mod overview;
+pub mod overwrite;
 pub mod paths;
 pub mod privilege;
 pub mod projects;
 pub mod recovery;
+pub mod secrets;
 pub mod settings;
+pub mod skill_detail;
+pub mod skill_wizard;
 pub mod state;
 pub mod updater;
 pub mod window_state;
@@ -85,23 +90,6 @@ pub fn run() -> tauri::Result<()> {
             return Ok(());
         }
     };
-    // Record this session before anything else can crash: `clean_exit: false` in `session.json` is
-    // what makes the next start run recovery. This happens after the single-instance gate (only
-    // the primary instance owns the marker) and before the window exists, so recovery is always
-    // decided before the UI is interactive.
-    match recovery::SessionFile::new(paths.support_dir()).start() {
-        Ok(recovery::PreviousExit::Unclean(previous)) => tracing::warn!(
-            pid = previous.pid,
-            started_at = %previous.started_at,
-            "the previous session did not exit cleanly; startup recovery will run"
-        ),
-        Ok(recovery::PreviousExit::Running(previous)) => tracing::warn!(
-            pid = previous.pid,
-            "another live instance owns the session marker; recovery will not run"
-        ),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(%error, "could not write the session marker"),
-    }
     let instance_state = Arc::new(primary.into_state());
     let setup_instance = Arc::clone(&instance_state);
     let setup_config = Arc::clone(&config);
@@ -151,6 +139,26 @@ pub fn run() -> tauri::Result<()> {
             let state = match database {
                 Some(database) => state.with_database(database),
                 None => state,
+            };
+            let state = match state.database_handle() {
+                Ok(database) => {
+                    let service = Arc::new(recovery::RecoveryService::new(
+                        recovery::RecoveryLocations::from_paths(&setup_paths),
+                        Arc::new(
+                            recovery::DatabaseRecoveryOperations::new(Arc::clone(&database))
+                                .with_backup_root(setup_paths.backup_dir()),
+                        ),
+                        Arc::new(recovery::DatabaseIndexIntegrity::new(database)),
+                    ));
+                    match service.run() {
+                        Ok(outcome) => state.with_recovery(service, outcome),
+                        Err(error) => {
+                            tracing::error!(%error, "startup recovery could not complete");
+                            state
+                        }
+                    }
+                }
+                Err(_) => state,
             };
             app.manage(state);
             if let Some(window) = app.get_webview_window("main") {
@@ -203,13 +211,24 @@ pub fn run() -> tauri::Result<()> {
         commands::settings_load,
         commands::app_paths,
         commands::settings_set,
+        overview::overview_load,
+        commands::recovery_sheet,
+        commands::recovery_discard,
+        commands::recovery_restore,
         commands::item_lookup,
+        skill_detail::skill_detail_load,
+        skill_detail::skill_compare_copies,
+        skill_detail::skill_version_compare,
+        skill_detail::skill_reveal,
+        skill_detail::skill_edit_preview,
+        skill_detail::skill_edit_apply,
         window_state::window_state_load,
         window_state::window_state_save,
         window_state::window_state_reset,
         logs::logs_tail,
         logs::logs_reveal,
         diagnostics::diagnostics_export,
+        diagnostics::diagnostics_report_copy,
         projects::projects_list,
         projects::projects_add,
         projects::projects_choose_folder,
@@ -218,9 +237,13 @@ pub fn run() -> tauri::Result<()> {
         network::network_events,
         network::network_clear_events,
         network::network_set_offline,
-        config::config_report,
         commands::mcp_test_connection,
-        commands::dev_run_job
+        secrets::secrets_list,
+        secrets::secrets_create,
+        secrets::secrets_rotate,
+        secrets::secrets_delete,
+        overwrite::overwrite_move_aside,
+        skill_wizard::skill_wizard_transition
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -233,23 +256,39 @@ pub fn run() -> tauri::Result<()> {
         commands::app_paths,
         commands::settings_load,
         commands::settings_set,
+        commands::recovery_sheet,
+        commands::recovery_discard,
+        commands::recovery_restore,
+        overview::overview_load,
         commands::item_lookup,
+        skill_detail::skill_detail_load,
+        skill_detail::skill_compare_copies,
+        skill_detail::skill_version_compare,
+        skill_detail::skill_reveal,
+        skill_detail::skill_edit_preview,
+        skill_detail::skill_edit_apply,
         window_state::window_state_load,
         window_state::window_state_save,
         window_state::window_state_reset,
         logs::logs_tail,
         logs::logs_reveal,
         diagnostics::diagnostics_export,
+        diagnostics::diagnostics_report_copy,
         network::network_policy,
         network::network_events,
         projects::projects_list,
         projects::projects_add,
         projects::projects_choose_folder,
         projects::projects_scan,
-        network::network_clear_events,
         network::network_set_offline,
         config::config_report,
-        commands::mcp_test_connection
+        commands::mcp_test_connection,
+        secrets::secrets_list,
+        secrets::secrets_create,
+        secrets::secrets_rotate,
+        secrets::secrets_delete,
+        overwrite::overwrite_move_aside,
+        skill_wizard::skill_wizard_transition
     ]);
 
     let exit_paths = paths.clone();

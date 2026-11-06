@@ -18,6 +18,8 @@ import { cn } from "../components/cn";
 import type { StateRouteId } from "../components/states";
 import { getThemeTokens } from "../theme";
 import type { ThemeMode } from "../theme";
+import { AccountMenu } from "../overlays/menus/AccountMenu";
+import type { AccountMenuAction } from "../overlays/menus/AccountMenu";
 import { SECTION_ICONS } from "./icons";
 import {
   SHELL_SECTION_LABEL,
@@ -38,6 +40,8 @@ export interface SidebarProps {
   readonly agents?: readonly ShellAgentStatus[];
   /** Account identity for the footer card. */
   readonly account?: ShellAccount;
+  /** Account menu action forwarded to the shared application dispatcher. */
+  readonly onAccountAction?: (action: AccountMenuAction) => void;
   /** App version line under the logo, for example `v0.1 · local`. */
   readonly versionLabel?: string;
   /** Active theme mode; scope dots use its palette. Defaults to `dark`. */
@@ -68,6 +72,7 @@ export function Sidebar({
   agents = [],
   account,
   versionLabel = "v0.1 · local",
+  onAccountAction,
   themeMode = "dark",
   className,
 }: SidebarProps): JSX.Element {
@@ -211,25 +216,9 @@ export function Sidebar({
         )}
       </nav>
 
-      {/* Account card */}
-      {account === undefined ? null : (
-        <div className="px-8 pb-12 pt-8">
-          <div className="flex items-center gap-8 rounded-6 border border-border bg-raised px-8 py-[6px]">
-            <span
-              aria-hidden="true"
-              className="flex size-[20px] shrink-0 items-center justify-center rounded-full bg-overlay text-12 font-semibold text-text"
-            >
-              {account.name.slice(0, 1).toUpperCase()}
-            </span>
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate text-12 font-medium text-text">{account.name}</span>
-              {account.detail === undefined ? null : (
-                <span className="truncate font-mono text-11 text-text-muted">{account.detail}</span>
-              )}
-            </span>
-          </div>
-        </div>
-      )}
+      <div className="px-8 pb-12 pt-8">
+        <AccountMenu version={versionLabel} account={account} onAction={onAccountAction} />
+      </div>
     </div>
   );
 }

@@ -38,6 +38,7 @@ export const STATE_ROUTE_IDS = [
   "add-skill",
   "migrate",
   "settings",
+  "secrets",
 ] as const;
 
 /** A TU-010 route id. */
@@ -240,6 +241,15 @@ const SURFACE_META: Readonly<Record<StateSurfaceId, SurfaceMeta>> = {
     errorTitle: "Couldn't load settings",
     rows: 9,
     populatedNote: "Health, backups, network and appearance sections",
+  },
+  secrets: {
+    emptyTitle: "No secrets linked",
+    emptyBody: "Secret references will appear here when used by managed configurations.",
+    action: "Reload secret inventory",
+    loadingTitle: "Loading secret inventory…",
+    errorTitle: "Couldn't load secret inventory",
+    rows: 5,
+    populatedNote: "Keychain secret names and their managed references",
   },
   shell: {
     emptyTitle: "No workspace open",

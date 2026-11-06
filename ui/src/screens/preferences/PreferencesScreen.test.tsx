@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { PreferencesScreen } from "./PreferencesScreen";
 
@@ -48,3 +49,9 @@ describe("PreferencesScreen", () => {
     expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThan(0);
   });
 });
+  test("populated Preferences and embedded Logs have no axe violations", async () => {
+    ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : paths);
+    const { container } = render(<PreferencesScreen />);
+    await screen.findByLabelText("Health interval");
+    expect((await axe(container)).violations).toEqual([]);
+  });

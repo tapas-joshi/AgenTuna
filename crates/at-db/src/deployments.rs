@@ -212,6 +212,38 @@ pub fn upsert_deployment(
     Ok(())
 }
 
+/// Updates the recorded common Project/User content baseline after a reviewed sync applies.
+///
+/// This updates existing Project deployment rows only; it never creates missing rows or
+/// replaces deployment state. A missing row is reported as zero updated rows.
+///
+/// # Errors
+/// Returns [`DbError::InvalidValue`] for a malformed hash and [`DbError`] for a SQLite error.
+pub fn update_project_sync_baseline(
+    connection: &Connection,
+    item_id: &ItemId,
+    project_id: &str,
+    baseline_hash: &str,
+) -> Result<usize, DbError> {
+    if baseline_hash.len() != 64
+        || !baseline_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DbError::InvalidValue {
+            field: "baseline_hash",
+            reason: "expected a lowercase SHA-256 digest".to_owned(),
+        });
+    }
+    let changed = connection.execute(
+        "UPDATE deployments SET baseline_hash = ?1, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE item_id = ?2 AND scope = 'project' AND project_id = ?3",
+        params![baseline_hash, item_id.to_string(), project_id],
+    )?;
+    Ok(changed)
+}
+
 /// One deployment cell for one `(item, agent, scope, project)` key.
 ///
 /// Returns `None` when no row exists.

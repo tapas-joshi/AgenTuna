@@ -261,6 +261,29 @@ pub struct AgentPathSpec<'a> {
     pub exists: bool,
 }
 
+/// One candidate path probe, including whether it passed the usability checks.
+#[derive(Clone, Debug)]
+pub struct AgentPathProbeSpec<'a> {
+    /// Agent the path belongs to.
+    pub agent: &'a AgentId,
+    /// Scope the path serves.
+    pub scope: Scope,
+    /// What the path is.
+    pub kind: AgentPathKind,
+    /// Candidate filesystem location.
+    pub path: &'a Path,
+    /// Format of the file, when known.
+    pub format: Option<AgentPathFormat>,
+    /// Whether this is the adapter's preferred candidate.
+    pub is_primary: bool,
+    /// Whether stat found the candidate.
+    pub exists: bool,
+    /// Whether the candidate passed stat, expected-kind and read-access checks.
+    pub verified: bool,
+    /// Whether this candidate is a user-saved override.
+    pub is_override: bool,
+}
+
 /// Records one detection result for `agent`.
 ///
 /// Idempotent by `agents.id`: the row is inserted once and later passes update
@@ -425,6 +448,48 @@ pub fn upsert_agent_path(
                 spec.format.map(AgentPathFormat::wire_name),
                 i64::from(spec.is_primary),
                 i64::from(spec.exists),
+            ],
+            path_from_row,
+        )
+        .map_err(DbError::from)
+}
+
+/// Inserts or refreshes a path candidate with its actual usability state.
+///
+/// Unlike [`upsert_agent_path`], this records `verified = false` for missing,
+/// wrong-kind or unreadable candidates. A persisted user override remains an override.
+///
+/// # Errors
+/// A SQLite failure, or a `path` that cannot be stored as text.
+pub fn record_agent_path_probe(
+    connection: &Connection,
+    spec: &AgentPathProbeSpec<'_>,
+) -> Result<AgentPath, DbError> {
+    let sql = format!(
+        "INSERT INTO agent_paths \
+             (agent_id, scope, kind, path, format, is_primary, \"exists\", verified, is_override) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         ON CONFLICT(agent_id, scope, kind, path) DO UPDATE SET \
+             format = excluded.format, \
+             is_primary = excluded.is_primary, \
+             \"exists\" = excluded.\"exists\", \
+             verified = excluded.verified, \
+             is_override = CASE WHEN agent_paths.is_override = 1 THEN 1 ELSE excluded.is_override END \
+         RETURNING {PATH_COLUMNS}"
+    );
+    connection
+        .query_row(
+            &sql,
+            params![
+                spec.agent.to_string(),
+                spec.scope.wire_name(),
+                spec.kind.wire_name(),
+                path_text(spec.path)?,
+                spec.format.map(AgentPathFormat::wire_name),
+                i64::from(spec.is_primary),
+                i64::from(spec.exists),
+                i64::from(spec.verified),
+                i64::from(spec.is_override),
             ],
             path_from_row,
         )

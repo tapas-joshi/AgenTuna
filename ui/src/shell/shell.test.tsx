@@ -30,6 +30,8 @@ describe("stable route identifiers", () => {
   test("parses item deep links and identifies project-scoped routes", () => {
     expect(parseItemDeepLink("agentuna://item/itm_example")).toBe("itm_example");
     expect(parseItemDeepLink("agentuna://item/")).toBeNull();
+    expect(parseItemDeepLink("agentuna://item/itm_example/extra")).toBeNull();
+    expect(parseItemDeepLink("agentuna://item/itm_example?ignored=true")).toBeNull();
     expect(routeRequiresProject("mcp-detail")).toBe(true);
     expect(routeRequiresProject("overview")).toBe(false);
   });
@@ -45,6 +47,7 @@ const AGENTS: readonly ShellAgentStatus[] = [
 interface ShellOverrides {
   readonly route?: StateRouteId;
   readonly projectLabel?: string | null;
+  readonly canGoBack?: boolean;
   readonly scopeSwitcher?: ReactNode;
   readonly paletteModifier?: "meta" | "ctrl";
   readonly children?: ReactNode;
@@ -54,6 +57,7 @@ function renderShell(overrides: ShellOverrides = {}) {
   const onNavigate = vi.fn();
   const onProjectPicker = vi.fn();
   const onPalette = vi.fn();
+  const onBack = vi.fn();
   render(
     <Shell
       route={overrides.route ?? "overview"}
@@ -61,6 +65,8 @@ function renderShell(overrides: ShellOverrides = {}) {
       onNavigate={onNavigate}
       onProjectPicker={onProjectPicker}
       onPalette={onPalette}
+      canGoBack={overrides.canGoBack}
+      onBack={onBack}
       projectLabel={overrides.projectLabel === undefined ? "ai-coding-config-studio" : overrides.projectLabel}
       agents={AGENTS}
       account={{ name: "tapas", detail: "~/ · macOS" }}
@@ -70,7 +76,7 @@ function renderShell(overrides: ShellOverrides = {}) {
       {overrides.children ?? <div data-testid="body">body</div>}
     </Shell>,
   );
-  return { onNavigate, onProjectPicker, onPalette };
+  return { onNavigate, onProjectPicker, onPalette, onBack };
 }
 
 describe("sidebar sections", () => {
@@ -169,6 +175,17 @@ describe("top bar", () => {
     await user.click(palette);
     expect(onProjectPicker).toHaveBeenCalledTimes(1);
     expect(onPalette).toHaveBeenCalledTimes(1);
+  });
+  test("Back is labelled, disabled at the root and dispatches route history when available", async () => {
+    const user = userEvent.setup();
+    const disabled = renderShell();
+    expect((screen.getByRole("button", { name: "Back" }) as HTMLButtonElement).disabled).toBe(true);
+    cleanup();
+    const enabled = renderShell({ canGoBack: true });
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(enabled.onBack).toHaveBeenCalledOnce();
+    expect((screen.getByRole("button", { name: "Back" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(disabled.onBack).not.toHaveBeenCalled();
   });
 
   test("project picker shows the empty state when no project is active", () => {

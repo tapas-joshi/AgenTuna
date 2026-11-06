@@ -2,6 +2,8 @@
  * Menu surface barrel (TU-004).
  */
 
+export { AccountMenu } from "./AccountMenu";
+export type { AccountMenuAction } from "./AccountMenu";
 export { Menu, MenuLabel, MenuSeparator } from "./Menu";
 export type { MenuProps } from "./Menu";
 export { MenuItem } from "./MenuItem";

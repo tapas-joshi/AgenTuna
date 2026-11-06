@@ -11,6 +11,47 @@ use super::cli_install::{
     CliInstallError, CliInstallLocation, CliInstallReport, CliInstallStatus, CliInstaller,
     CliUninstallReport,
 };
+/// Serializable Recovery sheet state shown before normal app work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct RecoverySheetView {
+    /// Interrupted operations that still have pending journal state.
+    pub operations: Vec<RecoveryOperationView>,
+    /// Files classified for recovery.
+    pub files: Vec<RecoveryFileView>,
+    /// Human-review cases that recovery will not modify.
+    pub manual_review: Vec<String>,
+    /// Temporary files eligible for explicit discard.
+    pub temp_files: Vec<String>,
+}
+
+/// One interrupted operation in the Recovery sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct RecoveryOperationView {
+    /// Stable operation id.
+    pub id: String,
+    /// Operation type.
+    pub kind: String,
+    /// Paths associated with the operation.
+    pub paths: Vec<String>,
+}
+
+/// One file state in the Recovery sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct RecoveryFileView {
+    /// Owning operation id.
+    pub operation_id: String,
+    /// File path.
+    pub path: String,
+    /// Current state label.
+    pub state: String,
+    /// Whether a backup is available for restoration.
+    pub can_restore: bool,
+    /// Backup digest, when the journal contains one.
+    pub before_hash: Option<String>,
+}
 /// Presentation-ready review of the exact ChangeSet planned for an MCP edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -300,6 +341,23 @@ pub enum CommandErrorCode {
     Unavailable,
     /// An unexpected internal failure occurred.
     Internal,
+    /// An unmanaged filesystem target refused an overwrite.
+    #[serde(rename = "refused_overwrite")]
+    RefusedOverwrite,
+}
+
+/// Structured details for an unmanaged target refused by `at-fs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct RefusedOverwriteView {
+    /// Refused filesystem path.
+    pub path: String,
+    /// Target kind (`file`, `directory`, `symlink`, or `entry`).
+    pub kind: String,
+    /// Existing file hash, when the target is a regular file.
+    pub existing_hash: Option<String>,
+    /// Remedies offered for this refusal.
+    pub remedies: Vec<String>,
 }
 
 /// Typed, redacted error returned by every Tauri command.
@@ -310,6 +368,10 @@ pub struct CommandError {
     pub code: CommandErrorCode,
     /// Human-readable, secret-free explanation.
     pub message: String,
+    /// Structured refusal details when an unmanaged target blocked a write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refusal: Option<Box<RefusedOverwriteView>>,
 }
 
 impl CommandError {
@@ -319,6 +381,37 @@ impl CommandError {
         Self {
             code,
             message: message.into(),
+            refusal: None,
+        }
+    }
+
+    /// Converts a filesystem overwrite refusal into the typed UI contract.
+    #[must_use]
+    pub fn refused_overwrite(
+        path: &std::path::Path,
+        kind: at_fs::TargetKind,
+        existing_hash: Option<String>,
+    ) -> Self {
+        let kind = match kind {
+            at_fs::TargetKind::File => "file",
+            at_fs::TargetKind::Dir => "directory",
+            at_fs::TargetKind::Symlink => "symlink",
+            at_fs::TargetKind::Entry => "entry",
+            _ => "unknown",
+        };
+        Self {
+            code: CommandErrorCode::RefusedOverwrite,
+            message: "AgenTuna refused to overwrite an unmanaged item.".to_owned(),
+            refusal: Some(Box::new(RefusedOverwriteView {
+                path: path.display().to_string(),
+                kind: kind.to_owned(),
+                existing_hash,
+                remedies: vec![
+                    "adopt".to_owned(),
+                    "move_aside".to_owned(),
+                    "cancel".to_owned(),
+                ],
+            })),
         }
     }
 
@@ -361,6 +454,32 @@ impl From<CliInstallError> for CommandError {
 impl From<super::bridge::BridgeError> for CommandError {
     fn from(error: super::bridge::BridgeError) -> Self {
         Self::new(CommandErrorCode::Bridge, error.to_string())
+    }
+}
+impl From<at_fs::FsError> for CommandError {
+    fn from(error: at_fs::FsError) -> Self {
+        match error {
+            at_fs::FsError::RefusedOverwrite {
+                path,
+                kind,
+                existing_hash,
+                ..
+            } => Self::refused_overwrite(&path, kind, existing_hash),
+            _ => Self::internal("filesystem operation failed"),
+        }
+    }
+}
+impl From<at_fs::changeset::ChangeSetApplyError> for CommandError {
+    fn from(error: at_fs::changeset::ChangeSetApplyError) -> Self {
+        match error {
+            at_fs::changeset::ChangeSetApplyError::Fs(at_fs::FsError::RefusedOverwrite {
+                path,
+                kind,
+                existing_hash,
+                ..
+            }) => Self::refused_overwrite(&path, kind, existing_hash),
+            _ => Self::internal("reviewed filesystem change could not be applied"),
+        }
     }
 }
 
@@ -513,6 +632,138 @@ pub fn app_paths() -> Result<super::paths::AppPathsView, CommandError> {
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     Ok((&paths).into())
 }
+/// Returns the startup recovery sheet when an unclean exit needs user review.
+#[tauri::command]
+pub fn recovery_sheet(
+    state: State<'_, AppState>,
+) -> Result<Option<RecoverySheetView>, CommandError> {
+    let Some(sheet) = state.recovery_outcome().and_then(|outcome| outcome.sheet()) else {
+        return Ok(None);
+    };
+    Ok(Some(RecoverySheetView {
+        operations: sheet
+            .interrupted
+            .iter()
+            .map(|operation| RecoveryOperationView {
+                id: operation.id.clone(),
+                kind: operation.kind.clone(),
+                paths: operation
+                    .paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            })
+            .collect(),
+        files: sheet
+            .files
+            .iter()
+            .map(|file| RecoveryFileView {
+                operation_id: file.operation_id.clone(),
+                path: file.path.display().to_string(),
+                state: file.state.label().to_owned(),
+                can_restore: matches!(file.state, at_fs::recovery::EntryState::After)
+                    && file.before_hash.is_some(),
+                before_hash: file.before_hash.clone(),
+            })
+            .collect(),
+        manual_review: sheet
+            .manual_review
+            .iter()
+            .map(|entry| {
+                entry.path.as_ref().map_or_else(
+                    || entry.reason.clone(),
+                    |path| format!("{}: {}", path.display(), entry.reason),
+                )
+            })
+            .collect(),
+        temp_files: sheet
+            .temp_files
+            .iter()
+            .map(|file| file.path.display().to_string())
+            .collect(),
+    }))
+}
+/// Discards one operation's pending journal without changing the destination files.
+#[tauri::command]
+pub fn recovery_discard(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<(), CommandError> {
+    if operation_id.len() > 64 {
+        return Err(CommandError::invalid_argument(
+            "operation_id",
+            "must be at most 64 bytes",
+        ));
+    }
+    let present = state
+        .recovery_outcome()
+        .and_then(|outcome| outcome.sheet())
+        .is_some_and(|sheet| sheet.interrupted.iter().any(|op| op.id == operation_id));
+    if !present {
+        return Err(CommandError::invalid_argument(
+            "operation_id",
+            "operation is not pending recovery",
+        ));
+    }
+    let service = state
+        .recovery()
+        .ok_or_else(|| CommandError::unavailable("recovery service is unavailable"))?;
+    service
+        .discard(&operation_id)
+        .map(|_| ())
+        .map_err(|error| CommandError::internal(error.to_string()))
+}
+
+/// Restores one file from its recorded backup after validating it against startup recovery state.
+#[tauri::command]
+pub fn recovery_restore(
+    state: State<'_, AppState>,
+    operation_id: String,
+    path: String,
+) -> Result<String, CommandError> {
+    if operation_id.len() > 64 || path.len() > 4_096 {
+        return Err(CommandError::invalid_argument(
+            "recovery_restore",
+            "operation id or path exceeds its size limit",
+        ));
+    }
+    let outcome = state
+        .recovery_outcome()
+        .and_then(|outcome| outcome.sheet())
+        .ok_or_else(|| CommandError::unavailable("no recovery review is active"))?;
+    let file = outcome
+        .files
+        .iter()
+        .find(|file| file.operation_id == operation_id && file.path.to_string_lossy() == path)
+        .ok_or_else(|| CommandError::invalid_argument("path", "file is not pending recovery"))?;
+    if !matches!(file.state, at_fs::recovery::EntryState::After) || file.before_hash.is_none() {
+        return Err(CommandError::invalid_argument(
+            "path",
+            "file is not eligible for automatic restoration",
+        ));
+    }
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let backups = at_db::backups::backups_for_operation(database.connection(), &operation_id)
+        .map_err(|error| CommandError::internal(error.to_string()))?;
+    drop(database);
+    let path_text = file.path.to_string_lossy();
+    let backup = backups
+        .into_iter()
+        .find(|backup| {
+            backup.original_path.as_deref() == Some(path_text.as_ref())
+                && backup.content_hash.as_deref() == file.before_hash.as_deref()
+        })
+        .and_then(|backup| backup.backup_path)
+        .ok_or_else(|| CommandError::unavailable("the recorded before-image is unavailable"))?;
+    let service = state
+        .recovery()
+        .ok_or_else(|| CommandError::unavailable("recovery service is unavailable"))?;
+    service
+        .restore(file, std::path::Path::new(&backup))
+        .map(|report| report.operation_id)
+        .map_err(|error| CommandError::internal(error.to_string()))
+}
+
 /// Looks up an opaque item id before the frontend opens its detail route.
 #[tauri::command]
 pub fn item_lookup(
@@ -546,7 +797,32 @@ fn require_test_approval(approved: bool) -> Result<(), CommandError> {
 
 #[cfg(test)]
 mod mcp_test_connection_tests {
-    use super::require_test_approval;
+    use super::{CommandError, CommandErrorCode, require_test_approval};
+
+    #[test]
+    fn refused_overwrite_serializes_typed_remedies_and_hash() {
+        let error = CommandError::refused_overwrite(
+            std::path::Path::new("/sandbox/agent/skill"),
+            at_fs::TargetKind::Dir,
+            Some("sha256:fixture".to_owned()),
+        );
+        let value = serde_json::to_value(error).expect("serialize command error");
+        assert_eq!(value["code"], "refused_overwrite");
+        assert_eq!(value["refusal"]["path"], "/sandbox/agent/skill");
+        assert_eq!(value["refusal"]["kind"], "directory");
+        assert_eq!(value["refusal"]["existing_hash"], "sha256:fixture");
+        assert_eq!(
+            value["refusal"]["remedies"],
+            serde_json::json!(["adopt", "move_aside", "cancel"])
+        );
+        let plain = CommandError::new(CommandErrorCode::Internal, "failure");
+        assert!(
+            serde_json::to_value(plain)
+                .expect("serialize plain error")
+                .get("refusal")
+                .is_none()
+        );
+    }
 
     #[test]
     fn connection_test_requires_explicit_approval() {

@@ -630,8 +630,15 @@ fn classify_recovery_op(
             ObservedNode::File(hash) if before == Some(hash.as_str()) => RecoveryState::Before,
             _ => RecoveryState::Diverged,
         },
-        FileOp::Copy { .. } => match node {
+        FileOp::Copy { source, .. } => match node {
             ObservedNode::Missing if before.is_none() => RecoveryState::Before,
+            ObservedNode::Directory { .. } => {
+                if copy_manifest_matches(&entry.path, source, store_root)? {
+                    RecoveryState::After
+                } else {
+                    RecoveryState::Diverged
+                }
+            }
             ObservedNode::File(hash) if hash == entry.after_hash => RecoveryState::After,
             _ => RecoveryState::Diverged,
         },
@@ -678,6 +685,110 @@ fn classify_recovery_op(
         _ => RecoveryState::Diverged,
     };
     Ok(result)
+}
+/// A directory copy is removable only when its self-identifying deploy manifest proves the
+/// journaled source and the entire current tree still match the manifest.
+fn copy_manifest_matches(
+    destination: &Path,
+    source: &Path,
+    store_root: &Path,
+) -> Result<bool, RecoveryError> {
+    use crate::deploy::{COPY_MANIFEST_FILE, CopyManifest};
+
+    let Some(manifest) =
+        CopyManifest::read(destination).map_err(|error| RecoveryError::Callback {
+            operation_id: "copy".to_owned(),
+            message: error.to_string(),
+        })?
+    else {
+        return Ok(false);
+    };
+    let source_path = resolve_store_path(store_root, source)
+        .or_else(|| source.is_absolute().then(|| source.to_path_buf()));
+    let Some(source_path) = source_path else {
+        return Ok(false);
+    };
+    let expected_source = fs::canonicalize(&source_path).ok();
+    let recorded_source = fs::canonicalize(&manifest.source_path).ok();
+    if expected_source.is_none() || expected_source != recorded_source {
+        return Ok(false);
+    }
+    let mut expected = BTreeSet::new();
+    expected.insert(COPY_MANIFEST_FILE.to_owned());
+    for directory in &manifest.dirs {
+        let relative = Path::new(directory);
+        if !is_safe_relative_path(relative) {
+            return Ok(false);
+        }
+        let path = destination.join(relative);
+        if !matches!(observe_node(&path)?, ObservedNode::Directory { .. }) {
+            return Ok(false);
+        }
+        expected.insert(directory.clone());
+    }
+    for file in &manifest.files {
+        let relative = Path::new(&file.path);
+        if !is_safe_relative_path(relative) {
+            return Ok(false);
+        }
+        let path = destination.join(relative);
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok(false);
+        };
+        if sha256_hex(&bytes) != file.sha256 || bytes.len() as u64 != file.bytes {
+            return Ok(false);
+        }
+        expected.insert(file.path.clone());
+    }
+    let mut actual = BTreeSet::new();
+    collect_relative_entries(destination, destination, &mut actual)?;
+    Ok(actual == expected)
+}
+
+fn collect_relative_entries(
+    root: &Path,
+    directory: &Path,
+    entries: &mut BTreeSet<String>,
+) -> Result<(), RecoveryError> {
+    for entry in fs::read_dir(directory).map_err(|error| io_error(directory, error))? {
+        let entry = entry.map_err(|error| io_error(directory, error))?;
+        let path = entry.path();
+        let relative =
+            path.strip_prefix(root)
+                .map_err(|error| RecoveryError::MalformedJournal {
+                    path: path.clone(),
+                    reason: error.to_string(),
+                })?;
+        let Some(relative) = relative.to_str() else {
+            return Err(RecoveryError::MalformedJournal {
+                path,
+                reason: "copy manifest path is not UTF-8".to_owned(),
+            });
+        };
+        if !is_safe_relative_path(Path::new(relative)) {
+            return Err(RecoveryError::MalformedJournal {
+                path,
+                reason: "unsafe copy manifest path".to_owned(),
+            });
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(RecoveryError::MalformedJournal {
+                path,
+                reason: "copy deployment contains a symlink".to_owned(),
+            });
+        }
+        entries.insert(relative.replace(std::path::MAIN_SEPARATOR, "/"));
+        if metadata.is_dir() {
+            collect_relative_entries(root, &entry.path(), entries)?;
+        } else if !metadata.is_file() {
+            return Err(RecoveryError::MalformedJournal {
+                path,
+                reason: "copy deployment contains a non-file".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn expected_content_hash(expected: &ModelExpectedState) -> Option<&str> {
@@ -750,7 +861,29 @@ fn rollback_recovery_op(
             };
             apply(&write).map(|_| ()).map_err(RecoveryError::from)
         }
-        FileOp::Copy { .. } | FileOp::Symlink { .. } => {
+        FileOp::Copy { source, .. } => {
+            let metadata =
+                fs::symlink_metadata(&entry.path).map_err(|error| io_error(&entry.path, error))?;
+            if metadata.is_dir() {
+                #[cfg(any(test, feature = "faults", feature = "testkit"))]
+                if let Err(failure) = crate::failpoint::hit(
+                    crate::failpoint::FaultPoint::ChangeSetOperation,
+                    &entry.path,
+                ) {
+                    return Err(io_error(&entry.path, failure.into_io()));
+                }
+                if !copy_manifest_matches(&entry.path, source, store_root)? {
+                    return Err(RecoveryError::MalformedJournal {
+                        path: entry.path.clone(),
+                        reason: "copy deployment changed during recovery".to_owned(),
+                    });
+                }
+                fs::remove_dir_all(&entry.path).map_err(|error| io_error(&entry.path, error))
+            } else {
+                fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))
+            }
+        }
+        FileOp::Symlink { .. } => {
             fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))
         }
         FileOp::Mkdir { .. } => {
@@ -1191,8 +1324,11 @@ pub fn restore_file(request: &RestoreRequest) -> Result<WriteOutcome, RecoveryEr
 mod startup_recovery_tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
+    use std::sync::Arc;
+
+    use crate::failpoint::{Fault, FaultPoint, TestInjector, with_injector};
     use at_model::{ChangeSet, ContentHash, ExpectedState as ModelExpectedState, FileOp};
     use time::OffsetDateTime;
 
@@ -1419,5 +1555,116 @@ mod startup_recovery_tests {
         assert_eq!(report.legacy, vec![path.clone()]);
         assert_eq!(read_journal(&path).expect("read legacy"), journal);
         assert!(path.exists());
+    }
+    #[test]
+    fn recovery_removes_verified_directory_copy_after_progress_was_journaled() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox.path().join("store");
+        let journal_dir = root.join(".state/journal");
+        let source = root.join("source");
+        let destination = root.join("copy");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("item.txt"), b"copied content").expect("source content");
+        crate::deploy::copy_dir(&source, &destination).expect("copy deployment");
+        let journal = PendingJournal {
+            journal_version: JOURNAL_VERSION,
+            operation_id: "op-copy".to_owned(),
+            started_at: OffsetDateTime::now_utc(),
+            entries: vec![JournalEntry {
+                path: destination.clone(),
+                before_hash: None,
+                after_hash: String::new(),
+            }],
+            temp_files: Vec::new(),
+            change_set: Some(ChangeSet {
+                id: "set-copy".to_owned(),
+                preview_id: "preview-copy".to_owned(),
+                operation_kind: at_model::OperationKind::parse("deploy")
+                    .expect("known operation kind"),
+                scope: None,
+                project_id: None,
+                summary: "copy recovery test".to_owned(),
+                ops: vec![FileOp::Copy {
+                    source: PathBuf::from("source"),
+                    dest: PathBuf::from("copy"),
+                    expected: ModelExpectedState::Absent,
+                }],
+                created_at_unix_seconds: 0,
+            }),
+            completed_ops: vec![0],
+            committed: false,
+        };
+        write_journal(&journal_dir, &journal).expect("write in-flight journal");
+
+        let injector = Arc::new(TestInjector::new());
+        injector.arm(FaultPoint::ChangeSetOperation, Fault::Fail(libc::EIO));
+        let failed = with_injector(injector, || {
+            recover_journals(&journal_dir, &root, &mut Callbacks::default())
+        });
+        assert!(failed.is_err());
+        assert!(destination.exists(), "failed recovery preserves copy tree");
+        assert!(
+            journal_dir.join("op-copy.journal").exists(),
+            "failed recovery preserves journal for retry"
+        );
+
+        let report = recover_journals(&journal_dir, &root, &mut Callbacks::default())
+            .expect("recovery retry");
+
+        assert_eq!(report.rolled_back.len(), 1);
+        assert!(!destination.exists());
+        assert!(source.join("item.txt").exists());
+    }
+
+    #[test]
+    fn recovery_keeps_directory_copy_with_modified_manifest_content_for_review() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox.path().join("store");
+        let journal_dir = root.join(".state/journal");
+        let source = root.join("source");
+        let destination = root.join("copy");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("item.txt"), b"original").expect("source content");
+        crate::deploy::copy_dir(&source, &destination).expect("copy deployment");
+        fs::write(destination.join("item.txt"), b"external edit").expect("external edit");
+        let journal = PendingJournal {
+            journal_version: JOURNAL_VERSION,
+            operation_id: "op-copy-edited".to_owned(),
+            started_at: OffsetDateTime::now_utc(),
+            entries: vec![JournalEntry {
+                path: destination.clone(),
+                before_hash: None,
+                after_hash: String::new(),
+            }],
+            temp_files: Vec::new(),
+            change_set: Some(ChangeSet {
+                id: "set-copy-edited".to_owned(),
+                preview_id: "preview-copy-edited".to_owned(),
+                operation_kind: at_model::OperationKind::parse("deploy")
+                    .expect("known operation kind"),
+                scope: None,
+                project_id: None,
+                summary: "copy recovery test".to_owned(),
+                ops: vec![FileOp::Copy {
+                    source: PathBuf::from("source"),
+                    dest: PathBuf::from("copy"),
+                    expected: ModelExpectedState::Absent,
+                }],
+                created_at_unix_seconds: 0,
+            }),
+            completed_ops: vec![0],
+            committed: false,
+        };
+        let journal_path = write_journal(&journal_dir, &journal).expect("write journal");
+
+        let report = recover_journals(&journal_dir, &root, &mut Callbacks::default())
+            .expect("recover edited copy");
+
+        assert_eq!(report.manual_review.len(), 1);
+        assert!(journal_path.exists());
+        assert_eq!(
+            fs::read(destination.join("item.txt")).expect("preserve edit"),
+            b"external edit"
+        );
     }
 }

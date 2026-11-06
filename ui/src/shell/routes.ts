@@ -26,6 +26,7 @@ export const ROUTE_IDS = [
   "add-skill",
   "migrate",
   "settings",
+  "secrets",
 ] as const;
 
 /** A stable route id used by deep links and route history. */

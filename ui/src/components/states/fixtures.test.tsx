@@ -15,7 +15,10 @@ import { STATE_VARIANTS, type StateVariant } from "./types";
 
 afterEach(cleanup);
 
-/** The route ids TU-010 defines, spelled out so a rename in the router fails here. */
+/**
+ * The route ids TU-010 defines plus `secrets` (the TM-026 inventory screen), spelled out so a
+ * rename in the router fails here.
+ */
 const TU_010_ROUTE_IDS = [
   "overview",
   "skills",
@@ -30,6 +33,7 @@ const TU_010_ROUTE_IDS = [
   "add-skill",
   "migrate",
   "settings",
+  "secrets",
 ];
 
 describe("state fixture matrix", () => {

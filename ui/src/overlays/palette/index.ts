@@ -8,6 +8,8 @@ export interface PaletteEntry {
   readonly title: string;
   readonly subtitle: string;
   readonly keywords: readonly string[];
+  readonly shortcut?: string;
+  readonly disabledReason?: string;
   readonly run?: () => void;
 }
 

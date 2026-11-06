@@ -7,7 +7,7 @@ mod common;
 use at_db::Database;
 use at_db::deployments::{
     DeploymentSpec, effective_rows, find_deployment, health_counts, list_deployments_for_agent,
-    list_deployments_for_item, upsert_deployment,
+    list_deployments_for_item, update_project_sync_baseline, upsert_deployment,
 };
 use at_db::locks::{
     LockSpec, count_locks_for_scope, find_lock, list_locks, locks_for_item, locks_for_scope,
@@ -458,4 +458,35 @@ fn lock_row_constructible_from_db_row() {
     assert_eq!(lock.item_id, item);
     assert_eq!(lock.scope, Scope::Global);
     assert_eq!(lock.reason.as_deref(), Some("test"));
+}
+#[test]
+fn project_sync_baseline_updates_only_existing_project_deployments() {
+    let db = open_with_all();
+    let connection = db.connection();
+    let item = seed_item(connection, "sync-skill", ItemKind::Skill, Scope::Project);
+    seed_agent(connection, "claude_code", true);
+    let agent = AgentId::ClaudeCode;
+    let project = "project-sync";
+    let spec = DeploymentSpec::new(&item, &agent, Scope::Project, ItemState::Linked)
+        .with_project(project)
+        .with_hashes(Some("a"), Some("b"), Some("a"));
+    upsert_deployment(connection, &spec).expect("seed deployment");
+
+    assert_eq!(
+        update_project_sync_baseline(connection, &item, project, &"c".repeat(64))
+            .expect("baseline update"),
+        1
+    );
+    let rows = list_deployments_for_item(connection, &item).expect("deployment query");
+    let expected_baseline = "c".repeat(64);
+    assert_eq!(
+        rows[0].baseline_hash.as_deref(),
+        Some(expected_baseline.as_str())
+    );
+    assert_eq!(
+        update_project_sync_baseline(connection, &item, "another-project", &"d".repeat(64))
+            .expect("missing row is not inserted"),
+        0
+    );
+    assert!(update_project_sync_baseline(connection, &item, project, "bad").is_err());
 }

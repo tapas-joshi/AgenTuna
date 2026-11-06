@@ -53,9 +53,9 @@ pub use project_scan::{
     ScanWarning, ScanWarningKind, apply_diff, scan, scan_with, spawn_scan,
 };
 pub use remote_backup::{
-    BackupError, BackupOutcome, BackupRequest, DeviceNameError, default_device_name, device_name,
-    is_excluded_from_backup, push_backup, remote_conflict_count, set_device_name,
-    validate_device_name,
+    BackupError, BackupOutcome, BackupRequest, DeviceNameError, RemoteConflict,
+    default_device_name, device_name, is_excluded_from_backup, push_backup, remote_conflict_count,
+    set_device_name, sync_from_remote, validate_device_name,
 };
 pub use skill::{
     LoadedSkill, SkillReadError, parse_skill_doc, parse_skill_doc_in_folder, read_skill_doc,

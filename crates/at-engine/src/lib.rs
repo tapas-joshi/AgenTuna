@@ -1,5 +1,6 @@
 //! Scope resolution, effective config, and change planning engine.
 
+pub mod agent_paths;
 pub mod effective;
 pub mod error;
 pub mod health;
@@ -15,6 +16,7 @@ pub mod skill_names;
 pub mod skill_shadows;
 pub mod skill_source;
 pub mod skill_templates;
+pub mod skill_wizard;
 pub mod state;
 pub mod tombstones;
 

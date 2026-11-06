@@ -150,6 +150,216 @@ pub struct SyncCopyRequest {
     /// Exact source bytes shown in the reviewed preview.
     pub source_bytes: Vec<u8>,
 }
+/// One path and hash pair used for content-based rename detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncNamedHash {
+    /// Stable identity of the item.
+    pub item_id: ItemId,
+    /// Current user-facing name.
+    pub name: String,
+    /// Aggregate content hash.
+    pub hash: String,
+}
+
+/// A same-content rename between the Project copy and User library copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncRename {
+    /// Stable identity retained by the renamed item.
+    pub item_id: ItemId,
+    /// Name of the Project copy.
+    pub project_name: String,
+    /// Name of the User library copy.
+    pub library_name: String,
+    /// Hash proving both copies have identical content.
+    pub content_hash: String,
+}
+
+/// Detects same-content, different-name items without treating names as identity.
+#[must_use]
+pub fn detect_sync_renames(
+    project_items: &[SyncNamedHash],
+    library_items: &[SyncNamedHash],
+) -> Vec<SyncRename> {
+    let library_by_id: BTreeMap<_, _> = library_items
+        .iter()
+        .map(|item| (item.item_id, item))
+        .collect();
+    project_items
+        .iter()
+        .filter_map(|project| {
+            let library = library_by_id.get(&project.item_id)?;
+            (project.name != library.name && project.hash == library.hash).then(|| SyncRename {
+                item_id: project.item_id,
+                project_name: project.name.clone(),
+                library_name: library.name.clone(),
+                content_hash: project.hash.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Inputs for previewing a complete item tree, including MCP and rules documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncTreeRequest {
+    /// Stable identity of the item being synchronized.
+    pub item_id: ItemId,
+    /// Project registry id.
+    pub project_id: String,
+    /// Direction requested by the caller.
+    pub direction: SyncDirection,
+    /// Unmodified classification from TA-005.
+    pub label: SyncLabel,
+    /// Last common aggregate hash.
+    pub base_hash: Option<String>,
+    /// Current destination aggregate hash.
+    pub destination_hash: Option<String>,
+    /// Aggregate source hash.
+    pub source_hash: String,
+    /// Caller reviewed the diff when the destination changed from base.
+    pub force_reviewed: bool,
+    /// Destination root presence; pull never recreates a missing project store.
+    pub destination_root_exists: bool,
+    /// Exact source files, keyed by path relative to the store root.
+    pub source_files: BTreeMap<PathBuf, Vec<u8>>,
+    /// SHA-256 of each source file, keyed by the same relative paths.
+    pub source_file_hashes: BTreeMap<PathBuf, String>,
+    /// Current destination file hashes by relative path; absent paths are omitted.
+    pub destination_files: BTreeMap<PathBuf, String>,
+}
+
+/// Builds a reviewed multi-file ChangeSet for one item tree.
+///
+/// The same operation handles directory-backed skills and file-backed MCP/rule entries. Every
+/// write and delete carries the destination hash observed during preview.
+///
+/// # Errors
+/// Returns a typed refusal for incompatible labels, conflicts, stale destinations, missing
+/// project stores, invalid hashes, or invalid ChangeSets.
+pub fn plan_sync_tree(request: SyncTreeRequest) -> Result<SyncPlan, SyncPlanError> {
+    if matches!(request.label, SyncLabel::Conflict | SyncLabel::Drifted) {
+        return Err(SyncPlanError::Conflict);
+    }
+    let permitted = matches!(
+        (request.direction, request.label),
+        (
+            SyncDirection::Push,
+            SyncLabel::ProjectOnly | SyncLabel::ProjectNewer | SyncLabel::InSync,
+        ) | (
+            SyncDirection::Pull,
+            SyncLabel::LibraryOnly | SyncLabel::LibraryNewer | SyncLabel::InSync,
+        )
+    );
+    if !permitted {
+        return Err(SyncPlanError::DirectionNotAllowed {
+            label: request.label,
+            direction: request.direction,
+        });
+    }
+    if request.direction == SyncDirection::Pull && !request.destination_root_exists {
+        return Err(SyncPlanError::MissingProjectStore);
+    }
+    at_model::ContentHash::parse(&request.source_hash)?;
+    if let Some(hash) = &request.base_hash {
+        at_model::ContentHash::parse(hash)?;
+    }
+    if let Some(hash) = &request.destination_hash {
+        at_model::ContentHash::parse(hash)?;
+    }
+    for path in request
+        .source_files
+        .keys()
+        .chain(request.destination_files.keys())
+    {
+        let text = path
+            .to_str()
+            .ok_or_else(|| SyncPlanError::InvalidTreePath(path.display().to_string()))?;
+        at_store::manifest::StorePath::parse(text)
+            .map_err(|_| SyncPlanError::InvalidTreePath(text.to_owned()))?;
+    }
+    if request.source_file_hashes.len() != request.source_files.len()
+        || request.source_files.iter().any(|(path, bytes)| {
+            request.source_file_hashes.get(path).is_none_or(|hash| {
+                at_model::ContentHash::parse(hash).is_err() || hash != &at_fs::sha256_hex(bytes)
+            })
+        })
+    {
+        return Err(SyncPlanError::SourceHashMismatch);
+    }
+    for hash in request.destination_files.values() {
+        at_model::ContentHash::parse(hash)?;
+    }
+    let missing_source_paths: Vec<_> = request
+        .destination_files
+        .keys()
+        .filter(|path| !request.source_files.contains_key(*path))
+        .cloned()
+        .collect();
+    if request.source_hash == request.destination_hash.as_deref().unwrap_or_default() {
+        return Ok(if missing_source_paths.is_empty() {
+            SyncPlan::AlreadyInSync
+        } else {
+            SyncPlan::MissingSide(missing_source_paths)
+        });
+    }
+    if request.destination_hash != request.base_hash && !request.force_reviewed {
+        return Err(SyncPlanError::TargetChanged);
+    }
+
+    let mut ops = Vec::new();
+    for (path, bytes) in &request.source_files {
+        let expected = match request.destination_files.get(path) {
+            Some(hash) => ModelExpectedState::hash(hash.clone())?,
+            None => ModelExpectedState::absent(),
+        };
+        if request
+            .destination_files
+            .get(path)
+            .is_none_or(|hash| *hash != at_fs::sha256_hex(bytes))
+        {
+            ops.push(FileOp::Write {
+                path: path.clone(),
+                bytes: bytes.clone(),
+                expected,
+                follow_symlink: false,
+                backup: true,
+            });
+        }
+    }
+    if ops.is_empty() {
+        return Ok(if missing_source_paths.is_empty() {
+            SyncPlan::AlreadyInSync
+        } else {
+            SyncPlan::MissingSide(missing_source_paths)
+        });
+    }
+    let action = match request.direction {
+        SyncDirection::Push => "sync_push",
+        SyncDirection::Pull => "sync_pull",
+    };
+    let now = time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64;
+    let change_set = ChangeSet {
+        id: uuid::Uuid::now_v7().to_string(),
+        preview_id: uuid::Uuid::now_v7().to_string(),
+        operation_kind: OperationKind::parse(action)?,
+        scope: Some(match request.direction {
+            SyncDirection::Push => Scope::User,
+            SyncDirection::Pull => Scope::Project,
+        }),
+        project_id: Some(request.project_id),
+        summary: format!("{action} item {}", request.item_id),
+        ops,
+        created_at_unix_seconds: now,
+    };
+    change_set.validate()?;
+    Ok(if missing_source_paths.is_empty() {
+        SyncPlan::Change(change_set)
+    } else {
+        SyncPlan::ChangeWithMissing {
+            change_set,
+            missing_source_paths,
+        }
+    })
+}
 
 /// Result of planning a sync action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,8 +369,16 @@ pub enum SyncPlan {
     AlreadyInSync,
     /// Reviewed file replacement, to apply without rebuilding.
     Change(ChangeSet),
+    /// A reviewed ChangeSet plus destination-only paths that are reported but never deleted.
+    ChangeWithMissing {
+        /// The reviewed operations to apply.
+        change_set: ChangeSet,
+        /// Paths absent from the selected source copy.
+        missing_source_paths: Vec<PathBuf>,
+    },
+    /// No file writes are needed, but the destination has paths absent from the source copy.
+    MissingSide(Vec<PathBuf>),
 }
-
 /// Errors encountered while planning a project/library synchronization.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -185,12 +403,24 @@ pub enum SyncPlanError {
     /// Source content does not match its claimed hash.
     #[error("sync source bytes do not match the supplied content hash")]
     SourceHashMismatch,
+    /// An item tree contains a path that is not a safe store-relative path.
+    #[error("invalid project sync path `{0}`")]
+    InvalidTreePath(String),
     /// Invalid content hash or change-set structure.
     #[error("invalid sync change set: {0}")]
     ChangeSet(#[from] at_model::ChangeSetError),
     /// The filesystem apply pipeline rejected the reviewed plan.
     #[error(transparent)]
     Apply(#[from] ChangeSetApplyError),
+    /// The reviewed preview no longer matches the ChangeSet or destination state.
+    #[error(transparent)]
+    Preview(#[from] crate::preview::PreviewError),
+    /// The deployment index could not record the new baseline.
+    #[error(transparent)]
+    Database(#[from] DbError),
+    /// No existing Project deployment row matched the sync baseline target.
+    #[error("project deployment row not found while updating sync baseline")]
+    BaselineNotFound,
 }
 
 /// Builds a reviewed ChangeSet for a single-file project/library copy.
@@ -274,6 +504,40 @@ pub fn plan_sync_copy(request: SyncCopyRequest) -> Result<SyncPlan, SyncPlanErro
     Ok(SyncPlan::Change(change_set))
 }
 
+/// Deployment row updated after a project/library sync applies.
+pub struct SyncBaselineTarget<'a> {
+    /// Database containing the deployment index.
+    pub database: &'a Database,
+    /// Item whose copies now share a baseline.
+    pub item_id: &'a ItemId,
+    /// Project registry id.
+    pub project_id: &'a str,
+    /// Exact common content hash after apply.
+    pub hash: &'a str,
+}
+
+/// Applies a reviewed sync plan, then records its new common baseline.
+///
+/// # Errors
+/// Returns an apply or database error. The baseline row is updated only after the file ChangeSet
+/// succeeds; no deployment row is inserted implicitly.
+pub fn apply_sync_plan_and_update_baseline(
+    change_set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    target: SyncBaselineTarget<'_>,
+) -> Result<ApplyOutcome, SyncPlanError> {
+    let outcome = apply_sync_plan(change_set, context)?;
+    let updated = at_db::deployments::update_project_sync_baseline(
+        target.database.connection(),
+        target.item_id,
+        target.project_id,
+        target.hash,
+    )?;
+    if updated == 0 {
+        return Err(SyncPlanError::BaselineNotFound);
+    }
+    Ok(outcome)
+}
 /// Applies the exact ChangeSet returned from [`plan_sync_copy`].
 ///
 /// # Errors
@@ -282,7 +546,7 @@ pub fn apply_sync_plan(
     change_set: &ChangeSet,
     context: &mut ApplyContext<'_>,
 ) -> Result<ApplyOutcome, SyncPlanError> {
-    Ok(at_fs::changeset::apply(change_set, context)?)
+    Ok(crate::preview::apply_reviewed(change_set, context)?)
 }
 
 /// Failure reading a project sync record or using its cache.

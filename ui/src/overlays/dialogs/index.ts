@@ -7,6 +7,8 @@
 
 export { Modal } from "./Modal";
 export type { ModalProps } from "./Modal";
+export { OverwriteRefusalDialog } from "./OverwriteRefusalDialog";
+export type { OverwriteRemedyResult, RefusedOverwriteDetails } from "./OverwriteRefusalDialog";
 export { ModalHost, useModals } from "./ModalHost";
 export type { ModalHostProps } from "./ModalHost";
 export { createModalQueue } from "./modal-queue";

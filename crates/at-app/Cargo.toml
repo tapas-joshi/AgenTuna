@@ -25,6 +25,7 @@ at-mcp.workspace = true
 at-model.workspace = true
 at-fs.workspace = true
 at-store.workspace = true
+at-engine.workspace = true
 at-db.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
@@ -45,10 +46,10 @@ time.workspace = true
 at-secrets.workspace = true
 tokio-util.workspace = true
 zip.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
-rusqlite.workspace = true
 # TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
 at-fs = { workspace = true, features = ["testkit"] }

@@ -371,11 +371,12 @@ fn execute_op(
             if bytes.len() as u64 > MAX_FILE_BYTES {
                 return Err("write exceeds maximum file size".to_owned());
             }
-            let mut request = WriteRequest::replace(
-                path,
-                bytes.clone(),
-                translate_expected(expected).map_err(|error| error.to_string())?,
-            );
+            let expected = translate_expected(expected).map_err(|error| error.to_string())?;
+            let mut request = if matches!(&expected, ExpectedState::Absent) {
+                WriteRequest::create(path, bytes.clone())
+            } else {
+                WriteRequest::replace(path, bytes.clone(), expected)
+            };
             request.follow_symlink = *follow_symlink;
             if *backup {
                 let relative = op
