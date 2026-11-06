@@ -381,3 +381,74 @@ fn audited_keys_record_one_operations_row_and_navigation_does_not() {
         "navigation and banner keys are not audited"
     );
 }
+
+#[test]
+fn ta014_link_mode_persists_exact_key_survives_reopen_and_audits_old_new() {
+    let path = tempfile::NamedTempFile::new()
+        .expect("temp file")
+        .path()
+        .to_path_buf();
+    let agent = AgentId::Codex;
+
+    {
+        let mut database = Database::open_file(&path).expect("open");
+        let connection = database.connection_mut();
+        set_link_mode(connection, &agent, LinkMode::Copy, UI).expect("set copy");
+        let rows = stored_rows(connection);
+        assert!(
+            rows.iter()
+                .any(|(key, value)| key == "link_mode.codex" && value == "\"copy\""),
+            "stored under exactly link_mode.<agent>: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(key, _)| key.contains("deployment_mode")),
+            "no agent.<id>.deployment_mode key exists: {rows:?}"
+        );
+        let audits = audit_rows(connection);
+        assert_eq!(audits.len(), 1);
+        assert!(
+            audits[0].contains("link_mode.codex")
+                && audits[0].contains("\"link\"")
+                && audits[0].contains("\"copy\""),
+            "audit records old and new values: {}",
+            audits[0]
+        );
+    }
+
+    // Reopen: the mode survives a restart.
+    {
+        let database = Database::open_file(&path).expect("reopen");
+        let settings = load(database.connection()).expect("load");
+        assert_eq!(settings.link_mode(&agent), LinkMode::Copy);
+        assert_eq!(settings.link_mode(&AgentId::Omp), LinkMode::Link);
+    }
+
+    // An unknown stored value is rejected at parse time and leaves the previous value intact.
+    {
+        let mut database = Database::open_file(&path).expect("reopen again");
+        let connection = database.connection_mut();
+        connection
+            .execute(
+                "UPDATE settings SET value_json = '\"bogus\"' WHERE key = 'link_mode.codex'",
+                [],
+            )
+            .expect("corrupt row");
+        let settings = load(connection).expect("load warns and defaults");
+        assert_eq!(
+            settings.link_mode(&agent),
+            LinkMode::Link,
+            "invalid value falls back to default; the row itself is preserved"
+        );
+        let stored: String = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = 'link_mode.codex'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row still there");
+        assert_eq!(
+            stored, "\"bogus\"",
+            "the bad row is left for the next write"
+        );
+    }
+}

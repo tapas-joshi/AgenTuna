@@ -92,3 +92,21 @@ impl From<rusqlite::Error> for DbError {
         Self::Sqlite(error)
     }
 }
+
+impl From<at_model::ItemIdError> for DbError {
+    fn from(error: at_model::ItemIdError) -> Self {
+        Self::InvalidValue {
+            field: "item_id",
+            reason: error.to_string(),
+        }
+    }
+}
+
+impl From<at_model::AgentIdError> for DbError {
+    fn from(error: at_model::AgentIdError) -> Self {
+        Self::InvalidValue {
+            field: "agent_id",
+            reason: error.to_string(),
+        }
+    }
+}

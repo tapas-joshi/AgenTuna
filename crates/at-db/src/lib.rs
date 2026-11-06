@@ -14,15 +14,28 @@
 //! raised before the database is modified.
 
 pub mod agents;
+pub mod backups;
 mod db;
+pub mod deployments;
+pub mod drift;
 mod error;
+pub mod health;
+pub mod locks;
 pub mod migrations;
+pub mod native;
 pub mod ops;
+pub mod overview;
+pub mod presets;
 pub mod projects;
 pub mod read_only;
+pub mod rebuild;
+pub mod remote_backup;
 pub mod retention;
 pub mod secret_refs;
 pub mod settings;
+pub mod shared;
+pub mod sources;
+pub mod versions;
 
 pub use db::Database;
 pub use error::DbError;

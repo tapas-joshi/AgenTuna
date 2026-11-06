@@ -3,6 +3,7 @@
 mod wire;
 
 pub mod agent;
+pub mod change_set;
 pub mod deployment;
 pub mod error;
 pub mod item;
@@ -15,8 +16,11 @@ pub mod redact;
 pub mod resolve;
 pub mod scope;
 pub mod skill;
-
 pub use agent::{Agent, AgentId, AgentIdError};
+pub use change_set::{
+    ChangeSet, ChangeSetError, ContentHash, DeployMode, ExpectedState, FileOp, OPERATION_KINDS,
+    OperationKind,
+};
 pub use deployment::{Deployment, ItemState, LinkMode, SyncLabel};
 pub use error::{ErrorKind, ErrorReport, REDACTION_MASK, Remedy, SecretRedactor};
 pub use item::{ItemId, ItemIdError, ItemKind};

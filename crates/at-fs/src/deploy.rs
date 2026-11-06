@@ -719,7 +719,52 @@ fn swap_aside(stage: &Path, target: &Path, fs_impl: &dyn DeployFs) -> Result<(),
     }
 }
 
+/// Atomically replaces or installs a directory tree.
+///
+/// When `target` does not exist, `staging` is renamed directly into `target`.
+/// When `target` exists, it is moved aside to a sibling `.old` directory, `staging`
+/// is renamed into place, and the old tree is removed. If the second rename fails,
+/// `target` is restored from the `.old` sibling.
+///
+/// Every step is a same-directory rename, ensuring readers never observe a missing
+/// or partial directory tree for longer than a single rename.
+///
+/// # Errors
+///
+/// [`FsError::CrossDeviceRename`] if `staging` and `target` reside on different filesystems,
+/// or other [`FsError`] variants for IO failures.
+pub fn install_dir_tree(staging: &Path, target: &Path) -> Result<(), FsError> {
+    install_dir_tree_with(staging, target, &SystemFs)
+}
+
+/// Atomically replaces or installs a directory tree using `fs_impl`.
+#[doc(hidden)]
+pub fn install_dir_tree_with(
+    staging: &Path,
+    target: &Path,
+    fs_impl: &dyn DeployFs,
+) -> Result<(), FsError> {
+    let target_exists = fs::symlink_metadata(target).is_ok();
+    if !target_exists {
+        rename(staging, target, fs_impl)
+    } else {
+        swap_aside(staging, target, fs_impl)
+    }
+}
+
 fn rename(from: &Path, to: &Path, fs_impl: &dyn DeployFs) -> Result<(), FsError> {
+    #[cfg(any(test, feature = "faults", feature = "testkit"))]
+    if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::DeployRename, to) {
+        let e = f.into_io();
+        if e.raw_os_error() == Some(libc::EXDEV) {
+            return Err(FsError::CrossDeviceRename {
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+            });
+        } else {
+            return Err(FsError::from_platform_io(to, e));
+        }
+    }
     fs_impl.rename(from, to).map_err(|e| {
         if e.raw_os_error() == Some(libc::EXDEV) {
             FsError::CrossDeviceRename {
@@ -727,7 +772,7 @@ fn rename(from: &Path, to: &Path, fs_impl: &dyn DeployFs) -> Result<(), FsError>
                 to: to.to_path_buf(),
             }
         } else {
-            FsError::from_io(to, e)
+            FsError::from_platform_io(to, e)
         }
     })
 }
@@ -749,6 +794,18 @@ struct Staging {
 impl Staging {
     fn link(target: &Path, link_target: &Path, fs_impl: &dyn DeployFs) -> Result<Self, FsError> {
         let path = sibling_path(target, "")?;
+        #[cfg(any(test, feature = "faults", feature = "testkit"))]
+        if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::DeploySymlink, &path) {
+            let e = f.into_io();
+            if is_link_unsupported(&e) {
+                return Err(FsError::LinkUnsupported {
+                    path: target.to_path_buf(),
+                    source: e,
+                });
+            } else {
+                return Err(FsError::from_platform_io(target, e));
+            }
+        }
         fs_impl.symlink(link_target, &path).map_err(|e| {
             if is_link_unsupported(&e) {
                 FsError::LinkUnsupported {

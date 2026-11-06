@@ -1,9 +1,20 @@
 //! MCP server client sessions, health checks, and tool listing.
 
+pub mod http;
+pub mod oauth;
 pub mod path;
 pub mod policy;
 pub mod session;
 
+pub use http::{
+    HTTP_INITIALIZE_TIMEOUT, HTTP_TOOL_LIMIT, HTTP_TOOL_PAGE_TIMEOUT, HttpClient, HttpError,
+    HttpErrorKind, HttpSession,
+};
+pub use oauth::{
+    BrowserOpener, CallbackRequest, KeychainCredentialStore, LoopbackListener,
+    OAUTH_KEYCHAIN_SERVICE, OAuthClient, PolicyOAuthHttpClient, REFRESH_SKEW, SIGN_IN_TIMEOUT,
+    SignInError, SignInErrorKind, SignInOutcome, SystemBrowser,
+};
 pub use path::{
     Clock, CommandLocation, ManagerHint, ManagerRoots, ManualClock, PathPlatform, PathResolver,
     PathResolverBuilder, PathSource, PlatformKind, PosixPlatform, ResolveError, ResolvedPath,

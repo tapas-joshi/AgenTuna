@@ -59,10 +59,10 @@ macro_rules! ops_enum {
         }
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
         #[non_exhaustive]
         pub enum $name {
-            $( $(#[$vmeta])* $variant ),+
+            $( $(#[$vmeta])* #[serde(rename = $wire)] $variant ),+
         }
 
         impl $name {
@@ -406,7 +406,7 @@ impl<'a> TouchedFile<'a> {
 /// module always set `actor` and `status`, and set `kind` unless the row comes
 /// from [`record_interrupted`], which records a generic app job that has no
 /// operation kind.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationRow {
     /// Primary key as stored.
     pub id: String,
@@ -1249,6 +1249,23 @@ mod tests {
         }
         assert!(OperationKind::WIRE_NAMES.contains(&"drift_adopt"));
         assert!("deploy_all_the_things".parse::<OperationKind>().is_err());
+    }
+
+    #[test]
+    fn model_operation_kinds_match_the_journal_set() {
+        // TF-052's at_model::OPERATION_KINDS is the wire contract ChangeSets validate against;
+        // it must stay identical to the operations log's OperationKind::WIRE_NAMES.
+        assert_eq!(
+            at_model::OPERATION_KINDS,
+            OperationKind::WIRE_NAMES,
+            "at-model and at-db operation kind lists drifted"
+        );
+        for name in at_model::OPERATION_KINDS {
+            assert!(
+                name.parse::<OperationKind>().is_ok(),
+                "at-model kind `{name}` is unknown to the journal"
+            );
+        }
     }
 
     #[test]

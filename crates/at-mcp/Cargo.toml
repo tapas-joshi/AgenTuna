@@ -12,7 +12,7 @@ workspace = true
 [features]
 # Builds the JSON-RPC stdio fake server used by the session acceptance tests.
 # It is never part of a shipped AgenTuna binary.
-testkit = ["dep:serde_json", "dep:signal-hook"]
+testkit = ["dep:signal-hook"]
 
 [[bin]]
 name = "at-mcp-fake-server"
@@ -20,19 +20,29 @@ path = "tests/support/fake_mcp_server.rs"
 required-features = ["testkit"]
 
 [dependencies]
+async-trait.workspace = true
 at-model.workspace = true
 at-secrets.workspace = true
+http.workspace = true
+oauth2.workspace = true
+reqwest.workspace = true
 rmcp.workspace = true
 rustix = { workspace = true, features = ["process"] }
-serde_json = { workspace = true, optional = true }
+serde_json.workspace = true
 signal-hook = { workspace = true, optional = true }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
+webbrowser.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustix = { workspace = true, features = ["process"] }
 tempfile.workspace = true
 tokio.workspace = true

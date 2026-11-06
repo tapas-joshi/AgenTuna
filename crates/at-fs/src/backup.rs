@@ -29,6 +29,15 @@ pub enum BackupError {
         /// What was wrong.
         reason: String,
     },
+    /// Permission denied, disk full, or other IO error while writing the backup copy.
+    #[error("backup failed at {}: {source}", .path.display())]
+    BackupFailed {
+        /// Path involved.
+        path: PathBuf,
+        /// Underlying error.
+        #[source]
+        source: std::io::Error,
+    },
     /// IO failure while writing or reading the backup.
     #[error("backup IO error at {}: {source}", .path.display())]
     Io {
@@ -85,20 +94,45 @@ impl BackupFiles {
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> BackupError + '_ {
-    move |source| BackupError::Io {
-        path: path.to_path_buf(),
-        source,
+    move |source| {
+        #[cfg(unix)]
+        if let Some(code) = source.raw_os_error()
+            && (code == libc::ENOSPC || code == libc::EDQUOT)
+        {
+            return BackupError::BackupFailed {
+                path: path.to_path_buf(),
+                source,
+            };
+        }
+        if source.kind() == std::io::ErrorKind::PermissionDenied {
+            return BackupError::BackupFailed {
+                path: path.to_path_buf(),
+                source,
+            };
+        }
+        BackupError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
     }
 }
 
 /// Writes `bytes` to a fresh file at `dest` (exclusive create), fsynced.
 fn write_new(dest: &Path, bytes: &[u8]) -> Result<(), BackupError> {
+    #[cfg(any(test, feature = "faults", feature = "testkit"))]
+    if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::BackupWrite, dest) {
+        return Err(io_err(dest)(f.into_io()));
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(dest)
         .map_err(io_err(dest))?;
     file.write_all(bytes).map_err(io_err(dest))?;
+    #[cfg(any(test, feature = "faults", feature = "testkit"))]
+    if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::BackupSync, dest) {
+        return Err(io_err(dest)(f.into_io()));
+    }
     file.sync_all().map_err(io_err(dest))
 }
 

@@ -179,6 +179,8 @@ pub enum SettingsKey {
     LastScope(String),
     /// `last_project_id`.
     LastProjectId,
+    /// `remote_backup.device_name`.
+    RemoteBackupDevice,
 }
 
 impl SettingsKey {
@@ -193,6 +195,7 @@ impl SettingsKey {
         Self::MarketplaceEnabled,
         Self::AutoUpdateSkills,
         Self::LastProjectId,
+        Self::RemoteBackupDevice,
     ];
 
     /// The exact string stored in `settings.key`.
@@ -211,6 +214,7 @@ impl SettingsKey {
             Self::AutoUpdateSkills => "auto_update_skills".to_owned(),
             Self::LastScope(project_id) => format!("{LAST_SCOPE_PREFIX}{project_id}"),
             Self::LastProjectId => "last_project_id".to_owned(),
+            Self::RemoteBackupDevice => "remote_backup.device_name".to_owned(),
         }
     }
 
@@ -329,6 +333,8 @@ pub struct Settings {
     pub last_scope: BTreeMap<String, Scope>,
     /// Last project opened, when one was.
     pub last_project_id: Option<String>,
+    /// Device name recorded in remote-backup commits, when set.
+    pub remote_backup_device: Option<String>,
     /// Stored rows whose key is not canonical, as raw JSON text, preserved verbatim.
     pub unknown: BTreeMap<String, String>,
 }
@@ -348,6 +354,7 @@ impl Default for Settings {
             auto_update_skills: false,
             last_scope: BTreeMap::new(),
             last_project_id: None,
+            remote_backup_device: None,
             unknown: BTreeMap::new(),
         }
     }
@@ -386,6 +393,12 @@ impl Settings {
     #[must_use]
     pub fn global_store_path(&self) -> Option<&Path> {
         self.global_store_path.as_deref()
+    }
+
+    /// The device name recorded in remote-backup commits, when set.
+    #[must_use]
+    pub fn remote_backup_device(&self) -> Option<&str> {
+        self.remote_backup_device.as_deref()
     }
 }
 
@@ -756,6 +769,37 @@ pub fn set_last_project_id(
     }
 }
 
+/// Sets or clears `remote_backup.device_name`.
+///
+/// `None` removes the row. The device name is a label, never a secret.
+///
+/// # Errors
+/// [`SettingsError::InvalidValue`] for a name that cannot be stored, or a SQLite failure.
+pub fn set_remote_backup_device(
+    connection: &mut Connection,
+    device_name: Option<&str>,
+    actor: OperationActor,
+) -> Result<(), SettingsError> {
+    let key = SettingsKey::RemoteBackupDevice;
+    match device_name {
+        Some(device_name) => {
+            if device_name.is_empty() || device_name.chars().any(char::is_control) {
+                return Err(SettingsError::InvalidValue {
+                    key: key.stored_key(),
+                    reason: "expected a non-empty name without control characters".to_owned(),
+                });
+            }
+            set_value(
+                connection,
+                &key,
+                &encode(&Decoded::Text(Some(device_name.to_owned())))?,
+                actor,
+            )
+        }
+        None => write(connection, &key, None, actor),
+    }
+}
+
 /// Every stored row as one versioned document, for export and CLI parity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsDocument {
@@ -999,7 +1043,9 @@ fn decode(key: &SettingsKey, value_json: &str) -> Result<Decoded, SettingsError>
                 .map(|scope| Decoded::Scope(Some(scope)))
                 .ok_or_else(|| invalid(key, "expected global, user, project, local or empty"))
         }
-        SettingsKey::LastProjectId => Ok(Decoded::Text(Some(string(key, &value)?.to_owned()))),
+        SettingsKey::LastProjectId | SettingsKey::RemoteBackupDevice => {
+            Ok(Decoded::Text(Some(string(key, &value)?.to_owned())))
+        }
     }
 }
 
@@ -1082,6 +1128,9 @@ fn assign(settings: &mut Settings, key: &SettingsKey, decoded: Decoded) {
         }
         (SettingsKey::LastProjectId, Decoded::Text(project_id)) => {
             settings.last_project_id = project_id;
+        }
+        (SettingsKey::RemoteBackupDevice, Decoded::Text(device)) => {
+            settings.remote_backup_device = device;
         }
         // `decode` never produces a value for a different key.
         _ => {}

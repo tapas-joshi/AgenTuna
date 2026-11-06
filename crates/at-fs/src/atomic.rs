@@ -1,5 +1,6 @@
 //! Guarded atomic write: temp file, fsync, re-check, rename, fsync directory.
 
+use crate::failpoint::{self, FaultPoint};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -125,6 +126,13 @@ pub enum Stage {
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Consults the failpoint registry; a no-op unless the `faults`/`testkit` feature is compiled in or in test.
+/// Injected `ENOSPC`/`EDQUOT` map to the same typed errors a real full disk produces.
+fn fault(point: FaultPoint, path: &Path) -> Result<(), FsError> {
+    failpoint::hit(point, path)
+        .map_err(|failure| FsError::from_platform_io(path, failure.into_io()))
+}
+
 /// Removes the temp file unless it was installed.
 struct TempGuard {
     path: PathBuf,
@@ -207,12 +215,13 @@ fn read_current(path: &Path, allow_empty_dir: bool) -> Result<Current, FsError> 
 fn create_temp(parent: &Path, name: &str) -> Result<(File, TempGuard), FsError> {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = parent.join(format!(".{name}.agentuna-tmp-{}-{n}", std::process::id()));
+    fault(FaultPoint::TempCreate, &path)?;
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&path)
-        .map_err(|e| FsError::from_io(parent, e))?;
+        .map_err(|e| FsError::from_platform_io(parent, e))?;
     Ok((file, TempGuard { path }))
 }
 
@@ -290,17 +299,19 @@ pub fn apply_with_hook(
 
     // Stage the new content first: this proves the directory is writable before any backup exists.
     let (mut temp_file, temp) = create_temp(parent, &name)?;
+    fault(FaultPoint::TempWrite, &temp.path)?;
     temp_file
         .write_all(&request.new_bytes)
-        .map_err(|e| FsError::from_io(&temp.path, e))?;
+        .map_err(|e| FsError::from_platform_io(&temp.path, e))?;
     if let Some(permissions) = &current.permissions {
         temp_file
             .set_permissions(permissions.clone())
-            .map_err(|e| FsError::from_io(&temp.path, e))?;
+            .map_err(|e| FsError::from_platform_io(&temp.path, e))?;
     }
+    fault(FaultPoint::TempSync, &temp.path)?;
     temp_file
         .sync_all()
-        .map_err(|e| FsError::from_io(&temp.path, e))?;
+        .map_err(|e| FsError::from_platform_io(&temp.path, e))?;
     drop(temp_file);
     hook(Stage::TempWritten);
 
@@ -332,14 +343,17 @@ pub fn apply_with_hook(
     match result {
         // The rename happened. A failed directory fsync is reported, but the backup is kept
         // because the new bytes are already in place.
-        Ok(()) => sync_dir(parent).map(|()| WriteOutcome {
-            diff,
-            backup_path: backup_files.map(|f| f.blob),
-            before_hash,
-            after_hash: sha256_hex(&request.new_bytes),
-            bytes: new_len,
-            symlink,
-        }),
+        Ok(()) => {
+            fault(FaultPoint::DirSync, parent)?;
+            sync_dir(parent).map(|()| WriteOutcome {
+                diff,
+                backup_path: backup_files.map(|f| f.blob),
+                before_hash,
+                after_hash: sha256_hex(&request.new_bytes),
+                bytes: new_len,
+                symlink,
+            })
+        }
         Err(e) => {
             if let Some(files) = &backup_files {
                 files.discard();
@@ -358,6 +372,7 @@ fn install(
     hook: &mut dyn FnMut(Stage),
 ) -> Result<(), FsError> {
     hook(Stage::BeforeRename);
+    fault(FaultPoint::BeforeRename, dest)?;
     if let Some(guard) = &request.guard {
         guard.check(dest, request.allow_empty_dir)?;
     }
@@ -370,8 +385,9 @@ fn install(
         ));
     }
     if before.empty_dir {
-        fs::remove_dir(dest).map_err(|e| FsError::from_io(dest, e))?;
+        fs::remove_dir(dest).map_err(|e| FsError::from_platform_io(dest, e))?;
     }
+    fault(FaultPoint::Rename, dest)?;
     match request.mode {
         // hard_link fails if the destination appeared meanwhile, so creation is exclusive.
         WriteMode::Create => fs::hard_link(&temp.path, dest).map_err(|e| match e.kind() {
@@ -380,10 +396,10 @@ fn install(
                 expected: "absent".to_owned(),
                 actual: "present".to_owned(),
             },
-            _ => FsError::from_io(dest, e),
+            _ => FsError::from_platform_io(dest, e),
         })?,
         WriteMode::Replace => {
-            fs::rename(&temp.path, dest).map_err(|e| FsError::from_io(dest, e))?
+            fs::rename(&temp.path, dest).map_err(|e| FsError::from_platform_io(dest, e))?
         }
     }
     Ok(())

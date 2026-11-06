@@ -13,6 +13,7 @@ pub struct AppState {
     cli: Option<CliInstaller>,
     config: Option<Arc<AppConfig>>,
     instance: Option<Arc<InstanceState>>,
+    logging: Option<at_store::logging::Logging>,
 }
 
 impl AppState {
@@ -24,6 +25,7 @@ impl AppState {
             cli,
             config: None,
             instance: None,
+            logging: None,
         }
     }
 
@@ -31,6 +33,13 @@ impl AppState {
     #[must_use]
     pub fn with_config(mut self, config: Arc<AppConfig>) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Attaches the process logging handle (reload + redactor slot).
+    #[must_use]
+    pub fn with_logging(mut self, logging: at_store::logging::Logging) -> Self {
+        self.logging = Some(logging);
         self
     }
 
@@ -57,6 +66,12 @@ impl AppState {
     #[must_use]
     pub fn config(&self) -> Option<&AppConfig> {
         self.config.as_deref()
+    }
+
+    /// The process logging handle, absent only in tests that build state directly.
+    #[must_use]
+    pub fn logging(&self) -> Option<&at_store::logging::Logging> {
+        self.logging.as_ref()
     }
 
     /// The single-instance state, absent only in tests that build state directly.

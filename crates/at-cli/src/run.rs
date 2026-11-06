@@ -28,6 +28,7 @@ pub fn production_registry() -> Result<Registry, RegistryError> {
 /// Runs the CLI for the current process and returns its exit status.
 #[must_use]
 pub fn run_from_env() -> ExitCode {
+    init_logging();
     let argv: Vec<OsString> = std::env::args_os().collect();
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();
@@ -276,4 +277,49 @@ fn resolve_color(argv: &[OsString], stderr_is_terminal: bool) -> Color {
     } else {
         Color::Ansi
     }
+}
+
+/// Installs process logging for the CLI: same daily file, filter and redaction as the app.
+///
+/// The project flag is parsed later, but the log directory lives under the support root,
+/// which does not depend on it, so paths resolve without a project root here. The level
+/// comes from `RUST_LOG` or the `[advanced] log_level` setting (default `info`); a config
+/// that cannot be read degrades to `info` — logging must never block a command.
+///
+/// `--read-only` and `--dry-run` runs keep their "writes nothing" contract: file logging
+/// is disabled and events go to stderr only. The appender itself is lazy, so even a
+/// normal run creates the log directory on the first event, not at startup.
+fn init_logging() {
+    use at_store::config::LogLevel;
+    use at_store::logging::{LoggingOptions, init};
+    use at_store::paths::PathEnvironment;
+
+    let Ok(paths) = at_store::paths::AppPaths::resolve(&PathEnvironment::from_process()) else {
+        return;
+    };
+    let level = at_store::config::RuntimeConfig::load(
+        paths.support_dir().join(at_store::config::CONFIG_FILE_NAME),
+        at_store::config::ConfigInput {
+            create: false,
+            ..at_store::config::ConfigInput::production(Vec::new())
+        },
+    )
+    .map(|config| config.advanced().log_level)
+    .unwrap_or(LogLevel::Info);
+    let mut options = LoggingOptions::for_paths(&paths, level);
+    options.file_logging = !read_only_invocation();
+    let _guard = init(&options);
+    // The guard is intentionally dropped: the global subscriber outlives it and the CLI
+    // process exits right after `run` returns.
+}
+
+/// Whether the raw argv asks for a run that must not write anything.
+///
+/// Clap parses the real flags later; this scan only looks for the two global boolean
+/// flags that forbid writes. A token equal to a flag name can only be the flag itself —
+/// values are paths or scopes and never start with `--`.
+fn read_only_invocation() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|arg| matches!(arg.to_str(), Some("--read-only" | "--dry-run")))
 }

@@ -22,13 +22,15 @@
 //! [`crate::locks::inspect`] to report as an orphan.
 
 use core::fmt;
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use at_model::{Definition, ItemId, LogicalId, Scope, ScopeSnapshot};
+use at_model::{AgentId, Definition, ItemId, LogicalId, Scope, ScopeSnapshot};
+use at_store::manifest::DisabledAgents;
 
 use crate::locks::{LockMark, LockRecord, LockStore};
+use crate::tombstones::TombstoneSource;
 
 /// Input to [`resolve`].
 ///
@@ -39,6 +41,8 @@ use crate::locks::{LockMark, LockRecord, LockStore};
 pub struct ResolveInput<'a> {
     layers: &'a [ScopeSnapshot],
     locks: Option<&'a dyn LockStore>,
+    tombstones: Option<&'a dyn TombstoneSource>,
+    agent: Option<&'a AgentId>,
 }
 
 impl fmt::Debug for ResolveInput<'_> {
@@ -46,6 +50,8 @@ impl fmt::Debug for ResolveInput<'_> {
         f.debug_struct("ResolveInput")
             .field("layers", &self.layers)
             .field("locks_attached", &self.locks.is_some())
+            .field("tombstones_attached", &self.tombstones.is_some())
+            .field("agent", &self.agent)
             .finish()
     }
 }
@@ -57,6 +63,8 @@ impl<'a> ResolveInput<'a> {
         Self {
             layers,
             locks: None,
+            tombstones: None,
+            agent: None,
         }
     }
 
@@ -67,6 +75,20 @@ impl<'a> ResolveInput<'a> {
     #[must_use]
     pub const fn with_locks(mut self, locks: &'a dyn LockStore) -> Self {
         self.locks = Some(locks);
+        self
+    }
+
+    /// Attaches the per-scope tombstone source (TA-003).
+    #[must_use]
+    pub const fn with_tombstones(mut self, tombstones: &'a dyn TombstoneSource) -> Self {
+        self.tombstones = Some(tombstones);
+        self
+    }
+
+    /// Limits resolution to a specific agent, so per-agent tombstones apply (TA-003).
+    #[must_use]
+    pub const fn for_agent(mut self, agent: &'a AgentId) -> Self {
+        self.agent = Some(agent);
         self
     }
 }
@@ -145,6 +167,21 @@ pub struct ShadowedBy {
     pub path: PathBuf,
 }
 
+/// An item that was disabled by a tombstone in one scope (TA-003).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisabledHere {
+    /// Identity shared across scopes.
+    pub logical_id: LogicalId,
+    /// Item id of the disabled item.
+    pub item_id: ItemId,
+    /// Scope the tombstone was recorded in.
+    pub scope: Scope,
+    /// Which agents the tombstone applies to (`All` or `Only([..])`).
+    pub agents: DisabledAgents,
+    /// The definition that is disabled.
+    pub definition: Definition,
+}
+
 /// Everything one resolution pass produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedSet {
@@ -153,6 +190,8 @@ pub struct ResolvedSet {
     /// Every definition that lost, ordered by kind, normalized name, logical key,
     /// losing scope depth, then path.
     pub shadowed: Vec<Shadowed>,
+    /// Items disabled by a tombstone (TA-003).
+    pub disabled: Vec<DisabledHere>,
     /// Problems that did not stop resolution, such as an unreadable lock store.
     pub diagnostics: Vec<ResolveDiagnostic>,
 }
@@ -167,6 +206,13 @@ pub enum ResolveDiagnostic {
     /// [`ResolvedSet::lock_read_failed`] as a failure; callers that can show a
     /// warning use it to explain why a locked item appears unlocked.
     LockReadFailed {
+        /// Store error text, already free of secret values.
+        message: String,
+    },
+    /// The tombstone source could not be read for a scope (TA-003).
+    TombstoneReadFailed {
+        /// Scope whose tombstones failed to load.
+        scope: Scope,
         /// Store error text, already free of secret values.
         message: String,
     },
@@ -194,6 +240,14 @@ impl ResolvedSet {
         self.diagnostics
             .iter()
             .any(|diagnostic| matches!(diagnostic, ResolveDiagnostic::LockReadFailed { .. }))
+    }
+
+    /// Whether the tombstone source could not be read during this pass (TA-003).
+    #[must_use]
+    pub fn tombstone_read_failed(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, ResolveDiagnostic::TombstoneReadFailed { .. }))
     }
 }
 
@@ -297,6 +351,84 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
         winners.insert(logical_id.clone(), *position);
     }
 
+    // Tombstones are applied after precedence: the item is removed from the effective
+    // set for that scope and all deeper scopes, optionally only for the listed agents (TA-003).
+    // A Global lock pin dominates a tombstone — a locked item cannot be disabled.
+    let mut disabled: Vec<DisabledHere> = Vec::new();
+    let mut disabled_ids: BTreeSet<LogicalId> = BTreeSet::new();
+
+    if let Some(source) = input.tombstones {
+        let mut participating_scopes: Vec<Scope> = input
+            .layers
+            .iter()
+            .map(|layer| layer.scope)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        participating_scopes.sort_by_key(|s| s.precedence());
+
+        for scope in participating_scopes {
+            match source.disabled(scope) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let Some((logical_id, &position)) = winners.iter().find(|(_, pos)| {
+                            candidates[**pos].definition.item_id == Some(entry.item_id)
+                        }) else {
+                            continue;
+                        };
+
+                        let candidate = &candidates[position];
+
+                        // A Global lock dominates a tombstone.
+                        if marks.contains_key(logical_id) {
+                            continue;
+                        }
+
+                        // The tombstone applies to that scope and all deeper scopes.
+                        if scope.precedence() < candidate.scope.precedence() {
+                            continue;
+                        }
+
+                        let applies_to_agent = match (&entry.agents, input.agent) {
+                            (DisabledAgents::All, _) => true,
+                            (DisabledAgents::Only(list), Some(agent)) => list.contains(agent),
+                            (DisabledAgents::Only(_), None) => false,
+                        };
+
+                        disabled.push(DisabledHere {
+                            logical_id: logical_id.clone(),
+                            item_id: entry.item_id,
+                            scope,
+                            agents: entry.agents.clone(),
+                            definition: candidate.definition.clone(),
+                        });
+
+                        if applies_to_agent {
+                            disabled_ids.insert(logical_id.clone());
+                        }
+                    }
+                }
+                Err(error) => diagnostics.push(ResolveDiagnostic::TombstoneReadFailed {
+                    scope,
+                    message: error.to_string(),
+                }),
+            }
+        }
+    }
+
+    disabled.sort_by_cached_key(|entry| {
+        (
+            entry.logical_id.kind,
+            entry.definition.normalized_name(),
+            entry.scope.precedence(),
+            entry.logical_id.key.clone(),
+        )
+    });
+    disabled.dedup_by(|a, b| a.item_id == b.item_id && a.scope == b.scope);
+
+    for id in &disabled_ids {
+        winners.remove(id);
+    }
     let mut items: Vec<ResolvedItem> = winners
         .iter()
         .map(|(logical_id, position)| {
@@ -354,6 +486,7 @@ pub fn resolve(input: ResolveInput<'_>) -> ResolvedSet {
     ResolvedSet {
         items,
         shadowed,
+        disabled,
         diagnostics,
     }
 }

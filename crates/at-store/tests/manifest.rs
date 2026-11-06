@@ -442,7 +442,8 @@ fn store_json_is_the_only_item_manifest() {
 #[test]
 fn invalid_tombstones_are_rejected_with_a_field_error() {
     let sandbox = tempfile::tempdir().expect("temp dir");
-    let layout = initialized(&sandbox);
+    let layout = StoreLayout::new(Scope::Global, sandbox.path().join("store"));
+    layout.init().expect("store initializes");
     let loaded = StoreManifest::load(&layout).expect("load");
     let mut manifest = loaded.manifest;
     let id = ItemId::new();

@@ -38,4 +38,13 @@ pub enum EngineError {
         /// Item that has no lock row.
         item_id: ItemId,
     },
+    /// The store manifest could not be loaded, parsed, validated or written.
+    #[error(transparent)]
+    Manifest(#[from] at_store::manifest::ManifestError),
+    /// A store file could not be locked, saved or reconciled.
+    #[error(transparent)]
+    Store(#[from] at_store::store_io::StoreIoError),
+    /// A tombstone source could not be read.
+    #[error(transparent)]
+    Tombstone(#[from] crate::tombstones::TombstoneError),
 }

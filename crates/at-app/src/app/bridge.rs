@@ -31,6 +31,7 @@ use tauri::Emitter;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 use ts_rs::TS;
 
 /// Webview event emitted when a job starts running.
@@ -690,7 +691,11 @@ impl JobBridge {
             work: (spec.work)(progress.clone()),
             tx,
         };
-        runtime.spawn(runner.run());
+        // The job span gives panics (via the tracing_panic hook, which runs inside the
+        // panicking thread's span context) and progress events the job_id/operation_id
+        // fields without every call site repeating them.
+        let job_span = at_store::logging::job_span(id.as_str(), &name);
+        runtime.spawn(runner.run().instrument(job_span));
 
         Ok(JobHandle {
             id,

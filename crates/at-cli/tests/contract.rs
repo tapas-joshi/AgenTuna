@@ -388,13 +388,8 @@ fn every_registered_command_answers_help_and_a_smoke_call() {
             vec!["completions", "zsh"],
             exit_code::SUCCESS,
         ),
-        (
-            "projects",
-            vec!["projects", "list"],
-            exit_code::NOT_IMPLEMENTED,
-        ),
-        ("scan", vec!["scan"], exit_code::NOT_IMPLEMENTED),
-        ("doctor", vec!["doctor"], exit_code::SUCCESS),
+        ("projects", vec!["projects", "list"], exit_code::SUCCESS),
+        ("scan", vec!["scan"], exit_code::SUCCESS),
     ];
     for noun in registry.names() {
         cases.push((noun, vec![noun], -1));

@@ -3,6 +3,8 @@
 //! These exercise the shipped process: exit codes, stream separation and the tree that
 //! `--help` advertises.
 
+mod support;
+
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
@@ -248,9 +250,12 @@ fn version_subcommand_prints_name_and_version() {
 }
 
 #[test]
-fn unimplemented_commands_fail_with_a_distinct_exit_code() {
-    // `doctor` left this list with TU-032: it now runs checks, so its sandboxed tests
-    // live in tests/doctor.rs where the real home is never touched.
+fn implemented_commands_no_longer_fail_with_not_implemented() {
+    // TU-027 landed `projects` and `scan`; they now run against the index, so
+    // the sandboxed behaviour tests live in tests/projects.rs. Here we only
+    // prove the stubs are gone, inside a temp HOME.
+    let sandbox = support::Sandbox::new();
+    sandbox.healthy();
     for args in [
         vec!["projects", "list"],
         vec!["projects", "add", "/tmp/agentuna-test"],
@@ -259,24 +264,29 @@ fn unimplemented_commands_fail_with_a_distinct_exit_code() {
         vec!["scan"],
         vec!["scan", "--depth", "3"],
     ] {
-        let output = agentuna(&args);
-        assert_eq!(
-            exit_code(&output),
+        let output = support::agentuna(&sandbox, &args);
+        let code = exit_code(&output);
+        assert_ne!(
+            code,
             11,
-            "args {args:?} must exit 11 (not implemented); stderr {}",
+            "args {args:?} must not report not_implemented anymore; stderr {}",
             stderr(&output)
         );
-        assert!(stdout(&output).is_empty(), "human errors go to stderr");
-        let err = stderr(&output);
-        assert!(err.contains("not implemented"), "stderr: {err}");
-        assert!(err.contains("hint:"), "stderr must carry a hint: {err}");
+        assert!(
+            code == 0 || code == 4 || code == 5 || code == 6,
+            "args {args:?} exited with unexpected code {code}: {}",
+            stderr(&output)
+        );
     }
 }
 
 #[test]
-fn unimplemented_commands_carry_the_error_envelope_in_json_mode() {
-    let output = agentuna(&["scan", "--json"]);
-    assert_eq!(exit_code(&output), 11);
+fn implemented_commands_carry_the_success_envelope_in_json_mode() {
+    // TU-027 landed `scan`; inside the sandbox it succeeds with one envelope.
+    let sandbox = support::Sandbox::new();
+    sandbox.healthy();
+    let output = support::agentuna(&sandbox, &["scan", "--json"]);
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
     assert_eq!(
         stdout(&output).lines().count(),
         1,
@@ -288,14 +298,12 @@ fn unimplemented_commands_carry_the_error_envelope_in_json_mode() {
 
     assert_eq!(envelope["schema_version"], 1);
     assert_eq!(envelope["command"], "scan");
-    assert_eq!(envelope["ok"], serde_json::Value::Bool(false));
-    assert_eq!(envelope["error"]["code"], "not_implemented");
-    assert!(
-        envelope["error"]["hint"]
-            .as_str()
-            .is_some_and(|hint| !hint.is_empty())
-    );
-    assert!(stderr(&output).contains("error:"));
+    assert_eq!(envelope["ok"], serde_json::Value::Bool(true));
+    assert_eq!(envelope["error"], serde_json::Value::Null);
+    assert!(envelope["data"]["discovered"].is_array());
+    assert!(envelope["data"]["new"].is_array());
+    assert!(envelope["data"]["missing"].is_array());
+    assert!(envelope["data"]["unchanged"].is_array());
 }
 
 #[test]

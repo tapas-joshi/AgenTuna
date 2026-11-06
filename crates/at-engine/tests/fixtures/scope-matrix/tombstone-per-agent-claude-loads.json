@@ -1,0 +1,72 @@
+{
+  "agent": "claude_code",
+  "expect": {
+    "diagnostics": [],
+    "disabled": [
+      {
+        "agents": [
+          "codex"
+        ],
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "scope": "project"
+      }
+    ],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "code-review",
+        "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "tombstone-per-agent-claude-loads",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "User review skill.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "project"
+    }
+  ],
+  "title": "A per-agent tombstone for codex leaves the item active for claude_code",
+  "tombstones": [
+    {
+      "agents": [
+        "codex"
+      ],
+      "kind": "skill",
+      "scope": "project",
+      "target": "code-review"
+    }
+  ]
+}
