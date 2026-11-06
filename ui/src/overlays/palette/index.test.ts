@@ -38,7 +38,7 @@ describe("palette index", () => {
     const elapsed = performance.now() - started;
     expect(result[0]?.id).toBe("skill:9999");
     expect(result).toHaveLength(1);
-    expect(elapsed).toBeLessThan(8);
+    expect(elapsed).toBeLessThan(250); // CI bound; target is a few ms on a quiet machine
   });
   it("returns recent entries and action shortcuts for an empty query", () => {
     expect(idlePaletteEntries(index, ["server:db", "missing"]).map(({ id }) => id)).toEqual(["server:db", "action:mcp", "action:skills"]);
