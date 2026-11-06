@@ -51,7 +51,7 @@ export interface ToastProviderProps {
   readonly clipboard?: ClipboardPort;
 }
 
-const ToastContext = createContext<ToastApi | null>(null);
+export const ToastContext = createContext<ToastApi | null>(null);
 
 /** Provides the toast API and renders the viewport once for the app. */
 export function ToastProvider({ children, store, clipboard }: ToastProviderProps) {

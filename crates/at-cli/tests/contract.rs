@@ -286,7 +286,7 @@ fn the_exit_code_table_is_unique_and_ordered() {
 
 #[test]
 fn error_codes_are_frozen() {
-    let frozen: [(ErrorCode, &str, i32); 11] = [
+    let frozen: [(ErrorCode, &str, i32); 15] = [
         (ErrorCode::Usage, "usage", exit_code::USAGE),
         (ErrorCode::Validation, "validation", exit_code::VALIDATION),
         (ErrorCode::NotFound, "not_found", exit_code::NOT_FOUND),
@@ -312,6 +312,18 @@ fn error_codes_are_frozen() {
             ErrorCode::NotImplemented,
             "not_implemented",
             exit_code::NOT_IMPLEMENTED,
+        ),
+        (
+            ErrorCode::NeedsResolution,
+            "needs_resolution",
+            exit_code::CONFLICT,
+        ),
+        (ErrorCode::StalePlan, "stale_plan", exit_code::CONFLICT),
+        (ErrorCode::UndoExpired, "undo_expired", exit_code::CONFLICT),
+        (
+            ErrorCode::PartialFailure,
+            "partial_failure",
+            exit_code::PARTIAL,
         ),
         (ErrorCode::Internal, "internal", exit_code::INTERNAL),
     ];

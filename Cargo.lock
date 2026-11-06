@@ -316,9 +316,11 @@ dependencies = [
 name = "at-cli"
 version = "0.1.0"
 dependencies = [
+ "at-adapters",
  "at-db",
  "at-engine",
  "at-fs",
+ "at-migrate",
  "at-model",
  "at-store",
  "clap",
@@ -357,6 +359,7 @@ dependencies = [
  "at-fs",
  "at-git",
  "at-mcp",
+ "at-migrate",
  "at-model",
  "at-secrets",
  "at-store",

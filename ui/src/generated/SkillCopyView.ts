@@ -19,4 +19,12 @@ hash: string,
 /**
  * Agent ids with deployments of this copy.
  */
-deployments: Array<string>, };
+deployments: Array<string>, 
+/**
+ * Absolute package folder path.
+ */
+path: string, 
+/**
+ * RFC 3339 modification time of SKILL.md.
+ */
+mtime: string, };

@@ -19,7 +19,7 @@ export {
   createToastStore,
 } from "./store";
 export type { ToastStore, ToastStoreOptions } from "./store";
-export { ToastProvider, useToast } from "./ToastProvider";
+export { ToastProvider, useToast, ToastContext } from "./ToastProvider";
 export type { ToastApi, ToastProviderProps } from "./ToastProvider";
 export { ToastViewport } from "./ToastViewport";
 export type { ToastViewportProps } from "./ToastViewport";

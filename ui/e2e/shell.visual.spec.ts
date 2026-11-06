@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
 
 test("every routed screen has a meaningful page heading", async ({ page }) => {
   const routes = [
-    ["Overview", "Overview"], ["Skills", "Presets"], ["MCP Servers", "MCP Servers"],
+    ["Overview", "Overview"], ["Skills", "Skills"], ["MCP Servers", "MCP Servers"],
     ["Instructions", "Instructions"], ["Agents", "Agents"], ["Effective config", "Effective config"],
     ["Sync & drift", "Sync & drift"],
   ] as const;
@@ -34,8 +34,7 @@ test("MCP detail, MCP form and migration routes render meaningful states", async
     mocks.commandOverrides.item_lookup = { kind: "mcp_server", scope: "user", project_id: null };
     mocks.emit("deep-link", "agentuna://item/srv_visual_fixture");
   });
-  await expect(page.getByRole("heading", { name: "MCP Servers", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "This server has no tools" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Visual server", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "Add MCP server" }).click();
   await expect(page.getByRole("heading", { name: "Add MCP server", exact: true })).toBeVisible();

@@ -25,6 +25,8 @@ pub fn production_registry() -> Result<Registry, RegistryError> {
     Registry::try_new(vec![
         Box::new(crate::runtime::ConfigGroup),
         Box::new(crate::mcp::McpGroup),
+        Box::new(crate::migrate::MigrateGroup),
+        Box::new(crate::adopt::AdoptGroup),
         Box::new(crate::agents::AgentsGroup),
         Box::new(crate::effective::EffectiveGroup),
         Box::new(crate::why::WhyGroup),

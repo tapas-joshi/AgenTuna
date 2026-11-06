@@ -58,3 +58,4 @@ tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
 # TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
 at-fs = { workspace = true, features = ["testkit"] }
+at-migrate = { workspace = true, features = ["testkit"] }

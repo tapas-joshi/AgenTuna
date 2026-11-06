@@ -200,6 +200,7 @@ pub fn index(
                         native_path: Some(path.to_string_lossy().into_owned()),
                         update_available: false,
                         updated_at: String::new(),
+                        description: None,
                     };
                     rows.push(SkillIndexRow {
                         skill: failed,
@@ -253,6 +254,7 @@ pub fn index(
                     native_path: Some(native.path.to_string_lossy().into_owned()),
                     update_available: false,
                     updated_at,
+                    description: None,
                 },
                 agents: BTreeMap::from([(
                     agent_id.clone(),

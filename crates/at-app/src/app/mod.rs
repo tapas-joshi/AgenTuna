@@ -1,5 +1,6 @@
 //! Tauri application setup: builder, command registry and window lifecycle.
 
+pub mod agent_connect;
 pub mod bridge;
 pub mod bulk_skill;
 pub mod cli_install;
@@ -28,11 +29,14 @@ pub mod project_sync;
 pub mod projects;
 pub mod recovery;
 pub mod remote_backup;
+pub mod rule_create;
 pub mod secrets;
 pub mod settings;
 pub mod skill_agent;
+pub mod skill_delete;
 pub mod skill_detail;
 pub mod skill_wizard;
+pub mod skills_list;
 pub mod source_updates;
 pub mod state;
 pub mod updater;
@@ -292,6 +296,7 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::skill_detail_load,
         skill_agent::skill_agent_preview,
         skill_agent::skill_agent_apply,
+        skills_list::skills_list,
         skill_detail::skill_auto_update_set,
         skill_detail::skill_update_ignore,
         source_updates::skill_source_check,
@@ -303,6 +308,8 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::reveal_item,
         skill_detail::skill_edit_preview,
         skill_detail::skill_edit_apply,
+        skill_detail::skill_keep_copy_preview,
+        skill_detail::skill_keep_copy_apply,
         window_state::window_state_load,
         window_state::window_state_save,
         window_state::window_state_reset,
@@ -327,6 +334,8 @@ pub fn run() -> tauri::Result<()> {
         mcp_servers::mcp_server_disable,
         mcp_servers::mcp_server_delete,
         mcp_servers::mcp_server_test,
+        mcp_servers::mcp_server_enable,
+        mcp_servers::mcp_server_detail,
         bulk_skill::bulk_skill_apply,
         commands::mcp_test_connection,
         secrets::secrets_list,
@@ -346,16 +355,24 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_import_git_candidates,
         skill_wizard::skill_marketplace_search,
         skill_wizard::skill_add_apply,
+        skill_delete::skill_delete_preview,
+        skill_delete::skill_delete_apply,
         migrate::migrate_conflicts,
         workflows::instructions_list,
         workflows::instruction_save,
-        workflows::instruction_create_project,
+        rule_create::instruction_create_options,
+        rule_create::instruction_create_preview,
+        rule_create::instruction_create,
         workflows::agents_list,
         workflows::agent_manage_set,
         workflows::agent_link_mode_set,
         workflows::agents_rescan,
         workflows::agent_path_set,
         workflows::agent_path_choose,
+        agent_connect::agent_path_candidates,
+        agent_connect::agent_path_validate,
+        agent_connect::custom_agent_preview,
+        agent_connect::custom_agent_create,
         workflows::presets_list,
         workflows::preset_create,
         workflows::preset_rename,
@@ -364,7 +381,10 @@ pub fn run() -> tauri::Result<()> {
         workflows::preset_member_candidates,
         preset_apply::preset_apply,
         preset_apply::preset_unapply,
-        migrate::migrate_plan
+        migrate::migrate_plan,
+        migrate::migrate_apply,
+        migrate::migrate_apply_result,
+        migrate::operation_undo_check
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -405,6 +425,7 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::skill_detail_load,
         skill_agent::skill_agent_preview,
         skill_agent::skill_agent_apply,
+        skills_list::skills_list,
         skill_detail::skill_auto_update_set,
         skill_detail::skill_update_ignore,
         source_updates::skill_source_check,
@@ -416,6 +437,8 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::reveal_item,
         skill_detail::skill_edit_preview,
         skill_detail::skill_edit_apply,
+        skill_detail::skill_keep_copy_preview,
+        skill_detail::skill_keep_copy_apply,
         window_state::window_state_load,
         window_state::window_state_save,
         window_state::window_state_reset,
@@ -440,6 +463,8 @@ pub fn run() -> tauri::Result<()> {
         mcp_servers::mcp_server_disable,
         mcp_servers::mcp_server_delete,
         mcp_servers::mcp_server_test,
+        mcp_servers::mcp_server_enable,
+        mcp_servers::mcp_server_detail,
         bulk_skill::bulk_skill_apply,
         commands::mcp_test_connection,
         secrets::secrets_list,
@@ -460,15 +485,23 @@ pub fn run() -> tauri::Result<()> {
         skill_wizard::skill_marketplace_search,
         skill_wizard::skill_import_git_candidates,
         skill_wizard::skill_add_apply,
+        skill_delete::skill_delete_preview,
+        skill_delete::skill_delete_apply,
         workflows::instructions_list,
         workflows::instruction_save,
-        workflows::instruction_create_project,
+        rule_create::instruction_create_options,
+        rule_create::instruction_create_preview,
+        rule_create::instruction_create,
         workflows::agents_list,
         workflows::agent_manage_set,
         workflows::agent_link_mode_set,
         workflows::agents_rescan,
         workflows::agent_path_set,
         workflows::agent_path_choose,
+        agent_connect::agent_path_candidates,
+        agent_connect::agent_path_validate,
+        agent_connect::custom_agent_preview,
+        agent_connect::custom_agent_create,
         workflows::presets_list,
         workflows::preset_create,
         workflows::preset_rename,
@@ -477,7 +510,10 @@ pub fn run() -> tauri::Result<()> {
         workflows::preset_member_candidates,
         preset_apply::preset_apply,
         preset_apply::preset_unapply,
-        migrate::migrate_plan
+        migrate::migrate_plan,
+        migrate::migrate_apply,
+        migrate::migrate_apply_result,
+        migrate::operation_undo_check
     ]);
 
     let exit_paths = paths.clone();

@@ -42,6 +42,22 @@ describe("SkillDetailScreen", () => {
     screen.getByRole("button", { name: "Compare copies" }).click();
     await waitFor(() => expect(ipc.calls.some((call) => call.command === "skill_compare_copies")).toBe(true));
     expect(await screen.findByText(/compared with winning project/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Keep project" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Keep user" })).toBeTruthy();
+  });
+
+  test("identical copy comparison shows No differences and disables Keep actions", async () => {
+    ipc.reply = (command) => Promise.resolve(command === "skill_detail_load" ? detail : {
+      winner: { scope: "project", markdown: "# Match", hash: "abc123", deployments: ["codex"] },
+      shadow: { scope: "user", markdown: "# Match", hash: "abc123", deployments: [] },
+      identical: true, diff: "",
+    });
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+    await screen.findAllByText("Review checklist");
+    screen.getByRole("button", { name: "Compare copies" }).click();
+    expect(await screen.findByText(/No differences — both copies are identical/)).toBeTruthy();
+    const keepBtn = screen.getByRole("button", { name: "Keep project" }) as HTMLButtonElement;
+    expect(keepBtn.disabled).toBe(true);
   });
 
   test("checks a source, shows the update badge and applies only a reviewed preview", async () => {

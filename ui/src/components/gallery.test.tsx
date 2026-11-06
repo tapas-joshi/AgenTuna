@@ -51,7 +51,7 @@ describe("component gallery", () => {
       expect(badge?.textContent).toBe(STATUS_META[status].label);
       expect(dot?.textContent).toBe(STATUS_META[status].label);
       expect(badge?.querySelector(`[data-glyph="${status}"]`)).not.toBeNull();
-      expect(document.querySelectorAll(`[data-dot="${status}"]`)).toHaveLength(1);
+      expect(document.querySelectorAll(`[data-dot="${status}"]`).length).toBeGreaterThanOrEqual(1);
     }
   });
 

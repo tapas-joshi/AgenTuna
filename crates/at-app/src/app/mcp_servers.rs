@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::{LazyLock, Mutex};
 
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
-use at_model::{AgentId, ChangeSet, ItemId, ItemKind, ItemState, Scope};
+use at_model::{AgentId, ChangeSet, EnvValue, ItemId, ItemKind, ItemState, McpTransport, Scope};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use ts_rs::TS;
@@ -157,6 +157,121 @@ pub struct McpActionApplyView {
     /// Number of file operations applied.
     pub files_changed: usize,
 }
+/// One environment variable row of an MCP server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpDetailEnvRowView {
+    /// Variable name.
+    pub key: String,
+    /// Redacted or placeholder value text.
+    pub value: String,
+    /// Whether this row is a secret reference.
+    pub is_secret: bool,
+    /// Keychain account name when this row references a secret.
+    pub keychain_account: Option<String>,
+}
+
+/// One health check history slot (out of 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpHealthCheckSlotView {
+    /// Timestamp of the check.
+    pub checked_at: String,
+    /// Status: `ok`, `failed`, `unknown`.
+    pub status: String,
+    /// Latency in milliseconds.
+    pub latency_ms: Option<u64>,
+    /// Trigger: `manual`, `scheduled`, `startup`.
+    pub trigger: String,
+    /// Redacted error text if failed.
+    pub error_text: Option<String>,
+}
+
+/// One agent's deployment and presence for the detail screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpDetailAgentView {
+    /// Stable agent id (`claude_code`, `codex`, `omp`, `cursor`).
+    pub id: String,
+    /// Display name.
+    pub label: String,
+    /// Presence: `installed`, `configured_only`, `not_installed`.
+    pub presence: String,
+    /// Reason if not installed or unavailable.
+    pub reason: Option<String>,
+    /// Whether currently enabled for this agent.
+    pub enabled: bool,
+    /// Deployment state wire name (`linked`, `off`, `native`, etc.).
+    pub state: String,
+    /// Target path in the agent's folder.
+    pub config_path: Option<String>,
+}
+
+/// Detailed projection for the MCP Server detail screen (TM-021).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpServerDetailView {
+    /// Canonical item id.
+    pub item_id: String,
+    /// Display name.
+    pub name: String,
+    /// Scope wire name.
+    pub scope: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Transport wire name: `stdio`, `http`.
+    pub transport: String,
+    /// Executable command for stdio.
+    pub command: Option<String>,
+    /// Arguments for stdio.
+    pub args: Vec<String>,
+    /// Working directory for stdio.
+    pub cwd: Option<String>,
+    /// Endpoint URL for http.
+    pub url: Option<String>,
+    /// Environment variables or HTTP headers.
+    pub env: Vec<McpDetailEnvRowView>,
+    /// List of file paths defining or projecting this server.
+    pub defined_in: Vec<String>,
+    /// Known tool names.
+    pub tools: Vec<String>,
+    /// Current health status: `ok`, `failed`, `unknown`, `not_tested`.
+    pub health_status: String,
+    /// Redacted error code if currently failing.
+    pub health_error_code: Option<String>,
+    /// Redacted error text if currently failing.
+    pub health_error_text: Option<String>,
+    /// Up to 5 newest health checks, oldest last.
+    pub last_checks: Vec<McpHealthCheckSlotView>,
+    /// Cadence text (e.g. `every 5 min`).
+    pub cadence_text: String,
+    /// Whether the server is OAuth-configured.
+    pub is_oauth: bool,
+    /// Whether OAuth token is missing.
+    pub needs_auth: bool,
+    /// Whether this server is locked at Global scope.
+    pub locked: bool,
+    /// Scope that owns the lock.
+    pub locked_by: Option<String>,
+    /// Lock reason.
+    pub lock_reason: Option<String>,
+    /// Per-agent toggle list.
+    pub agents: Vec<McpDetailAgentView>,
+    /// One-sentence explanation of why this server is loaded.
+    pub why_summary: String,
+}
+
+/// Request for MCP server details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpServerDetailRequest {
+    /// Canonical item id.
+    pub item_id: String,
+    /// Scope of the definition.
+    pub scope: String,
+    /// Registered project identity for project and local scopes.
+    pub project_id: Option<String>,
+}
 
 #[derive(Clone)]
 struct CachedAction {
@@ -171,6 +286,7 @@ struct CachedAction {
     in_repo: bool,
     item_id: ItemId,
     agents: Vec<AgentId>,
+    enabled: bool,
 }
 
 static ACTION_CACHE: LazyLock<Mutex<HashMap<String, CachedAction>>> =
@@ -182,19 +298,26 @@ pub fn mcp_server_list(
     state: State<'_, AppState>,
     request: McpServerListRequest,
 ) -> Result<McpServerListView, CommandError> {
-    let scope = Scope::from_str(&request.scope)
-        .map_err(|_| CommandError::invalid_argument("scope", "expected a supported scope"))?;
+    let scope_filter =
+        match request.scope.as_str() {
+            "" | "all" => None,
+            other => Some(Scope::from_str(other).map_err(|_| {
+                CommandError::invalid_argument("scope", "expected a supported scope")
+            })?),
+        };
     let database = state.database().map_err(CommandError::unavailable)?;
     let project = project_of(&database, request.project_id.as_deref())?;
     let paths = resolve_process_paths(project.as_ref().map(|project| Path::new(&project.path)))
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let rows = at_db::mcp_index::mcp_list_rows(
         database.connection(),
-        Some(scope),
+        scope_filter,
         request.project_id.as_deref(),
     )
     .map_err(|error| CommandError::internal(format!("cannot read MCP servers: {error}")))?;
-    let transports = transport_lookup(&paths, scope, project.as_ref().map(|p| Path::new(&p.path)));
+    let transports = scope_filter
+        .map(|s| transport_lookup(&paths, s, project.as_ref().map(|p| Path::new(&p.path))))
+        .unwrap_or_default();
     let mut servers = Vec::with_capacity(rows.len());
     for row in rows {
         let lock = row
@@ -211,7 +334,11 @@ pub fn mcp_server_list(
             slug: item.as_ref().map(|entry| entry.0.clone()),
             name: row.display_name.clone(),
             scope: row.scope.wire_name().to_owned(),
-            transport: item.map_or_else(|| String::from("unknown"), |entry| entry.1),
+            transport: row
+                .transport_subtitle
+                .clone()
+                .or_else(|| item.map(|entry| entry.1))
+                .unwrap_or_else(|| String::from("unknown")),
             native: row.native_only,
             locked: row.locked_by.is_some(),
             lock_scope: lock.as_ref().map(|lock| lock.scope.wire_name().to_owned()),
@@ -260,6 +387,257 @@ pub fn mcp_server_disable(
     request: McpServerActionRequest,
 ) -> Result<McpServerActionOutcome, CommandError> {
     run_action(&state, request, ActionKind::Disable)
+}
+
+/// Plans or applies enabling an MCP server for one agent.
+#[tauri::command]
+pub fn mcp_server_enable(
+    state: State<'_, AppState>,
+    request: McpServerActionRequest,
+) -> Result<McpServerActionOutcome, CommandError> {
+    run_action(&state, request, ActionKind::Enable)
+}
+
+/// Returns full details of one canonical MCP server definition.
+///
+/// # Errors
+/// Returns a typed [`CommandError`] with [`CommandErrorCode::NotFound`] if the server was
+/// deleted externally or cannot be read.
+#[tauri::command]
+pub fn mcp_server_detail(
+    state: State<'_, AppState>,
+    request: McpServerDetailRequest,
+) -> Result<McpServerDetailView, CommandError> {
+    let scope = Scope::from_str(&request.scope)
+        .map_err(|_| CommandError::invalid_argument("scope", "expected a supported scope"))?;
+    let item_id = ItemId::from_str(&request.item_id)
+        .map_err(|_| CommandError::invalid_argument("item_id", "expected a canonical item id"))?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let project = project_of(&database, request.project_id.as_deref())?;
+    let paths = resolve_process_paths(project.as_ref().map(|p| Path::new(&p.path)))
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let scoped = match project.as_ref() {
+        Some(project) if matches!(scope, Scope::Project | Scope::Local) => {
+            paths.for_project(Path::new(&project.path))
+        }
+        _ => Ok(paths.clone()),
+    }
+    .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let layout = at_store::layout::StoreLayout::for_scope(&scoped, scope)
+        .map_err(|_| CommandError::invalid_argument("scope", "canonical store is unavailable"))?;
+    let manifest = at_store::manifest::StoreManifest::load(&layout).map_err(|_| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "server is missing or was deleted externally",
+        )
+    })?;
+    let item = manifest.manifest.item(item_id).ok_or_else(|| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "server is missing or was deleted externally",
+        )
+    })?;
+    let loaded = at_store::mcp_store::McpStore::load(&layout).map_err(|_| {
+        CommandError::new(CommandErrorCode::NotFound, "server definition is missing")
+    })?;
+    let definition = loaded.store.get(item.slug.as_str()).ok_or_else(|| {
+        CommandError::new(CommandErrorCode::NotFound, "server definition is missing")
+    })?;
+
+    let mut defined_in = vec![layout.mcp_file().display().to_string()];
+    let deployments =
+        at_db::deployments::list_deployments_for_item(database.connection(), &item_id)
+            .unwrap_or_default();
+    for d in &deployments {
+        if let Some(target) = &d.target_path {
+            defined_in.push(target.clone());
+        }
+    }
+    defined_in.sort();
+    defined_in.dedup();
+
+    let transport;
+    let mut command = None;
+    let mut args = Vec::new();
+    let mut cwd = None;
+    let mut url = None;
+    let mut env = Vec::new();
+    let mut is_oauth = false;
+
+    match &definition.transport {
+        McpTransport::Stdio {
+            command: cmd,
+            args: a,
+            cwd: c,
+            env: e,
+        } => {
+            transport = "stdio".to_owned();
+            command = Some(cmd.clone());
+            args = a.clone();
+            cwd = c.as_ref().map(|p| p.display().to_string());
+            for (key, val) in e {
+                match val {
+                    EnvValue::Literal(lit) => {
+                        env.push(McpDetailEnvRowView {
+                            key: key.clone(),
+                            value: lit.clone(),
+                            is_secret: false,
+                            keychain_account: None,
+                        });
+                    }
+                    EnvValue::Secret(sec) => {
+                        env.push(McpDetailEnvRowView {
+                            key: key.clone(),
+                            value: format!("${{{}}}", sec.env_name),
+                            is_secret: true,
+                            keychain_account: Some(sec.keychain_account.clone()),
+                        });
+                    }
+                }
+            }
+        }
+        McpTransport::Http {
+            url: u,
+            headers: h,
+            oauth: o,
+        } => {
+            transport = "http".to_owned();
+            url = Some(u.to_string());
+            for (key, val) in h {
+                match val {
+                    EnvValue::Literal(lit) => {
+                        env.push(McpDetailEnvRowView {
+                            key: key.clone(),
+                            value: lit.clone(),
+                            is_secret: false,
+                            keychain_account: None,
+                        });
+                    }
+                    EnvValue::Secret(sec) => {
+                        env.push(McpDetailEnvRowView {
+                            key: key.clone(),
+                            value: format!("${{{}}}", sec.env_name),
+                            is_secret: true,
+                            keychain_account: Some(sec.keychain_account.clone()),
+                        });
+                    }
+                }
+            }
+            if let Some(profile) = o {
+                is_oauth = true;
+                env.push(McpDetailEnvRowView {
+                    key: "Authorization (OAuth)".to_owned(),
+                    value: "${OAUTH_TOKEN}".to_owned(),
+                    is_secret: true,
+                    keychain_account: Some(profile.token_ref.clone()),
+                });
+            }
+        }
+    }
+
+    let checks =
+        at_db::health::last_n(database.connection(), &item_id.to_string(), 5).unwrap_or_default();
+    let health_status = checks
+        .first()
+        .map(|c| c.status.as_str().to_owned())
+        .unwrap_or_else(|| "not_tested".to_owned());
+    let health_error_code = checks.first().and_then(|c| c.error_code.clone());
+    let health_error_text = checks.first().and_then(|c| c.error_text_redacted.clone());
+
+    let mut last_checks = Vec::new();
+    for c in checks.iter().rev() {
+        last_checks.push(McpHealthCheckSlotView {
+            checked_at: format!("{}", c.checked_at),
+            status: c.status.as_str().to_owned(),
+            latency_ms: c.latency_ms.map(|l| l.max(0) as u64),
+            trigger: format!("{:?}", c.trigger).to_lowercase(),
+            error_text: c.error_text_redacted.clone(),
+        });
+    }
+
+    let is_auth_error = health_error_code.as_deref().is_some_and(|code| {
+        let lower = code.to_lowercase();
+        lower.contains("auth")
+            || lower.contains("401")
+            || lower.contains("token")
+            || lower.contains("forbidden")
+    });
+    let needs_auth = is_auth_error || is_oauth;
+
+    let lock = at_db::locks::locks_for_item(database.connection(), &item_id)
+        .unwrap_or_default()
+        .into_iter()
+        .next();
+    let locked = lock.is_some();
+    let locked_by = lock.as_ref().map(|l| l.scope.wire_name().to_owned());
+    let lock_reason = lock.as_ref().and_then(|l| l.reason.clone());
+
+    let all_agents = at_db::agents::list_agents_on_mac(database.connection()).unwrap_or_default();
+    let mut agents = Vec::new();
+    let mut enabled_count = 0;
+    for a in all_agents {
+        let presence = match a.presence {
+            at_db::agents::AgentPresence::Installed => "installed",
+            at_db::agents::AgentPresence::ConfiguredOnly => "configured_only",
+            _ => "not_installed",
+        };
+        let reason = if presence == "not_installed" {
+            Some("Agent is not installed on this machine".to_owned())
+        } else {
+            None
+        };
+        let cell = deployments
+            .iter()
+            .find(|d| d.agent_id == a.id && d.scope == scope);
+        let state = cell.map_or("none", |c| c.state.wire_name());
+        let enabled = state == "linked" || state == "native";
+        if enabled {
+            enabled_count += 1;
+        }
+        agents.push(McpDetailAgentView {
+            id: a.id.to_string(),
+            label: a.display_name.unwrap_or_else(|| a.id.to_string()),
+            presence: presence.to_owned(),
+            reason,
+            enabled,
+            state: state.to_owned(),
+            config_path: cell.and_then(|c| c.target_path.clone()),
+        });
+    }
+
+    let why_summary = format!(
+        "{} is defined in {} scope and active for {} agent(s).",
+        definition.display_name,
+        scope.wire_name(),
+        enabled_count
+    );
+
+    Ok(McpServerDetailView {
+        item_id: item_id.to_string(),
+        name: definition.display_name.clone(),
+        scope: scope.wire_name().to_owned(),
+        description: definition.description.clone(),
+        transport,
+        command,
+        args,
+        cwd,
+        url,
+        env,
+        defined_in,
+        tools: Vec::new(),
+        health_status,
+        health_error_code,
+        health_error_text,
+        last_checks,
+        cadence_text: "every 5 min".to_owned(),
+        is_oauth,
+        needs_auth,
+        locked,
+        locked_by,
+        lock_reason,
+        agents,
+        why_summary,
+    })
 }
 
 /// Plans or applies deleting a managed MCP server and its native projections.
@@ -370,6 +748,7 @@ pub enum McpServerActionOutcome {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActionKind {
     Disable,
+    Enable,
     Delete,
 }
 
@@ -455,6 +834,17 @@ fn run_action(
                 enabled: false,
             }
         }
+        ActionKind::Enable => {
+            let agent = request.agent.as_deref().ok_or_else(|| {
+                CommandError::invalid_argument("agent", "choose the agent to enable")
+            })?;
+            let agent = AgentId::from_str(agent)
+                .map_err(|_| CommandError::invalid_argument("agent", "unknown agent identity"))?;
+            at_engine::mcp_plan::McpItemAction::SetEnabled {
+                agent,
+                enabled: true,
+            }
+        }
     };
     let planned = at_engine::mcp_plan::plan_item(at_engine::mcp_plan::McpItemPlanRequest {
         paths: &paths,
@@ -537,6 +927,7 @@ fn run_action(
         in_repo: request.in_repo && kind == ActionKind::Disable,
         item_id,
         agents,
+        enabled: kind == ActionKind::Enable,
     };
     ACTION_CACHE
         .lock()
@@ -596,7 +987,12 @@ fn apply_cached(
         state.record_writes(set, &cached.store_root);
     }
     if !cached.in_repo {
-        let state_value = ItemState::Off;
+        let state_value = if cached.enabled {
+            ItemState::Linked
+        } else {
+            ItemState::Off
+        };
+        let mode = if cached.enabled { "symlink" } else { "none" };
         for agent in &cached.agents {
             let spec = at_db::deployments::DeploymentSpec::new(
                 &cached.item_id,
@@ -604,7 +1000,7 @@ fn apply_cached(
                 cached.scope,
                 state_value,
             )
-            .with_mode("none")
+            .with_mode(mode)
             .with_operation(&outcome.operation_id);
             at_db::deployments::upsert_deployment(database.connection(), &spec).map_err(
                 |error| CommandError::internal(format!("cannot record the deployment: {error}")),
@@ -619,7 +1015,7 @@ fn apply_cached(
     })
 }
 
-fn project_of(
+pub(crate) fn project_of(
     database: &at_db::Database,
     project_id: Option<&str>,
 ) -> Result<Option<at_db::projects::ProjectSummary>, CommandError> {

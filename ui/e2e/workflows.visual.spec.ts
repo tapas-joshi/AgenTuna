@@ -33,6 +33,7 @@ test("Agents exposes persisted manage and deployment settings", async ({ page })
 test("Presets lists database ratios and edits member state", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Skills", exact: true }).click();
+  await page.getByRole("tab", { name: "Presets" }).click();
   await expect(page.getByRole("heading", { name: "Presets", level: 1 })).toBeVisible();
   await expect(page.getByLabel("Preset list").getByText("Code review", { exact: true })).toBeVisible();
   await expect(page).toHaveScreenshot("presets-populated.png", { animations: "disabled", caret: "hide" });

@@ -199,6 +199,10 @@ pub struct AgentCardView {
 /// Loads agents and their configuration paths from the database.
 #[tauri::command]
 pub fn agents_list(state: State<'_, AppState>) -> Result<Vec<AgentCardView>, CommandError> {
+    agents_list_impl(&state)
+}
+
+pub(crate) fn agents_list_impl(state: &AppState) -> Result<Vec<AgentCardView>, CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
     let records = at_db::agents::list_agents_on_mac(database.connection())
         .map_err(|_| CommandError::internal("could not load agents"))?;
@@ -308,6 +312,9 @@ fn format_summary(formats: &[at_db::agents::AgentPathFormat]) -> String {
         })
         .collect::<Vec<_>>();
     if labels.is_empty() {
+        if formats.contains(&at_db::agents::AgentPathFormat::Dir) {
+            return String::from("MCP not supported");
+        }
         return String::from("—");
     }
     let has_skills = formats.contains(&at_db::agents::AgentPathFormat::Dir);
@@ -902,66 +909,6 @@ fn conflict_view(
         buffer_content: buffer.to_owned(),
     })
 }
-/// Creates a new native AGENTS.md using the adapter-resolved create-only intent.
-#[tauri::command]
-pub fn instruction_create_project(
-    state: State<'_, AppState>,
-    project_id: String,
-) -> Result<String, CommandError> {
-    let project = project_path(&state, Some(&project_id))?
-        .ok_or_else(|| CommandError::invalid_argument("project_id", "select a project first"))?;
-    let paths = state
-        .paths()
-        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
-    let env = at_adapters::adapter::AgentEnvironment {
-        home: paths.home_dir().unwrap_or(Path::new("/")).to_path_buf(),
-        project: Some(project),
-        variables: Default::default(),
-    };
-    let registry = at_adapters::adapter::AgentAdapterRegistry::register();
-    let intent = at_engine::rule_editor::new_rule(
-        at_engine::rule_editor::RuleFileType::Agents,
-        at_model::Scope::Project,
-        &at_model::AgentId::Codex,
-        &registry,
-        &env,
-        false,
-    )
-    .map_err(|_| {
-        CommandError::invalid_argument(
-            "project_id",
-            "AGENTS.md already exists or its target is unavailable",
-        )
-    })?;
-    let item_id = at_model::ItemId::new();
-    let database = state.database().map_err(CommandError::unavailable)?;
-    let support = paths.support_dir();
-    let backup = paths.backup_dir();
-    let roots = at_fs::changeset::ApplyRoots::new(vec![
-        intent.path.parent().unwrap_or(Path::new("/")).to_path_buf(),
-        support.to_path_buf(),
-    ])
-    .map_err(|_| CommandError::unavailable("authorized instruction paths are unavailable"))?;
-    let mut recorder = at_fs::changeset::DbOperationRecorder::new(database.connection(), 30);
-    let mut context = at_fs::changeset::ApplyContext {
-        store_root: support,
-        backup_folder: backup,
-        recorder: &mut recorder,
-    };
-    let (source, _) = at_engine::rule_editor::apply_new_rule(
-        &intent,
-        &item_id,
-        database.connection(),
-        &mut context,
-        &roots,
-        &state.recent_writes(),
-    )
-    .map_err(|_| {
-        CommandError::invalid_argument("project_id", "could not create the instruction file")
-    })?;
-    Ok(source.path.display().to_string())
-}
-
 /// One indexed item offered for preset membership.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]

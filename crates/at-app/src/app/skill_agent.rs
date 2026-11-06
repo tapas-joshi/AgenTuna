@@ -160,6 +160,46 @@ pub fn skill_agent_preview(
     request: SkillAgentPreviewRequest,
 ) -> Result<SkillAgentPreviewView, CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
+    let project_root = preview_project_root(database.connection(), &request)?;
+    let paths = resolve_process_paths(project_root.as_deref())
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    skill_agent_preview_impl(database.connection(), &paths, request)
+}
+
+/// Resolves the registered project for a preview request, if the scope needs one.
+fn preview_project_root(
+    connection: &rusqlite::Connection,
+    request: &SkillAgentPreviewRequest,
+) -> Result<Option<PathBuf>, CommandError> {
+    match request.project_id.as_deref() {
+        Some(project_id) => Ok(Some(PathBuf::from(
+            at_db::projects::find_project_by_id(connection, project_id)
+                .map_err(|_| CommandError::internal("could not read the selected project"))?
+                .ok_or_else(|| {
+                    CommandError::invalid_argument("project_id", "project is not registered")
+                })?
+                .path,
+        ))),
+        None if matches!(
+            Scope::from_str(&request.scope).unwrap_or(Scope::User),
+            Scope::Project | Scope::Local
+        ) =>
+        {
+            Err(CommandError::invalid_argument(
+                "project_id",
+                "this scope requires a registered project",
+            ))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Preview implementation over injected database and paths so tests never touch the real HOME.
+pub(crate) fn skill_agent_preview_impl(
+    database: &rusqlite::Connection,
+    paths: &at_store::paths::AppPaths,
+    request: SkillAgentPreviewRequest,
+) -> Result<SkillAgentPreviewView, CommandError> {
     let item_id = request
         .item_id
         .parse::<ItemId>()
@@ -168,33 +208,15 @@ pub fn skill_agent_preview(
         .map_err(|_| CommandError::invalid_argument("scope", "unsupported scope"))?;
     let agent = AgentId::from_str(&request.agent_id)
         .map_err(|_| CommandError::invalid_argument("agent_id", "unknown agent"))?;
-    let item = at_db::shared::items_by_ids(database.connection(), std::slice::from_ref(&item_id))
+    let item = at_db::shared::items_by_ids(database, std::slice::from_ref(&item_id))
         .map_err(|_| CommandError::internal("could not read the skill index"))?
         .into_iter()
         .find(|item| item.kind == ItemKind::Skill && item.scope == scope)
         .ok_or_else(|| {
             CommandError::invalid_argument("item_id", "skill is unavailable in this scope")
         })?;
-    let project = match request.project_id.as_deref() {
-        Some(project_id) => Some(
-            at_db::projects::find_project_by_id(database.connection(), project_id)
-                .map_err(|_| CommandError::internal("could not read the selected project"))?
-                .ok_or_else(|| {
-                    CommandError::invalid_argument("project_id", "project is not registered")
-                })?,
-        ),
-        None if matches!(scope, Scope::Project | Scope::Local) => {
-            return Err(CommandError::invalid_argument(
-                "project_id",
-                "this scope requires a registered project",
-            ));
-        }
-        None => None,
-    };
-    let project_root = project.as_ref().map(|project| PathBuf::from(&project.path));
-    let paths = resolve_process_paths(project_root.as_deref())
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
-    let layout = StoreLayout::for_scope(&paths, scope)
+    let project_root = preview_project_root(database, &request)?;
+    let layout = StoreLayout::for_scope(paths, scope)
         .map_err(|_| CommandError::unavailable("the skill store is unavailable"))?;
     let slug = Slug::parse(&item.slug).map_err(|_| {
         CommandError::invalid_argument("item_id", "the skill has an invalid stored slug")
@@ -242,17 +264,17 @@ pub fn skill_agent_preview(
             CommandError::invalid_argument("scope", "agent has no skill directory for this scope")
         })?;
     let target = candidate.path.join(slug.as_str());
-    let agents = at_db::agents::list_agents_on_mac(database.connection())
+    let agents = at_db::agents::list_agents_on_mac(database)
         .map_err(|_| CommandError::internal("could not read agent installations"))?;
     let agent_row = agents
         .iter()
         .find(|row| row.id == agent)
         .ok_or_else(|| CommandError::invalid_argument("agent_id", "agent is not installed"))?;
     let installed = agent_row.presence == AgentPresence::Installed;
-    let managed = at_db::agents::is_agent_managed(database.connection(), &agent)
+    let managed = at_db::agents::is_agent_managed(database, &agent)
         .map_err(|_| CommandError::internal("could not read agent management settings"))?;
     let deployment = at_db::deployments::find_deployment(
-        database.connection(),
+        database,
         &item_id,
         &agent,
         scope,
@@ -266,10 +288,10 @@ pub fn skill_agent_preview(
         cell.state == ItemState::Linked
             && cell.target_path.as_deref() == Some(target.to_string_lossy().as_ref())
     });
-    let lock_reason = at_db::locks::find_lock(database.connection(), &item_id, Scope::Global)
+    let lock_reason = at_db::locks::find_lock(database, &item_id, Scope::Global)
         .map_err(|_| CommandError::internal("could not read skill locks"))?
         .and_then(|lock| lock.reason);
-    let settings = at_db::settings::load(database.connection())
+    let settings = at_db::settings::load(database)
         .map_err(|_| CommandError::internal("could not read deployment settings"))?;
     let mode = settings.link_mode(&agent);
     let supports_symlink = adapter.capabilities(&env).supports_symlink;
@@ -351,7 +373,22 @@ pub fn skill_agent_preview(
         already_enabled,
         disable_change_set,
     })
-    .map_err(|error| CommandError::new(CommandErrorCode::Conflict, error.to_string()))?;
+    .map_err(|error| match error {
+        at_engine::skill_agent::SkillAgentPlanError::NativeConflict { path } => CommandError {
+            code: CommandErrorCode::RefusedOverwrite,
+            message: format!(
+                "{} holds an unmanaged skill folder; adopt it or move it aside first.",
+                path.display()
+            ),
+            refusal: Some(Box::new(super::commands::RefusedOverwriteView {
+                path: path.display().to_string(),
+                kind: "directory".to_owned(),
+                existing_hash: None,
+                remedies: vec!["adopt".to_owned(), "move_aside".to_owned()],
+            })),
+        },
+        other => CommandError::new(CommandErrorCode::Conflict, other.to_string()),
+    })?;
     let preview_id = planned
         .change_set
         .as_ref()
@@ -430,10 +467,18 @@ pub fn skill_agent_apply(
     state: State<'_, AppState>,
     preview_id: String,
 ) -> Result<SkillAgentApplyView, CommandError> {
+    skill_agent_apply_impl(&state, &preview_id)
+}
+
+/// Apply implementation over the injected app state so tests use sandbox paths and database.
+pub(crate) fn skill_agent_apply_impl(
+    state: &AppState,
+    preview_id: &str,
+) -> Result<SkillAgentApplyView, CommandError> {
     let cached = plans()
         .lock()
         .map_err(|_| CommandError::internal("skill preview cache is unavailable"))?
-        .remove(&preview_id)
+        .remove(preview_id)
         .ok_or_else(|| {
             CommandError::invalid_argument(
                 "preview_id",
@@ -542,4 +587,340 @@ pub fn skill_agent_apply(
         enabled: cached.enabled,
         changed: true,
     })
+}
+
+#[cfg(test)]
+mod command_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
+    use at_db::{Database, agents, backups, deployments, locks, ops::OperationActor, settings};
+    use at_model::{Agent, AgentId, ItemState, LinkMode, Scope, SyncLabel};
+    use at_store::layout::{Slug, StoreLayout};
+    use at_store::paths::{AppPaths, PathEnvironment};
+
+    use super::*;
+    use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
+    use crate::app::state::AppState;
+
+    struct NullSink;
+
+    impl EventSink for NullSink {
+        fn emit(&self, _event: JobEvent) {}
+    }
+
+    /// One sandboxed home, injected paths, file-backed database and store package.
+    struct Sandbox {
+        _home: at_fs::testkit::TestHome,
+        paths: AppPaths,
+        database_path: PathBuf,
+        database: Database,
+        item_id: ItemId,
+        slug: Slug,
+    }
+
+    impl Sandbox {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let home = at_fs::testkit::TestHome::new()?;
+            let paths = AppPaths::resolve(
+                &PathEnvironment::default().with_home(home.home().to_path_buf()),
+            )?;
+            let database_path = home.home().join("agentuna").join("index.db");
+            if let Some(parent) = database_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let database = Database::open_file(&database_path)?;
+            {
+                let connection = database.connection();
+                agents::upsert_agent(
+                    connection,
+                    &Agent {
+                        id: AgentId::ClaudeCode,
+                        display_name: "Claude Code".to_owned(),
+                        detected: true,
+                        version: Some("1.0".to_owned()),
+                    },
+                )?;
+                agents::set_agent_managed(connection, &AgentId::ClaudeCode, true)?;
+                let layout = StoreLayout::for_scope(&paths, Scope::User)?;
+                let slug = Slug::parse("demo-skill")?;
+                let source = layout.skill_dir(&slug);
+                std::fs::create_dir_all(&source)?;
+                std::fs::write(
+                    source.join("SKILL.md"),
+                    "---\nname: demo-skill\ndescription: demo\n---\n\nBody.\n",
+                )?;
+                let item_id = ItemId::new();
+                let hash = at_store::manifest::hash_skill_folder(&source)?.to_string();
+                connection.execute(
+                    "INSERT INTO items (id, kind, scope, slug, name, source_path, content_hash, \
+                     state, managed) VALUES (?1, 'skill', 'user', ?2, 'demo-skill', ?3, ?4, \
+                     'present', 1)",
+                    rusqlite::params![
+                        item_id.to_string(),
+                        slug.as_str(),
+                        source.to_string_lossy(),
+                        hash
+                    ],
+                )?;
+                Ok(Self {
+                    _home: home,
+                    paths,
+                    database_path,
+                    database,
+                    item_id,
+                    slug,
+                })
+            }
+        }
+
+        fn request(&self, enabled: bool) -> SkillAgentPreviewRequest {
+            SkillAgentPreviewRequest {
+                item_id: self.item_id.to_string(),
+                scope: "user".to_owned(),
+                agent_id: "claude_code".to_owned(),
+                enabled,
+                project_id: None,
+            }
+        }
+
+        fn agent_skills_dir(&self) -> PathBuf {
+            let registry = AgentAdapterRegistry::register();
+            let adapter = registry
+                .get(&AgentId::ClaudeCode)
+                .expect("registry")
+                .expect("claude adapter");
+            let env = AgentEnvironment {
+                home: self.paths.home_dir().expect("home").to_path_buf(),
+                project: None,
+                variables: Default::default(),
+            };
+            adapter
+                .paths(ItemKind::Skill, Scope::User, &env)
+                .into_iter()
+                .find(|candidate| candidate.primary)
+                .expect("claude user skills dir")
+                .path
+        }
+
+        /// A second database handle over the same file, as the app shell holds.
+        fn state(&self) -> AppState {
+            let database = Database::open_file(&self.database_path).expect("second handle");
+            AppState::new(
+                Arc::new(JobBridge::new(
+                    Arc::new(NullSink),
+                    Arc::new(TracingOperationsLog),
+                )),
+                None,
+            )
+            .with_database(database)
+            .with_paths(self.paths.clone())
+        }
+
+        fn source_dir(&self) -> PathBuf {
+            StoreLayout::for_scope(&self.paths, Scope::User)
+                .expect("layout")
+                .skill_dir(&self.slug)
+        }
+    }
+
+    #[test]
+    fn enable_then_disable_round_trips_a_user_scope_symlink() {
+        let sandbox = Sandbox::new().expect("sandbox");
+        let target = sandbox.agent_skills_dir().join(sandbox.slug.as_str());
+        let preview = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("enable preview");
+        assert!(!preview.no_op);
+        assert_eq!(preview.mode.as_deref(), Some("link"));
+        assert_eq!(preview.paths, vec![target.display().to_string()]);
+
+        let applied =
+            skill_agent_apply_impl(&sandbox.state(), &preview.preview_id).expect("enable apply");
+        assert!(applied.changed);
+        assert!(
+            target.symlink_metadata().is_ok(),
+            "enable creates a symlink"
+        );
+        let deployment = deployments::find_deployment(
+            sandbox.database.connection(),
+            &sandbox.item_id,
+            &AgentId::ClaudeCode,
+            Scope::User,
+            None,
+        )
+        .expect("deployment read")
+        .expect("recorded");
+        assert_eq!(deployment.state, ItemState::Linked);
+        assert_eq!(deployment.mode.as_deref(), Some("symlink"));
+        assert_eq!(deployment.sync_label, Some(SyncLabel::InSync));
+        let resolved_target = target
+            .parent()
+            .unwrap()
+            .join(std::fs::read_link(&target).expect("link target"))
+            .canonicalize()
+            .expect("canonical link target");
+        assert_eq!(
+            resolved_target,
+            sandbox
+                .source_dir()
+                .canonicalize()
+                .expect("canonical source"),
+        );
+
+        // Re-applying the same state must not create a second operation.
+        let repeat = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("repeat preview");
+        assert!(repeat.no_op);
+        let repeat_apply =
+            skill_agent_apply_impl(&sandbox.state(), &repeat.preview_id).expect("repeat apply");
+        assert!(!repeat_apply.changed);
+        assert!(repeat_apply.operation_id.is_none());
+
+        // Disabling removes only the deployed link, never the store package.
+        let disable = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(false),
+        )
+        .expect("disable preview");
+        assert_eq!(disable.paths, vec![target.display().to_string()]);
+        let disabled =
+            skill_agent_apply_impl(&sandbox.state(), &disable.preview_id).expect("disable apply");
+        assert!(disabled.changed);
+        assert!(
+            target.symlink_metadata().is_err(),
+            "the deployed link is gone"
+        );
+        assert!(
+            sandbox.source_dir().join("SKILL.md").exists(),
+            "the store package survives"
+        );
+        let off = deployments::find_deployment(
+            sandbox.database.connection(),
+            &sandbox.item_id,
+            &AgentId::ClaudeCode,
+            Scope::User,
+            None,
+        )
+        .expect("deployment read")
+        .expect("recorded");
+        assert_eq!(off.state, ItemState::Off);
+        let operations: i64 = sandbox
+            .database
+            .connection()
+            .query_row("SELECT COUNT(*) FROM operations", [], |row| row.get(0))
+            .expect("operations count");
+        assert_eq!(operations, 2, "enable and disable, no idempotent repeats");
+    }
+
+    #[test]
+    fn a_missing_agent_writes_nothing() {
+        let sandbox = Sandbox::new().expect("sandbox");
+        let request = SkillAgentPreviewRequest {
+            agent_id: "codex".to_owned(),
+            ..sandbox.request(true)
+        };
+        let error =
+            skill_agent_preview_impl(sandbox.database.connection(), &sandbox.paths, request)
+                .expect_err("codex is not seeded");
+        assert!(error.message.contains("not installed"), "{error:?}");
+        assert!(
+            !sandbox
+                .agent_skills_dir()
+                .join(sandbox.slug.as_str())
+                .symlink_metadata()
+                .is_ok(),
+            "nothing is written"
+        );
+    }
+
+    #[test]
+    fn a_locked_skill_is_refused_without_a_changeset() {
+        let mut sandbox = Sandbox::new().expect("sandbox");
+        locks::upsert_lock(
+            sandbox.database.connection_mut(),
+            &locks::LockSpec {
+                item_id: &sandbox.item_id,
+                scope: Scope::Global,
+                reason: Some("pinned"),
+                locked_by: Some("ui"),
+            },
+        )
+        .expect("lock");
+        let error = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect_err("locked skills cannot deploy");
+        assert!(error.message.contains("locked"), "{error:?}");
+        assert!(
+            !sandbox
+                .agent_skills_dir()
+                .join(sandbox.slug.as_str())
+                .symlink_metadata()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn copy_mode_creates_a_copy_and_disable_records_a_backup() {
+        let mut sandbox = Sandbox::new().expect("sandbox");
+        settings::set_link_mode(
+            sandbox.database.connection_mut(),
+            &AgentId::ClaudeCode,
+            LinkMode::Copy,
+            OperationActor::Ui,
+        )
+        .expect("copy mode");
+        let target = sandbox.agent_skills_dir().join(sandbox.slug.as_str());
+        let preview = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("enable preview");
+        assert_eq!(preview.mode.as_deref(), Some("copy"));
+        skill_agent_apply_impl(&sandbox.state(), &preview.preview_id).expect("apply");
+        let metadata = target.symlink_metadata().expect("copy exists");
+        assert!(!metadata.file_type().is_symlink(), "a real copied folder");
+        let copy_target = std::fs::read_to_string(target.join("SKILL.md")).expect("copy content");
+        assert!(copy_target.contains("demo-skill"));
+
+        let disable = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(false),
+        )
+        .expect("disable preview");
+        skill_agent_apply_impl(&sandbox.state(), &disable.preview_id).expect("disable apply");
+        assert!(target.symlink_metadata().is_err());
+        let backups = backups::list_backups(
+            sandbox.database.connection(),
+            backups::BackupQuery {
+                path_prefix: None,
+                from: None,
+                to: None,
+                operation_id: None,
+                limit: None,
+            },
+        )
+        .expect("backup catalogue");
+        assert!(
+            backups.iter().any(|entry| entry
+                .original_path
+                .as_deref()
+                .is_some_and(|path| path.contains("demo-skill"))),
+            "the copied deployment was backed up before removal: {backups:?}"
+        );
+    }
 }

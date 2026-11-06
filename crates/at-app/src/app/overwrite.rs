@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use super::commands::{CommandError, CommandErrorCode};
-use super::paths::resolve_process_paths;
 use super::state::AppState;
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_fs::MoveAsideOutcome;
@@ -255,7 +254,7 @@ fn adopt_store_target(
 }
 
 /// Authorized roots for the native paths an adoption may replace.
-fn adopt_authorized_roots(paths: &AppPaths) -> Result<at_fs::ApplyRoots, CommandError> {
+pub(crate) fn adopt_authorized_roots(paths: &AppPaths) -> Result<at_fs::ApplyRoots, CommandError> {
     let mut roots = Vec::new();
     if let Some(home) = paths.home_dir() {
         roots.push(home.to_path_buf());
@@ -339,14 +338,27 @@ pub fn adopt_preview(
     expected_hash: Option<String>,
     handling: Option<String>,
 ) -> Result<AdoptPreviewView, CommandError> {
-    let target = validated_absolute_path(&path)?;
-    ensure_registered_target(&state, &target)?;
+    adopt_preview_inner(&state, &path, expected_hash, handling)
+}
+
+/// Bridge-facing body of [`adopt_preview`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`adopt_preview`].
+pub fn adopt_preview_inner(
+    state: &AppState,
+    path: &str,
+    expected_hash: Option<String>,
+    handling: Option<String>,
+) -> Result<AdoptPreviewView, CommandError> {
+    let target = validated_absolute_path(path)?;
+    ensure_registered_target(state, &target)?;
     ensure_unchanged_since_refusal(&target, expected_hash.as_deref())?;
     let handling = match handling.as_deref() {
         None => AdoptHandling::Link,
         Some(value) => AdoptHandling::parse(value).map_err(adopt_error)?,
     };
-    let paths = resolve_process_paths(None)
+    let paths = super::paths::resolve_command_paths(state, None)
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let scan = adopt_scan(&paths)?;
     let item = scan
@@ -404,14 +416,27 @@ pub fn adopt_apply(
     expected_hash: Option<String>,
     handling: Option<String>,
 ) -> Result<AdoptApplyView, CommandError> {
-    let target = validated_absolute_path(&path)?;
-    ensure_registered_target(&state, &target)?;
+    adopt_apply_inner(&state, &path, expected_hash, handling)
+}
+
+/// Bridge-facing body of [`adopt_apply`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`adopt_apply`].
+pub fn adopt_apply_inner(
+    state: &AppState,
+    path: &str,
+    expected_hash: Option<String>,
+    handling: Option<String>,
+) -> Result<AdoptApplyView, CommandError> {
+    let target = validated_absolute_path(path)?;
+    ensure_registered_target(state, &target)?;
     ensure_unchanged_since_refusal(&target, expected_hash.as_deref())?;
     let handling = match handling.as_deref() {
         None => AdoptHandling::Link,
         Some(value) => AdoptHandling::parse(value).map_err(adopt_error)?,
     };
-    let paths = resolve_process_paths(None)
+    let paths = super::paths::resolve_command_paths(state, None)
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let scan = adopt_scan(&paths)?;
     let item = scan
@@ -465,18 +490,36 @@ pub struct OperationUndoView {
 
 /// Undoes one recorded operation through the shared at-migrate undo pipeline.
 ///
+/// With `force` false (the default), an operation whose files changed afterwards is refused
+/// with a typed conflict naming the changed paths; `operation_undo_check` returns the same
+/// paths as data. With `force` true, the newer edits are deliberately replaced by the
+/// recorded backups.
+///
 /// # Errors
 /// Returns a typed conflict for an expired, already-undone or externally edited operation.
 #[tauri::command]
 pub fn operation_undo(
     state: State<'_, AppState>,
     operation_id: String,
+    force: Option<bool>,
 ) -> Result<OperationUndoView, CommandError> {
-    let paths = resolve_process_paths(None)
+    operation_undo_inner(&state, &operation_id, force.unwrap_or(false))
+}
+
+/// Bridge-facing body of [`operation_undo`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`operation_undo`].
+pub fn operation_undo_inner(
+    state: &AppState,
+    operation_id: &str,
+    force: bool,
+) -> Result<OperationUndoView, CommandError> {
+    let paths = super::paths::resolve_command_paths(state, None)
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let authorized = adopt_authorized_roots(&paths)?;
     let database = state.database().map_err(CommandError::unavailable)?;
-    let detail = at_db::ops::operation_detail(database.connection(), &operation_id)
+    let detail = at_db::ops::operation_detail(database.connection(), operation_id)
         .map_err(|_| CommandError::internal("operation history is unavailable"))?
         .ok_or_else(|| {
             CommandError::new(
@@ -497,8 +540,9 @@ pub fn operation_undo(
             backup_root: paths.backup_dir(),
             authorized_roots: &authorized,
             actor: at_db::ops::OperationActor::Ui,
+            force,
         },
-        &operation_id,
+        operation_id,
     )
     .map_err(|error| {
         CommandError::new(
@@ -506,6 +550,13 @@ pub fn operation_undo(
             format!("the operation could not be undone: {error}"),
         )
     })?;
+    let changed_paths = |paths: &[std::path::PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     match outcome {
         at_migrate::undo::UndoOutcome::Restored { undo_operation_id } => Ok(OperationUndoView {
             summary: format!("Operation {operation_id} was undone."),
@@ -522,13 +573,16 @@ pub fn operation_undo(
         at_migrate::undo::UndoOutcome::Conflict { paths } => Err(CommandError::new(
             CommandErrorCode::Conflict,
             format!(
-                "{} path(s) changed after the operation; the undo was refused",
-                paths.len()
+                "The undo was refused; these paths changed after the operation:\n{}",
+                changed_paths(&paths)
             ),
         )),
         at_migrate::undo::UndoOutcome::Partial { paths } => Err(CommandError::new(
             CommandErrorCode::Conflict,
-            format!("{} path(s) cannot be restored safely", paths.len()),
+            format!(
+                "These paths cannot be restored safely:\n{}",
+                changed_paths(&paths)
+            ),
         )),
         _ => Err(CommandError::internal("the undo could not be completed")),
     }

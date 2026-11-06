@@ -8,6 +8,7 @@ import type { InstructionFileView } from "../../generated/InstructionFileView";
 import type { InstructionSaveOutcome } from "../../generated/InstructionSaveOutcome";
 import type { InstructionSaveRequest } from "../../generated/InstructionSaveRequest";
 import { Modal } from "../../overlays";
+import { NewRuleDialog } from "../../overlays/dialogs/NewRuleDialog";
 import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot, useAppState } from "../../state/context";
 
@@ -58,6 +59,7 @@ export function InstructionsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState<InstructionConflictView | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const editor = useRef<MarkdownEditorHandle | null>(null);
   const selected = useMemo(
     () => files.find((file) => file.path === selectedPath) ?? null,
@@ -189,26 +191,6 @@ export function InstructionsScreen() {
     toast.info("Reloaded the version on disk. Your buffer was replaced.");
   }
 
-  async function createProjectRule(): Promise<void> {
-    if (activeProject === null) {
-      setError("Select a project before creating AGENTS.md.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await invoke<string>("instruction_create_project", {
-        projectId: activeProject,
-      });
-      toast.success(`${fileName(created)} created`);
-      await load();
-    } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Instruction file not saved" });
-    } finally {
-      setBusy(false);
-    }
-  }
 
   // The screen registers its buffer so leaving with unsaved changes asks for a decision.
   useEffect(() => {
@@ -252,7 +234,7 @@ export function InstructionsScreen() {
             Rule files your agents read at startup. Agents read every file below in this order.
           </p>
         </div>
-        <Button variant="primary" disabled={busy} onClick={() => void createProjectRule()}>
+        <Button variant="primary" disabled={busy} onClick={() => setCreateOpen(true)}>
           <span aria-hidden="true">＋</span> New rule file
         </Button>
       </header>
@@ -274,7 +256,7 @@ export function InstructionsScreen() {
           <p className="mt-8 text-13 text-text-secondary">
             Create a rule file through the New rule action.
           </p>
-          <Button variant="primary" disabled={busy || activeProject === null} onClick={() => void createProjectRule()}>
+          <Button variant="primary" disabled={busy} onClick={() => setCreateOpen(true)}>
             New rule file
           </Button>
         </section>
@@ -452,6 +434,15 @@ export function InstructionsScreen() {
           </>
         )}
       </Modal>
+      <NewRuleDialog
+        open={createOpen}
+        project={activeProject}
+        onClose={() => setCreateOpen(false)}
+        onCreated={async (created) => {
+          await load();
+          setSelectedPath(created);
+        }}
+      />
     </main>
   );
 }

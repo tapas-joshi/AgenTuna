@@ -4,6 +4,8 @@ import type { AgentCardView } from "../../generated/AgentCardView";
 import { EnableSkillPopover } from "../../overlays/popovers";
 import type { SkillCompareView } from "../../generated/SkillCompareView";
 import type { SkillVersionCompareView } from "../../generated/SkillVersionCompareView";
+import type { SkillKeepCopyPreviewView } from "../../generated/SkillKeepCopyPreviewView";
+import type { SkillKeepCopyResultView } from "../../generated/SkillKeepCopyResultView";
 import type { SkillDetailView } from "../../generated/SkillDetailView";
 import type { SkillEditPreviewView } from "../../generated/SkillEditPreviewView";
 import type { SkillUpdatePreviewView } from "../../generated/SkillUpdatePreviewView";
@@ -49,6 +51,7 @@ function SkillDetailContent({ detail, onRefresh }: { readonly detail: SkillDetai
   const [versionError, setVersionError] = useState<string | null>(null);
   const [compareError, setCompareError] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
+  const [keeping, setKeeping] = useState(false);
   const [editPreview, setEditPreview] = useState<SkillEditPreviewView | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -129,6 +132,36 @@ function SkillDetailContent({ detail, onRefresh }: { readonly detail: SkillDetai
       app.toasts.show({ kind: "error", title: "Update refused", message: "Files changed after review or the update could not be applied. Check the source and review again." });
     } finally { setUpdateApplying(false); }
   };
+  async function handleKeep(keepScope: string, dropScope: string): Promise<void> {
+    setKeeping(true);
+    try {
+      const preview = await invoke<SkillKeepCopyPreviewView>("skill_keep_copy_preview", {
+        request: {
+          item_id: detail.item_id,
+          keep_scope: keepScope,
+          drop_scope: dropScope,
+        },
+      });
+      await invoke<SkillKeepCopyResultView>("skill_keep_copy_apply", {
+        previewId: preview.preview_id,
+      });
+      app.toasts.show({
+        kind: "success",
+        title: `Kept ${keepScope} copy`,
+        message: `Overwrote ${dropScope} copy with backup created.`,
+      });
+      setComparison(null);
+      onRefresh();
+    } catch (cause) {
+      app.toasts.show({
+        kind: "error",
+        title: "Could not keep copy",
+        message: String(cause),
+      });
+    } finally {
+      setKeeping(false);
+    }
+  }
   const dirty = draft !== detail.markdown;
   const compareScope = detail.shadow_chain.find((scope) => scope !== detail.scope) ?? detail.shadowed_by;
   const scopeLabel = detail.scope[0]?.toUpperCase() + detail.scope.slice(1);
@@ -171,13 +204,51 @@ function SkillDetailContent({ detail, onRefresh }: { readonly detail: SkillDetai
       title="Compare copies"
       description={comparison ? `${comparison.shadow.scope} compared with winning ${comparison.winner.scope}${comparison.identical ? " · identical copies" : ""}` : undefined}
       onOpenChange={(open) => { if (!open) setComparison(null); }}
-      footer={<Button onClick={() => setComparison(null)}>Close</Button>}
+      footer={
+        <>
+          <Button variant="ghost" onClick={() => setComparison(null)}>
+            Close
+          </Button>
+          {comparison && (
+            <>
+              <Button
+                variant="secondary"
+                disabled={comparison.identical || keeping}
+                onClick={() => void handleKeep(comparison.winner.scope, comparison.shadow.scope)}
+              >
+                Keep {comparison.winner.scope}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={comparison.identical || keeping}
+                onClick={() => void handleKeep(comparison.shadow.scope, comparison.winner.scope)}
+              >
+                Keep {comparison.shadow.scope}
+              </Button>
+            </>
+          )}
+        </>
+      }
     >
       {comparison && (
         <div className="grid gap-12 md:grid-cols-2">
-          <div><h3 className="m-0 text-12">{comparison.winner.scope} · winner</h3><code className="break-all text-11">{comparison.winner.hash}</code></div>
-          <div><h3 className="m-0 text-12">{comparison.shadow.scope} · shadow</h3><code className="break-all text-11">{comparison.shadow.hash}</code></div>
-          <div className="md:col-span-2"><DiffViewer diff={comparison.diff} displayPath="SKILL.md" /></div>
+          <div className="rounded-6 border border-border p-8">
+            <h3 className="m-0 text-12 font-semibold capitalize">{comparison.winner.scope} (winner)</h3>
+            <code className="mt-4 block break-all font-mono text-11 text-text-muted">{comparison.winner.hash}</code>
+          </div>
+          <div className="rounded-6 border border-border p-8">
+            <h3 className="m-0 text-12 font-semibold capitalize">{comparison.shadow.scope} (shadow)</h3>
+            <code className="mt-4 block break-all font-mono text-11 text-text-muted">{comparison.shadow.hash}</code>
+          </div>
+          <div className="md:col-span-2">
+            {comparison.identical ? (
+              <p className="m-0 py-16 text-center text-13 text-text-secondary" role="status">
+                No differences — both copies are identical.
+              </p>
+            ) : (
+              <DiffViewer diff={comparison.diff} displayPath="SKILL.md" />
+            )}
+          </div>
         </div>
       )}
     </Modal>

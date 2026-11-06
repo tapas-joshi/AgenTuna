@@ -327,7 +327,7 @@ fn undo_after_an_external_edit_refuses_and_keeps_the_edit() -> Result<(), Box<dy
 #[test]
 fn undo_after_the_window_refuses_as_expired_and_restores_at_the_edge() -> Result<(), Box<dyn Error>>
 {
-    for (age, refuses) in [(31, true), (UNDO_WINDOW_DAYS, false)] {
+    for (age, refuses) in [(31, true), (29, false), (UNDO_WINDOW_DAYS, false)] {
         let fixture = MigrationFixture::copy()?;
         let paths = fixture.paths().clone();
         let filter = fixture.filter();
@@ -667,6 +667,7 @@ impl Scenario {
                 backup_root: &backup_root,
                 authorized_roots: &roots,
                 actor: at_db::ops::OperationActor::Migration,
+                force: false,
             },
             operation_id,
         )

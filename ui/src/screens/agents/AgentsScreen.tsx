@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Button, Input, SegmentedControl, Toggle } from "../../components";
+import { Button, SegmentedControl, Toggle } from "../../components";
 import type { AgentCardView } from "../../generated/AgentCardView";
-import { Modal } from "../../overlays";
+import { ConnectAgentDialog } from "../../overlays/dialogs/ConnectAgentDialog";
 import { useToast } from "../../overlays/toasts";
 
 const INITIALS: Readonly<Record<string, string>> = {
@@ -53,9 +53,6 @@ export function AgentsScreen() {
   const [busy, setBusy] = useState<string | null>(null);
   const [rescanError, setRescanError] = useState<string | null>(null);
   const [pathAgent, setPathAgent] = useState<AgentCardView | null>(null);
-  const [pathValue, setPathValue] = useState("");
-  const [pathError, setPathError] = useState<string | null>(null);
-  const [pathBusy, setPathBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -130,35 +127,7 @@ export function AgentsScreen() {
     }
   }
 
-  async function choosePath(): Promise<void> {
-    try {
-      const selected = await invoke<string | null>("agent_path_choose", {
-        title: `Choose the ${pathAgent?.name ?? "agent"} configuration folder`,
-      });
-      if (selected !== null) setPathValue(selected);
-    } catch (cause) {
-      setPathError(String(cause));
-    }
-  }
 
-  async function savePath(): Promise<void> {
-    if (pathAgent === null) return;
-    setPathBusy(true);
-    setPathError(null);
-    try {
-      const updated = await invoke<AgentCardView>("agent_path_set", {
-        agentId: pathAgent.id,
-        path: pathValue,
-      });
-      setAgents((current) => current.map((row) => (row.id === updated.id ? updated : row)));
-      setPathAgent(null);
-      toast.success(`${updated.name} now points at ${updated.primary_path ?? pathValue}`);
-    } catch (cause) {
-      setPathError(String(cause));
-    } finally {
-      setPathBusy(false);
-    }
-  }
 
   return (
     <main aria-label="Agents" className="mx-auto flex max-w-[1180px] flex-col gap-20 p-24">
@@ -275,8 +244,6 @@ export function AgentsScreen() {
                         size="sm"
                         onClick={() => {
                           setPathAgent(agent);
-                          setPathValue(agent.primary_path ?? "");
-                          setPathError(null);
                         }}
                       >
                         Set path…
@@ -322,46 +289,14 @@ export function AgentsScreen() {
         </div>
       )}
 
-      <Modal
-        open={pathAgent !== null}
-        title={`Set path for ${pathAgent?.name ?? "agent"}`}
-        description="Choose the folder or document AgenTuna should read for this agent. The path is verified before it is saved."
-        onOpenChange={(open) => {
-          if (!open) setPathAgent(null);
+      <ConnectAgentDialog
+        agent={pathAgent}
+        onClose={() => setPathAgent(null)}
+        onSaved={(updated) => {
+          setAgents((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+          setPathAgent(null);
         }}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setPathAgent(null)}>
-              Cancel
-            </Button>
-            <Button variant="secondary" onClick={() => void choosePath()}>
-              Choose folder…
-            </Button>
-            <Button
-              variant="primary"
-              disabled={pathBusy || pathValue.trim().length === 0}
-              onClick={() => void savePath()}
-            >
-              {pathBusy ? "Saving…" : "Save path"}
-            </Button>
-          </>
-        }
-      >
-        <label className="grid gap-6 text-13">
-          Configuration path
-          <Input
-            value={pathValue}
-            onChange={(event) => setPathValue(event.target.value)}
-            placeholder="/Users/you/.cursor/skills"
-            aria-label="Agent configuration path"
-          />
-        </label>
-        {pathError !== null && (
-          <p role="alert" className="m-0 mt-8 text-13 text-danger">
-            {pathError}
-          </p>
-        )}
-      </Modal>
+      />
     </main>
   );
 }

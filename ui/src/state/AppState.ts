@@ -57,6 +57,8 @@ export interface AppState {
   restore(projectId: string | null, scope: ScopeToken): void;
   /** Scope-authority event from TA-053 schedules exactly one route reload. */
   receiveScope(scope: ScopeToken): void;
+  /** Sets the active scope. */
+  setScope(scope: ScopeToken): void;
   /** Route change with an explicit dirty-buffer decision. */
   navigate(route: StateRouteId, decision?: DirtyDecision): boolean;
   /** Navigates back to the previous route without adding a history entry. */
@@ -142,6 +144,9 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
       const route = scope === "local" ? "effective" : snapshot.route;
       update({ scope, route, routeStack: route === snapshot.route ? snapshot.routeStack : [...snapshot.routeStack, route].slice(-50) });
       reload("scope");
+    },
+    setScope(scope) {
+      this.receiveScope(scope);
     },
     navigate(route, decision) {
       if (routeRequiresProject(route) && snapshot.activeProject === null) {

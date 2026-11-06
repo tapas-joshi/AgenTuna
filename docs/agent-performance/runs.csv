@@ -1,0 +1,138 @@
+agent,wave,provider,model,models_used,reasoning_effort,minutes,assistant_turns,tool_calls,tokens_in,tokens_out,cost_usd,quota_stop,grade,note
+AdapterCodexMcp,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.9,58,80,207452,99462,0.1165,,,
+AdapterGolden,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,22.4,81,104,195995,79985,0.1092,,,
+AdapterOmpMcp,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,19.2,83,124,211128,90894,0.1187,,,
+AppRecovery,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,19.9,85,101,197686,83305,0.1125,,,
+AppRelease,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,20.8,80,134,205701,92957,0.1183,,,
+AppRuntimePlatform,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,29.7,115,152,373738,178095,0.2414,,,
+AppShellRust,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,29.0,92,122,302481,140868,0.1856,,,
+BoardSetup,1-3,devin,swe-2-flash,devin/swe-2-flash,max,178.0,85,79,1106839,21604,1.0701,,,
+CliContract,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,26.7,119,141,281585,130716,0.1909,,,
+CliTree,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.7,51,60,157374,72985,0.0852,,,
+DbFoundation,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,13.6,33,42,117687,49423,0.0556,,,
+DbOps,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,24.4,80,95,240479,124118,0.1471,,,
+DbSchemaB,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,24.5,113,112,213020,92456,0.1298,,,
+DbSchemas,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.7,69,102,215650,95087,0.1175,,,
+DbSettingsRepos,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.3,95,127,241314,110628,0.147,,,
+EngineLocalTemplates,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,22.2,123,127,244431,96349,0.157,,,
+EngineLocksStates,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.6,72,90,158173,70185,0.0908,,,
+EngineTests,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.2,87,105,245938,97713,0.1377,,,
+FsLinkPrimitive,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.6,48,66,160712,71819,0.0833,,,
+FsLinkStrategy,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.0,113,146,265076,121425,0.1763,,,
+FsWatchHarness,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,28.4,113,132,312354,152199,0.1995,,,
+McpPathResolution,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,14.6,44,64,143948,64184,0.073,,,
+McpSession,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,25.6,87,113,270556,122708,0.1563,,,
+McpValidationSecrets,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,16.9,68,87,171614,75298,0.0941,,,
+MigrateFixtures,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.4,68,94,242879,110354,0.1333,,,
+ModelErrorsAndMcp,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.9,52,78,186113,77132,0.0903,,,
+ModelRedaction,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.9,75,100,244491,110186,0.1383,,,
+NetworkPolicy,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,26.3,132,158,263400,128083,0.1904,,,
+PrivilegedGlobal,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.1,95,106,157032,67970,0.0941,,,
+ProjectsResearch,1-3,devin,swe-2-flash,devin/swe-2-flash,max,21.0,23,37,160996,4063,0.2054,,,
+QuotaProbe,1-3,zai,glm-5.3-flash,zai/glm-5.3-flash,max,7.0,1,0,0,0,0.0,yes,,
+ScopeResolution,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.0,49,64,154817,59015,0.0746,,,
+SecretsKeychain,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,14.1,40,60,136395,56656,0.0654,,,
+StoreGitScan,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,21.5,88,96,195884,91542,0.1169,,,
+StoreLayout,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,29.2,73,95,172445,72373,0.097,,,
+StoreManifest,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.0,73,94,256606,111154,0.1433,,,
+StorePathsAndSkillModel,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,19.3,79,104,233618,101209,0.1258,,,
+ThemeTokens,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,16.0,49,66,149979,72675,0.0816,,,
+UiComponents,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,21.0,105,143,556470,95719,0.182,,,
+UiDiffEditor,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,28.3,137,173,301756,143082,0.2091,,,
+UiOverlays,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,25.1,126,154,247301,117143,0.167,,,
+UiStates,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.6,69,102,192695,90977,0.1091,,,
+UiTable,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,24.1,128,191,705027,107023,0.2309,,,
+UiToastFonts,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.9,85,93,191409,92432,0.116,,,
+W10Facade,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,53.1,287,293,342919,63388,0.414,,B,loader and real effective/why commands
+W10Lints,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,16.2,100,99,167000,8933,0.0736,,A,cleared workspace clippy and docs
+W10Migrate,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,24.2,121,120,168567,29210,0.1638,,D,TC-009/010/011 not implemented
+W10MigrateApply,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,28.4,135,133,185894,28623,0.1561,,C,LeaveAndWatch only
+W10Playwright,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,66.5,261,291,361079,52755,0.3462,,A,suite extended and green twice
+W10RulesCli,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,45.7,203,200,201811,21626,0.2764,,B,CLI groups done; checks not run
+W10Secrets,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,58.4,270,267,489129,64875,0.4123,,C,partial on three stories
+W10Skills,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,182.4,226,237,326197,51729,0.3775,yes,C,compile blockers; no app tests
+W10TestFix,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,11.9,41,49,99546,7043,0.036,,A,four failing tests root-caused
+W10UiScreens,10,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,182.4,395,388,693259,62435,0.5699,,C,stub command attempt; later fixed
+W11Drift,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,76.4,94,93,266366,24431,0.1058,yes,C,four stories partial; no checks run
+W11Engine,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,76.3,462,460,485744,91589,0.6682,yes,C,one slice then stopped
+W11MigrateLinks,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,76.2,471,485,547393,115595,0.7736,yes,B,link/copy replacement real; rest partial
+W11RemoteBackupFinish,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,7.0,1,0,0,0,0.0,yes,Q,failed in 2 s on quota
+W11RemoteBackupUi,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,62.6,168,235,626261,146583,0.3591,yes,Q,max reasoning; quota cut at 55 min with 6 compile errors
+W11Screens,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,69.6,337,332,389907,49904,0.4934,,B,screens built; tests left failing
+W11Undo,11,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,76.1,189,188,312619,58406,0.329,yes,Q,cut off by ChatGPT quota after 1h
+W12EngineCli,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,33.2,263,297,379072,141668,0.5553,,A,five of six stories done
+W12MigrateApply,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,24.0,209,226,271708,95938,0.3222,,A,TC-009/032 done with 34 tests
+W12Screens,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,33.6,261,270,1833366,151361,0.8378,yes,B,backend good; UI tests left failing then quota
+W12UiRepair,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,16.9,113,128,250860,43853,0.1527,,A,found one-fixture root cause; TC-028 UI done
+W12Undo,12,devin,deepseek-v4-1-flash,devin/deepseek-v4-1-flash,max,32.8,208,228,365526,155475,0.4651,,A,TC-010/011/034/039 done
+W13CliMigrate,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.8,127,148,252359,59334,0.4446,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Dialogs-2,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,54.2,389,386,1654222,115407,7.4791,yes,B,TA-057/059/055/TS-010/038 done; left stale Playwright specs and missing mock commands; TA-060 partial; TS-033-037/041/044 not started (quota stop)
+W13Dialogs,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.5,157,191,212800,56876,0.5167,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Lists-2,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,53.3,352,349,1458285,123084,7.7304,,A,TS-028/TM-020/TM-021/TS-001/TM-033 done with Playwright
+W13Lists,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.6,175,185,194035,52221,0.5826,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13MigrateScreens-2,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,43.2,304,302,1749080,79512,5.6767,,A,TC-023/024/025 done with e2e test and Playwright; verified
+W13MigrateScreens,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.5,140,152,274792,54265,0.5847,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Partials,13,zai,glm-5.3-flash,zai/glm-5.3-flash,max,28.5,171,207,249593,50947,0.6581,yes,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Stabilize,13,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,53.9,347,345,1157110,92932,5.8747,,B,TS-014/TC-030/TC-035/TC-013 done and verified; 3 failing tests left (CLI reference not updated; 2 tests written as no-ops); TC-031/040/036 not started (quota stop)
+W4AppLog,4,devin,swe-2-flash,devin/swe-2-flash,max,124.4,400,415,4554078,125008,7.1363,,B,TF-024 done after revival; broke at-cli doctor tests until told
+W4CliProjects,4,devin,swe-2-flash,devin/swe-2-flash,max,107.4,212,223,6357598,60937,6.665,,B,TU-027 done; scan report-only
+W4DbDeploy,4,devin,swe-2-flash,devin/swe-2-flash,max,93.5,300,309,6146533,65543,7.5937,,A,three DB stories verified
+W4DbFinish,4,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,medium,19.3,137,136,402492,44979,1.462,,A,finished five at-db stories from half-written drafts
+W4DbRebuild,4,devin,swe-2-flash,devin/swe-2-flash,max,42.3,156,156,5284642,15042,4.75,yes,Q,cut off by rate limit
+W4DbRebuildB,4,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,unrecorded,31.2,206,205,787145,106858,4.0385,,A,TF-019 done atomic rebuild
+W4DbRepoB,4,devin,swe-2-flash,devin/swe-2-flash,max,42.6,154,163,6961600,61896,6.1353,yes,Q,cut off by rate limit
+W4DbSkills,4,devin,swe-2-flash,devin/swe-2-flash,max,42.3,209,253,4405886,101688,5.164,yes,Q,cut off by rate limit
+W4McpHttp,4,devin,swe-2-flash,devin/swe-2-flash,max,42.3,157,162,5203092,37968,4.7275,yes,Q,cut off by rate limit
+W4McpHttpB,4,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,unrecorded,31.9,226,225,1048720,103173,4.2523,,A,TM-016 done with fixture OAuth server
+W4ModelChangeSet,4,devin,swe-2-flash,devin/swe-2-flash,max,32.7,117,137,3744405,31179,3.4423,,A,TF-052/TA-014/TF-034 done and verified
+W4RemoteBackup,4,devin,swe-2-flash,devin/swe-2-flash,max,42.5,208,207,5199578,38763,5.1318,yes,Q,cut off by rate limit
+W4RemoteBackupB,4,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,unrecorded,27.2,224,223,901203,76327,3.2344,,A,TC-017 done; token never in argv
+W4SafetyAudit,4,devin,swe-2-flash,devin/swe-2-flash,max,44.2,171,176,4285090,38967,4.3233,yes,Q,cut off by free-tier rate limit; re-run by W4SafetyAuditB
+W4SafetyAuditB,4,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,unrecorded,29.9,167,166,760144,89967,2.8803,,A,TF-044/TF-049 done with failpoints
+W4SkillPkgMigrate,4,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,8.3,22,24,93958,2015,0.018,,B,moved install onto at-fs primitive
+W4StoreCore,4,devin,swe-2-flash,devin/swe-2-flash,max,42.4,113,128,5570890,81499,5.0232,yes,Q,cut off by rate limit
+W4StoreCoreB,4,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,unrecorded,35.6,250,249,749239,91663,4.7147,,A,TC-003 and TA-003 done with matrix cases
+W4StoreDocs,4,devin,swe-2-flash,devin/swe-2-flash,max,86.7,257,262,6872291,58891,7.66,,B,done; verification blocked by sibling errors at report time
+W4UiShell,4,devin,swe-2-flash,devin/swe-2-flash,max,26.9,142,168,3570468,31716,3.3874,,A,TU-006 verified with screenshots
+W5AppState,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,36.7,90,90,152407,26021,0.1202,,C,three UI stories partial
+W5CliDocs,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,15.7,52,75,130399,20800,0.0526,,C,partial; verification not run
+W5DbQueries,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,45.7,230,241,405140,66121,0.3253,,B,three stories partial but honest and verified
+W5Engine,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,43.9,136,131,183891,35323,0.1931,,C,partial; asked for unverified claims
+W5FsJournal,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,40.8,246,253,285921,61335,0.3956,,C,TC-014/TF-053 partial after two pushes
+W5Import,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,57.5,207,206,318256,54392,0.2916,,A,TS-019/020 done with security tests
+W5McpTest,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,65.9,136,148,177999,37887,0.1827,,B,TM-017/032 done after compile fix
+W5Platform,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,20.5,82,79,115610,19851,0.0767,,D,quit early twice; TF-035 empty
+W5StoreIntegrity,5,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,48.0,302,300,303537,61098,0.4301,,B,TC-005 done after being pushed; TC-015 partial
+W6ClaudeAdapter,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,37.2,175,178,203334,41828,0.2594,,A,TM-005 golden-tested
+W6Engine,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,46.0,324,321,585701,49180,0.4963,,C,quit twice before finishing
+W6GitSources,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,60.3,283,281,301249,61426,0.4525,,A,TS-021/023 done
+W6Journal,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,41.4,252,264,298549,64426,0.3966,,B,TC-014 done; TF-053/040 partial
+W6McpHealth,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,73.8,398,396,712347,100178,0.6221,,C,quit after 4 min first time; later done
+W6Platform,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,77.5,202,201,192048,41046,0.239,,B,perf harness and menu done; visual partial
+W6StoreSync,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,40.6,223,224,219666,45631,0.2865,,B,TC-033 done; TC-016/TF-054 partial
+W6UiNav,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,43.2,351,348,265195,52534,0.4909,yes,C,left four bullets
+W6UiOverlays,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,40.3,281,279,271911,60236,0.3935,,C,components built but unmounted
+W6UiScreens,6,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,39.5,231,237,304016,60066,0.3426,,B,TU-019/TF-025/TU-043 done
+W7Adapters,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,64.5,319,326,411293,112445,0.4966,,B,TA-020 finished only after a second push
+W7EngineQuality,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,55.8,286,305,393580,68851,0.4463,,B,done after pushes; honest partials
+W7MultiSync,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,58.8,201,203,294342,54662,0.3073,,A,TC-016/TC-018 done
+W7Playwright,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,142.2,129,140,368866,24933,0.1859,,B,suite green after repairs
+W7Recovery,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,45.9,204,201,213663,40455,0.2966,,C,final report empty
+W7UiQa,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,59.2,225,251,299653,64055,0.3484,,C,visuals blocked and unverified
+W7UiScreensA,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,83.0,305,340,399094,75967,0.4493,,C,left a compile error at report
+W7UiScreensB,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,62.6,208,225,302141,68528,0.3331,,C,wizard partial
+W7UiShellA,7,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,92.4,579,576,626015,129334,0.7914,,C,TF-043 partial; TU-016 partial
+W8AdapterClaudeCodex,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,62.4,314,312,287146,74418,0.4561,,C,TA-091 left undone
+W8AdapterOmpOthers,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,52.1,253,248,371997,58116,0.3997,,B,omp/cursor/custom done
+W8AgentsOps,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,145.0,176,173,444489,35654,0.3016,,B,TC-019/TM-030 done; TA-031 skipped
+W8EngineCore,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,130.9,651,655,730475,133106,0.9784,,B,planner done; TM-004 one bullet missing
+W8Playwright,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,medium,72.4,228,217,434319,29420,0.3409,,B,suite repaired after a second pass
+W8UiForms,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,139.5,870,882,1198046,226655,1.3765,,B,fabricated Done screen caught and fixed after prompt
+W8UiOverview,8,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,104.9,609,631,788489,150515,0.9841,,B,TC-027 done
+W9AdapterTests,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,34.0,171,200,198977,45977,0.2408,,B,harness done
+W9FsDirOps,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,16.5,67,72,90282,13470,0.0621,,C,half of the directory ops
+W9McpRemote,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,23.6,228,225,294144,29183,0.3348,,D,five of seven stories unstarted
+W9Migrate,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,52.3,213,235,303892,64670,0.3511,,D,TC-006..008 partial; TC-009/010 not started
+W9Rules,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,64.1,342,340,379948,69302,0.4831,,B,four stories done after pushes
+W9SkillsIndex,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,64.0,302,309,357953,71085,0.4234,,C,TS-010 left
+W9UiWizardSteps,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,63.5,328,330,357584,64470,0.4835,,C,most steps unfinished

@@ -22,6 +22,14 @@ pub struct UndoOperationRequest<'a> {
     pub authorized_roots: &'a ApplyRoots,
     /// Actor recorded on the new Undo operation.
     pub actor: ops::OperationActor,
+    /// Proceed despite files that changed after the operation (`false` by default).
+    ///
+    /// With `false`, any externally edited path refuses the undo with
+    /// [`UndoOutcome::Conflict`] before anything is written. With `true`, those paths are
+    /// restored from the operation backups anyway, deliberately replacing the newer edits;
+    /// the inverse operations still carry the observed current state, so the at-fs pipeline
+    /// refuses a path that changes again between the check and the apply.
+    pub force: bool,
 }
 
 /// Outcome of undoing a recorded operation.
@@ -181,7 +189,7 @@ pub fn undo_operation(
         .filter(|file| file.conflicted)
         .filter_map(|file| file.path.as_ref().map(PathBuf::from))
         .collect::<Vec<_>>();
-    if !conflicts.is_empty() {
+    if !conflicts.is_empty() && !request.force {
         return Ok(UndoOutcome::Conflict { paths: conflicts });
     }
 
@@ -388,6 +396,89 @@ fn normalize_lexically(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// What a caller needs to decide whether undo is offered and how it will behave.
+///
+/// Produced by [`undo_readiness`] without writing anything; [`undo_operation`] re-checks
+/// everything at undo time, so this is advisory, not an authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UndoReadiness {
+    /// The operation row exists.
+    pub known: bool,
+    /// The operation already has an Undo child operation.
+    pub already_undone: bool,
+    /// The operation started before the fixed undo window.
+    pub expired: bool,
+    /// The fixed undo window in days.
+    pub window_days: u32,
+    /// Unix seconds when the window closes, when the operation exists.
+    pub expires_at_unix_seconds: Option<i64>,
+    /// Paths that changed after the operation and refuse undo unless forced.
+    pub conflicted_paths: Vec<PathBuf>,
+}
+
+/// Reads undo readiness for one operation without writing anything.
+///
+/// # Errors
+/// [`UndoError`] when history cannot be queried.
+pub fn undo_readiness(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<UndoReadiness, UndoError> {
+    let known = ops::operation_detail(connection, operation_id)?.is_some();
+    if !known {
+        return Ok(UndoReadiness {
+            known: false,
+            already_undone: false,
+            expired: false,
+            window_days: at_db::retention::UNDO_WINDOW_DAYS,
+            expires_at_unix_seconds: None,
+            conflicted_paths: Vec::new(),
+        });
+    }
+    let already_undone: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE undo_of = ?1)",
+            [operation_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| UndoError::Database(error.into()))?;
+    let expires_at: Option<String> = connection
+        .query_row(
+            "SELECT strftime('%s', started_at, ?1) FROM operations WHERE id = ?2",
+            rusqlite::params![
+                format!("+{} days", at_db::retention::UNDO_WINDOW_DAYS),
+                operation_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| UndoError::Database(error.into()))?;
+    let expires_at_unix_seconds = expires_at.and_then(|text| text.parse::<i64>().ok());
+    let now_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| UndoError::Clock)?
+        .as_secs();
+    let expired = expires_at_unix_seconds
+        .is_some_and(|expires| expires <= i64::try_from(now_unix_seconds).unwrap_or(i64::MAX));
+    let conflicted_paths = match ops::undo_file_list_with(connection, operation_id, &TreeFileProbe)?
+    {
+        Some(list) => collapse_file_rows(&list.files)
+            .iter()
+            .filter(|file| file.conflicted)
+            .filter_map(|file| file.path.as_ref().map(PathBuf::from))
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(UndoReadiness {
+        known: true,
+        already_undone,
+        expired,
+        window_days: at_db::retention::UNDO_WINDOW_DAYS,
+        expires_at_unix_seconds,
+        conflicted_paths,
+    })
 }
 
 /// Removes directories the undo emptied inside the store.

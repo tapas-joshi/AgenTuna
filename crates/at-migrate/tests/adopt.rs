@@ -346,6 +346,7 @@ fn the_adopt_operation_id_is_accepted_by_undo_and_restores_the_pre_adopt_tree() 
             backup_root: &fixture.backups,
             authorized_roots: &authorized,
             actor: ops::OperationActor::Ui,
+            force: false,
         },
         &outcome.operation_id,
     )

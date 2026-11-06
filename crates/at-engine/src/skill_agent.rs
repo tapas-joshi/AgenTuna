@@ -215,6 +215,7 @@ pub fn plan_skill_agent_change(
 mod tests {
     use super::*;
     use at_model::{ExpectedState, OperationKind, Scope};
+    use std::path::Path;
 
     #[test]
     fn copy_mode_disable_accepts_a_reviewed_directory_delete() {
@@ -266,5 +267,170 @@ mod tests {
 
         assert_eq!(plan.mode_used, Some(LinkMode::Copy));
         assert_eq!(plan.removal.expect("owned deployment").target, destination);
+    }
+
+    fn base_request(enabled: bool) -> SkillAgentPlanRequest {
+        let destination = PathBuf::from("/tmp/agentuna-test/skills/example");
+        SkillAgentPlanRequest {
+            intent: SetSkillAgentEnabled {
+                item_id: at_model::ItemId::new(),
+                scope: Scope::User,
+                agent: AgentId::ClaudeCode,
+                enabled,
+            },
+            deployment: PlanRequest {
+                item_id: at_model::ItemId::new(),
+                scope: Scope::User,
+                agent: AgentId::ClaudeCode,
+                store_root: PathBuf::from("/tmp/agentuna-test/store"),
+                source: PathBuf::from("/tmp/agentuna-test/store/skills/example"),
+                destination: destination.clone(),
+                mode: LinkMode::Link,
+                link_supported: true,
+                managed: true,
+                destination_managed: false,
+                shared_agents: Vec::new(),
+                project_id: None,
+                summary: "Set skill".to_owned(),
+            },
+            agent_installed: true,
+            lock_reason: None,
+            already_enabled: false,
+            disable_change_set: None,
+        }
+    }
+
+    fn reviewed_disable_change_set(destination: &Path) -> ChangeSet {
+        ChangeSet {
+            id: "operation".to_owned(),
+            preview_id: "preview".to_owned(),
+            operation_kind: OperationKind::parse("deploy").expect("known operation"),
+            scope: Some(Scope::User),
+            project_id: None,
+            summary: "Disable skill".to_owned(),
+            ops: vec![FileOp::Delete {
+                path: destination.to_path_buf(),
+                expected: ExpectedState::hash("0".repeat(64)).expect("valid digest"),
+            }],
+            created_at_unix_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn a_missing_agent_is_refused_without_a_plan() {
+        let request = base_request(true);
+        let error = plan_skill_agent_change(SkillAgentPlanRequest {
+            agent_installed: false,
+            ..request
+        })
+        .expect_err("missing agents cannot be planned");
+        match error {
+            SkillAgentPlanError::AgentNotInstalled { agent } => {
+                assert_eq!(agent, AgentId::ClaudeCode);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_locked_item_is_refused_without_a_changeset() {
+        let request = base_request(true);
+        let item_id = request.intent.item_id;
+        let error = plan_skill_agent_change(SkillAgentPlanRequest {
+            lock_reason: Some("pinned by policy".to_owned()),
+            ..request
+        })
+        .expect_err("locked items cannot be planned");
+        match error {
+            SkillAgentPlanError::Locked {
+                item_id: locked,
+                reason,
+            } => {
+                assert_eq!(locked, item_id);
+                assert_eq!(reason, "pinned by policy");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reapplying_the_current_state_is_a_no_op() {
+        let request = base_request(false);
+        let plan = plan_skill_agent_change(SkillAgentPlanRequest {
+            already_enabled: false,
+            ..request
+        })
+        .expect("idempotent disable plans");
+        assert!(plan.no_op);
+        assert!(plan.change_set.is_none());
+        assert!(plan.removal.is_none());
+        assert!(plan.warnings.is_empty());
+
+        let request = base_request(true);
+        let plan = plan_skill_agent_change(SkillAgentPlanRequest {
+            already_enabled: true,
+            ..request
+        })
+        .expect("idempotent enable plans");
+        assert!(plan.no_op);
+        assert!(plan.change_set.is_none());
+    }
+
+    #[test]
+    fn an_unmanaged_disable_target_is_a_native_conflict() {
+        let destination = std::env::temp_dir();
+        let request = SkillAgentPlanRequest {
+            already_enabled: true,
+            ..base_request(false)
+        };
+        let error = plan_skill_agent_change(SkillAgentPlanRequest {
+            disable_change_set: Some(reviewed_disable_change_set(&destination)),
+            deployment: PlanRequest {
+                destination: destination.clone(),
+                ..request.deployment
+            },
+            ..request
+        })
+        .expect_err("an unmanaged target must be refused");
+        match error {
+            SkillAgentPlanError::NativeConflict { path } => assert_eq!(path, destination),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disable_without_a_reviewed_manifest_plan_is_refused() {
+        let destination = PathBuf::from("/tmp/agentuna-test/skills/example");
+        let request = SkillAgentPlanRequest {
+            already_enabled: true,
+            ..base_request(false)
+        };
+        let error = plan_skill_agent_change(SkillAgentPlanRequest {
+            deployment: PlanRequest {
+                destination_managed: true,
+                destination,
+                ..request.deployment
+            },
+            ..request
+        })
+        .expect_err("disable requires the reviewed manifest plan");
+        assert!(matches!(error, SkillAgentPlanError::MissingDisablePlan));
+    }
+
+    #[test]
+    fn an_unmanaged_agent_enable_is_refused() {
+        let request = base_request(true);
+        let error = plan_skill_agent_change(SkillAgentPlanRequest {
+            deployment: PlanRequest {
+                managed: false,
+                ..request.deployment
+            },
+            ..request
+        })
+        .expect_err("unmanaged agents cannot receive deployments");
+        match error {
+            SkillAgentPlanError::AgentUnmanaged { agent } => assert_eq!(agent, AgentId::ClaudeCode),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

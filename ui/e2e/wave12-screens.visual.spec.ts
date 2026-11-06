@@ -73,6 +73,7 @@ test("Agents shows copy fallback, missing Set path and the path dialog", async (
 test("Presets applies and unapplies a reviewed preset with ratio chips", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Skills", exact: true }).click();
+  await page.getByRole("tab", { name: "Presets" }).click();
   const main = page.getByRole("main", { name: "Presets" });
   const list = page.getByLabel("Preset list");
   await expect(list.getByText("claude code 2/3")).toBeVisible();

@@ -1,0 +1,94 @@
+agent,grade,note
+W4ModelChangeSet,A,TF-052/TA-014/TF-034 done and verified
+W4UiShell,A,TU-006 verified with screenshots
+W4DbDeploy,A,three DB stories verified
+W4StoreDocs,B,done; verification blocked by sibling errors at report time
+W4AppLog,B,TF-024 done after revival; broke at-cli doctor tests until told
+W4CliProjects,B,TU-027 done; scan report-only
+W4SafetyAudit,Q,cut off by free-tier rate limit; re-run by W4SafetyAuditB
+W4DbSkills,Q,cut off by rate limit
+W4DbRebuild,Q,cut off by rate limit
+W4McpHttp,Q,cut off by rate limit
+W4StoreCore,Q,cut off by rate limit
+W4RemoteBackup,Q,cut off by rate limit
+W4DbRepoB,Q,cut off by rate limit
+W4DbFinish,A,finished five at-db stories from half-written drafts
+W4StoreCoreB,A,TC-003 and TA-003 done with matrix cases
+W4McpHttpB,A,TM-016 done with fixture OAuth server
+W4RemoteBackupB,A,TC-017 done; token never in argv
+W4SafetyAuditB,A,TF-044/TF-049 done with failpoints
+W4DbRebuildB,A,TF-019 done atomic rebuild
+W4SkillPkgMigrate,B,moved install onto at-fs primitive
+W5Engine,C,partial; asked for unverified claims
+W5StoreIntegrity,B,TC-005 done after being pushed; TC-015 partial
+W5FsJournal,C,TC-014/TF-053 partial after two pushes
+W5DbQueries,B,three stories partial but honest and verified
+W5McpTest,B,TM-017/032 done after compile fix
+W5Import,A,TS-019/020 done with security tests
+W5AppState,C,three UI stories partial
+W5Platform,D,quit early twice; TF-035 empty
+W5CliDocs,C,partial; verification not run
+W6Journal,B,TC-014 done; TF-053/040 partial
+W6ClaudeAdapter,A,TM-005 golden-tested
+W6Engine,C,quit twice before finishing
+W6GitSources,A,TS-021/023 done
+W6StoreSync,B,TC-033 done; TC-016/TF-054 partial
+W6McpHealth,C,quit after 4 min first time; later done
+W6UiNav,C,left four bullets
+W6UiOverlays,C,components built but unmounted
+W6UiScreens,B,TU-019/TF-025/TU-043 done
+W6Platform,B,perf harness and menu done; visual partial
+W7Adapters,B,TA-020 finished only after a second push
+W7EngineQuality,B,done after pushes; honest partials
+W7MultiSync,A,TC-016/TC-018 done
+W7UiShellA,C,TF-043 partial; TU-016 partial
+W7UiScreensA,C,left a compile error at report
+W7UiScreensB,C,wizard partial
+W7UiQa,C,visuals blocked and unverified
+W7Recovery,C,final report empty
+W7Playwright,B,suite green after repairs
+W8AdapterClaudeCodex,C,TA-091 left undone
+W8AdapterOmpOthers,B,omp/cursor/custom done
+W8EngineCore,B,planner done; TM-004 one bullet missing
+W8AgentsOps,B,TC-019/TM-030 done; TA-031 skipped
+W8UiOverview,B,TC-027 done
+W8UiForms,B,fabricated Done screen caught and fixed after prompt
+W8Playwright,B,suite repaired after a second pass
+W9AdapterTests,B,harness done
+W9Rules,B,four stories done after pushes
+W9Migrate,D,TC-006..008 partial; TC-009/010 not started
+W9SkillsIndex,C,TS-010 left
+W9UiWizardSteps,C,most steps unfinished
+W9McpRemote,D,five of seven stories unstarted
+W9FsDirOps,C,half of the directory ops
+W10Migrate,D,TC-009/010/011 not implemented
+W10RulesCli,B,CLI groups done; checks not run
+W10Skills,C,compile blockers; no app tests
+W10UiScreens,C,stub command attempt; later fixed
+W10Secrets,C,partial on three stories
+W10Facade,B,loader and real effective/why commands
+W10MigrateApply,C,LeaveAndWatch only
+W10Lints,A,cleared workspace clippy and docs
+W10TestFix,A,four failing tests root-caused
+W10Playwright,A,suite extended and green twice
+W11MigrateLinks,B,link/copy replacement real; rest partial
+W11Undo,Q,cut off by ChatGPT quota after 1h
+W11Drift,C,four stories partial; no checks run
+W11Screens,B,screens built; tests left failing
+W11Engine,C,one slice then stopped
+W11RemoteBackupUi,Q,max reasoning; quota cut at 55 min with 6 compile errors
+W11RemoteBackupFinish,Q,failed in 2 s on quota
+W12MigrateApply,A,TC-009/032 done with 34 tests
+W12Undo,A,TC-010/011/034/039 done
+W12UiRepair,A,found one-fixture root cause; TC-028 UI done
+W12Screens,B,backend good; UI tests left failing then quota
+W12EngineCli,A,five of six stories done
+W13MigrateScreens,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Lists,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13CliMigrate,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Dialogs,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Partials,Q,cut off by zai 5-hour usage limit at ~21 min; partial work salvaged
+W13Stabilize,B,TS-014/TC-030/TC-035/TC-013 done and verified; 3 failing tests left (CLI reference not updated; 2 tests written as no-ops); TC-031/040/036 not started (quota stop)
+W13MigrateScreens-2,A,TC-023/024/025 done with e2e test and Playwright; verified
+W13Lists-2,A,TS-028/TM-020/TM-021/TS-001/TM-033 done with Playwright
+W13Dialogs-2,B,TA-057/059/055/TS-010/038 done; left stale Playwright specs and missing mock commands; TA-060 partial; TS-033-037/041/044 not started (quota stop)

@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { Badge, Button, RadioCardGroup } from "../../components";
+import type { JSX } from "react";
+import { Badge, Button, Checkbox, RadioCardGroup } from "../../components";
 import type { MigratePlanView } from "../../generated/MigratePlanView";
+import { Modal } from "../../overlays/dialogs/Modal";
 
 const ACTION_LABEL: Readonly<Record<string, string>> = {
   backuporiginal: "Back up original",
@@ -29,13 +31,16 @@ const STRATEGY_OPTIONS = [
   },
 ] as const;
 
-/** Screen three of migration: reviewed strategy, counts and the exact dry run. */
+/** Screen three of migration: reviewed strategy, counts and the exact dry run (TC-023). */
 export function MigratePlanScreen({
   plan,
   strategy,
   busy,
   error,
+  backupLocation = "~/.config-studio/backups/migration",
+  warnings = [],
   onStrategyChange,
+  onApply,
   onBack,
   onCancel,
 }: {
@@ -43,18 +48,45 @@ export function MigratePlanScreen({
   readonly strategy: "replace_with_links" | "leave_and_watch";
   readonly busy: boolean;
   readonly error: string | null;
+  readonly backupLocation?: string;
+  readonly warnings?: readonly string[];
   readonly onStrategyChange: (strategy: "replace_with_links" | "leave_and_watch") => void;
+  readonly onApply: () => Promise<void>;
   readonly onBack: () => void;
   readonly onCancel: () => void;
-}) {
+}): JSX.Element {
   const [showFiles, setShowFiles] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+
+  const hasGlobalWarning = plan?.scope === "global";
+
+  async function handleConfirmApply() {
+    setApplying(true);
+    setApplyError(null);
+    try {
+      await onApply();
+      setConfirmOpen(false);
+    } catch (err: unknown) {
+      setApplyError(String(err));
+    } finally {
+      setApplying(false);
+    }
+  }
+
   return (
     <main aria-label="Migration plan" className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-4">
         <p className="m-0 text-12 uppercase tracking-wide text-text-muted">Migrate to AgenTuna</p>
-        <h1 className="m-0 text-26 font-semibold text-text">Plan the move</h1>
+        <h1 className="m-0 text-26 font-semibold text-text">
+          {showFiles ? "Preview the exact changes" : "Plan the move"}
+        </h1>
         <p className="m-0 text-13 text-text-secondary">
-          Choose what happens to the originals. Every write is previewed, backed up and reversible.
+          {showFiles
+            ? "Nothing has been written yet. This is the file list Apply will run."
+            : "Choose what happens to the originals. Every write is previewed, backed up and reversible."}
         </p>
       </div>
 
@@ -124,7 +156,7 @@ export function MigratePlanScreen({
                 {showFiles ? "Hide file list" : "Show file list"}
               </Button>
               {showFiles && (
-                <ol className="m-0 flex max-h-[320px] list-none flex-col gap-4 overflow-auto p-0">
+                <ol className="m-0 flex max-h-[320px] list-none flex-col gap-4 overflow-auto p-0" aria-label="Planned files">
                   {plan.steps.map((step) => (
                     <li key={step.seq} className="rounded-6 border border-border p-8">
                       <div className="flex items-center justify-between gap-6">
@@ -168,11 +200,94 @@ export function MigratePlanScreen({
           <Button variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
-          <Button variant="primary" disabled={plan === null || busy} onClick={() => setShowFiles(true)}>
-            {busy ? "Planning…" : "Preview"}
+          {!showFiles ? (
+            <Button variant="secondary" disabled={plan === null || busy} onClick={() => setShowFiles(true)}>
+              Preview
+            </Button>
+          ) : null}
+          <Button
+            variant="primary"
+            disabled={plan === null || busy}
+            onClick={() => {
+              setConfirmed(false);
+              setApplyError(null);
+              setConfirmOpen(true);
+            }}
+          >
+            {busy ? "Planning…" : `Apply ${plan?.counts.items ?? 0} items`}
           </Button>
         </div>
       </footer>
+
+      {confirmOpen && plan !== null && (
+        <Modal
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) setConfirmOpen(false);
+          }}
+          title="Confirm migration"
+          description="Review before writing changes to disk."
+          footer={
+            <div className="flex items-center justify-end gap-8">
+              <Button variant="ghost" disabled={applying} onClick={() => setConfirmOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                disabled={!confirmed || applying}
+                onClick={() => void handleConfirmApply()}
+              >
+                {applying ? "Applying…" : "Apply migration"}
+              </Button>
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-16 py-8">
+            <div className="rounded-8 border border-border bg-raised p-12">
+              <h3 className="m-0 text-13 font-semibold text-text">Migration summary</h3>
+              <ul className="m-0 mt-8 flex list-disc flex-col gap-4 pl-16 text-12 text-text">
+                <li>{plan.counts.items} item{plan.counts.items === 1 ? "" : "s"} copied to {plan.scope} store</li>
+                <li>{plan.counts.links_written} skill folder links to be written</li>
+                <li>{plan.counts.files_backed_up} files backed up before modification</li>
+              </ul>
+            </div>
+
+            <div className="rounded-8 border border-border bg-raised p-12">
+              <span className="text-11 font-semibold uppercase tracking-wide text-text-muted">
+                Backup location
+              </span>
+              <p className="m-0 mt-4 font-mono text-12 text-text">{backupLocation}</p>
+              <p className="m-0 mt-2 text-11 text-text-muted">
+                Original files will be backed up here before anything is changed.
+              </p>
+            </div>
+
+            {(hasGlobalWarning || warnings.length > 0) && (
+              <div role="alert" className="flex flex-col gap-4 rounded-8 border border-warning/40 bg-warning/10 p-12 text-12 text-warning">
+                <span className="font-semibold">Notice:</span>
+                {hasGlobalWarning && <p className="m-0">Global-scope migration affects machine-wide configuration.</p>}
+                {warnings.map((w, idx) => (
+                  <p key={idx} className="m-0">{w}</p>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4">
+              <Checkbox
+                checked={confirmed}
+                onCheckedChange={(checked) => setConfirmed(checked === true)}
+                label={`I understand that originals will be backed up to ${backupLocation} and replaced according to this plan.`}
+              />
+            </div>
+
+            {applyError && (
+              <p role="alert" className="m-0 text-12 text-danger">
+                {applyError}
+              </p>
+            )}
+          </div>
+        </Modal>
+      )}
     </main>
   );
 }

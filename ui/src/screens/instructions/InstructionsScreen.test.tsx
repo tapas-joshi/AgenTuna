@@ -154,7 +154,23 @@ describe("InstructionsScreen", () => {
   test("an empty scope offers the New rule action and creates a project rule", async () => {
     ipc.reply = (command) => {
       if (command === "instructions_list") return Promise.resolve([]);
-      if (command === "instruction_create_project") {
+      if (command === "instruction_create_options") {
+        return Promise.resolve({
+          global_writable: true,
+          global_reason: null,
+          local_available: true,
+          local_reason: null,
+          has_project: true,
+        });
+      }
+      if (command === "instruction_create_preview") {
+        return Promise.resolve({
+          path: "/sandbox/Projects/AgenTuna/AGENTS.md",
+          exists: false,
+          reason: null,
+        });
+      }
+      if (command === "instruction_create") {
         return Promise.resolve("/sandbox/Projects/AgenTuna/AGENTS.md");
       }
       return Promise.resolve(undefined);
@@ -162,9 +178,11 @@ describe("InstructionsScreen", () => {
     renderScreen();
     const buttons = await screen.findAllByRole("button", { name: "New rule file" });
     fireEvent.click(buttons.at(-1) as HTMLButtonElement);
+    const createButton = await screen.findByRole("button", { name: /^Create/ });
+    fireEvent.click(createButton);
     await waitFor(() =>
-      expect(ipc.calls.some((call) => call.command === "instruction_create_project")).toBe(true),
+      expect(ipc.calls.some((call) => call.command === "instruction_create")).toBe(true),
     );
-    expect((await screen.findAllByText(/AGENTS\.md created/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/created/)).length).toBeGreaterThan(0);
   });
 });

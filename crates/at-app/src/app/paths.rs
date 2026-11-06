@@ -10,6 +10,8 @@ use at_store::paths::{AppPaths, PathEnvironment, PathError};
 use serde::Serialize;
 use ts_rs::TS;
 
+use super::commands::CommandError;
+
 /// Resolves every root from the process environment, optionally for a project.
 ///
 /// # Errors
@@ -20,6 +22,29 @@ pub fn resolve_process_paths(project_root: Option<&Path>) -> Result<AppPaths, Pa
         environment = environment.with_project_root(root);
     }
     AppPaths::resolve(&environment)
+}
+
+/// Resolves the paths one command operates on.
+///
+/// An [`AppPaths`] injected into the [`super::state::AppState`] wins over process resolution, so a test or
+/// recovery session never reads a developer's real home; the selected project root is
+/// re-resolved through the same central path policy either way. Production resolves from the
+/// process environment exactly like the CLI.
+///
+/// # Errors
+/// Returns [`CommandError`] when no home can be resolved or the project root is invalid.
+pub fn resolve_command_paths(
+    state: &super::state::AppState,
+    project_root: Option<&Path>,
+) -> Result<AppPaths, CommandError> {
+    match state.paths() {
+        Some(paths) if project_root.is_none() => Ok(paths.clone()),
+        Some(paths) => paths
+            .for_project(project_root.expect("project root checked above"))
+            .map_err(|_| CommandError::unavailable("application paths are unavailable")),
+        None => resolve_process_paths(project_root)
+            .map_err(|_| CommandError::unavailable("application paths are unavailable")),
+    }
 }
 
 /// Serializable snapshot of [`AppPaths`] for the webview, which never touches the filesystem.

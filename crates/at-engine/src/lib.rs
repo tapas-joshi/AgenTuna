@@ -22,6 +22,7 @@ pub mod rule_editor;
 pub mod rules;
 pub mod skill_add_plan;
 pub mod skill_agent;
+pub mod skill_delete;
 pub mod skill_import;
 pub mod skill_names;
 pub mod skill_shadows;

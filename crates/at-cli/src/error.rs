@@ -150,6 +150,16 @@ pub enum ErrorCode {
     NetworkRequired,
     /// The command exists but has no implementation in this build.
     NotImplemented,
+    /// A migration conflict needs an explicit `--keep-a`/`--keep-b`/`--keep-both` choice.
+    ///
+    /// Non-interactive callers refuse to guess (TC-030).
+    NeedsResolution,
+    /// A reviewed plan or migration source is no longer current; rebuild the plan.
+    StalePlan,
+    /// The operation is outside the fixed 30-day undo window.
+    UndoExpired,
+    /// A multi-file operation failed part-way and the completed part was rolled back.
+    PartialFailure,
     /// An invariant of the CLI itself was violated.
     Internal,
 }
@@ -167,6 +177,10 @@ impl ErrorCode {
         Self::ConfirmationRequired,
         Self::NetworkRequired,
         Self::NotImplemented,
+        Self::NeedsResolution,
+        Self::StalePlan,
+        Self::UndoExpired,
+        Self::PartialFailure,
         Self::Internal,
     ];
 
@@ -184,6 +198,10 @@ impl ErrorCode {
             Self::ConfirmationRequired => "confirmation_required",
             Self::NetworkRequired => "network_required",
             Self::NotImplemented => "not_implemented",
+            Self::NeedsResolution => "needs_resolution",
+            Self::StalePlan => "stale_plan",
+            Self::UndoExpired => "undo_expired",
+            Self::PartialFailure => "partial_failure",
             Self::Internal => "internal",
         }
     }
@@ -202,6 +220,10 @@ impl ErrorCode {
             Self::ConfirmationRequired => exit_code::CONFIRMATION_REQUIRED,
             Self::NetworkRequired => exit_code::NETWORK_REQUIRED,
             Self::NotImplemented => exit_code::NOT_IMPLEMENTED,
+            Self::NeedsResolution => exit_code::CONFLICT,
+            Self::StalePlan => exit_code::CONFLICT,
+            Self::UndoExpired => exit_code::CONFLICT,
+            Self::PartialFailure => exit_code::PARTIAL,
             Self::Internal => exit_code::INTERNAL,
         }
     }
