@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use at_engine::resolve::{ResolveInput, ResolvedSet, resolve};
-use at_model::{Definition, ItemId, ItemKind, LogicalKey, Scope, ScopeSnapshot};
+use at_engine::tombstones::{TombstoneError, TombstoneMetadata, TombstoneSource};
+use at_model::{AgentId, Definition, ItemId, ItemKind, LogicalKey, Scope, ScopeSnapshot};
+use at_store::manifest::{DisabledAgents, DisabledEntry};
 
 fn definition(kind: ItemKind, name: &str, path: &str) -> Definition {
     Definition {
@@ -448,4 +450,149 @@ fn adding_a_deeper_layer_leaves_other_logical_ids_untouched() {
     assert_eq!(after.shadowed.len(), 1);
     assert_eq!(after.shadowed[0].logical_id, review.logical_id());
     assert_eq!(after.shadowed[0].scope, Scope::Global);
+}
+/// A deeper definition can replace only the same logical id, for either managed kind.
+#[test]
+fn adding_a_deeper_definition_changes_only_its_logical_id_for_every_kind() {
+    let scopes = [Scope::Global, Scope::User, Scope::Project, Scope::Local];
+    for kind in [ItemKind::Skill, ItemKind::McpServer] {
+        for (index, deeper_scope) in scopes.iter().copied().enumerate().skip(1) {
+            let base_definitions = vec![
+                definition(kind, "target", "global/target"),
+                definition(kind, "unrelated-a", "global/unrelated-a"),
+                definition(kind, "unrelated-b", "global/unrelated-b"),
+            ];
+            let mut extended_definitions = base_definitions.clone();
+            let deeper = definition(kind, "target", "deeper/target");
+            extended_definitions.push(deeper.clone());
+
+            let base = [
+                layer(Scope::Global, base_definitions),
+                layer(deeper_scope, Vec::new()),
+            ];
+            let extended = [
+                layer(Scope::Global, extended_definitions[..3].to_vec()),
+                layer(deeper_scope, vec![deeper]),
+            ];
+            let before = resolve_layers(&base);
+            let after = resolve_layers(&extended);
+
+            assert_eq!(before.items.len(), 3, "{kind:?}, {deeper_scope:?}");
+            assert_eq!(after.items.len(), 3, "{kind:?}, {deeper_scope:?}");
+            let target = definition(kind, "target", "lookup");
+            assert_eq!(
+                after.get(&target.logical_id()).map(|winner| winner.scope),
+                Some(deeper_scope),
+                "deeper layer index {index}"
+            );
+            for name in ["unrelated-a", "unrelated-b"] {
+                let id = definition(kind, name, "lookup").logical_id();
+                assert_eq!(after.get(&id), before.get(&id), "{kind:?}, {name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn scope_kind_agent_matrix_resolves_expected_winner_for_forty_cases() {
+    let scopes = [Scope::Global, Scope::User, Scope::Project, Scope::Local];
+    let agents = [
+        AgentId::ClaudeCode,
+        AgentId::Codex,
+        AgentId::Omp,
+        AgentId::Cursor,
+        AgentId::custom("fixture").expect("valid custom agent id"),
+    ];
+    let mut cases = 0;
+    for agent in &agents {
+        for kind in [ItemKind::Skill, ItemKind::McpServer] {
+            for winning_scope in scopes {
+                let layers: Vec<_> = scopes
+                    .iter()
+                    .map(|scope| {
+                        let path = format!("{scope}/matrix");
+                        let entry = if kind == ItemKind::Skill {
+                            skill("matrix", &path)
+                        } else {
+                            mcp("matrix", None, &format!("{path}.json"))
+                        };
+                        layer(
+                            *scope,
+                            if scope.precedence() <= winning_scope.precedence() {
+                                vec![entry]
+                            } else {
+                                Vec::new()
+                            },
+                        )
+                    })
+                    .collect();
+                let result = resolve(ResolveInput::new(&layers).for_agent(agent));
+                assert_eq!(result.items.len(), 1, "{agent}, {kind}, {winning_scope}");
+                assert_eq!(
+                    result.items[0].scope, winning_scope,
+                    "{agent}, {kind}, {winning_scope}"
+                );
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 40);
+}
+
+struct MetadataTombstoneSource {
+    scope: Scope,
+    entry: DisabledEntry,
+    metadata: TombstoneMetadata,
+}
+
+impl TombstoneSource for MetadataTombstoneSource {
+    fn disabled(&self, scope: Scope) -> Result<Vec<DisabledEntry>, TombstoneError> {
+        Ok((scope == self.scope)
+            .then(|| self.entry.clone())
+            .into_iter()
+            .collect())
+    }
+
+    fn metadata(&self, scope: Scope) -> Option<TombstoneMetadata> {
+        (scope == self.scope).then(|| self.metadata.clone())
+    }
+}
+
+#[test]
+fn resolver_preserves_tombstone_reason_and_manifest_path() {
+    let item_id = ItemId::new();
+    let mut definition = skill("review", "user/review/SKILL.md");
+    definition.item_id = Some(item_id);
+    let layers = [
+        layer(Scope::User, vec![definition]),
+        layer(Scope::Project, Vec::new()),
+    ];
+    let source = MetadataTombstoneSource {
+        scope: Scope::Project,
+        entry: DisabledEntry {
+            item_id,
+            kind: ItemKind::Skill,
+            agents: DisabledAgents::All,
+        },
+        metadata: TombstoneMetadata {
+            reason: Some("disabled in this project".to_owned()),
+            path: Some(PathBuf::from("project/.agentuna/store.json")),
+        },
+    };
+    let result = resolve(
+        ResolveInput::new(&layers)
+            .for_agent(&AgentId::Codex)
+            .with_tombstones(&source),
+    );
+
+    assert!(result.items.is_empty());
+    assert_eq!(result.disabled.len(), 1);
+    assert_eq!(
+        result.disabled[0].reason.as_deref(),
+        Some("disabled in this project")
+    );
+    assert_eq!(
+        result.disabled[0].tombstone_path,
+        Some(PathBuf::from("project/.agentuna/store.json"))
+    );
 }

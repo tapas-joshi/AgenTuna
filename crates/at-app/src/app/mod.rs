@@ -13,6 +13,7 @@ pub mod privilege;
 pub mod recovery;
 pub mod settings;
 pub mod state;
+pub mod updater;
 
 use at_store::config::LogLevel;
 use std::sync::Arc;

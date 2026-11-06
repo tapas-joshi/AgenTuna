@@ -50,7 +50,7 @@ pub const RETENTION: Duration = Duration::days(7);
 pub const JOURNAL_EXTENSION: &str = "journal";
 
 /// Journal format version written by [`write_journal`] and accepted by [`read_journal`].
-pub const JOURNAL_VERSION: u32 = 1;
+pub const JOURNAL_VERSION: u32 = 2;
 
 /// Deepest directory level [`scan_temp_files`] descends below each root.
 ///
@@ -103,7 +103,7 @@ pub struct JournalEntry {
 /// (and, for tests and repair, writes) it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingJournal {
-    /// Format version; [`JOURNAL_VERSION`] for anything this crate writes.
+    /// Format version; new journals use [`JOURNAL_VERSION`], and v1 remains readable.
     pub journal_version: u32,
     /// The `operations` row the journal belongs to.
     pub operation_id: String,
@@ -115,6 +115,15 @@ pub struct PendingJournal {
     /// Temp files the operation staged before the crash, if it recorded them.
     #[serde(default)]
     pub temp_files: Vec<PathBuf>,
+    /// Complete reviewed operation set (absent in pre-v2 recovery journals).
+    #[serde(default)]
+    pub change_set: Option<at_model::ChangeSet>,
+    /// Indices durably marked complete after each file operation.
+    #[serde(default)]
+    pub completed_ops: Vec<usize>,
+    /// Whether every op completed and the caller committed the operation.
+    #[serde(default)]
+    pub committed: bool,
 }
 
 /// What the destination currently holds relative to a [`JournalEntry`].
@@ -233,6 +242,14 @@ pub enum RecoveryError {
         path: PathBuf,
         /// What was wrong.
         reason: String,
+    },
+    /// A journal's on-disk version is not readable by this implementation.
+    #[error("{}: journal version {version} is unsupported", path.display())]
+    JournalVersionUnsupported {
+        /// Journal path.
+        path: PathBuf,
+        /// Unsupported wire version.
+        version: u32,
     },
     /// The bytes offered for a restore do not hash to the recorded before hash.
     #[error(
@@ -461,13 +478,10 @@ pub fn read_journal(path: &Path) -> Result<PendingJournal, RecoveryError> {
             path: path.to_path_buf(),
             reason: error.to_string(),
         })?;
-    if journal.journal_version != JOURNAL_VERSION {
-        return Err(RecoveryError::MalformedJournal {
+    if !matches!(journal.journal_version, 1 | JOURNAL_VERSION) {
+        return Err(RecoveryError::JournalVersionUnsupported {
             path: path.to_path_buf(),
-            reason: format!(
-                "journal version {} is not supported by this build (expected {JOURNAL_VERSION})",
-                journal.journal_version
-            ),
+            version: journal.journal_version,
         });
     }
     Ok(journal)

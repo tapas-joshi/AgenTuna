@@ -1,0 +1,735 @@
+//! Journaled application of reviewed multi-file ChangeSets.
+
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use at_model::{ChangeSet, FileOp};
+use fs4::FileExt;
+use time::OffsetDateTime;
+
+use crate::atomic::{BackupPolicy, WriteRequest, apply as apply_write};
+use crate::backup::BackupMeta;
+use crate::concurrency::ExpectedState;
+use crate::hash::sha256_hex;
+use crate::recovery::{JOURNAL_VERSION, JournalEntry, PendingJournal, write_journal};
+use crate::{FsError, MAX_FILE_BYTES};
+
+/// Database callbacks for operation lifecycle and file history.
+pub trait OperationRecorder {
+    /// Opens a running operation.
+    fn begin(&mut self, change_set: &ChangeSet) -> Result<String, String>;
+    /// Records one completed operation file and optional backup catalogue entry.
+    fn file_completed(
+        &mut self,
+        operation_id: &str,
+        path: &Path,
+        before_hash: Option<&str>,
+        after_hash: Option<&str>,
+        backup_path: Option<&Path>,
+    ) -> Result<(), String>;
+    /// Finishes the operation; a failed rollback requires manual review.
+    fn finish(
+        &mut self,
+        operation_id: &str,
+        succeeded: bool,
+        manual_review: bool,
+    ) -> Result<(), String>;
+}
+
+/// Concrete operation recorder backed by at-db repositories.
+pub struct DbOperationRecorder<'a> {
+    connection: &'a rusqlite::Connection,
+    backup_retention_days: u32,
+}
+
+impl<'a> DbOperationRecorder<'a> {
+    /// Builds a recorder, clamping retention to the contract's 30-day minimum.
+    #[must_use]
+    pub const fn new(connection: &'a rusqlite::Connection, backup_retention_days: u32) -> Self {
+        Self {
+            connection,
+            backup_retention_days: if backup_retention_days < 30 {
+                30
+            } else {
+                backup_retention_days
+            },
+        }
+    }
+}
+
+impl OperationRecorder for DbOperationRecorder<'_> {
+    fn begin(&mut self, set: &ChangeSet) -> Result<String, String> {
+        use at_db::ops::{NewOperation, OperationActor, OperationKind, begin};
+        use std::str::FromStr;
+        let kind = OperationKind::from_str(set.operation_kind.as_str())
+            .map_err(|error| error.to_string())?;
+        let mut operation = NewOperation::new(kind, OperationActor::Ui).with_summary(&set.summary);
+        operation.scope = set.scope;
+        begin(self.connection, &operation)
+            .map(|id| id.to_string())
+            .map_err(|error| error.to_string())
+    }
+
+    fn file_completed(
+        &mut self,
+        id: &str,
+        path: &Path,
+        before: Option<&str>,
+        after: Option<&str>,
+        backup_path: Option<&Path>,
+    ) -> Result<(), String> {
+        use at_db::backups::{NewBackup, record_backup};
+        use at_db::ops::{FileAction, OperationId, TouchedFile, attach_file};
+        use std::str::FromStr;
+        let operation = OperationId::from_str(id).map_err(|error| error.to_string())?;
+        let action = match (before, after) {
+            (None, Some(_)) => FileAction::Created,
+            (Some(_), None) => FileAction::Deleted,
+            (Some(_), Some(_)) => FileAction::Modified,
+            (None, None) => return Err("operation file has no before or after hash".to_owned()),
+        };
+        let path_text = path.to_string_lossy().into_owned();
+        let backup_id = if let Some(blob) = backup_path {
+            let size = fs::metadata(blob).map_err(|error| error.to_string())?.len();
+            let expires = (OffsetDateTime::now_utc()
+                + time::Duration::days(i64::from(self.backup_retention_days)))
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|error| error.to_string())?;
+            let blob_text = blob.to_string_lossy().into_owned();
+            let mut row = NewBackup::new(&path_text, &blob_text)
+                .with_operation(id)
+                .with_content(before, i64::try_from(size).ok());
+            row.expires_at = Some(&expires);
+            Some(record_backup(self.connection, &row).map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
+        let mut row = TouchedFile::new(&path_text, action).with_hashes(before, after);
+        if let Some(backup_id) = backup_id.as_deref() {
+            row = row.with_backup(backup_id);
+        }
+        attach_file(self.connection, &operation, &row).map_err(|error| error.to_string())
+    }
+
+    fn finish(&mut self, id: &str, succeeded: bool, manual_review: bool) -> Result<(), String> {
+        use at_db::ops::{OperationId, OperationStatus, finish};
+        use std::str::FromStr;
+        let operation = OperationId::from_str(id).map_err(|error| error.to_string())?;
+        let status = if succeeded {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        };
+        let error_kind = manual_review.then_some("manual_review_required");
+        if finish(self.connection, &operation, status, error_kind)
+            .map_err(|error| error.to_string())?
+        {
+            Ok(())
+        } else {
+            Err("operation row was not running".to_owned())
+        }
+    }
+}
+
+/// Parameters for applying a ChangeSet.
+pub struct ApplyContext<'a> {
+    /// Active store root for resolving relative paths.
+    pub store_root: &'a Path,
+    /// Operation folder created beneath `backups/` by the caller.
+    pub backup_folder: &'a Path,
+    /// Operation-history repository.
+    pub recorder: &'a mut dyn OperationRecorder,
+}
+
+/// Successful ChangeSet application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    /// Database operation identifier.
+    pub operation_id: String,
+    /// Number of operations applied.
+    pub completed: usize,
+}
+
+/// ChangeSet application failures.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ChangeSetApplyError {
+    /// Pure ChangeSet validation failed.
+    #[error("invalid change set: {0}")]
+    Invalid(#[from] at_model::ChangeSetError),
+    /// Path is unsafe or this implementation does not support the operation.
+    #[error("unsafe or unsupported change-set path: {0}")]
+    UnsafePath(PathBuf),
+    /// Reviewed path state is stale.
+    #[error("stale change-set target: {0}")]
+    Stale(PathBuf),
+    /// Filesystem pipeline failure.
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    /// Journal failure.
+    #[error("journal failure: {0}")]
+    Journal(String),
+    /// Operation repository failure.
+    #[error("operation history failure: {0}")]
+    History(String),
+    /// Apply failed and reverse rollback was attempted.
+    #[error("change-set failed: {cause}; rollback: {rollback}")]
+    Apply {
+        /// Failure that began rollback.
+        cause: String,
+        /// Rollback result or manual-review detail.
+        rollback: String,
+    },
+}
+
+/// Applies a reviewed ChangeSet, journals it before writes and rolls back completed operations.
+///
+/// Preflight errors produce neither history rows nor journals. In-flight journals are v2 and
+/// retain the full reviewed set and per-op progress; v1 recovery journals remain readable.
+///
+/// # Errors
+/// Returns a validation, stale-state, IO, journal, or operation-history error. Failed rollback
+/// preserves its journal for manual recovery and marks the operation as requiring review.
+pub fn apply(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    set.validate()?;
+    let mut paths = Vec::with_capacity(set.ops.len());
+    for op in &set.ops {
+        if op.destination().is_none() {
+            return Err(ChangeSetApplyError::UnsafePath(PathBuf::new()));
+        }
+        let relative = op
+            .destination()
+            .ok_or_else(|| ChangeSetApplyError::UnsafePath(PathBuf::new()))?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(ChangeSetApplyError::UnsafePath(relative.to_path_buf()));
+        }
+        paths.push(context.store_root.join(relative));
+    }
+    for (op, path) in set.ops.iter().zip(&paths) {
+        validate_expected(op, path, context.store_root)?;
+    }
+
+    let lock_dir = context.store_root.join(".state/locks");
+    fs::create_dir_all(&lock_dir)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_dir.join("store.lock"))
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    FileExt::try_lock(&lock_file)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    let operation_id = context
+        .recorder
+        .begin(set)
+        .map_err(ChangeSetApplyError::History)?;
+    let journal_dir = context.store_root.join(".state/journal");
+    let entries = set
+        .ops
+        .iter()
+        .zip(&paths)
+        .map(|(op, path)| JournalEntry {
+            path: path.clone(),
+            before_hash: fs::read(path).ok().map(|bytes| sha256_hex(&bytes)),
+            after_hash: match op {
+                FileOp::Write { bytes, .. } => sha256_hex(bytes),
+                FileOp::Delete { .. } => String::new(),
+                _ => String::new(),
+            },
+        })
+        .collect();
+    let mut journal = PendingJournal {
+        journal_version: JOURNAL_VERSION,
+        operation_id: operation_id.clone(),
+        started_at: OffsetDateTime::now_utc(),
+        entries,
+        temp_files: Vec::new(),
+        change_set: Some(set.clone()),
+        completed_ops: Vec::new(),
+        committed: false,
+    };
+    let journal_path = write_journal(&journal_dir, &journal)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    let mut done = Vec::with_capacity(set.ops.len());
+    for (index, (op, path)) in set.ops.iter().zip(&paths).enumerate() {
+        let prior = fs::read(path).ok();
+        let backup_path = match execute_op(
+            op,
+            path,
+            prior.as_deref(),
+            set,
+            &operation_id,
+            context.backup_folder,
+        ) {
+            Ok(path) => path,
+            Err(cause) => {
+                return fail_rollback(
+                    context,
+                    &operation_id,
+                    &journal_path,
+                    &done,
+                    &paths,
+                    &journal.entries,
+                    cause,
+                );
+            }
+        };
+        let before_hash = prior.as_ref().map(|bytes| sha256_hex(bytes));
+        let after_hash = fs::read(path).ok().map(|bytes| sha256_hex(&bytes));
+        done.push((index, prior));
+        journal.completed_ops.push(index);
+        if let Err(error) = write_journal(&journal_dir, &journal) {
+            return fail_rollback(
+                context,
+                &operation_id,
+                &journal_path,
+                &done,
+                &paths,
+                &journal.entries,
+                error.to_string(),
+            );
+        }
+        if let Err(error) = context.recorder.file_completed(
+            &operation_id,
+            path,
+            before_hash.as_deref(),
+            after_hash.as_deref(),
+            backup_path.as_deref(),
+        ) {
+            return fail_rollback(
+                context,
+                &operation_id,
+                &journal_path,
+                &done,
+                &paths,
+                &journal.entries,
+                error,
+            );
+        }
+    }
+    journal.committed = true;
+    write_journal(&journal_dir, &journal)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    context
+        .recorder
+        .finish(&operation_id, true, false)
+        .map_err(ChangeSetApplyError::History)?;
+    fs::remove_file(&journal_path)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    Ok(ApplyOutcome {
+        operation_id,
+        completed: done.len(),
+    })
+}
+
+fn execute_op(
+    op: &FileOp,
+    path: &Path,
+    prior: Option<&[u8]>,
+    set: &ChangeSet,
+    operation_id: &str,
+    backup_root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    match op {
+        FileOp::Write {
+            bytes,
+            expected,
+            follow_symlink,
+            backup,
+            ..
+        } => {
+            if bytes.len() as u64 > MAX_FILE_BYTES {
+                return Err("write exceeds maximum file size".to_owned());
+            }
+            let mut request = WriteRequest::replace(
+                path,
+                bytes.clone(),
+                translate_expected(expected).map_err(|error| error.to_string())?,
+            );
+            request.follow_symlink = *follow_symlink;
+            if *backup {
+                let relative = op
+                    .destination()
+                    .ok_or_else(|| "destination missing".to_owned())?;
+                request.backup =
+                    BackupPolicy::OperationFolder(backup_folder(backup_root, set.scope, relative)?);
+            }
+            request.backup_meta = backup_meta(set, operation_id, op, path);
+            apply_write(&request)
+                .map(|outcome| outcome.backup_path)
+                .map_err(|error| error.to_string())
+        }
+        FileOp::Delete { expected, .. } => {
+            let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
+            let actual = prior
+                .map(|bytes| ExpectedState::Hash(sha256_hex(bytes)))
+                .unwrap_or(ExpectedState::Absent);
+            if !same_expected(&wanted, &actual) {
+                return Err(format!("stale target: {}", path.display()));
+            }
+            let bytes =
+                prior.ok_or_else(|| format!("delete target is absent: {}", path.display()))?;
+            let relative = op
+                .destination()
+                .ok_or_else(|| "destination missing".to_owned())?;
+            let folder = backup_folder(backup_root, set.scope, relative)?;
+            let files = crate::backup::copy_into(
+                &folder,
+                path,
+                bytes,
+                &backup_meta(set, operation_id, op, path),
+                OffsetDateTime::now_utc(),
+            )
+            .map_err(|error| error.to_string())?;
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+            Ok(Some(files.blob))
+        }
+        FileOp::Symlink { target, mode, .. } => {
+            let source = resolve_path(backup_root, target)?;
+            let link_mode = match mode {
+                at_model::DeployMode::Link => at_model::LinkMode::Link,
+                at_model::DeployMode::Copy => at_model::LinkMode::Copy,
+                _ => return Err("unsupported link mode".to_owned()),
+            };
+            crate::deploy::link_dir(&source, path, link_mode).map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+        FileOp::Copy {
+            source, expected, ..
+        } => {
+            let source = resolve_path(backup_root, source)?;
+            let wanted = translate_expected(expected).map_err(|error| error.to_string())?;
+            if wanted != ExpectedState::Absent {
+                return Err("copy destination replacement is not supported".to_owned());
+            }
+            if source.is_dir() {
+                crate::deploy::copy_dir(&source, path).map_err(|error| error.to_string())?;
+                Ok(None)
+            } else {
+                let bytes = fs::read(&source).map_err(|error| error.to_string())?;
+                let request = WriteRequest::create(path, bytes);
+                apply_write(&request)
+                    .map(|_| None)
+                    .map_err(|error| error.to_string())
+            }
+        }
+        FileOp::Mkdir { mode, parents, .. } => {
+            if *parents {
+                fs::create_dir_all(path)
+            } else {
+                fs::create_dir(path)
+            }
+            .map_err(|error| error.to_string())?;
+            if let Some(mode) = mode {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(*mode & 0o777))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(None)
+        }
+        FileOp::Move { .. } => {
+            Err("Move requires source-and-destination rollback support".to_owned())
+        }
+        _ => Err("unsupported operation".to_owned()),
+    }
+}
+
+fn resolve_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    if path
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err("unsafe source path".to_owned());
+    }
+    Ok(root.join(path))
+}
+
+fn backup_meta(set: &ChangeSet, operation_id: &str, op: &FileOp, path: &Path) -> BackupMeta {
+    BackupMeta {
+        scope: set.scope,
+        relpath: op
+            .destination()
+            .map(|value| value.to_string_lossy().into_owned()),
+        operation_id: Some(operation_id.to_owned()),
+        mode: fs::metadata(path)
+            .ok()
+            .map(|meta| std::os::unix::fs::MetadataExt::mode(&meta) & 0o7777),
+    }
+}
+
+fn backup_folder(
+    root: &Path,
+    scope: Option<at_model::Scope>,
+    relative: &Path,
+) -> Result<PathBuf, String> {
+    let scope = scope.ok_or_else(|| "backup scope is required".to_owned())?;
+    let mut folder = root.join(scope.to_string());
+    if let Some(parent) = relative.parent() {
+        folder.push(parent);
+    }
+    fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+    Ok(folder)
+}
+
+fn translate_expected(
+    expected: &at_model::ExpectedState,
+) -> Result<ExpectedState, ChangeSetApplyError> {
+    match expected {
+        at_model::ExpectedState::Absent => Ok(ExpectedState::Absent),
+        at_model::ExpectedState::Hash { hash } => Ok(ExpectedState::Hash(hash.to_string())),
+        at_model::ExpectedState::HashAndMtime { hash, .. } => {
+            Ok(ExpectedState::Hash(hash.to_string()))
+        }
+        _ => Err(ChangeSetApplyError::UnsafePath(PathBuf::new())),
+    }
+}
+
+fn same_expected(wanted: &ExpectedState, actual: &ExpectedState) -> bool {
+    match (wanted, actual) {
+        (ExpectedState::Absent, ExpectedState::Absent) => true,
+        (ExpectedState::Hash(a), ExpectedState::Hash(b)) => a == b,
+        (ExpectedState::HashAndMtime { hash: a, .. }, ExpectedState::Hash(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn validate_expected(
+    op: &FileOp,
+    path: &Path,
+    store_root: &Path,
+) -> Result<(), ChangeSetApplyError> {
+    let mut parent = path.parent();
+    while let Some(current) = parent {
+        if current == store_root {
+            break;
+        }
+        if fs::symlink_metadata(current).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(ChangeSetApplyError::UnsafePath(current.to_path_buf()));
+        }
+        parent = current.parent();
+    }
+    let valid = match op {
+        FileOp::Write { expected, .. }
+        | FileOp::Delete { expected, .. }
+        | FileOp::Copy { expected, .. } => expected_matches(path, expected),
+        FileOp::Symlink { target, .. } => {
+            expected_absent(path)
+                && resolve_path(store_root, target).is_ok_and(|target| target.exists())
+        }
+        FileOp::Mkdir { parents, .. } => {
+            expected_absent(path) && (*parents || path.parent().is_some_and(Path::is_dir))
+        }
+        FileOp::Move { from, expected, .. } => {
+            let source = store_root.join(from);
+            expected_matches(&source, expected) && expected_absent(path)
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ChangeSetApplyError::Stale(path.to_path_buf()))
+    }
+}
+
+fn expected_absent(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn expected_matches(path: &Path, expected: &at_model::ExpectedState) -> bool {
+    let Ok(expected) = translate_expected(expected) else {
+        return false;
+    };
+    match (expected, fs::symlink_metadata(path)) {
+        (ExpectedState::Absent, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => true,
+        (ExpectedState::Hash(hash), Ok(meta)) if meta.is_file() => {
+            fs::read(path).is_ok_and(|bytes| sha256_hex(&bytes) == hash)
+        }
+        (ExpectedState::HashAndMtime { hash, mtime }, Ok(meta)) if meta.is_file() => fs::read(path)
+            .is_ok_and(|bytes| sha256_hex(&bytes) == hash && meta.modified().ok() == Some(mtime)),
+        _ => false,
+    }
+}
+
+fn rollback(
+    done: &[(usize, Option<Vec<u8>>)],
+    paths: &[PathBuf],
+    entries: &[JournalEntry],
+) -> Result<(), String> {
+    for (index, before) in done.iter().rev() {
+        let path = paths
+            .get(*index)
+            .ok_or_else(|| "rollback path missing".to_owned())?;
+        let after = entries
+            .get(*index)
+            .ok_or_else(|| "journal entry missing".to_owned())?
+            .after_hash
+            .as_str();
+        let current = fs::read(path).ok();
+        if after.is_empty() {
+            if current.is_some() {
+                return Err(format!(
+                    "target changed during rollback: {}",
+                    path.display()
+                ));
+            }
+        } else if current.as_ref().map(|bytes| sha256_hex(bytes)).as_deref() != Some(after) {
+            return Err(format!(
+                "target changed during rollback: {}",
+                path.display()
+            ));
+        }
+        match before {
+            Some(bytes) => {
+                let expected = if after.is_empty() {
+                    ExpectedState::Absent
+                } else {
+                    ExpectedState::Hash(after.to_owned())
+                };
+                apply_write(&WriteRequest::replace(path, bytes.clone(), expected))
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                if current.is_some() {
+                    fs::remove_file(path).map_err(|error| error.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fail_rollback(
+    context: &mut ApplyContext<'_>,
+    id: &str,
+    journal_path: &Path,
+    done: &[(usize, Option<Vec<u8>>)],
+    paths: &[PathBuf],
+    entries: &[JournalEntry],
+    cause: String,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    let rolled_back = rollback(done, paths, entries);
+    let _ = context.recorder.finish(id, false, rolled_back.is_err());
+    if rolled_back.is_ok() {
+        let _ = fs::remove_file(journal_path);
+    }
+    Err(ChangeSetApplyError::Apply {
+        cause,
+        rollback: rolled_back.err().unwrap_or_else(|| "complete".to_owned()),
+    })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::failpoint::{FailInjector, Fault, FaultPoint};
+    use at_model::{ExpectedState as ModelExpected, OperationKind, Scope};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct Recorder {
+        starts: usize,
+        completed: usize,
+        finish: Vec<(bool, bool)>,
+    }
+    impl OperationRecorder for Recorder {
+        fn begin(&mut self, _: &ChangeSet) -> Result<String, String> {
+            self.starts += 1;
+            Ok(format!("op-{}", self.starts))
+        }
+        fn file_completed(
+            &mut self,
+            _: &str,
+            _: &Path,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&Path>,
+        ) -> Result<(), String> {
+            self.completed += 1;
+            Ok(())
+        }
+        fn finish(&mut self, _: &str, ok: bool, review: bool) -> Result<(), String> {
+            self.finish.push((ok, review));
+            Ok(())
+        }
+    }
+    struct FailThird(AtomicUsize);
+    impl FailInjector for FailThird {
+        fn fault(&self, point: FaultPoint, _: &Path) -> Option<Fault> {
+            (point == FaultPoint::TempWrite && self.0.fetch_add(1, Ordering::SeqCst) == 2)
+                .then_some(Fault::Fail(libc::EIO))
+        }
+    }
+    fn changeset(ops: Vec<FileOp>) -> ChangeSet {
+        ChangeSet {
+            id: "cs-test".to_owned(),
+            preview_id: "preview".to_owned(),
+            operation_kind: OperationKind::parse("edit_rule").expect("known operation"),
+            scope: Some(Scope::Project),
+            project_id: None,
+            summary: "test".to_owned(),
+            ops,
+            created_at_unix_seconds: 0,
+        }
+    }
+    #[test]
+    fn third_write_failure_rolls_back_first_two_and_leaves_rest_untouched() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let backups = root.join("backups").join("20261106T120000Z-op-1");
+        fs::create_dir_all(&backups).expect("backup root");
+        let mut operations = Vec::new();
+        let mut paths = Vec::new();
+        for index in 0..5 {
+            let relative = PathBuf::from(format!("f{index}.txt"));
+            let full = root.join(&relative);
+            fs::create_dir_all(&root).expect("store root");
+            let before = format!("before-{index}");
+            fs::write(&full, &before).expect("seed");
+            operations.push(FileOp::Write {
+                path: relative,
+                bytes: format!("after-{index}").into_bytes(),
+                expected: ModelExpected::hash(sha256_hex(before.as_bytes())).expect("valid hash"),
+                follow_symlink: false,
+                backup: true,
+            });
+            paths.push(full);
+        }
+        let set = changeset(operations);
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backups,
+            recorder: &mut recorder,
+        };
+        let injector = Arc::new(FailThird(AtomicUsize::new(0)));
+        let result = crate::failpoint::with_injector(injector, || apply(&set, &mut context));
+        assert!(
+            matches!(result, Err(ChangeSetApplyError::Apply { .. })),
+            "{result:?}"
+        );
+        for (index, path) in paths.iter().enumerate() {
+            assert_eq!(
+                fs::read(path).expect("file"),
+                format!("before-{index}").as_bytes()
+            );
+        }
+        assert_eq!(recorder.starts, 1);
+        assert_eq!(recorder.completed, 2);
+        assert_eq!(recorder.finish, [(false, false)]);
+    }
+}

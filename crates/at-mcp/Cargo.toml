@@ -27,6 +27,7 @@ http.workspace = true
 oauth2.workspace = true
 reqwest.workspace = true
 rmcp.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 signal-hook = { workspace = true, optional = true }
@@ -42,7 +43,6 @@ webbrowser.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustix = { workspace = true, features = ["process"] }
 tempfile.workspace = true
 tokio.workspace = true

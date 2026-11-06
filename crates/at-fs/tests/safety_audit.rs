@@ -106,6 +106,31 @@ const AUDIT_ALLOWLIST: &[AllowEntry] = &[
         line_substring: "remove_file",
         justification: "Retention policy deletion of expired log files older than 30 days",
     },
+    AllowEntry {
+        file_pattern: "at-db/src/db.rs",
+        line_substring: "File::create",
+        justification: "Create only the SQLite database's unclean-shutdown marker",
+    },
+    AllowEntry {
+        file_pattern: "at-db/src/db.rs",
+        line_substring: "fs::create_dir_all",
+        justification: "Create only the SQLite database's sibling backup directory",
+    },
+    AllowEntry {
+        file_pattern: "at-db/src/db.rs",
+        line_substring: "fs::copy",
+        justification: "Copy only the SQLite database to or from its sibling migration backup",
+    },
+    AllowEntry {
+        file_pattern: "at-db/src/db.rs",
+        line_substring: "fs::remove_file",
+        justification: "Remove only SQLite database marker, sidecars, or expired database backups",
+    },
+    AllowEntry {
+        file_pattern: "at-db/src/db.rs",
+        line_substring: "fs::rename",
+        justification: "Rename only the SQLite database and its WAL/SHM sidecars into quarantine",
+    },
 ];
 
 #[derive(Debug, Default)]

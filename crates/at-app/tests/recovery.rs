@@ -98,6 +98,9 @@ fn pending_journal(paths: &AppPaths, operation_id: &str, entries: Vec<JournalEnt
             started_at: OffsetDateTime::now_utc(),
             entries,
             temp_files: Vec::new(),
+            change_set: None,
+            completed_ops: Vec::new(),
+            committed: false,
         },
     )
     .unwrap()
@@ -230,6 +233,9 @@ fn discard_removes_the_debris_keeps_the_bytes_and_keeps_the_audit_row() {
             after_hash: at_fs::sha256_hex(b"after"),
         }],
         temp_files: vec![staged.clone()],
+        change_set: None,
+        completed_ops: Vec::new(),
+        committed: false,
     };
     let journal_path = write_journal(&paths.cache_dir().join("pending"), &journal).unwrap();
 

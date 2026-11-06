@@ -12,6 +12,7 @@ use at_fs::recovery::{
     purge_expired_journals, read_journal, restore_file, scan_journals, scan_temp_files,
     sweep_stale_temp_files, temp_target_name, write_journal,
 };
+use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 
 fn age(path: &Path, days: i64) {
@@ -27,6 +28,9 @@ fn journal(operation_id: &str, entries: Vec<JournalEntry>) -> PendingJournal {
         started_at: OffsetDateTime::now_utc(),
         entries,
         temp_files: Vec::new(),
+        change_set: None,
+        completed_ops: Vec::new(),
+        committed: false,
     }
 }
 
@@ -124,8 +128,17 @@ fn journal_round_trips_and_rejects_an_unknown_version() {
     write_journal(&dir, &newer).unwrap();
     assert!(matches!(
         read_journal(&path).unwrap_err(),
-        RecoveryError::MalformedJournal { .. }
+        RecoveryError::JournalVersionUnsupported { .. }
     ));
+}
+
+#[test]
+fn version_one_journals_remain_readable_after_the_v2_upgrade() {
+    let sandbox = TempDir::new().expect("sandbox");
+    let mut legacy = journal("op-v1", Vec::new());
+    legacy.journal_version = 1;
+    let path = write_journal(&sandbox.path().join("journal"), &legacy).expect("write v1 journal");
+    assert_eq!(read_journal(&path).expect("read legacy journal"), legacy);
 }
 
 #[test]

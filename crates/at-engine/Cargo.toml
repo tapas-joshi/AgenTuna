@@ -10,17 +10,21 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+at-db.workspace = true
+at-git.workspace = true
 at-fs.workspace = true
 at-model.workspace = true
 at-store.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 time.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 at-fs = { workspace = true, features = ["testkit"] }
-serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
 tempfile.workspace = true
+zip.workspace = true

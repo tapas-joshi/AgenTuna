@@ -1432,9 +1432,8 @@ pub struct ServerIdentity {
     /// Optional usage instructions.
     pub instructions: Option<String>,
 }
-
 impl ServerIdentity {
-    fn from_peer(info: &ServerPeerInfo) -> Self {
+    pub(crate) fn from_peer(info: &ServerPeerInfo) -> Self {
         let server = info.server_info.as_ref();
         Self {
             name: server.map(|server| server.name.clone()),

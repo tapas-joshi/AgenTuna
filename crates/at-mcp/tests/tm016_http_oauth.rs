@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use at_mcp::{
@@ -431,12 +431,15 @@ enum OpenerMode {
     WrongState,
     MismatchedVerifier,
     BrowserFails,
+    NoRedirect,
 }
 
 struct MockBrowserOpener {
     mode: OpenerMode,
     last_callback_response_status: Arc<AsyncMutex<Option<u16>>>,
     last_callback_response_body: Arc<AsyncMutex<Option<String>>>,
+    opened: Arc<AtomicBool>,
+    callback_port: Arc<AtomicUsize>,
 }
 
 impl MockBrowserOpener {
@@ -445,6 +448,8 @@ impl MockBrowserOpener {
             mode,
             last_callback_response_status: Arc::new(AsyncMutex::new(None)),
             last_callback_response_body: Arc::new(AsyncMutex::new(None)),
+            opened: Arc::new(AtomicBool::new(false)),
+            callback_port: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -461,6 +466,16 @@ impl BrowserOpener for MockBrowserOpener {
             .find(|(k, _)| k == "redirect_uri")
             .map(|(_, v)| v.into_owned())
             .ok_or_else(|| "missing redirect_uri".to_string())?;
+        let redirect_url = Url::parse(&redirect_uri).map_err(|e| e.to_string())?;
+        let port = redirect_url
+            .port()
+            .ok_or_else(|| "missing callback port".to_string())?;
+        self.callback_port
+            .store(usize::from(port), Ordering::SeqCst);
+        self.opened.store(true, Ordering::SeqCst);
+        if self.mode == OpenerMode::NoRedirect {
+            return Ok(());
+        }
         let state = parsed
             .query_pairs()
             .find(|(k, _)| k == "state")
@@ -483,7 +498,7 @@ impl BrowserOpener for MockBrowserOpener {
                 OpenerMode::MismatchedVerifier => {
                     format!("{redirect_uri}?code=bad_verifier_code&state={state}")
                 }
-                OpenerMode::BrowserFails => unreachable!(),
+                OpenerMode::BrowserFails | OpenerMode::NoRedirect => return,
             };
 
             let client = reqwest::Client::new();
@@ -940,4 +955,105 @@ async fn test_network_policy_denial_blocks_oauth_before_opening_socket() {
 
     assert_eq!(auth_server.request_count(), 0);
     assert_eq!(mcp_server.request_count(), 0);
+}
+
+/// A still-valid access token inside the configured refresh skew is refreshed before
+/// the MCP request, then the resulting session completes without an extra retry.
+#[tokio::test]
+async fn access_token_inside_refresh_skew_is_refreshed_once() {
+    let auth_server = MockAuthServer::start(AuthServerBehavior::Normal).await;
+    let mcp_server =
+        MockMcpServer::start(auth_server.addr.port(), McpServerBehavior::RequireAuth).await;
+    let server_id = McpServerId::new();
+    let server = create_test_server(server_id, mcp_server.endpoint_url(), &auth_server.issuer());
+    let policy = Arc::new(NetworkPolicy::default());
+    let secrets = Arc::new(MemoryStore::new());
+    let log = Arc::new(AsyncMutex::new(at_model::NetworkEventLog::new()));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let credentials = json!({
+        "client_id": "test-client-id",
+        "token_response": {
+            "access_token": "valid_access_token",
+            "token_type": "bearer",
+            "expires_in": 30,
+            "refresh_token": "valid_refresh_token"
+        },
+        "granted_scopes": ["read", "write"],
+        "token_received_at": now,
+        "issuer": auth_server.issuer()
+    });
+    let account = format!("oauth:{server_id}:{}", auth_server.issuer());
+    let keychain_id = KeychainId::with_service(OAUTH_KEYCHAIN_SERVICE, account).unwrap();
+    secrets
+        .create(&keychain_id, SecretString::new(credentials.to_string()))
+        .unwrap();
+
+    let client = HttpClient::new(policy, secrets).with_log(log);
+    let cancel = CancellationToken::new();
+    let session = client.open(&server, &cancel).await.expect("open");
+    let tools = session.list_tools(&cancel).await.expect("list tools");
+    session.close().await;
+
+    assert_eq!(tools.tools.len(), 1);
+    assert_eq!(mcp_server.request_count(), 3);
+    assert_eq!(
+        auth_server.request_count(),
+        2,
+        "metadata discovery plus one refresh"
+    );
+}
+
+/// Cancelling while OAuth waits for the browser redirect drops and releases the callback port.
+#[tokio::test]
+async fn cancelling_waiting_oauth_releases_callback_listener() {
+    let auth_server = MockAuthServer::start(AuthServerBehavior::Normal).await;
+    let mcp_server =
+        MockMcpServer::start(auth_server.addr.port(), McpServerBehavior::RequireAuth).await;
+    let server_id = McpServerId::new();
+    let server = create_test_server(server_id, mcp_server.endpoint_url(), &auth_server.issuer());
+    let policy = Arc::new(NetworkPolicy::default());
+    let secrets = Arc::new(MemoryStore::new());
+    let log = Arc::new(AsyncMutex::new(at_model::NetworkEventLog::new()));
+    let opener = Arc::new(MockBrowserOpener::new(OpenerMode::NoRedirect));
+    let opened = opener.opened.clone();
+    let callback_port = opener.callback_port.clone();
+    let oauth = OAuthClient::new(server, policy, secrets.clone(), log).with_opener(opener);
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move { oauth.sign_in(&task_cancel).await });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !opened.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("OAuth reached the callback wait");
+    let port = u16::try_from(callback_port.load(Ordering::SeqCst)).expect("valid callback port");
+    let callback_addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let cancelled_at = std::time::Instant::now();
+    cancel.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("sign-in cancelled within one second")
+        .expect("sign-in task joined")
+        .expect_err("cancelled sign-in must fail");
+    assert_eq!(error.kind(), SignInErrorKind::Cancelled);
+    assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+
+    let rebound = TcpListener::bind(callback_addr).await;
+    assert!(
+        rebound.is_ok(),
+        "callback port should be released after cancellation"
+    );
+    let keychain_id = KeychainId::with_service(
+        OAUTH_KEYCHAIN_SERVICE,
+        format!("oauth:{server_id}:{}", auth_server.issuer()),
+    )
+    .unwrap();
+    assert!(!secrets.exists(&keychain_id).unwrap());
 }

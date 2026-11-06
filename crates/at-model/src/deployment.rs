@@ -21,8 +21,30 @@ wire_enum! {
         Drifted => "drifted",
     }
 }
+wire_enum! {
+    /// Projected state of a skill for one agent in the skills index.
+    pub enum DeploymentState {
+        /// A managed link or copy is present.
+        Linked => "linked",
+        /// The item is known but disabled for this agent.
+        Off => "off",
+        /// A deployment conflicts with another definition.
+        Conflict => "conflict",
+        /// A deployed copy has changed outside AgenTuna.
+        Drifted => "drifted",
+        /// A native, unmanaged item is present.
+        Native => "native",
+        /// A higher-precedence definition wins for this agent.
+        Shadowed => "shadowed",
+        /// The agent is installed but has no deployment.
+        None => "none",
+        /// The agent is not installed.
+        NotInstalled => "not_installed",
+    }
+}
 
 wire_enum! {
+    #[non_exhaustive]
     /// How a project copy relates to the library copy.
     pub enum SyncLabel {
         /// Both copies are identical.
@@ -33,6 +55,12 @@ wire_enum! {
         LibraryNewer => "library_newer",
         /// The project copy is newer.
         ProjectNewer => "project_newer",
+        /// Exists only in the User library.
+        LibraryOnly => "library_only",
+        /// Both copies changed from their shared base.
+        Conflict => "conflict",
+        /// The Project copy changed outside AgenTuna.
+        Drifted => "drifted",
     }
 }
 

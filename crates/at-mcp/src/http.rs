@@ -27,7 +27,7 @@ use tracing::debug;
 
 use crate::oauth::KeychainCredentialStore;
 use crate::policy::{ConnectIntent, McpAccess, authorize_connect};
-use crate::session::{ToolListing, ToolSummary};
+use crate::session::{ServerIdentity, ToolListing, ToolSummary};
 
 /// Budget for the HTTP `initialize` handshake.
 pub const HTTP_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -280,6 +280,7 @@ impl HttpClient {
             config = config.custom_headers(custom_headers);
         }
 
+        crate::tls::ensure_crypto_provider();
         let client_config = ClientConfig::new(ClientCapabilities::default(), self.client.clone());
 
         let running = if let Some(profile) = oauth {
@@ -368,6 +369,14 @@ impl HttpSession {
     #[must_use]
     pub fn server_id(&self) -> McpServerId {
         self.server_id
+    }
+
+    /// The server identity negotiated during `initialize`, when reported.
+    #[must_use]
+    pub fn server_identity(&self) -> Option<ServerIdentity> {
+        self.running
+            .peer_info()
+            .map(|info| ServerIdentity::from_peer(&info))
     }
 
     /// Lists tools with pagination, bounded by [`HTTP_TOOL_LIMIT`].

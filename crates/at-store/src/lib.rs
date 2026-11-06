@@ -3,10 +3,12 @@
 pub mod config;
 pub mod git_contract;
 pub mod instance;
+pub mod integrity;
 pub mod layout;
 pub mod local_store;
 pub mod logging;
 pub mod manifest;
+pub mod manifest_rebuild;
 pub mod mcp_store;
 pub mod pathkey;
 pub mod paths;
@@ -15,6 +17,7 @@ pub mod project_scan;
 pub mod rebuild;
 pub mod remote_backup;
 pub mod skill;
+pub mod skill_import;
 pub mod skill_package;
 pub mod store_io;
 
@@ -64,6 +67,11 @@ pub use skill_package::{
     SkillPackage, SkillPackageError, SkillWriteOutcome,
 };
 
+pub use integrity::{DuplicateItemName, StoreIntegrityReport, verify_store};
+pub use manifest_rebuild::{
+    ManifestRebuildError, ManifestRebuildPlan, ManifestRebuildReport, RebuiltItem,
+    SkippedRebuildEntry, apply_manifest_rebuild, plan_manifest_rebuild,
+};
 pub use rebuild::rebuild_from_app_paths;
 
 pub use store_io::{

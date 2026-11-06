@@ -79,6 +79,38 @@ fn upsert_deployment_inserts_then_updates_in_place() {
 }
 
 #[test]
+fn query_derived_sync_labels_are_refused_before_sqlite_write() {
+    let db = open_with_all();
+    let connection = db.connection();
+    let item = seed_item(connection, "project-item", ItemKind::Skill, Scope::Project);
+    seed_agent(connection, "claude_code", true);
+
+    for label in [
+        SyncLabel::LibraryOnly,
+        SyncLabel::Conflict,
+        SyncLabel::Drifted,
+    ] {
+        let spec = DeploymentSpec::new(
+            &item,
+            &AgentId::ClaudeCode,
+            Scope::Project,
+            ItemState::Linked,
+        )
+        .with_project("project")
+        .with_sync_label(label);
+        let error = upsert_deployment(connection, &spec).expect_err("non-persistable label");
+        assert!(
+            matches!(error, at_db::DbError::InvalidValue { field, .. } if field == "sync_label")
+        );
+    }
+    assert!(
+        list_deployments_for_item(connection, &item)
+            .expect("query")
+            .is_empty()
+    );
+}
+
+#[test]
 fn find_deployment_returns_none_for_missing_cell() {
     let db = open_with_all();
     let connection = db.connection();

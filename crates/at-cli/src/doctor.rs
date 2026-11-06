@@ -655,7 +655,7 @@ fn check_database(paths: &AppPaths, repair: &mut Repair, out: &mut Vec<Finding>)
             ));
             return;
         }
-        match Database::open_file(db_path) {
+        match Database::open_file_inspecting(db_path) {
             Ok(db) => {
                 drop(db);
                 repair.record(
@@ -676,7 +676,7 @@ fn check_database(paths: &AppPaths, repair: &mut Repair, out: &mut Vec<Finding>)
         }
     }
 
-    match Database::open_file(db_path) {
+    match Database::open_file_inspecting(db_path) {
         Ok(db) => {
             if let Err(detail) = database_integrity(&db) {
                 let failure = Finding::error(
@@ -854,7 +854,7 @@ fn rebuild_index(db_path: &Path, failure: Finding, repair: &mut Repair, out: &mu
                     outcome.moved_to.display()
                 ),
             );
-            match Database::open_file(db_path) {
+            match Database::open_file_inspecting(db_path) {
                 Ok(db) => {
                     drop(db);
                     repair.record(

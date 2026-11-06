@@ -161,7 +161,8 @@ fn at_cli_depends_only_on_the_engine_and_the_crates_that_own_writes() {
             "`{dependency}` is banned even as a dev-dependency"
         );
         assert!(
-            dependency == "tempfile" || ALLOWED.contains(&dependency.as_str()),
+            matches!(dependency.as_str(), "tempfile" | "saphyr" | "sha2")
+                || ALLOWED.contains(&dependency.as_str()),
             "unexpected dev-dependency `{dependency}`: tests may only add test-only helpers"
         );
     }
