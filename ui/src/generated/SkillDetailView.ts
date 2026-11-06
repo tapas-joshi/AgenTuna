@@ -73,4 +73,24 @@ missing: boolean,
 /**
  * Whether AgenTuna owns the file and permits a reviewed edit.
  */
-editable: boolean, };
+editable: boolean, 
+/**
+ * Whether the last source check reported an unignored update.
+ */
+update_available: boolean, 
+/**
+ * Installed source commit, when available.
+ */
+source_commit_sha: string | null, 
+/**
+ * Latest checked upstream commit, when available.
+ */
+source_remote_sha: string | null, 
+/**
+ * Time the upstream source was last checked.
+ */
+source_last_checked_at: string | null, 
+/**
+ * Per-skill auto-update mode: off, inherit or on.
+ */
+auto_update: string, };

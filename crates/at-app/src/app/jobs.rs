@@ -421,7 +421,9 @@ impl HealthScheduler {
                     http_host = Some(authorized);
                 }
                 let result = tokio::select! {
-                    result = context.runner.check(&target, context.network, context.cancellation) => result,
+                    result = tokio::time::timeout(HEALTH_CHECK_DEADLINE, context.runner.check(&target, context.network, context.cancellation)) => {
+                        result.unwrap_or_else(|_| failed_check("check_timeout"))
+                    },
                     _ = context.cancellation.cancelled() => {
                         self.cancel(&target.id);
                         return Ok(());
@@ -549,10 +551,15 @@ impl HealthScheduler {
                 .take()
                 .map_or(0, |start| now_ms.saturating_sub(start));
             for state in self.states.values_mut() {
-                state.due_at_ms = state
-                    .due_at_ms
-                    .saturating_add(hidden_for)
-                    .saturating_add(stagger_ms.min(2_000) as i64);
+                let stagger = stagger_ms.min(2_000) as i64;
+                state.due_at_ms = if state.due_at_ms <= now_ms {
+                    now_ms.saturating_add(stagger)
+                } else {
+                    state
+                        .due_at_ms
+                        .saturating_add(hidden_for)
+                        .saturating_add(stagger)
+                };
             }
             self.paused = false;
         }
@@ -1002,6 +1009,9 @@ fn bounded_jitter(jitter: &dyn Jitter) -> i64 {
 /// Scheduler cadence jitter bound.
 pub const MAX_JITTER: Duration = Duration::from_secs(30);
 
+/// Maximum wall-clock duration of one scheduled MCP health check.
+pub const HEALTH_CHECK_DEADLINE: Duration = Duration::from_secs(30);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,6 +1085,82 @@ mod tests {
         }
     }
 
+    struct HangingRunner;
+    impl HealthRunner for HangingRunner {
+        async fn check(
+            &self,
+            _target: &HealthTarget,
+            _network: &NetworkState,
+            _cancellation: &tokio_util::sync::CancellationToken,
+        ) -> CheckResult {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_check_times_out_and_the_next_server_runs() {
+        let mut scheduler = HealthScheduler::new();
+        let targets = [
+            target("hang", HealthTransport::Stdio, true),
+            target("next", HealthTransport::Stdio, true),
+        ];
+        let policy = policy(HealthInterval::FiveMinutes, BackgroundHealth::Local, true);
+        let jitter = FixedJitter(0);
+        scheduler.due_checks(0, policy, &targets, &jitter);
+        let due = scheduler.due_checks(300_000, policy, &targets, &jitter);
+        let database = Mutex::new(Database::open_in_memory().expect("database initializes"));
+        let network = NetworkState::default();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut due = due.into_iter();
+        scheduler
+            .execute(
+                due.next().expect("first check due"),
+                &ExecutionContext {
+                    clock: &TestClock(300_000),
+                    interval: HealthInterval::FiveMinutes,
+                    runner: &HangingRunner,
+                    network: &network,
+                    database: &database,
+                    cancellation: &cancellation,
+                    jitter: &jitter,
+                    event_sink: None,
+                },
+            )
+            .await
+            .expect("hung check is recorded as failure");
+        scheduler
+            .execute(
+                due.next().expect("second check due"),
+                &ExecutionContext {
+                    clock: &TestClock(300_000),
+                    interval: HealthInterval::FiveMinutes,
+                    runner: &PassingRunner,
+                    network: &network,
+                    database: &database,
+                    cancellation: &cancellation,
+                    jitter: &jitter,
+                    event_sink: None,
+                },
+            )
+            .await
+            .expect("next server check succeeds");
+        let database = database.lock().expect("database lock");
+        let rows: i64 = database
+            .connection()
+            .query_row("SELECT COUNT(*) FROM health_checks", [], |row| row.get(0))
+            .expect("both checks persisted");
+        assert_eq!(rows, 2);
+        let timeout: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM health_checks WHERE error_code = 'check_timeout'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("timeout failure recorded");
+        assert_eq!(timeout, 1);
+    }
+
     #[tokio::test]
     async fn repeated_identical_failures_persist_but_publish_one_status_event() {
         let mut scheduler = HealthScheduler::new();
@@ -1087,7 +1173,12 @@ mod tests {
         let events = EventRecorder::default();
         scheduler.due_checks(0, policy, std::slice::from_ref(&target), &jitter);
 
-        for now_ms in [300_000, 600_000] {
+        for attempt in 0..10 {
+            let now_ms = if attempt == 0 {
+                300_000
+            } else {
+                scheduler.states["test"].due_at_ms
+            };
             let due = scheduler
                 .due_checks(now_ms, policy, std::slice::from_ref(&target), &jitter)
                 .into_iter()
@@ -1116,8 +1207,8 @@ mod tests {
         let rows: i64 = database
             .connection()
             .query_row("SELECT COUNT(*) FROM health_checks", [], |row| row.get(0))
-            .expect("both failed checks persisted");
-        assert_eq!(rows, 2);
+            .expect("all failed checks persisted");
+        assert_eq!(rows, 10);
     }
 
     fn policy(
@@ -1318,6 +1409,26 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(scheduler.states["x"].due_at_ms, 311_990);
+        let mut long_hidden = HealthScheduler::new();
+        let targets = [
+            target("first", HealthTransport::Stdio, true),
+            target("second", HealthTransport::Stdio, true),
+        ];
+        long_hidden.due_checks(0, policy, &targets, &zero);
+        long_hidden.set_visible(false, 0, 0);
+        assert!(
+            long_hidden
+                .due_checks(1_800_000, policy, &targets, &zero)
+                .is_empty()
+        );
+        long_hidden.set_visible(true, 1_800_000, 2_000);
+        assert!(
+            long_hidden
+                .due_checks(1_800_000, policy, &targets, &zero)
+                .is_empty()
+        );
+        let resumed = long_hidden.due_checks(1_802_000, policy, &targets, &zero);
+        assert_eq!(resumed.len(), 2);
     }
 
     #[test]

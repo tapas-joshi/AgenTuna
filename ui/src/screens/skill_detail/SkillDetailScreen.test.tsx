@@ -15,6 +15,7 @@ const detail = {
   source: null, mode: "copy", shadowed_by: "project", shadow_chain: ["project", "user"],
   deployments: [{ agent_id: "codex", agent_name: "Codex", state: "linked", mode: "symlink", target_path: ".agents/skills/review-checklist" }],
   history: [{ content_hash: "abc123", captured_at: "2026-11-06T10:00:00Z", operation_kind: "skill_edit", operation_summary: "Edited skill" }], missing: false,
+  editable: true, update_available: false, source_commit_sha: null, source_remote_sha: null, source_last_checked_at: null, auto_update: "inherit",
 };
 
 afterEach(() => { cleanup(); ipc.calls.length = 0; });
@@ -41,5 +42,41 @@ describe("SkillDetailScreen", () => {
     screen.getByRole("button", { name: "Compare copies" }).click();
     await waitFor(() => expect(ipc.calls.some((call) => call.command === "skill_compare_copies")).toBe(true));
     expect(await screen.findByText(/compared with winning project/)).toBeTruthy();
+  });
+
+  test("checks a source, shows the update badge and applies only a reviewed preview", async () => {
+    const sourced = { ...detail, source: "git", update_available: true, source_commit_sha: "a".repeat(40), source_remote_sha: "b".repeat(40), source_last_checked_at: "2026-11-06T11:00:00Z" };
+    ipc.reply = (command) => Promise.resolve(
+      command === "skill_detail_load" ? sourced :
+      command === "skill_source_check" ? { status: "update_available", remote_sha: "b".repeat(40), local_modified: false } :
+      command === "skill_update_preview" ? { preview_id: "preview_update", files: [{ path: "skills/review-checklist/SKILL.md", diff: "-old\n+new", backup_required: true }] } :
+      command === "skill_update_apply" ? { operation_id: "op_update", files_changed: 1 } :
+      undefined,
+    );
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+    expect(await screen.findByText("Update available")).toBeTruthy();
+    screen.getByRole("button", { name: "Check now" }).click();
+    await waitFor(() => expect(ipc.calls.some((call) => call.command === "skill_source_check")).toBe(true));
+    screen.getByRole("button", { name: "Update now" }).click();
+    expect(await screen.findByRole("dialog", { name: "Review skill update" })).toBeTruthy();
+    expect(screen.getByText("skills/review-checklist/SKILL.md")).toBeTruthy();
+    screen.getByRole("button", { name: "Apply update" }).click();
+    await waitFor(() => expect(ipc.calls.some((call) => call.command === "skill_update_apply")).toBe(true));
+    expect(ipc.calls.find((call) => call.command === "skill_update_apply")?.args).toEqual({ previewId: "preview_update", confirmed: true });
+  });
+
+  test("hides a stale update badge when the latest source check is unknown", async () => {
+    const sourced = { ...detail, source: "git", update_available: true, source_commit_sha: "a".repeat(40), source_remote_sha: "b".repeat(40), source_last_checked_at: "2026-11-06T11:00:00Z" };
+    ipc.reply = (command) => Promise.resolve(
+      command === "skill_detail_load" ? sourced :
+      command === "skill_source_check" ? { status: "unknown", remote_sha: null, local_modified: null } :
+      undefined,
+    );
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+    expect(await screen.findByText("Update available")).toBeTruthy();
+    screen.getByRole("button", { name: "Check now" }).click();
+    await waitFor(() => expect(ipc.calls.some((call) => call.command === "skill_source_check")).toBe(true));
+    await waitFor(() => expect(screen.queryByText("Update available")).toBeNull());
+    expect(screen.getByTitle("Source status is unknown or offline; no update badge is shown.")).toBeTruthy();
   });
 });

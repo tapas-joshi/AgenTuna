@@ -40,7 +40,9 @@ use at_secrets::SecretStore;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::integrity::verify_store;
 use crate::layout::{MANIFEST_FILE, MCP_FILE, RULES_DIR, SKILLS_DIR, StoreError, StoreLayout};
+use crate::manifest::StoreManifest;
 /// Directory inside the backup repo that holds one folder per store.
 const STORES_DIR: &str = "stores";
 
@@ -164,6 +166,15 @@ pub enum BackupError {
         /// Underlying I/O error.
         source: io::Error,
     },
+    /// The destination store already contains managed content and merge was not confirmed.
+    #[error("remote restore requires an empty store unless merge is explicitly confirmed")]
+    NonEmptyRestore,
+    /// Snapshot manifest content does not match the declared hash for this item.
+    #[error("remote snapshot item `{item}` failed integrity verification")]
+    CorruptSnapshot {
+        /// Stable id or path of the first invalid snapshot item.
+        item: String,
+    },
 }
 
 impl BackupError {
@@ -181,6 +192,8 @@ impl BackupError {
             Self::ChangeSet(_) => "changeset",
             Self::Apply(_) => "apply",
             Self::Denied(_) => "network_denied",
+            Self::NonEmptyRestore => "non_empty",
+            Self::CorruptSnapshot { .. } => "corrupt_snapshot",
             Self::Git(_) => "git",
             Self::Store(_) => "store",
             Self::Db(_) => "db",
@@ -481,10 +494,14 @@ fn stage_work(
     auth: &GitAuth,
     remote_empty: bool,
 ) -> Result<(PathBuf, TempDirGuard), BackupError> {
+    // Two backups can start in the same instant (an injected clock, or coarse OS timers), so a
+    // process-wide sequence number keeps their work directories apart.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "agentuna-backup-{}-{}",
+        "agentuna-backup-{}-{}-{}",
         std::process::id(),
-        ctx.now.unix_timestamp_nanos()
+        ctx.now.unix_timestamp_nanos(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).map_err(|source| BackupError::Io {
         path: dir.clone(),
@@ -940,6 +957,203 @@ pub fn sync_from_remote(
         status: RemoteBackupStatus::Idle,
         error_kind: (conflict_count > 0).then(|| "conflict".to_owned()),
         conflicts: conflict_paths,
+    })
+}
+
+/// Restores a commit's snapshot into an empty store.
+///
+/// Every network git call is authorized by the shared network policy through `RemoteContext`.
+/// Merge confirmation is handled by TC-018's three-way sync operation instead of overwriting
+/// existing data here.
+///
+/// # Errors
+/// Returns typed errors for offline access, invalid snapshots, non-empty stores, and safe-write
+/// failures. All snapshot checks complete before the first destination mutation.
+pub fn restore_from_remote(
+    request: &mut BackupRequest<'_>,
+    commit: &str,
+    merge_confirmed: bool,
+) -> Result<BackupOutcome, BackupError> {
+    if commit.is_empty() || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(BackupError::InvalidSnapshotPath(PathBuf::from(commit)));
+    }
+    let state = remote_backup_state(request.db.connection())?;
+    let repo_url = state.repo_url.clone().ok_or(BackupError::Unconfigured)?;
+    at_git::remote::validate_repo_url(&repo_url)?;
+    let token = at_secrets::read_token(request.secrets).map_err(|error| {
+        if matches!(error, at_secrets::SecretsError::NotFound { .. }) {
+            BackupError::TokenMissing
+        } else {
+            BackupError::Secrets(error)
+        }
+    })?;
+    let auth = GitAuth::token(token.expose_secret()).map_err(|error| match error {
+        RemoteError::AuthSetup { path, source } => BackupError::Io { path, source },
+        other => BackupError::Git(other),
+    })?;
+    let current_bytes =
+        fs::read(request.store.manifest_path()).map_err(|source| BackupError::Io {
+            path: request.store.manifest_path(),
+            source,
+        })?;
+    let current_manifest =
+        StoreManifest::parse(&current_bytes).map_err(|_| BackupError::CorruptSnapshot {
+            item: MANIFEST_FILE.to_owned(),
+        })?;
+    if !current_manifest.items().is_empty() {
+        if merge_confirmed {
+            return sync_from_remote(request, false);
+        }
+        return Err(BackupError::NonEmptyRestore);
+    }
+
+    let mut context = RemoteContext {
+        policy: request.policy,
+        log: request.log,
+        runner: request.remote_runner,
+        local: request.local_runner,
+        redact: &|text| request.redactor.redact_text(text),
+        now: request.now,
+    };
+    let (work, _guard) = stage_work(&mut context, &repo_url, &auth, false)?;
+    let store_id = store_id_for_commit(request.local_runner, &work, commit)?;
+    let files = read_commit_snapshot(request.local_runner, &work, commit, &store_id)?;
+    let snapshot_manifest =
+        files
+            .get(Path::new(MANIFEST_FILE))
+            .ok_or_else(|| BackupError::CorruptSnapshot {
+                item: MANIFEST_FILE.to_owned(),
+            })?;
+    let manifest =
+        StoreManifest::parse(snapshot_manifest).map_err(|_| BackupError::CorruptSnapshot {
+            item: MANIFEST_FILE.to_owned(),
+        })?;
+    let snapshot_root = work.join(STORES_DIR).join(&store_id);
+    let integrity = verify_store(
+        &StoreLayout::new(request.store.scope(), &snapshot_root),
+        crate::store_io::StoreAccess::ReadOnly,
+    )
+    .map_err(|_| BackupError::CorruptSnapshot {
+        item: manifest
+            .items()
+            .first()
+            .map_or_else(|| MANIFEST_FILE.to_owned(), |item| item.id.to_string()),
+    })?;
+    if integrity.has_issues() {
+        let failing_item = integrity
+            .snapshot
+            .items
+            .iter()
+            .find(|item| item.state != crate::store_io::StoreItemState::Present)
+            .map(|item| item.item.id.to_string())
+            .unwrap_or_else(|| MANIFEST_FILE.to_owned());
+        return Err(BackupError::CorruptSnapshot { item: failing_item });
+    }
+
+    let mut operations = Vec::with_capacity(files.len());
+    let mut created_parents = std::collections::BTreeSet::new();
+    for (relative, bytes) in files {
+        validate_snapshot_path(&relative)?;
+        if let Some(parent) = relative.parent()
+            && !parent.as_os_str().is_empty()
+            && created_parents.insert(parent.to_path_buf())
+            && !request.store.root().join(parent).is_dir()
+        {
+            ensure_change_set_directory(request.store, request.db, request.now, parent)?;
+        }
+        operations.push(change_write(
+            &request.store.root().join(&relative),
+            &relative,
+            bytes,
+        )?);
+    }
+    let change_set = at_model::ChangeSet {
+        id: uuid::Uuid::now_v7().to_string(),
+        preview_id: uuid::Uuid::now_v7().to_string(),
+        operation_kind: at_model::OperationKind::parse("remote_restore")?,
+        scope: Some(request.store.scope()),
+        project_id: None,
+        summary: format!("restore remote backup {commit}"),
+        ops: operations,
+        created_at_unix_seconds: request.now.unix_timestamp().max(0) as u64,
+    };
+    change_set.validate()?;
+    let mut recorder = at_fs::changeset::DbOperationRecorder::new(request.db.connection(), 30);
+    let mut apply_context = at_fs::changeset::ApplyContext {
+        store_root: request.store.root(),
+        backup_folder: &request.store.backups_dir(),
+        recorder: &mut recorder,
+    };
+    at_fs::changeset::apply(&change_set, &mut apply_context)?;
+
+    let mut next = remote_backup_state(request.db.connection())?;
+    next.last_commit = Some(commit.to_owned());
+    next.last_pull_at = Some(
+        request
+            .now
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| request.now.unix_timestamp().to_string()),
+    );
+    next.status = RemoteBackupStatus::Idle;
+    next.error_kind = None;
+    save_remote_backup_state(request.db.connection(), &next)?;
+    record_ops_row(request.db, true, None);
+    Ok(BackupOutcome {
+        commit: Some(commit.to_owned()),
+        committed: false,
+        pushed: false,
+        status: RemoteBackupStatus::Idle,
+        error_kind: None,
+        conflicts: Vec::new(),
+    })
+}
+
+fn store_id_for_commit(
+    runner: &dyn at_git::local::LocalGitRunner,
+    repo: &Path,
+    commit: &str,
+) -> Result<String, BackupError> {
+    let args = [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--name-only",
+        commit,
+        "--",
+        STORES_DIR,
+    ];
+    let output = runner
+        .run(&at_git::local::LocalGitCall {
+            repo,
+            args: &args,
+            stdin: None,
+            literal_pathspecs: true,
+        })
+        .map_err(|error| BackupError::Git(RemoteError::Process(error)))?;
+    if !output.success {
+        return Err(BackupError::CorruptSnapshot {
+            item: MANIFEST_FILE.to_owned(),
+        });
+    }
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = std::str::from_utf8(path).map_err(|_| BackupError::CorruptSnapshot {
+            item: MANIFEST_FILE.to_owned(),
+        })?;
+        let mut components = Path::new(path).components();
+        if components
+            .next()
+            .is_some_and(|component| component.as_os_str() == STORES_DIR)
+            && let Some(std::path::Component::Normal(store_id)) = components.next()
+        {
+            return Ok(store_id.to_string_lossy().into_owned());
+        }
+    }
+    Err(BackupError::CorruptSnapshot {
+        item: MANIFEST_FILE.to_owned(),
     })
 }
 
@@ -1677,5 +1891,196 @@ mod sync_tests {
         fs::create_dir_all(conflict_root.join("laptop/second")).expect("second conflict");
         fs::create_dir_all(conflict_root.join("desktop/third")).expect("third conflict");
         assert_eq!(remote_conflict_count(&store).expect("count folders"), 3);
+    }
+    #[test]
+    fn restore_from_bare_remote_into_fresh_store_and_refuse_nonempty_target() {
+        let sandbox = TempDir::new().expect("sandbox");
+        let bare = sandbox.path().join("restore-remote.git");
+        fs::create_dir_all(&bare).expect("remote folder");
+        let local = ProcessLocalGitRunner::default();
+        let initialized = local
+            .run(&LocalGitCall {
+                repo: &bare,
+                args: &["init", "--bare", "-b", "main"],
+                stdin: None,
+                literal_pathspecs: true,
+            })
+            .expect("initialize bare remote");
+        assert!(initialized.success);
+        let remote_url = format!("file://localhost{}", bare.display());
+        let source = StoreLayout::new(at_model::Scope::User, sandbox.path().join("source"));
+        source.init().expect("source store");
+        let skill_file = source.skills_dir().join("echo/SKILL.md");
+        fs::create_dir_all(skill_file.parent().expect("skill parent")).expect("skill dir");
+        fs::write(
+            &skill_file,
+            "---\nname: Echo\ndescription: fixture\n---\nBody\n",
+        )
+        .expect("skill content");
+        let loaded = StoreManifest::load(&source).expect("load source manifest");
+        let mut manifest = loaded.manifest;
+        let slug = crate::layout::Slug::parse("echo").expect("slug");
+        manifest
+            .insert_item(crate::manifest::ManifestItem::new(
+                at_model::ItemId::new(),
+                at_model::ItemKind::Skill,
+                slug,
+                crate::manifest::StorePath::parse("skills/echo").expect("item path"),
+                crate::manifest::hash_skill_folder(&source.skills_dir().join("echo"))
+                    .expect("content hash"),
+            ))
+            .expect("manifest item");
+        manifest
+            .save(
+                &source,
+                at_fs::ExpectedState::Hash(loaded.hash.to_string()),
+                at_fs::BackupPolicy::None,
+            )
+            .expect("save manifest");
+        let mut database = at_db::Database::open_in_memory().expect("database");
+        // The default device name comes from the host name, which CI runners may not make valid.
+        set_device_name(&mut database, Some("fixture")).expect("device name");
+        save_remote_backup_state(
+            database.connection(),
+            &RemoteBackupState {
+                repo_url: Some(remote_url.clone()),
+                branch: Some("main".to_owned()),
+                ..RemoteBackupState::default()
+            },
+        )
+        .expect("remote config");
+        let secrets = MemoryStore::new();
+        save_token(
+            &secrets,
+            concat!("ghp_", "0123456789abcdef", "0123456789abcdef"),
+        )
+        .expect("fixture token");
+        let policy = NetworkPolicy::default();
+        let mut log = NetworkEventLog::default();
+        let remote = ProcessRemoteGitRunner::default();
+        let redactor = Redactor::new();
+        let now = OffsetDateTime::now_utc();
+        let commit = {
+            let mut request = BackupRequest {
+                store: &source,
+                db: &database,
+                secrets: &secrets,
+                policy: &policy,
+                log: &mut log,
+                remote_runner: &remote,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            push_backup(&mut request)
+                .expect("push fixture backup")
+                .commit
+                .expect("backup commit")
+        };
+        let destination = StoreLayout::new(at_model::Scope::User, sandbox.path().join("fresh"));
+        destination.init().expect("fresh store");
+        let before_offline = fs::read(destination.manifest_path()).expect("empty manifest");
+        let offline_policy = policy.clone().with_offline(true);
+        let mut offline_log = NetworkEventLog::default();
+        {
+            let mut offline_request = BackupRequest {
+                store: &destination,
+                db: &database,
+                secrets: &secrets,
+                policy: &offline_policy,
+                log: &mut offline_log,
+                remote_runner: &remote,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            assert!(restore_from_remote(&mut offline_request, &commit, false).is_err());
+            assert_eq!(
+                fs::read(destination.manifest_path()).expect("unchanged empty manifest"),
+                before_offline
+            );
+        }
+        let mut request = BackupRequest {
+            store: &destination,
+            db: &database,
+            secrets: &secrets,
+            policy: &policy,
+            log: &mut log,
+            remote_runner: &remote,
+            local_runner: &local,
+            redactor: &redactor,
+            now,
+        };
+        restore_from_remote(&mut request, &commit, false).expect("restore snapshot");
+        assert_eq!(
+            fs::read(destination.skills_dir().join("echo/SKILL.md")).expect("restored skill"),
+            fs::read(skill_file).expect("source skill")
+        );
+        assert_eq!(
+            at_db::remote_backup::remote_backup_state(database.connection())
+                .expect("remote state")
+                .last_commit
+                .as_deref(),
+            Some(commit.as_str())
+        );
+        assert!(matches!(
+            restore_from_remote(&mut request, &commit, false),
+            Err(BackupError::NonEmptyRestore)
+        ));
+        let corrupted_work = sandbox.path().join("corrupt-writer");
+        let corrupt_commit = {
+            let auth = GitAuth::none();
+            let mut context = RemoteContext {
+                policy: &policy,
+                log: &mut log,
+                runner: &remote,
+                local: &local,
+                redact: &|text| text.to_owned(),
+                now,
+            };
+            context
+                .clone_remote(&remote_url, &corrupted_work, &auth)
+                .expect("clone remote for corrupt fixture");
+            let store_id = source
+                .read_header()
+                .expect("source header")
+                .store_id
+                .to_string();
+            let corrupt_skill = corrupted_work
+                .join(STORES_DIR)
+                .join(store_id)
+                .join("skills/echo/SKILL.md");
+            fs::write(&corrupt_skill, b"corrupted snapshot\n").expect("corrupt skill");
+            at_git::remote::stage_all(&local, &corrupted_work).expect("stage corruption");
+            let commit = at_git::remote::commit_local(&local, &corrupted_work, "corrupt fixture")
+                .expect("commit corruption");
+            context
+                .push_remote(&corrupted_work, &remote_url, "main", &auth)
+                .expect("push corrupt fixture");
+            commit
+        };
+        let corrupt_destination =
+            StoreLayout::new(at_model::Scope::User, sandbox.path().join("corrupt-target"));
+        corrupt_destination.init().expect("corrupt target store");
+        let corrupt_empty = fs::read(corrupt_destination.manifest_path()).expect("empty manifest");
+        let mut corrupt_request = BackupRequest {
+            store: &corrupt_destination,
+            db: &database,
+            secrets: &secrets,
+            policy: &policy,
+            log: &mut log,
+            remote_runner: &remote,
+            local_runner: &local,
+            redactor: &redactor,
+            now,
+        };
+        assert!(matches!(
+            restore_from_remote(&mut corrupt_request, &corrupt_commit, false),
+            Err(BackupError::CorruptSnapshot { .. })
+        ));
+        assert_eq!(
+            fs::read(corrupt_destination.manifest_path()).expect("still empty"),
+            corrupt_empty
+        );
     }
 }

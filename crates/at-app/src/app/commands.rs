@@ -58,6 +58,8 @@ pub struct RecoveryFileView {
 pub struct McpChangeSetPreviewView {
     /// Identity of the planned ChangeSet.
     pub change_set_id: String,
+    /// Content-bound identity of the reviewed files and current disk state.
+    pub preview_id: String,
     /// Per-agent files and their exact proposed changes.
     pub files: Vec<McpFileChangeView>,
 }
@@ -344,6 +346,8 @@ pub enum CommandErrorCode {
     /// An unmanaged filesystem target refused an overwrite.
     #[serde(rename = "refused_overwrite")]
     RefusedOverwrite,
+    /// A reviewed plan conflicts with newer or divergent state.
+    Conflict,
 }
 
 /// Structured details for an unmanaged target refused by `at-fs`.
@@ -603,6 +607,7 @@ pub fn settings_load(state: State<'_, AppState>) -> Result<serde_json::Value, Co
 #[tauri::command]
 pub fn settings_set(
     state: State<'_, AppState>,
+    network: State<'_, super::network::NetworkState>,
     key: String,
     value: serde_json::Value,
 ) -> Result<(), CommandError> {
@@ -614,6 +619,9 @@ pub fn settings_set(
     }
     let setting_key = at_db::settings::SettingsKey::parse(&key)
         .map_err(|error| CommandError::invalid_argument("key", &error.to_string()))?;
+    let updates_opt_in = (setting_key == at_db::settings::SettingsKey::AutoUpdateSkills)
+        .then(|| value.as_bool())
+        .flatten();
     let value = serde_json::to_string(&value)
         .map_err(|error| CommandError::invalid_argument("value", &error.to_string()))?;
     let mut database = state.database().map_err(CommandError::unavailable)?;
@@ -623,7 +631,11 @@ pub fn settings_set(
         &value,
         at_db::ops::OperationActor::Ui,
     )
-    .map_err(|error| CommandError::invalid_argument("value", &error.to_string()))
+    .map_err(|error| CommandError::invalid_argument("value", &error.to_string()))?;
+    if let Some(enabled) = updates_opt_in {
+        network.set_updates_opt_in(enabled);
+    }
+    Ok(())
 }
 /// Returns the resolved application paths without exposing filesystem access to the webview.
 #[tauri::command]

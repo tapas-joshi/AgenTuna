@@ -19,6 +19,12 @@ import { OverviewScreen } from "./screens/overview/OverviewScreen";
 import { AddSkillWizard } from "./screens/add_skill/AddSkillWizard";
 import { SecretInventoryScreen } from "./screens/secrets/SecretInventoryScreen";
 import { SkillDetailScreen } from "./screens/skill_detail/SkillDetailScreen";
+import { AddMcpServerForm } from "./screens/mcp_form";
+import type { AddMcpServerDraft } from "./screens/mcp_form";
+import type { McpChangeSetPreviewView } from "./generated/McpChangeSetPreviewView";
+import type { McpPlanPreviewRequest } from "./generated/McpPlanPreviewRequest";
+import type { McpSaveRequest } from "./generated/McpSaveRequest";
+import type { McpSaveResultView } from "./generated/McpSaveResultView";
 
 /**
  * Subscribes to a Tauri event and returns the cleanup for `useEffect`.
@@ -43,13 +49,43 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
   };
 }
 /** Placeholder routed body; real screen contents are supplied by their stories. */
-function RouteBody({ route, onClose }: { readonly route: StateRouteId; readonly onClose: () => void }) {
+function RouteBody({
+  route,
+  onClose,
+  projectId,
+}: {
+  readonly route: StateRouteId;
+  readonly onClose: () => void;
+  readonly projectId: string | null;
+}) {
   const section = sectionForRoute(route);
   if (route === "overview") return <OverviewScreen />;
   if (route === "skill-detail") return <SkillDetailScreen />;
-  if (route === "add-skill") return <AddSkillWizard onClose={onClose} />;
+  if (route === "add-skill") return <AddSkillWizard onClose={onClose} projectId={projectId} />;
   if (route === "secrets") return <SecretInventoryScreen />;
   if (route === "settings") return <PreferencesScreen />;
+  if (route === "mcp-form") return <AddMcpServerForm
+    onCancel={onClose}
+    onPlan={(draft: AddMcpServerDraft) => {
+      const request: McpPlanPreviewRequest = {
+        name: draft.name,
+        transport: draft.transport,
+        command: draft.command,
+        args: [...draft.args],
+        url: draft.url,
+        headers: draft.headers.map(({ name, value }) => ({ name, value })),
+        env: draft.env.map(({ name, value }) => ({ name, value })),
+        scope: draft.scope,
+        agents: [...draft.agents],
+        project_id: projectId,
+      };
+      return invoke<McpChangeSetPreviewView>("mcp_plan_preview", { request });
+    }}
+    onSave={async (previewId, selectedAgents) => {
+      const request: McpSaveRequest = { preview_id: previewId, selected_agents: [...selectedAgents] };
+      await invoke<McpSaveResultView>("mcp_save", { request });
+    }}
+  />;
   const empty = SURFACE_STATE_FIXTURES[route].empty;
   return (
     <div className="mx-auto flex max-w-[720px] flex-col gap-16 p-24">
@@ -205,7 +241,11 @@ export function App() {
               overlays={overlaySlots.overlays}
             >
               {error === null ? (
-                <RouteBody route={route} onClose={() => appState.navigate("overview", "discard")} />
+                <RouteBody
+                  route={route}
+                  onClose={() => appState.navigate("overview", "discard")}
+                  projectId={appSnapshot.activeProject}
+                />
               ) : (
                 <div className="p-24 text-danger">Backend error: {error}</div>
               )}

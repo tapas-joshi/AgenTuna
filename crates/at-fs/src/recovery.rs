@@ -123,6 +123,9 @@ pub struct PendingJournal {
     /// Indices durably marked complete after each file operation.
     #[serde(default)]
     pub completed_ops: Vec<usize>,
+    /// Parent directories that were absent before the journaled apply began.
+    #[serde(default)]
+    pub created_dirs: Vec<PathBuf>,
     /// Whether every op completed and the caller committed the operation.
     #[serde(default)]
     pub committed: bool,
@@ -474,6 +477,18 @@ pub fn recover_journals(
                     recovery.before_bytes.as_deref(),
                     store_root,
                 )?;
+            }
+        }
+        for directory in &journal.created_dirs {
+            match fs::remove_dir(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(RecoveryError::Io {
+                        path: directory.clone(),
+                        message: error.to_string(),
+                    });
+                }
             }
         }
         callbacks
@@ -1413,6 +1428,7 @@ mod startup_recovery_tests {
                 created_at_unix_seconds: 0,
             }),
             completed_ops,
+            created_dirs: Vec::new(),
             committed: false,
         };
         write_journal(journal_dir, &journal).expect("write journal");
@@ -1545,6 +1561,7 @@ mod startup_recovery_tests {
             temp_files: Vec::new(),
             change_set: None,
             completed_ops: Vec::new(),
+            created_dirs: Vec::new(),
             committed: false,
         };
         journal.journal_version = 1;
@@ -1592,6 +1609,7 @@ mod startup_recovery_tests {
                 created_at_unix_seconds: 0,
             }),
             completed_ops: vec![0],
+            created_dirs: Vec::new(),
             committed: false,
         };
         write_journal(&journal_dir, &journal).expect("write in-flight journal");
@@ -1653,6 +1671,7 @@ mod startup_recovery_tests {
                 created_at_unix_seconds: 0,
             }),
             completed_ops: vec![0],
+            created_dirs: Vec::new(),
             committed: false,
         };
         let journal_path = write_journal(&journal_dir, &journal).expect("write journal");

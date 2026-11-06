@@ -91,6 +91,16 @@ pub struct SkillDetailView {
     pub missing: bool,
     /// Whether AgenTuna owns the file and permits a reviewed edit.
     pub editable: bool,
+    /// Whether the last source check reported an unignored update.
+    pub update_available: bool,
+    /// Installed source commit, when available.
+    pub source_commit_sha: Option<String>,
+    /// Latest checked upstream commit, when available.
+    pub source_remote_sha: Option<String>,
+    /// Time the upstream source was last checked.
+    pub source_last_checked_at: Option<String>,
+    /// Per-skill auto-update mode: off, inherit or on.
+    pub auto_update: String,
 }
 
 /// Loads one indexed skill detail; native-only skills are intentionally not editable here.
@@ -164,9 +174,24 @@ pub fn skill_detail_load(
             operation_summary: None,
         })
         .collect();
-    let source = at_db::sources::source_for(database.connection(), &id)
-        .map_err(|_| CommandError::internal("could not query skill source"))?
+    let source_row = at_db::sources::source_for(database.connection(), &id)
+        .map_err(|_| CommandError::internal("could not query skill source"))?;
+    let source = source_row
+        .as_ref()
         .map(|source| format!("{:?}", source.kind).to_lowercase());
+    let update_available = source_row
+        .as_ref()
+        .is_some_and(|source| source.update_available && source.remote_sha != source.ignored_sha);
+    let auto_update = source_row
+        .as_ref()
+        .and_then(|source| source.auto_update)
+        .map(|mode| match mode {
+            at_db::sources::AutoUpdate::Off => "off",
+            at_db::sources::AutoUpdate::On => "on",
+            at_db::sources::AutoUpdate::Inherit => "inherit",
+        })
+        .unwrap_or("inherit")
+        .to_owned();
     let shadow_chain = at_engine::skill_shadows::indexed_skill_shadows(database.connection())
         .map_err(|_| CommandError::internal("could not query skill shadow chain"))?
         .into_iter()
@@ -218,9 +243,95 @@ pub fn skill_detail_load(
         shadow_chain,
         deployments,
         history,
-        editable: item.managed,
         missing,
+        editable: item.managed,
+        update_available,
+        source_commit_sha: source_row
+            .as_ref()
+            .and_then(|source| source.commit_sha.clone()),
+        source_remote_sha: source_row
+            .as_ref()
+            .and_then(|source| source.remote_sha.clone()),
+        source_last_checked_at: source_row
+            .as_ref()
+            .and_then(|source| source.last_checked_at.clone()),
+        auto_update,
     })
+}
+/// Persists the per-skill automatic update preference.
+#[tauri::command]
+pub fn skill_auto_update_set(
+    state: State<'_, AppState>,
+    item_id: String,
+    mode: String,
+) -> Result<(), CommandError> {
+    let id = item_id
+        .parse::<at_model::ItemId>()
+        .map_err(|_| CommandError::invalid_argument("item_id", "invalid skill identity"))?;
+    let mode = match mode.as_str() {
+        "off" => at_db::sources::AutoUpdate::Off,
+        "on" => at_db::sources::AutoUpdate::On,
+        "inherit" => at_db::sources::AutoUpdate::Inherit,
+        _ => {
+            return Err(CommandError::invalid_argument(
+                "mode",
+                "choose off, inherit or on",
+            ));
+        }
+    };
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let source = at_db::sources::source_for(database.connection(), &id)
+        .map_err(|_| CommandError::internal("could not query skill source"))?
+        .ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::NotFound,
+                "This skill has no update source.",
+            )
+        })?;
+    if !at_db::sources::set_auto_update(database.connection(), &source.id, mode)
+        .map_err(|_| CommandError::internal("could not save update preference"))?
+    {
+        return Err(CommandError::new(
+            CommandErrorCode::NotFound,
+            "The skill update source was removed.",
+        ));
+    }
+    Ok(())
+}
+
+/// Ignores the currently observed upstream commit for this skill.
+#[tauri::command]
+pub fn skill_update_ignore(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<(), CommandError> {
+    let id = item_id
+        .parse::<at_model::ItemId>()
+        .map_err(|_| CommandError::invalid_argument("item_id", "invalid skill identity"))?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let source = at_db::sources::source_for(database.connection(), &id)
+        .map_err(|_| CommandError::internal("could not query skill source"))?
+        .ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::NotFound,
+                "This skill has no update source.",
+            )
+        })?;
+    let remote_sha = source.remote_sha.ok_or_else(|| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "No checked upstream version is available.",
+        )
+    })?;
+    if !at_db::sources::set_ignored_sha(database.connection(), &source.id, Some(&remote_sha))
+        .map_err(|_| CommandError::internal("could not ignore upstream version"))?
+    {
+        return Err(CommandError::new(
+            CommandErrorCode::NotFound,
+            "The skill update source was removed.",
+        ));
+    }
+    Ok(())
 }
 /// Loads a captured version's document and compares it with the current package.
 #[tauri::command]

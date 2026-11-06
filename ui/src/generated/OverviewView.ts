@@ -22,4 +22,20 @@ attention_total: number,
 /**
  * Recent operations, newest first.
  */
-changes: Array<OverviewChangeView>, };
+changes: Array<OverviewChangeView>, 
+/**
+ * Resolved user store directory for copy and path display.
+ */
+user_path: string, 
+/**
+ * Resolved machine-wide Global store directory.
+ */
+global_path: string, 
+/**
+ * Whether this process can write to the Global store.
+ */
+global_writable: boolean, 
+/**
+ * Why Global writes are unavailable, when applicable.
+ */
+global_reason: string | null, };

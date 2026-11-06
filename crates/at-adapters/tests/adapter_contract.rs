@@ -43,7 +43,16 @@ fn seed_paths(
                     .expect("skill content");
             } else if candidate.kind.ends_with("dir") {
                 fs::create_dir_all(&candidate.path).expect("rule directory");
-                fs::write(candidate.path.join("RULES.md"), b"# Rules\n").expect("rule file");
+                if candidate.format.as_deref() == Some("mdc") {
+                    fs::write(
+                        candidate.path.join("sample.mdc"),
+                        b"---\ndescription: \"Sample rule\"\nglobs:\n  - \"src/**\"\nalwaysApply: true\n---\n\n# Rules\n",
+                    )
+                    .expect("mdc rule file");
+                } else {
+                    fs::write(candidate.path.join("RULES.md"), b"# Rules\n")
+                        .expect("rule file");
+                }
             } else {
                 if let Some(parent) = candidate.path.parent() {
                     fs::create_dir_all(parent).expect("rule parent");
@@ -129,7 +138,11 @@ fn every_registered_adapter_obeys_native_adapter_contract() {
             let rule_read = adapter
                 .read_io(ItemKind::Rule, scope, &env)
                 .expect("rule read");
-            assert_eq!(rule_read.content, b"# Rules\n");
+            if id == AgentId::Cursor {
+                assert!(rule_read.content.starts_with(b"---\ndescription:"));
+            } else {
+                assert_eq!(rule_read.content, b"# Rules\n");
+            }
             let rule_deployment = AgentDeployment {
                 kind: ItemKind::Rule,
                 scope,
@@ -156,7 +169,7 @@ fn every_registered_adapter_obeys_native_adapter_contract() {
             }
 
             let after = fs::read(&rule_read.path).expect("rule unchanged");
-            assert_eq!(after, b"# Rules\n");
+            assert_eq!(after, rule_read.content);
         }
     }
 

@@ -22,6 +22,14 @@ describe("PreferencesScreen", () => {
     expect((screen.getByLabelText("Default link mode") as HTMLSelectElement).value).toBe("link");
     expect(screen.getByText("/sandbox/global")).toBeTruthy();
   });
+  test("auto-update is disabled by default and persists through typed settings", async () => {
+    ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : paths);
+    render(<PreferencesScreen />);
+    const toggle = await screen.findByRole("switch", { name: "Automatically update skills" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    expect(ipc.calls.some(call => call.command === "settings_set" && JSON.stringify(call.args).includes("auto_update_skills"))).toBe(true);
+  });
 
   test("rejects retention below 30 without a settings write", async () => {
     ipc.reply = command => Promise.resolve(command === "settings_load" ? settings : command === "network_policy" ? policy : command === "logs_tail" ? emptyLogs : paths);

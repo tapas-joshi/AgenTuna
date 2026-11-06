@@ -43,12 +43,15 @@ url.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 time.workspace = true
+at-git.workspace = true
+at-adapters.workspace = true
 at-secrets.workspace = true
 tokio-util.workspace = true
 zip.workspace = true
 rusqlite.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
 # TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
