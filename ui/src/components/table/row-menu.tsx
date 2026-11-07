@@ -15,15 +15,99 @@ import { cn } from "../cn";
 export interface RowMenuController {
   /** Row id whose menu is open, or `null`. */
   readonly openRowId: string | null;
+  /**
+   * Trigger element of the open menu, or `null` when closed. Feeds
+   * {@link useRowMenuPlacement} so the menu opens on the roomier side.
+   */
+  readonly anchor: Element | null;
   /** True when `rowId` owns the open menu. */
   readonly isOpen: (rowId: string) => boolean;
   /** Opens the menu for `rowId`, or closes it when it is already open. */
-  readonly toggle: (rowId: string) => void;
+  readonly toggle: (rowId: string, anchor?: Element | null) => void;
   /** Closes whichever menu is open. */
   readonly close: () => void;
 }
 
 const MENU_SELECTOR = "[data-row-menu]";
+
+/** Gap between the trigger and its menu, in pixels. */
+const ROW_MENU_GAP = 4;
+/** Tallest a row menu grows before it scrolls its own items. */
+const ROW_MENU_MAX_HEIGHT = 320;
+
+/** Where an open row menu fits: which side of its trigger, and how tall it may be. */
+export interface RowMenuPlacement {
+  /** `below` when opening downward, `above` when the menu flips upward. */
+  readonly side: "above" | "below";
+  /** Tallest the menu may render before its items scroll, in pixels. */
+  readonly maxHeight: number;
+}
+
+/** The visible box of the nearest ancestor that clips, limited to the window. */
+export function rowMenuBounds(anchor: Element): { readonly top: number; readonly bottom: number } {
+  for (let ancestor = anchor.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const style = getComputedStyle(ancestor);
+    if (
+      style.overflowY !== "auto" &&
+      style.overflowY !== "scroll" &&
+      style.overflowY !== "hidden" &&
+      style.overflowY !== "clip"
+    ) {
+      continue;
+    }
+    const box = ancestor.getBoundingClientRect();
+    return { top: Math.max(box.top, 0), bottom: Math.min(box.bottom, window.innerHeight) };
+  }
+  return { top: 0, bottom: window.innerHeight };
+}
+
+/**
+ * Picks the side of the trigger with more room and clamps the menu to it.
+ *
+ * A menu opened from a row near the bottom of the table would otherwise render
+ * past the scroll container and have its last items clipped away, which makes
+ * them unclickable. Choosing the roomier side keeps every item reachable; when
+ * neither side is tall enough the menu scrolls its own items.
+ */
+export function rowMenuPlacement(
+  anchor: DOMRect,
+  bounds: { readonly top: number; readonly bottom: number },
+): RowMenuPlacement {
+  const below = bounds.bottom - anchor.bottom - ROW_MENU_GAP;
+  const above = anchor.top - bounds.top - ROW_MENU_GAP;
+  const side = below >= above ? "below" : "above";
+  const room = side === "below" ? below : above;
+  return { side, maxHeight: Math.max(0, Math.min(ROW_MENU_MAX_HEIGHT, Math.floor(room))) };
+}
+
+/**
+ * Placement for the open menu, measured when it opens and on resize or scroll.
+ *
+ * The listeners exist only while a menu is open: a table renders one trigger
+ * per row, so subscribing per row would add idle wake-ups for no benefit.
+ */
+export function useRowMenuPlacement(anchor: Element | null, open: boolean): RowMenuPlacement {
+  const [placement, setPlacement] = useState<RowMenuPlacement>({
+    side: "below",
+    maxHeight: ROW_MENU_MAX_HEIGHT,
+  });
+
+  useEffect(() => {
+    if (!open || anchor === null) return;
+    const measure = () => {
+      setPlacement(rowMenuPlacement(anchor.getBoundingClientRect(), rowMenuBounds(anchor)));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    document.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      document.removeEventListener("scroll", measure, true);
+    };
+  }, [anchor, open]);
+
+  return placement;
+}
 
 /**
  * Tracks which row's menu is open.
@@ -32,21 +116,24 @@ const MENU_SELECTOR = "[data-row-menu]";
  * closed menu pays nothing.
  */
 export function useRowMenu(): RowMenuController {
-  const [openRowId, setOpenRowId] = useState<string | null>(null);
+  const [openRow, setOpenRow] = useState<{ readonly id: string; readonly anchor: Element | null } | null>(
+    null,
+  );
+  const openRowId = openRow?.id ?? null;
 
   useEffect(() => {
-    if (openRowId === null) {
+    if (openRow === null) {
       return;
     }
     const onPointerDown = (event: PointerEvent) => {
       if (event.target instanceof Element && event.target.closest(MENU_SELECTOR) !== null) {
         return;
       }
-      setOpenRowId(null);
+      setOpenRow(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setOpenRowId(null);
+        setOpenRow(null);
       }
     };
     document.addEventListener("pointerdown", onPointerDown);
@@ -55,15 +142,15 @@ export function useRowMenu(): RowMenuController {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [openRowId]);
+  }, [openRow]);
 
-  const toggle = useCallback((rowId: string) => {
-    setOpenRowId((current) => (current === rowId ? null : rowId));
+  const toggle = useCallback((rowId: string, anchor: Element | null = null) => {
+    setOpenRow((current) => (current?.id === rowId ? null : { id: rowId, anchor }));
   }, []);
-  const close = useCallback(() => setOpenRowId(null), []);
+  const close = useCallback(() => setOpenRow(null), []);
   const isOpen = useCallback((rowId: string) => openRowId === rowId, [openRowId]);
 
-  return { openRowId, isOpen, toggle, close };
+  return { openRowId, anchor: openRow?.anchor ?? null, isOpen, toggle, close };
 }
 
 /** Props accepted by {@link RowMenuTrigger}. */

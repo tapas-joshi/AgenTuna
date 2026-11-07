@@ -88,6 +88,7 @@ fn a_source_changed_between_plan_and_apply_aborts_before_any_backup() -> Result<
         ownership: Ownership::NotInAgenTuna,
     };
     let scan = ScanReport {
+        roots: Vec::new(),
         items: vec![item],
         partial: false,
         skipped_roots: Vec::new(),

@@ -70,7 +70,7 @@ describe("monospace and tabular rendering", () => {
       />,
     );
     const path = container.querySelector("[data-slot='agent-path']");
-    expect(path?.textContent).toBe("/sandbox/home/.claude/skills");
+    expect(path?.textContent).toBe(".claude/skills");
     expect(path?.className).toContain("font-mono");
   });
 

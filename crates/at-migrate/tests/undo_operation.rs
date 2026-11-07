@@ -299,6 +299,7 @@ fn plan_for(
         .map(|item| item.path.clone())
         .collect::<BTreeSet<_>>();
     let scan = ScanReport {
+        roots: Vec::new(),
         items,
         partial: false,
         skipped_roots: Vec::new(),
@@ -331,6 +332,7 @@ fn plan_for_scope(
         .map(|item| item.path.clone())
         .collect::<BTreeSet<_>>();
     let scan = ScanReport {
+        roots: Vec::new(),
         items,
         partial: false,
         skipped_roots: Vec::new(),
@@ -556,6 +558,7 @@ fn undo_of_migration_with_sibling_skills_restores_each_native_tree() {
         })
         .collect::<Vec<_>>();
     let scan = ScanReport {
+        roots: Vec::new(),
         items,
         partial: false,
         skipped_roots: Vec::new(),

@@ -104,18 +104,18 @@ async function openMenu(name = "Server") {
 }
 
 describe("McpListScreen row actions", () => {
-  test("Open on a native-only row routes to adopt instead of detail", async () => {
+  test("Adopt on a native-only row opens AdoptModal dialog instead of navigating to migrate", async () => {
     ipc.reply = (command) =>
       Promise.resolve(
         command === "mcp_server_list"
-          ? list({ servers: [row({ id: "", native: true, name: "Native server" })] })
+          ? list({ servers: [row({ id: "", native: true, name: "Native server", source_path: "/sandbox/home/.claude.json" })] })
           : undefined,
       );
     renderScreen();
     const menu = await openMenu("Native server");
     await userEvent.setup().click(within(menu).getByRole("menuitem", { name: "Adopt…" }));
-    await waitFor(() => expect(app.getSnapshot().route).toBe("migrate"));
-    expect(ipc.calls.some((call) => call.command === "mcp_disable_in_repo")).toBe(false);
+    expect(await screen.findByRole("dialog", { name: /Adopt Native server/i })).toBeTruthy();
+    expect(app.getSnapshot().route).not.toBe("migrate");
   });
 
   test("confirming Disable in this repo previews then applies, and cancelling writes nothing", async () => {

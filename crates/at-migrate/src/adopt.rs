@@ -326,6 +326,7 @@ fn build_adopt_plan(
     slug: &str,
 ) -> Result<MigrationPlan, AdoptError> {
     let scan = ScanReport {
+        roots: Vec::new(),
         items: vec![item.clone()],
         partial: false,
         skipped_roots: Vec::new(),

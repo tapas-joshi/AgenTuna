@@ -79,4 +79,6 @@ pnpm --dir ui build             # typecheck + production bundle
 
 Playwright runs the production Vite preview at 1x and 2x scale. Install the Chromium browser outside the repository with `pnpm --dir ui exec playwright install chromium`, then run `pnpm --dir ui run visual`. A difference over 0.1% of pixels fails the test, which writes the `-expected`, `-actual` and `-diff` images plus one merged `expected | actual | diff` image per failure under `ui/test-results/side-by-side/`. Review changed images under `ui/e2e/snapshots/`; update the baselines deliberately with `UPDATE_SNAPSHOTS=1 cargo test -p at-app --test snapshots` (or `pnpm --dir ui run visual:update`). The informational `visual` CI job runs the comparison on macOS and uploads `ui/test-results` and `ui/playwright-report` when it fails.
 
+The small-window visual suite checks all main screens at 960×640, 1180×720 and 1280×800 (1x), including scrollable tables and reachable actions. Run `pnpm --dir ui exec playwright test e2e/small-window.visual.spec.ts`; screenshots are attached to `ui/playwright-report/`, with baselines only for the Skills list and MCP editor at each size.
+
 Commit changes to `ui/src/generated/`; do not edit those files by hand.

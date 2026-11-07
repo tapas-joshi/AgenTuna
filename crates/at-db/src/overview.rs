@@ -40,6 +40,8 @@ pub struct ScopeOverview {
     pub counts: ScopeCounts,
     /// Newest `operations.created_at` at this scope, when any exist.
     pub last_edited: Option<String>,
+    /// Actor that performed the newest operation at this scope, when any exist.
+    pub last_edited_by: Option<String>,
 }
 
 /// One row of the recent-changes timeline.
@@ -256,26 +258,40 @@ pub fn counts_for_scope(connection: &Connection) -> Result<Vec<(Scope, ScopeCoun
 /// [`DbError`] when the query fails.
 pub fn last_edited(connection: &Connection) -> Result<Vec<ScopeOverview>, DbError> {
     let mut statement = connection.prepare(
-        "SELECT scope, MAX(created_at) AS last_edited \
-           FROM operations \
-          WHERE scope IS NOT NULL \
-          GROUP BY scope",
+        "SELECT o.scope, o.created_at, o.actor \
+           FROM operations o \
+           JOIN (SELECT scope, MAX(created_at) AS latest \
+                   FROM operations \
+                  WHERE scope IS NOT NULL \
+                  GROUP BY scope) newest \
+             ON newest.scope = o.scope AND newest.latest = o.created_at \
+          ORDER BY o.id DESC",
     )?;
     let rows = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut out = Vec::with_capacity(rows.len());
-    for (scope_text, last_edited) in rows {
+    let mut newest: std::collections::BTreeMap<Scope, (Option<String>, Option<String>)> =
+        std::collections::BTreeMap::new();
+    for (scope_text, last_edited, actor) in rows {
         let scope: Scope = scope_text.parse().map_err(DbError::from)?;
-        out.push(ScopeOverview {
+        // Rows arrive newest id first; the first row per scope is the newest operation.
+        newest.entry(scope).or_insert((last_edited, actor));
+    }
+    Ok(newest
+        .into_iter()
+        .map(|(scope, (last_edited, last_edited_by))| ScopeOverview {
             scope,
             counts: ScopeCounts::default(),
             last_edited,
-        });
-    }
-    Ok(out)
+            last_edited_by,
+        })
+        .collect())
 }
 
 /// The recent-changes timeline: newest operations first, with file counts.

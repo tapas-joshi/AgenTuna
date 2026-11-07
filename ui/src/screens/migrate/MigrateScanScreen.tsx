@@ -8,7 +8,7 @@ import type { MigrateConflictView } from "../../generated/MigrateConflictView";
 import type { MigratePlanView } from "../../generated/MigratePlanView";
 import type { MigrateScanItemView } from "../../generated/MigrateScanItemView";
 import type { MigrateScanView } from "../../generated/MigrateScanView";
-import { useAppSnapshot } from "../../state/context";
+import { useAppSnapshot, useAppState } from "../../state/context";
 import { awaitApplyJob, describeCause, describeFailure, failureFromCommandError } from "./applyJob";
 import type { ApplyFailure, ApplyJobBridge } from "./applyJob";
 import { MigrateDoneScreen } from "./MigrateDoneScreen";
@@ -41,6 +41,26 @@ const STEPS: readonly { readonly id: Step | "done"; readonly label: string }[] =
 function itemKey(item: MigrateScanItemView): string {
   return `${item.kind}:${item.path}:${item.content_hash ?? ""}`;
 }
+export function formatPath(path: string): string {
+  if (path.startsWith("~/") || path.startsWith("./")) return path;
+  const homeMatch = path.match(/(?:^|\/)(?:Users\/[^/]+|home\/[^/]+|\.agentuna-shots-sandbox\/home)(.*)/);
+  if (homeMatch?.[1]) {
+    return `~${homeMatch[1]}`;
+  }
+  const projectMatch = path.match(/(?:^|\/)(?:payments-service|ai-coding-config-studio|AgenTuna)(.*)/);
+  if (projectMatch?.[1]) {
+    return `.${projectMatch[1]}`;
+  }
+  return path;
+}
+
+/** Human label for the native item kind a scanned root holds. */
+function rootKindLabel(kind: string): string {
+  if (kind === "mcp_server") return "MCP";
+  if (kind === "rule") return "rules";
+  if (kind === "skill") return "skills";
+  return kind;
+}
 
 /** Short state label for one scanned row, from the backend's authoritative label. */
 function itemState(item: MigrateScanItemView): { readonly label: string; readonly tone: "success" | "warning" | "danger" | "info" } {
@@ -52,7 +72,9 @@ function itemState(item: MigrateScanItemView): { readonly label: string; readonl
 
 /** Migration wizard: scan, resolve conflicts, then the reviewed plan. */
 export function MigrateScanScreen() {
-  const { activeProject } = useAppSnapshot();
+  const { activeProject, screenState } = useAppSnapshot();
+  const app = useAppState();
+  const kindFilter = screenState["migrate:kind"] as string | undefined;
   const [step, setStep] = useState<Step>("scan");
   const [report, setReport] = useState<MigrateScanView | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -211,7 +233,8 @@ export function MigrateScanScreen() {
     }
   }
 
-  const items = report?.items ?? [];
+  const rawItems = report?.items ?? [];
+  const items = kindFilter ? rawItems.filter((i) => i.kind === kindFilter) : rawItems;
   const selectedPaths = useMemo(
     () => items.filter((item) => selected.has(itemKey(item))).map((item) => item.path),
     [items, selected],
@@ -244,14 +267,20 @@ export function MigrateScanScreen() {
     <main aria-label="Move into AgenTuna" className="mx-auto flex min-h-full max-w-[1180px] flex-col gap-16 p-24">
       {step !== "scan" ? null : (
         <header className="flex flex-col gap-4">
-          <p className="m-0 text-12 uppercase tracking-wide text-text-muted">Migrate to AgenTuna</p>
+          <p className="m-0 text-12 uppercase tracking-wide text-text-muted">
+            {kindFilter === "mcp_server" ? "MCP Servers / Import from apps" : "Migrate to AgenTuna"}
+          </p>
           <h1 className="m-0 text-26 font-semibold text-text">
-            {items.length === 0
-              ? "No items outside AgenTuna"
-              : `Found ${items.length} item${items.length === 1 ? "" : "s"} outside AgenTuna`}
+            {kindFilter === "mcp_server"
+              ? "Review before import"
+              : items.length === 0
+                ? "No items outside AgenTuna"
+                : `Found ${items.length} item${items.length === 1 ? "" : "s"} outside AgenTuna`}
           </h1>
           <p className="m-0 text-13 text-text-secondary">
-            They live only in agent folders. Pick what to move into the AgenTuna store.
+            {kindFilter === "mcp_server"
+              ? `${items.length} definition${items.length === 1 ? "" : "s"} across User, Project and Local sources. Nothing is merged or written until you resolve conflicts and approve.`
+              : "They live only in agent folders. Pick what to move into the AgenTuna store."}
           </p>
         </header>
       )}
@@ -399,7 +428,7 @@ export function MigrateScanScreen() {
             </p>
           )}
 
-          <div className="grid min-h-[520px] grid-cols-[320px_1fr] gap-16">
+          <div className="grid min-h-[520px] grid-cols-[320px_1fr] gap-16 max-[1099px]:grid-cols-[minmax(200px,0.6fr)_minmax(0,1.4fr)]">
             <aside aria-label="Scanned folders" className="rounded-10 border border-border bg-raised p-12">
               <h2 className="m-0 text-11 font-semibold uppercase tracking-wide text-text-muted">
                 Scanned folders
@@ -414,31 +443,46 @@ export function MigrateScanScreen() {
               ) : (
                 <ul className="m-0 mt-8 flex list-none flex-col gap-10 p-0">
                   {report.roots.map((root) => (
-                    <li key={root.path}>
+                    <li key={`${root.kind}:${root.path}`}>
                       <p className="m-0 truncate font-mono text-12 text-text" title={root.path}>
                         {root.path}
                       </p>
                       <div className="flex items-center justify-between gap-6">
-                        <span className="text-11 text-text-muted">{root.agents.join(", ")}</span>
-                        <span className={`text-11 ${root.new_items > 0 ? "text-warning" : "text-success"}`}>
-                          {root.new_items > 0 ? `${root.new_items} new` : `${root.in_sync} in sync`}
+                        <span className="text-11 text-text-muted">{root.agents.join(", ")} · {rootKindLabel(root.kind)}</span>
+                        <span
+                          className={`text-11 ${
+                            root.status === "unreadable"
+                              ? "text-danger"
+                              : root.status === "not_present" || root.status === "empty"
+                                ? "text-text-muted"
+                                : root.new_items > 0
+                                  ? "text-warning"
+                                  : "text-success"
+                          }`}
+                        >
+                          {root.status === "not_present"
+                            ? "not present"
+                            : root.status === "unreadable"
+                              ? "unreadable"
+                              : root.status === "empty"
+                                ? "0 new"
+                                : root.new_items > 0
+                                  ? `${root.new_items} new`
+                                  : `${root.in_sync} in sync`}
                         </span>
                       </div>
+                      {root.status === "unreadable" && root.unreadable_reason !== null && (
+                        <p className="m-0 text-11 text-danger">{root.unreadable_reason}</p>
+                      )}
+                      {root.status === "empty" && <p className="m-0 text-11 text-text-muted">empty</p>}
+                      {root.status === "scanned" && (
+                        <p className="m-0 text-11 text-text-muted">
+                          {root.found_items} found{root.skipped_items > 0 ? ` · ${root.skipped_items} skipped` : ""}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
-              )}
-              {report !== null && report.skipped_roots.length > 0 && (
-                <div className="mt-12 border-t border-border pt-8">
-                  <h3 className="m-0 text-11 uppercase tracking-wide text-text-muted">Not found</h3>
-                  <ul className="m-0 mt-4 list-none p-0">
-                    {report.skipped_roots.map((path) => (
-                      <li key={path} className="truncate font-mono text-11 text-text-muted" title={path}>
-                        {path}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
               )}
             </aside>
 
@@ -555,8 +599,18 @@ export function MigrateScanScreen() {
             </section>
           </div>
 
-          <footer className="mt-auto flex items-center justify-between gap-8 border-t border-border pt-16">
-            <Button variant="ghost" onClick={() => setStep("scan")}>
+          <footer className="mt-auto flex items-center justify-end gap-12 border-t border-border pt-16">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (kindFilter) {
+                  app.setScreenState("migrate:kind", undefined);
+                  app.navigate("mcp-list");
+                } else {
+                  setStep("scan");
+                }
+              }}
+            >
               Cancel
             </Button>
             <Button

@@ -212,9 +212,23 @@ pub(crate) fn agents_list_impl(state: &AppState) -> Result<Vec<AgentCardView>, C
         .paths()
         .and_then(|paths| paths.home_dir())
         .unwrap_or(Path::new("/"));
+    let environment = at_adapters::adapter::AgentEnvironment {
+        home: home.to_path_buf(),
+        project: None,
+        variables: Default::default(),
+    };
     records
         .into_iter()
-        .map(|agent| agent_card(database.connection(), &agent, &settings, home))
+        .map(|agent| {
+            agent_card(
+                database.connection(),
+                &agent,
+                &settings,
+                home,
+                state.adapters(),
+                &environment,
+            )
+        })
         .collect()
 }
 
@@ -224,6 +238,8 @@ fn agent_card(
     agent: &at_db::agents::AgentSummary,
     settings: &at_db::settings::Settings,
     home: &Path,
+    registry: &at_adapters::adapter::AgentAdapterRegistry,
+    environment: &at_adapters::adapter::AgentEnvironment,
 ) -> Result<AgentCardView, CommandError> {
     let paths = at_db::agents::list_agent_paths(connection, &agent.id)
         .map_err(|_| CommandError::internal("could not load agent paths"))?;
@@ -262,6 +278,10 @@ fn agent_card(
         .map_err(|_| CommandError::internal("could not compute agent health"))?;
     let copy_fallback = line.copy_fallback;
     let mode = settings.link_mode(&agent.id);
+    // A missing agent has no native format to claim; the design shows an em dash there.
+    let declared_format = (agent.presence != at_db::agents::AgentPresence::NotInstalled)
+        .then(|| native_format_summary(registry, &agent.id, environment))
+        .flatten();
     Ok(AgentCardView {
         id: agent.id.to_string(),
         name: agent
@@ -280,7 +300,7 @@ fn agent_card(
             at_db::agents::AgentPresence::NotInstalled => "not_installed",
         }
         .to_owned(),
-        format: format_summary(&formats),
+        format: declared_format.unwrap_or_else(|| format_summary(&formats)),
         managed_skills: i32::try_from(counts.managed_skills).unwrap_or(i32::MAX),
         managed_servers: i32::try_from(counts.managed_servers).unwrap_or(i32::MAX),
         native_skills: i32::try_from(counts.native_skills).unwrap_or(i32::MAX),
@@ -292,6 +312,63 @@ fn agent_card(
         total: i32::try_from(health.total).unwrap_or(i32::MAX),
         linked_deployments,
     })
+}
+
+/// Native formats one adapter declares, for example `JSON + Markdown skills`.
+///
+/// The paths an adapter publishes are the truth for what the agent reads, even before
+/// any of those files exist, so the card does not fall back to an em dash just because
+/// nothing has been written yet.
+fn native_format_summary(
+    registry: &at_adapters::adapter::AgentAdapterRegistry,
+    agent: &at_model::AgentId,
+    environment: &at_adapters::adapter::AgentEnvironment,
+) -> Option<String> {
+    // Custom agents store their MCP format in the registry row, including `none`; the
+    // adapter's declared paths do not carry that choice, so keep the row-derived summary.
+    if matches!(agent, at_model::AgentId::Custom(_)) {
+        return None;
+    }
+    let adapter = registry.get(agent).ok().flatten()?;
+    let mut mcp_formats: Vec<&'static str> = Vec::new();
+    let mut has_skills = false;
+    for scope in [at_model::Scope::User, at_model::Scope::Project] {
+        for kind in [at_model::ItemKind::Skill, at_model::ItemKind::McpServer] {
+            for candidate in adapter.paths(kind, scope, environment) {
+                if kind == at_model::ItemKind::Skill {
+                    has_skills = true;
+                    continue;
+                }
+                if let Some(label) = candidate.format.as_deref().and_then(mcp_format_label)
+                    && !mcp_formats.contains(&label)
+                {
+                    mcp_formats.push(label);
+                }
+            }
+        }
+    }
+    if mcp_formats.is_empty() && !has_skills {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !mcp_formats.is_empty() {
+        parts.push(mcp_formats.join(" + "));
+    }
+    if has_skills {
+        parts.push("Markdown skills".to_owned());
+    }
+    Some(parts.join(" + "))
+}
+
+/// The label a declared MCP document format gets on the agent card.
+fn mcp_format_label(format: &str) -> Option<&'static str> {
+    match format {
+        "json" => Some("JSON"),
+        "jsonc" => Some("JSONC"),
+        "toml" => Some("TOML"),
+        "yaml" => Some("YAML"),
+        _ => None,
+    }
 }
 
 /// Renders the native format summary shown on an agent card.
@@ -439,7 +516,14 @@ pub fn agent_path_set(
         .into_iter()
         .find(|agent| agent.id == id)
         .ok_or_else(|| CommandError::internal("the agent row disappeared"))?;
-    agent_card(database.connection(), &agent, &settings, &home)
+    agent_card(
+        database.connection(),
+        &agent,
+        &settings,
+        &home,
+        state.adapters(),
+        &environment,
+    )
 }
 
 /// Opens the native folder picker for a missing agent's configuration location.
@@ -1104,5 +1188,35 @@ mod instruction_drift_tests {
             .expect("undo");
         assert_no_drift(&sandbox.state, "after undoing the rule save");
         assert_external_edit_detected(&sandbox.state, &sandbox.path, EXTERNAL.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
+    use at_model::AgentId;
+
+    #[test]
+    fn agent_formats_come_from_the_adapter_not_from_existing_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let environment = AgentEnvironment {
+            home: dir.path().to_path_buf(),
+            project: None,
+            variables: Default::default(),
+        };
+        let registry = AgentAdapterRegistry::register();
+        assert_eq!(
+            native_format_summary(&registry, &AgentId::ClaudeCode, &environment).as_deref(),
+            Some("JSON + Markdown skills")
+        );
+        assert_eq!(
+            native_format_summary(&registry, &AgentId::Codex, &environment).as_deref(),
+            Some("TOML + Markdown skills")
+        );
+        assert_eq!(
+            native_format_summary(&registry, &AgentId::Omp, &environment).as_deref(),
+            Some("JSON + Markdown skills")
+        );
     }
 }

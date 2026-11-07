@@ -90,9 +90,8 @@ test("MCP list renders servers matrix and filter chips", async ({ page }) => {
   await expect(main.getByRole("columnheader", { name: "OMP" })).toBeVisible();
   const visualRow = main.getByRole("row").filter({ hasText: "Visual server" });
   await expect(visualRow.getByRole("group", { name: "omp" }).getByRole("switch")).toBeEnabled();
-  const cursorCell = visualRow.getByRole("group", { name: "Cursor" });
-  await expect(cursorCell).toHaveAttribute("title", "Cursor is not installed on this Mac");
-  await expect(cursorCell.getByRole("switch")).toBeDisabled();
+  // Agents that are not installed get no column: design 06 lists only installed agents.
+  await expect(visualRow.getByRole("group", { name: "Cursor" })).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Unmanaged servers banner" })).toBeVisible();
   await expect(page).toHaveScreenshot("mcp-list-populated.png", { animations: "disabled", caret: "hide" });
 });
@@ -110,7 +109,7 @@ test("MCP detail renders configuration, tools, health history and Loaded by", as
   await expect(detailMain.getByRole("heading", { name: "Visual server" })).toBeVisible();
   await expect(detailMain.getByText("stdio")).toBeVisible();
   await expect(detailMain.getByText("npx")).toBeVisible();
-  await expect(detailMain.getByText("Health")).toBeVisible();
+  await expect(detailMain.getByRole("heading", { name: "Health" })).toBeVisible();
   await expect(detailMain.getByText("Loaded by")).toBeVisible();
   await expect(page).toHaveScreenshot("mcp-detail-populated.png", { animations: "disabled", caret: "hide" });
 });

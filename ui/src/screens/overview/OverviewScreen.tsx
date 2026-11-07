@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Badge } from "../../components/badge";
 import { Button } from "../../components/button";
@@ -69,36 +69,66 @@ function relativeTime(timestamp: string | null): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-function ScopeCard({ card, path, note, selected, setupBusy, onSetUp, onCopy }: { readonly card: OverviewScopeView; readonly path: string; readonly note?: string; readonly selected: boolean; readonly setupBusy: boolean; readonly onSetUp: () => void; readonly onCopy: () => void }) {
+const ACTOR_LABELS: Readonly<Record<string, string>> = {
+  ui: "You",
+  cli: "CLI",
+  migration: "Migration",
+  watcher: "File watcher",
+  updater: "Updater",
+};
+
+/** Narrower scopes are dimmed when the selected scope is broader than they are. */
+const SCOPE_DEPTH: Readonly<Record<string, number>> = { global: 0, user: 1, project: 2, local: 3 };
+
+function ScopeCard({ card, selected, dimmed, setupBusy, onSetUp, onCopy }: { readonly card: OverviewScopeView; readonly selected: boolean; readonly dimmed: boolean; readonly setupBusy: boolean; readonly onSetUp: () => void; readonly onCopy: () => void }) {
   const skills = Number(card.skills);
   const mcp = Number(card.mcp);
   const rules = Number(card.rules);
   const locks = Number(card.locks);
-  const disabled = Number(card.disabled);
   const empty = !card.store_ready;
-  const scopeColor = card.scope === "global" || card.scope === "user" || card.scope === "project" || card.scope === "local" ? `var(--at-color-scope-${card.scope})` : "var(--at-color-border)";
+  const nativeRoots = card.native_roots ?? [];
+  const storeRoot = card.store_root === "" ? "" : card.store_root;
+  const git = card.git_uncommitted;
+  const editedBy = card.last_edited_by === null || card.last_edited_by === undefined ? null : ACTOR_LABELS[card.last_edited_by] ?? card.last_edited_by;
+  const edited = card.last_edited === null ? "Not edited yet" : relativeTime(card.last_edited);
+  const footerLeft = card.scope === "project"
+    ? git === null || git === undefined ? "git: no repository" : git === 0 ? "git: clean" : `git: ${git} uncommitted`
+    : `${locks} locked`;
   return (
-    <article className={`flex h-[214px] flex-col gap-8 rounded-10 border p-12 ${selected ? "bg-raised shadow-[0_0_0_1px_var(--at-color-border)]" : "border-border bg-raised"}`} style={selected ? { borderColor: scopeColor, boxShadow: `0 0 0 1px ${scopeColor}` } : undefined} aria-current={selected ? "true" : undefined}>
-      <div className="flex items-center justify-between">
-        <span className={`rounded-6 px-8 py-4 text-12 font-semibold text-slate-950 ${SCOPE_COLORS[card.scope] ?? "bg-overlay text-text"}`}>{SCOPE_NAMES[card.scope] ?? card.scope}</span>
-        {locks > 0 && <span role="img" className="inline-flex items-center gap-4 text-12 text-warning" aria-label={`${locks} locked items`} title="Global locks protect these items"><svg aria-hidden="true" className="h-12 w-12 fill-none stroke-current" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="8" rx="1" /><path d="M5 7V5a3 3 0 0 1 6 0v2" /></svg>{locks} locked</span>}
+    <article className={`flex min-h-[196px] flex-col gap-12 rounded-10 border border-border p-16 ${selected ? "bg-raised" : "bg-surface"} ${dimmed ? "opacity-65" : ""}`} style={selected ? { borderColor: "var(--at-color-scope-project)", boxShadow: "0 0 0 1px var(--at-color-scope-project)" } : undefined} aria-current={selected ? "true" : undefined} aria-label={`${SCOPE_NAMES[card.scope] ?? card.scope} scope`}>
+      <div className="flex items-center justify-between gap-8">
+        <span className="inline-flex items-center gap-6 rounded-6 bg-overlay px-8 py-4 text-12 font-semibold text-text">
+          <i aria-hidden="true" className={`size-8 shrink-0 rounded-full ${SCOPE_COLORS[card.scope] ?? "bg-overlay"}`} />
+          {SCOPE_NAMES[card.scope] ?? card.scope}
+        </span>
+        {selected && <span className="text-11 font-semibold text-text-secondary">Selected</span>}
       </div>
-      {empty ? <div className="flex flex-1 flex-col justify-center gap-8"><p className="m-0 flex min-w-0 items-center gap-6 font-mono text-12 text-text-muted"><span className="min-w-0 flex-1 truncate" title={path}>{path}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-3 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p><p className="m-0 text-13 text-text-secondary">This scope has no AgenTuna store yet.</p><Button size="sm" className="self-start" loading={setupBusy} aria-label={`Set up the ${SCOPE_NAMES[card.scope] ?? card.scope} scope`} onClick={onSetUp}>Set up this scope</Button></div> : <>
-        <p className="m-0 flex min-w-0 items-center gap-6 font-mono text-12 text-text-muted"><span className="min-w-0 flex-1 truncate" title={path}>{path}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-3 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p>
+      {empty ? <div className="flex flex-1 flex-col justify-center gap-8"><p className="m-0 flex min-w-0 items-center gap-6 font-mono text-12 text-text-muted"><span className="min-w-0 flex-1 truncate" title={storeRoot}>{storeRoot}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-3 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p><p className="m-0 text-13 text-text-secondary">This scope has no AgenTuna store yet.</p><Button size="sm" className="self-start" loading={setupBusy} aria-label={`Set up the ${SCOPE_NAMES[card.scope] ?? card.scope} scope`} onClick={onSetUp}>Set up this scope</Button></div> : <>
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-6">
+            <p className="m-0 min-w-0 flex-1 truncate font-mono text-12 text-text" title={nativeRoots.length > 0 ? nativeRoots.join(" · ") : storeRoot}>
+              {nativeRoots.length > 0 ? nativeRoots.join(" · ") : storeRoot}
+            </p>
+            {card.scope === "user" && nativeRoots.length === 0 && <button type="button" className="shrink-0 rounded-4 px-6 py-2 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}
+          </div>
+          {nativeRoots.length > 0 && <p className="m-0 mt-2 flex min-w-0 items-center gap-6 text-11 text-text-muted"><span className="min-w-0 flex-1 truncate font-mono" title={storeRoot}>Store: {storeRoot}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-2 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p>}
+        </div>
         <div className="grid grid-cols-3 gap-8">
           <Count value={skills} label="skills" />
           <Count value={mcp} label="MCP servers" />
           <Count value={rules} label="instruction files" />
         </div>
-        {note && <p className="m-0 truncate text-11 text-text-muted" title={note}>{note}</p>}
-        <div className="mt-auto flex justify-between border-t border-border pt-8 text-11 text-text-muted"><span>{disabled > 0 ? `${disabled} disabled` : "No disabled items"}</span><span>{relativeTime(card.last_edited)}</span></div>
+        <div className="mt-auto flex justify-between gap-8 border-t border-border pt-8 text-11 text-text-muted">
+          <span className="inline-flex items-center gap-4">{card.scope !== "project" && locks > 0 && <svg aria-hidden="true" className="h-10 w-10 fill-none stroke-current text-warning" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="8" rx="1" /><path d="M5 7V5a3 3 0 0 1 6 0v2" /></svg>}{footerLeft}</span>
+          <span title={card.last_edited ?? undefined}>{editedBy === null ? edited : `${editedBy} · ${edited}`}</span>
+        </div>
       </>}
     </article>
   );
 }
 
 function Count({ value, label }: { readonly value: number; readonly label: string }) {
-  return <div><strong className="block font-mono text-20 text-text">{value}</strong><span className="text-11 text-text-muted">{label}</span></div>;
+  return <div><strong className="block font-mono text-22 text-text">{value}</strong><span className="text-11 text-text-muted">{label}</span></div>;
 }
 
 function AttentionStatusBadge({ row }: { readonly row: OverviewView["attention"][number] }) {
@@ -156,6 +186,60 @@ function AttentionList({ entries, total, onActivate }: { readonly entries: Overv
   </>;
 }
 
+/** Human verb for any operation kind that still carries a planner-style summary. */
+const CHANGE_VERBS: Readonly<Record<string, string>> = {
+  edit_mcp: "Updated MCP server",
+  edit_skill: "Updated skill",
+  edit_rule: "Updated instruction file",
+  deploy: "Deployed",
+  undeploy: "Removed deployment of",
+  migrate: "Migrated",
+  adopt: "Adopted",
+  restore: "Restored",
+  backup: "Backed up",
+  update: "Updated",
+  drift_adopt: "Adopted drift for",
+  drift_restore: "Restored",
+  delete: "Deleted",
+  promote: "Promoted",
+  move: "Moved",
+  preset_apply: "Applied preset",
+  preset_unapply: "Unapplied preset",
+  lock: "Locked",
+  unlock: "Unlocked",
+  global_write: "Enabled Global writes for",
+};
+
+/** The item name a touched path implies, for legacy rows with no readable summary. */
+function itemNameFromPath(path: string | undefined): string | null {
+  if (!path) return null;
+  const parts = path.split("/").filter(Boolean);
+  const skills = parts.lastIndexOf("skills");
+  const skillName = skills >= 0 ? parts[skills + 1] : undefined;
+  if (skillName) return skillName;
+  const base = parts.at(-1);
+  if (!base) return null;
+  return base.replace(/\.(md|json|toml|ya?ml)$/i, "");
+}
+
+/** One timeline line. Stored summaries win; planner-era rows map to the same wording. */
+function changeLine(row: OverviewView["changes"][number]): string {
+  const summary = row.summary?.trim() ?? "";
+  if (summary && !/^Plan /i.test(summary) && !/\(one operation\)/i.test(summary)) return summary;
+  const name = itemNameFromPath(row.files[0]?.path);
+  const verb = CHANGE_VERBS[row.kind];
+  if (verb) return name ? `${verb} ${name}` : verb;
+  return summary && !/^Plan /i.test(summary) ? summary : name ? `Changed ${name}` : "Changed configuration";
+}
+
+/** Shortens a touched-file path to its last two components for the timeline line. */
+function shortChangePath(path: string | undefined): string | null {
+  if (!path) return null;
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 2) return parts.join("/");
+  return `…/${parts.slice(-2).join("/")}`;
+}
+
 function ChangesTimeline({ entries }: { readonly entries: OverviewView["changes"] }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   if (entries.length === 0) return <p className="m-0 py-24 text-13 text-text-muted">No changes yet.</p>;
@@ -172,7 +256,9 @@ function ChangesTimeline({ entries }: { readonly entries: OverviewView["changes"
     const rows = groups.get(group);
     return rows?.length ? <section key={group} aria-label={group}><h3 className="mb-8 mt-0 text-11 font-semibold uppercase tracking-wide text-text-muted">{group}</h3><ol className="m-0 list-none border-l border-border p-0 pl-16">{rows.map((row) => {
       const isExpanded = expanded.has(row.id);
-      return <li key={row.id} className="relative mb-12 last:mb-0"><span aria-hidden="true" className="absolute -left-[20px] top-4 h-8 w-8 rounded-full bg-scope-project ring-2 ring-raised"/><button type="button" aria-expanded={isExpanded} className="w-full bg-transparent p-0 text-left focus-visible:outline-2 focus-visible:outline-focus" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; })}><strong className="block text-13 text-text">{row.summary ?? row.kind}</strong><span className="text-11 text-text-muted">{relativeTime(row.created_at)} · {row.file_count} files{row.scope ? ` · ${SCOPE_NAMES[row.scope] ?? row.scope}` : ""}</span></button>{isExpanded && <ul className="mt-6 list-none space-y-4 p-0 text-11 text-text-muted">{row.files.length === 0 ? <li>No file paths recorded</li> : row.files.map((file, index) => <li key={`${file.path}-${index}`} className="flex flex-wrap items-center gap-6"><code className="break-all">{file.path}</code>{file.scope && <span className={`shrink-0 whitespace-nowrap rounded-4 px-4 py-2 ${SCOPE_COLORS[file.scope] ?? "bg-overlay"}`}>{SCOPE_NAMES[file.scope] ?? file.scope}</span>}</li>)}</ul>}</li>;
+      const file = shortChangePath(row.files[0]?.path);
+      const scopeName = row.scope === null ? null : SCOPE_NAMES[row.scope] ?? row.scope;
+      return <li key={row.id} className="relative mb-12 last:mb-0"><span aria-hidden="true" title={scopeName ?? undefined} className={`absolute -left-[20px] top-4 h-8 w-8 rounded-full ring-2 ring-raised ${SCOPE_COLORS[row.scope ?? ""] ?? "bg-scope-project"}`}/><button type="button" aria-expanded={isExpanded} title={row.files[0]?.path} className="w-full bg-transparent p-0 text-left focus-visible:outline-2 focus-visible:outline-focus" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; })}><strong className="block text-13 text-text">{changeLine(row)}</strong><span className="text-11 text-text-muted">{relativeTime(row.created_at)}{file === null ? "" : ` · ${file}`}{scopeName === null ? null : <span className="sr-only"> · {scopeName} scope</span>}</span></button>{isExpanded && <ul className="mt-6 list-none space-y-4 p-0 text-11 text-text-muted">{row.files.length === 0 ? <li>No file paths recorded</li> : row.files.map((entry, index) => <li key={`${entry.path}-${index}`} className="flex flex-wrap items-center gap-6"><code className="break-all">{entry.path}</code>{entry.scope && <span className="shrink-0 whitespace-nowrap rounded-4 bg-overlay px-4 py-2 text-text-secondary">{SCOPE_NAMES[entry.scope] ?? entry.scope}</span>}</li>)}</ul>}</li>;
     })}</ol></section> : null;
   })}</div>;
 }
@@ -226,15 +312,43 @@ export function ProjectSyncPanel({ projectId, itemId }: { readonly projectId: st
   </section>;
 }
 
-function OverviewContent({ data, activeScope, projectId, onReload }: { readonly data: OverviewView; readonly activeScope: string; readonly projectId: string | null; readonly onReload: () => void }) {
-  const total = data.scopes.reduce((sum, scope) => sum + Number(scope.skills) + Number(scope.mcp) + Number(scope.rules), 0);
-  const percentages = useMemo(() => data.scopes.map((scope) => ({ ...scope, value: total === 0 ? 0 : (Number(scope.skills) + Number(scope.mcp) + Number(scope.rules)) / total * 100 })), [data.scopes, total]);
+/** Title, subtitle, CTA and summary heading for each scope the top bar selects. */
+function overviewCopy(scope: string, projectName: string | null): { readonly title: string; readonly subtitle: string; readonly cta: string; readonly section: string } {
+  if (scope === "user") {
+    return {
+      title: "Overview · User scope",
+      subtitle: "What loads for you in every repo. A repo's Project files can still override these.",
+      cta: "+ Add to User",
+      section: "Effective for you, every repo",
+    };
+  }
+  if (scope === "global") {
+    return {
+      title: "Overview · Global scope",
+      subtitle: "What every user and agent on this Mac gets. Locked values can't be overridden below.",
+      cta: "+ Add to Global",
+      section: "Effective for everyone on this Mac",
+    };
+  }
+  const where = projectName === null || projectName === "" ? "this repo" : projectName;
+  return {
+    title: "Overview",
+    subtitle: `What your agents load in ${where}. Nearest scope wins: Project, then User, then Global.`,
+    cta: "+ Add to this repo",
+    section: "Effective in this repo",
+  };
+}
+
+function OverviewContent({ data, activeScope, projectId, projectName, onReload }: { readonly data: OverviewView; readonly activeScope: string; readonly projectId: string | null; readonly projectName: string | null; readonly onReload: () => void }) {
   const app = useAppState();
+  const cards = data.scopes.filter((scope) => scope.scope !== "local");
+  const effective = data.effective ?? { skills: 0, mcp: 0, rules: 0, shadowed_skills: 0, disabled: 0 };
+  const total = Number(effective.skills) + Number(effective.mcp) + Number(effective.rules);
+  const scopeTotals = data.scopes.map((scope) => ({ ...scope, value: Number(scope.skills) + Number(scope.mcp) + Number(scope.rules) }));
+  const scopeCopy = overviewCopy(activeScope, projectName);
+  const activeDepth = SCOPE_DEPTH[activeScope] ?? SCOPE_DEPTH.project ?? 2;
   const [globalStatus, setGlobalStatus] = useState(data.global_store.status);
   const [enablingGlobal, setEnablingGlobal] = useState(false);
-  const cards = data.scopes.filter((scope) => scope.scope !== "local");
-  const scopePath = (scope: OverviewScopeView) => scope.scope === "project" ? "./.agentuna" : scope.scope === "user" ? data.user_path : scope.scope === "global" ? data.global_store.path : "Local store";
-  const globalNote = `Source: ${data.global_store.source} · ${data.global_store.locks.length} lock${data.global_store.locks.length === 1 ? "" : "s"}`;
   const copyUserPath = () => { void navigator.clipboard.writeText(data.user_path).catch(() => undefined); };
   const requestGlobalWrites = () => {
     setEnablingGlobal(true);
@@ -347,15 +461,30 @@ function OverviewContent({ data, activeScope, projectId, onReload }: { readonly 
       () => openFallback(),
     );
   };
+  const disabledLabel = activeScope === "project" ? "in this repo" : activeScope === "user" ? "for you" : activeScope === "global" ? "for everyone" : "in this scope";
+  const shadowed = Number(effective.shadowed_skills);
+  const disabled = Number(effective.disabled);
+  const effectiveParts: string[] = [];
+  if (shadowed > 0) effectiveParts.push(`${shadowed} skill${shadowed === 1 ? "" : "s"} shadowed by a nearer scope`);
+  if (disabled > 0) effectiveParts.push(`${disabled} item${disabled === 1 ? "" : "s"} disabled ${disabledLabel}`);
+  const effectiveLine = effectiveParts.length > 0 ? effectiveParts.join(" · ") : "No shadowed or disabled items.";
   return <div className="flex flex-col gap-24">
-    <header className="flex flex-wrap items-start justify-between gap-16"><div><h1 className="m-0 text-26 font-semibold text-text">Overview</h1><p className="mb-0 mt-8 text-13 text-text-secondary">What your agents load here. Nearest scope wins: Project, then User, then Global.</p></div><Button variant="primary" onClick={() => app.navigate("add-skill")}>Add to this repo</Button></header>
+    <header className="flex flex-wrap items-start justify-between gap-16"><div><h1 className="m-0 text-26 font-semibold text-text">{scopeCopy.title}</h1><p className="mb-0 mt-8 text-13 text-text-secondary">{scopeCopy.subtitle}</p></div><Button variant="primary" onClick={() => app.navigate("add-skill")}>{scopeCopy.cta}</Button></header>
     {(data.startup_warnings ?? []).map((warning) => <section key={`${warning.kind}-${warning.path ?? ""}`} role="status" aria-label="Startup warning" className="rounded-8 border border-warning/40 bg-warning/10 p-12"><p className="m-0 text-13 text-text">{warning.message}</p>{warning.path && <p className="mb-0 mt-4 break-words font-mono text-11 text-text-muted">{warning.path}</p>}</section>)}
     {activeScope === "global" && globalStatus !== "available" && <section role="status" className="flex flex-wrap items-center justify-between gap-12 rounded-8 border border-warning/40 bg-warning/10 p-12"><span className="text-13 text-text">Global store is read-only{data.global_store.reason ? `: ${data.global_store.reason}` : "."}</span><Button size="sm" variant="secondary" loading={enablingGlobal} onClick={requestGlobalWrites}>Enable global writes</Button></section>}
-    <section aria-label="Scope stores" className="grid grid-cols-1 gap-16 md:grid-cols-3">{cards.map((card) => <ScopeCard key={card.scope} card={card} path={scopePath(card)} selected={activeScope === card.scope} note={card.scope === "global" ? globalNote : undefined} setupBusy={setupBusy && setupCard?.scope === card.scope} onSetUp={() => void startSetup(card)} onCopy={copyUserPath} />)}</section>
+    <section aria-label="Scope stores" className="grid grid-cols-1 gap-16 md:grid-cols-3">{cards.map((card) => <ScopeCard key={card.scope} card={card} selected={activeScope === card.scope} dimmed={(SCOPE_DEPTH[card.scope] ?? 0) > activeDepth} setupBusy={setupBusy && setupCard?.scope === card.scope} onSetUp={() => void startSetup(card)} onCopy={copyUserPath} />)}</section>
     {setupError && <p role="alert" className="m-0 rounded-8 border border-danger/40 bg-danger/10 p-12 text-13 text-text">{setupError}</p>}
-    <section className="grid gap-16 rounded-10 border border-border bg-raised p-16 md:grid-cols-2" aria-label="Effective configuration summary">
-      <div><h2 className="m-0 text-14 font-semibold text-text">Effective in this repo</h2><p className="mb-0 mt-8 font-mono text-16 font-semibold text-text">{total} indexed items</p><p className="mb-0 mt-4 text-12 text-text-muted">Skills, servers and instruction files across scopes</p></div>
-      <div><div className="mb-8 flex justify-between text-12 text-text-secondary"><span>Where they come from</span><span>{total} items</span></div><div className="flex h-8 overflow-hidden rounded-full bg-overlay" role="img" aria-label="Items by scope">{percentages.map((scope) => scope.value > 0 && <span key={scope.scope} className={SCOPE_COLORS[scope.scope] ?? "bg-overlay"} style={{ width: `${scope.value}%` }} />)}</div><div className="mt-8 flex flex-wrap gap-12 text-11 text-text-muted">{percentages.map((scope) => <span key={scope.scope} className="inline-flex items-center gap-4"><i aria-hidden="true" className={`h-8 w-8 rounded-full ${SCOPE_COLORS[scope.scope] ?? "bg-overlay"}`} />{SCOPE_NAMES[scope.scope] ?? scope.scope} {Math.round(scope.value)}%</span>)}</div></div>
+    <section className="grid gap-16 rounded-10 border border-border bg-surface p-16 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]" aria-label="Effective configuration summary">
+      <div>
+        <h2 className="m-0 text-14 font-semibold text-text">{scopeCopy.section}</h2>
+        <p className="mb-0 mt-10 text-18 font-semibold text-text">{Number(effective.skills)} skills · {Number(effective.mcp)} MCP servers · {Number(effective.rules)} instruction file{Number(effective.rules) === 1 ? "" : "s"}</p>
+        <p className="mb-0 mt-6 text-12 text-text-muted">{effectiveLine}</p>
+      </div>
+      <div>
+        <div className="mb-8 flex justify-between text-12 text-text-secondary"><span>Where they come from</span><span>{total} items</span></div>
+        <div className="flex h-10 overflow-hidden rounded-full bg-overlay" role="img" aria-label={`Items by scope: ${scopeTotals.map((scope) => `${SCOPE_NAMES[scope.scope] ?? scope.scope} ${scope.value}`).join(", ")}`}>{scopeTotals.map((scope) => scope.value > 0 && <span key={scope.scope} className={SCOPE_COLORS[scope.scope] ?? "bg-overlay"} style={{ width: `${total === 0 ? 0 : scope.value / total * 100}%` }} />)}</div>
+        <div className="mt-10 flex flex-wrap gap-x-16 gap-y-6 text-12 text-text-muted">{scopeTotals.map((scope) => <span key={scope.scope} aria-label={`${SCOPE_NAMES[scope.scope] ?? scope.scope} ${scope.value} items`} className="inline-flex items-center gap-6"><i aria-hidden="true" className={`size-8 rounded-full ${SCOPE_COLORS[scope.scope] ?? "bg-overlay"}`} />{SCOPE_NAMES[scope.scope] ?? scope.scope} <strong className="font-mono font-medium text-text-secondary">{scope.value}</strong></span>)}</div>
+      </div>
     </section>
     <div className="grid gap-16 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
       <section className="rounded-10 border border-border bg-raised p-16">
@@ -399,7 +528,7 @@ function OverviewContent({ data, activeScope, projectId, onReload }: { readonly 
 export const scopeScrollPositions = new Map<string, number>();
 
 /** Overview uses only the typed Rust query; errors and loading are never hidden by sample data. */
-export function OverviewScreen() {
+export function OverviewScreen({ projectName = null }: { readonly projectName?: string | null } = {}) {
   const { scope, activeProject } = useAppSnapshot();
   const activeScope = scope;
   const resource = useAsyncResource(() => loadOverview(activeScope), { deps: [activeScope], isEmpty: (data) => !data || !Array.isArray(data.scopes) || data.scopes.length === 0 });
@@ -429,7 +558,7 @@ export function OverviewScreen() {
   return (
     <main aria-label="Overview" className="mx-auto flex w-full max-w-[1240px] flex-col gap-24 p-24">
       <AsyncBoundary state={resource} loadingTitle="Loading overview" loadingBody="Reading scope and change summaries" skeletonRows={3} errorTitle="Overview could not load" minHeight={360} empty={{ title: "No scope data", body: "The overview query returned no scope summaries." }}>
-        {(data) => <OverviewContent key={activeScope} data={data} activeScope={activeScope} projectId={activeProject} onReload={resource.retry} />}
+        {(data) => <OverviewContent key={activeScope} data={data} activeScope={activeScope} projectId={activeProject} projectName={projectName} onReload={resource.retry} />}
       </AsyncBoundary>
     </main>
   );

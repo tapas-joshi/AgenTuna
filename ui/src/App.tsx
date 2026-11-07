@@ -5,6 +5,7 @@ import type { AppInfo } from "./generated/AppInfo";
 import type { AgentCardView } from "./generated/AgentCardView";
 import type { InstructionCreateOptions } from "./generated/InstructionCreateOptions";
 import type { ProjectView } from "./generated/ProjectView";
+import type { SourceKind } from "./generated/SourceKind";
 import { ScopeSwitcher } from "./components/scope_switcher/ScopeSwitcher";
 import type { StateRouteId } from "./components/states";
 import { Modal, ModalHost, OverlayStackProvider } from "./overlays";
@@ -156,20 +157,25 @@ function RouteBody({
   route,
   onClose,
   projectId,
+  projectName,
   scope,
   localEnabled,
   globalLocked,
+  initialSkillSource,
 }: {
   readonly route: StateRouteId;
   readonly onClose: () => void;
   readonly projectId: string | null;
+  readonly projectName: string | null;
   readonly scope: ScopeToken;
   readonly localEnabled: boolean;
   readonly globalLocked: boolean;
+  /** Source selected by the button that opened the add-skill wizard. */
+  readonly initialSkillSource: SourceKind | null;
 }) {
-  if (route === "overview") return <OverviewScreen />;
+  if (route === "overview") return <OverviewScreen projectName={projectName} />;
   if (route === "skill-detail") return <SkillDetailScreen />;
-  if (route === "add-skill") return <AddSkillWizard onClose={onClose} projectId={projectId} initialScope={scope} />;
+  if (route === "add-skill") return <AddSkillWizard onClose={onClose} projectId={projectId} initialScope={scope} initialSource={initialSkillSource} />;
   if (route === "secrets") return <SecretInventoryScreen />;
   if (route === "instructions") return <InstructionsScreen />;
   if (route === "agents") return <AgentsScreen />;
@@ -367,11 +373,28 @@ export function App() {
               {error === null ? (
                 <RouteBody
                   route={route}
-                  onClose={() => appState.navigate("overview", "discard")}
+                  onClose={() => {
+                    if (appSnapshot.routeStack.length > 1) {
+                      appState.back("discard");
+                    } else {
+                      appState.navigate("mcp-list", "discard");
+                    }
+                  }}
                   projectId={appSnapshot.activeProject}
+                  projectName={projects.find((project) => project.id === appSnapshot.activeProject)?.name ?? null}
                   scope={appSnapshot.scope}
                   localEnabled={currentScopeAvailability?.local_available ?? false}
                   globalLocked={currentScopeAvailability !== null && !currentScopeAvailability.global_writable}
+                  initialSkillSource={
+                    appSnapshot.screenState["add-skill:source"] === "git" ||
+                    appSnapshot.screenState["add-skill:source"] === "new" ||
+                    appSnapshot.screenState["add-skill:source"] === "library" ||
+                    appSnapshot.screenState["add-skill:source"] === "marketplace" ||
+                    appSnapshot.screenState["add-skill:source"] === "folder" ||
+                    appSnapshot.screenState["add-skill:source"] === "zip"
+                      ? (appSnapshot.screenState["add-skill:source"] as SourceKind)
+                      : null
+                  }
                 />
               ) : (
                 <div className="p-24 text-danger">Backend error: {error}</div>

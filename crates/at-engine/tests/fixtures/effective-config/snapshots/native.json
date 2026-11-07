@@ -8,6 +8,7 @@
           {
             "agent": "claude_code",
             "loads": true,
+            "path": "<agent>/skills/formatter/SKILL.md",
             "state": "native"
           }
         ],

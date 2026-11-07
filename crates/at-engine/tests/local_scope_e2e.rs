@@ -558,6 +558,24 @@ fn disable_inherited_tombstones_and_safe_writes_e2e() {
     assert_eq!(entry.kind, ItemKind::Skill);
     assert_eq!(entry.agents, DisabledAgents::All);
 
+    // Acceptance 3 second half: repeating the same disable is a successful no-op that writes
+    // no byte and records no new operation.
+    let after_first_disable =
+        fs::read(project_layout.manifest_path()).expect("read store after first disable");
+    disable(
+        &project_layout,
+        &locks,
+        user_skill_id,
+        ItemKind::Skill,
+        DisabledAgents::All,
+    )
+    .expect("second identical disable succeeds");
+    assert_eq!(
+        fs::read(project_layout.manifest_path()).expect("read store after second disable"),
+        after_first_disable,
+        "a repeated identical disable writes nothing"
+    );
+
     // Acceptance 5: effective-config output exposes a DisabledHere row with tombstone scope and agents list
     let mut tombstones = ManifestTombstones::new();
     tombstones.insert_manifest(Scope::Project, &project_loaded.manifest);
@@ -792,5 +810,100 @@ fn deleting_the_local_store_reconciles_the_index_on_rescan() {
             .iter()
             .all(|item| !item.definition.path.starts_with(&local_root)),
         "no winner references the removed Local store"
+    );
+}
+
+/// Content hash of every file plus the target of every symlink under `root`.
+fn tree_hash(root: &Path) -> Vec<(String, String)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .expect("read tree")
+            .map(Result::unwrap)
+            .collect();
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(base)
+                .expect("path under base")
+                .display()
+                .to_string();
+            let meta = fs::symlink_metadata(&path).expect("tree metadata");
+            if meta.file_type().is_symlink() {
+                out.push((
+                    relative,
+                    format!(
+                        "link:{}",
+                        fs::read_link(&path).expect("link target").display()
+                    ),
+                ));
+            } else if meta.is_dir() {
+                walk(base, &path, out);
+            } else {
+                out.push((
+                    relative,
+                    at_fs::sha256_hex(&fs::read(&path).expect("bytes")),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn disable_then_enable_leaves_the_deployed_tree_byte_identical() {
+    use at_fs::LinkMode;
+
+    let home = TestHome::new().expect("temp home");
+    let project = home.project("deployment-set").expect("project");
+    init_repository(project.root());
+    let user_layout = StoreLayout::new(Scope::User, home.home().join(".agentuna"));
+    user_layout.init().expect("user layout init");
+    let project_layout = StoreLayout::new(Scope::Project, project.root().join(".agentuna"));
+    project_layout.init().expect("project layout init");
+    let skill_doc = write_skill(
+        user_layout.root(),
+        "code-review",
+        "code-review",
+        "Deployment-set fixture.",
+    );
+    let item_id = ItemId::new();
+    let agent_root = home.home().join(".claude/skills");
+    fs::create_dir_all(&agent_root).expect("agent skills root");
+    let target = agent_root.join("code-review");
+    at_fs::link_dir(
+        skill_doc.parent().expect("skill folder"),
+        &target,
+        LinkMode::Link,
+    )
+    .expect("deploy the skill");
+    let before = tree_hash(&agent_root);
+    assert_eq!(before.len(), 1, "one deployed link");
+
+    let locks = MemoryLockStore::new();
+    disable(
+        &project_layout,
+        &locks,
+        item_id,
+        ItemKind::Skill,
+        DisabledAgents::All,
+    )
+    .expect("disable the inherited skill");
+    assert_eq!(
+        tree_hash(&agent_root),
+        before,
+        "disabling writes a tombstone and never rewrites the deployment"
+    );
+
+    assert!(
+        enable(&project_layout, &locks, item_id).expect("re-enable"),
+        "the tombstone was removed"
+    );
+    assert_eq!(
+        tree_hash(&agent_root),
+        before,
+        "re-enabling restores the exact deployment set"
     );
 }

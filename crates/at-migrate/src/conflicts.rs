@@ -425,6 +425,7 @@ mod tests {
     #[test]
     fn equal_normalized_copies_are_formatting_only() {
         let report = ScanReport {
+            roots: Vec::new(),
             items: vec![
                 copy("a.md", "raw-a", "same", AgentId::ClaudeCode),
                 copy("b.md", "raw-b", "same", AgentId::Codex),
@@ -445,6 +446,7 @@ mod tests {
     #[test]
     fn identical_copies_collapse_into_one_equal_group() {
         let report = ScanReport {
+            roots: Vec::new(),
             items: vec![
                 copy("a.md", "same", "same", AgentId::ClaudeCode),
                 copy("b.md", "same", "same", AgentId::Codex),

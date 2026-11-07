@@ -22,8 +22,8 @@ export type ScopeToken = "global" | "user" | "project" | "local";
 /** Spacing steps in pixels (density 7: compact desktop spacing). */
 export type SpacingToken = 2 | 4 | 8 | 12 | 16 | 24 | 32;
 
-/** Corner radii in pixels. */
-export type RadiusToken = 3 | 6 | 10;
+/** Corner radii in pixels. The number is the radius: `rounded-8` is 8px. */
+export type RadiusToken = 2 | 3 | 4 | 6 | 8 | 10 | 12;
 
 /**
  * Font sizes in pixels. `11`-`22` are the UI scale from TU-001; `14`, `16`
@@ -134,9 +134,13 @@ const dark: ThemeTokens = {
     32: "32px",
   },
   radius: {
+    2: "2px",
     3: "3px",
+    4: "4px",
     6: "6px",
+    8: "8px",
     10: "10px",
+    12: "12px",
   },
   fontSize: {
     11: "11px",

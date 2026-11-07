@@ -318,10 +318,10 @@ pub trait AgentAdapter: Send + Sync {
         )
     }
 
-    /// Lists native skill folders including links into an AgenTuna store.
+    /// Lists native skills from one candidate root, including AgenTuna store links.
     ///
-    /// The migration scan uses this to label store deployments as Managed; the skills list
-    /// uses [`Self::list_native_skills`], which omits them.
+    /// Migration scans each root independently so one failure does not discard other results;
+    /// adapter-specific exclusions still apply.
     ///
     /// # Errors
     /// Returns [`AgentError::Permission`] or [`AgentError::Io`] when a candidate root cannot
@@ -330,14 +330,13 @@ pub trait AgentAdapter: Send + Sync {
         &self,
         env: &AgentEnvironment,
         store_roots: &[PathBuf],
+        root: AgentPathCandidate,
     ) -> Result<Vec<crate::native_skills::NativeSkill>, AgentError> {
         crate::native_skills::list_native_skills_with_options(
             &self.id(),
             env,
             store_roots,
-            self.paths(ItemKind::Skill, Scope::User, env)
-                .into_iter()
-                .chain(self.paths(ItemKind::Skill, Scope::Project, env)),
+            std::iter::once(root),
             true,
         )
     }

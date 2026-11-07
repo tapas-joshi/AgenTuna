@@ -23,6 +23,21 @@ pub struct AgentLoads {
     pub installed: bool,
     /// Items the adapter confirms this agent renders, keyed by logical identity.
     pub loaded: BTreeMap<LogicalId, ItemState>,
+    /// Paths from which the agent loads this item, or where it is deployed.
+    pub paths: BTreeMap<LogicalId, String>,
+}
+
+impl AgentLoads {
+    /// Creates an `AgentLoads` record with empty paths.
+    #[must_use]
+    pub fn new(agent: AgentId, installed: bool, loaded: BTreeMap<LogicalId, ItemState>) -> Self {
+        Self {
+            agent,
+            installed,
+            loaded,
+            paths: BTreeMap::new(),
+        }
+    }
 }
 
 /// Inputs loaded by the caller from canonical stores, adapters and agent discovery.
@@ -83,6 +98,9 @@ pub struct EffectiveAgentState {
     pub state: ItemState,
     /// Whether the item is loaded by this agent.
     pub loads: bool,
+    /// Path from which the agent loads this item, or where it is deployed.
+    #[ts(type = "string | null")]
+    pub path: Option<String>,
 }
 
 /// Lock metadata shown with an effective item.
@@ -271,13 +289,15 @@ pub fn query(input: EffectiveQuery<'_>) -> EffectiveConfig {
             }
             if let Some(agent) = context {
                 let loaded_state = agent.loaded.get(&item.logical_id).copied();
+                let path = agent.paths.get(&item.logical_id).cloned();
                 states_by_id
                     .entry(item.logical_id.clone())
                     .or_default()
                     .push(EffectiveAgentState {
                         agent: agent.agent.clone(),
                         state: loaded_state.unwrap_or(ItemState::Off),
-                        loads: loaded_state.is_some(),
+                        loads: loaded_state.is_some() && loaded_state != Some(ItemState::Off),
+                        path,
                     });
             }
             resolved_by_id
@@ -314,6 +334,7 @@ pub fn query(input: EffectiveQuery<'_>) -> EffectiveConfig {
                     agent: agent.agent.clone(),
                     state: ItemState::Off,
                     loads: false,
+                    path: None,
                 });
             }
         }

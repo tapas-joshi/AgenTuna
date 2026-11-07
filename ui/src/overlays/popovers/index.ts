@@ -7,3 +7,4 @@ export type { PopoverAlign, PopoverProps, PopoverSide } from "./Popover";
 export { isAnchorRect, virtualAnchorFromRect } from "./anchor";
 export type { AnchorRect, MeasurableAnchor, VirtualAnchor } from "./anchor";
 export { EnableSkillPopover } from "./EnableSkillPopover";
+export type { AgentChoice, EnableSkillPopoverProps } from "./EnableSkillPopover";

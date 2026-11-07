@@ -40,6 +40,18 @@ const AGENT_NAME: Readonly<Record<string, string>> = {
   omp: "omp",
   cursor: "Cursor",
 };
+function formatPath(path: string): string {
+  if (path.startsWith("~/") || path.startsWith("./")) return path;
+  const homeMatch = path.match(/(?:^|\/)(?:Users\/[^/]+|home\/[^/]+|\.agentuna-shots-sandbox\/home)(.*)/);
+  if (homeMatch?.[1]) {
+    return `~${homeMatch[1]}`;
+  }
+  const projectMatch = path.match(/(?:^|\/)(?:payments-service|ai-coding-config-studio|AgenTuna)(.*)/);
+  if (projectMatch?.[1]) {
+    return `.${projectMatch[1]}`;
+  }
+  return path;
+}
 
 /** Human label for one scope's why-trace step. */
 function stepLabel(scope: string, status: unknown): string {
@@ -291,7 +303,7 @@ export function EffectiveScreen() {
   return (
     <main aria-label="Effective config" className="mx-auto flex max-w-[1180px] flex-col gap-16 p-24">
       <header>
-        <h1 className="m-0 text-22 font-semibold text-text">Effective config</h1>
+        <h1 className="m-0 text-26 font-semibold text-text">Effective config</h1>
         <p className="m-0 mt-4 text-13 text-text-secondary">
           Everything your agents load in {SCOPE_LABEL[scope] ?? scope}, and which scope it came from.
         </p>
@@ -305,7 +317,7 @@ export function EffectiveScreen() {
               type="button"
               role="tab"
               aria-selected={tab === entry.kind}
-              className={`inline-flex items-center gap-6 rounded-6 px-10 py-6 text-13 transition-colors ${
+              className={`inline-flex items-center gap-6 rounded-6 px-10 py-6 text-13 transition-colors max-[1199px]:gap-8 max-[1199px]:px-16 max-[1199px]:py-8 ${
                 tab === entry.kind
                   ? "bg-overlay font-semibold text-text"
                   : "text-text-secondary hover:text-text"
@@ -322,7 +334,7 @@ export function EffectiveScreen() {
           placeholder="Filter"
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
-          className="w-64"
+          className="w-256"
         />
       </div>
 
@@ -482,15 +494,15 @@ export function EffectiveScreen() {
                       <p role="alert" className="m-0 text-12 text-danger">
                         {traceError}
                       </p>
-                    ) : trace === null ? (
+                    ) : trace === null || !trace.trace ? (
                       <p role="status" className="m-0 text-12 text-text-muted">
                         Resolving the scope trace…
                       </p>
                     ) : (
                       <ol className="m-0 flex list-none flex-col gap-2 p-0">
                         {SCOPES.map((entry) => {
-                          const step = trace.trace.steps.find((candidate) => candidate.scope === entry);
-                          const winning = trace.trace.verdict.on && trace.trace.steps[trace.trace.verdict.decisive_step ?? 0]?.scope === entry;
+                          const step = trace.trace.steps?.find((candidate) => candidate.scope === entry);
+                          const winning = trace.trace.verdict?.on && trace.trace.steps?.[trace.trace.verdict.decisive_step ?? 0]?.scope === entry;
                           return (
                             <li
                               key={entry}
@@ -548,9 +560,11 @@ export function EffectiveScreen() {
                           <p className="m-0 truncate text-12 font-semibold text-text">
                             {AGENT_NAME[agent.agent] ?? agent.agent.replaceAll("_", " ")}
                           </p>
-                          <p className="m-0 text-11 text-text-muted">{agent.state}</p>
+                          <p className="m-0 truncate font-mono text-11 text-text-muted" title={agent.path ?? undefined}>
+                            {agent.path ? formatPath(agent.path) : agent.state}
+                          </p>
                           <p className={`m-0 text-11 ${agent.loads ? "text-success" : "text-text-muted"}`}>
-                            {agent.loads ? "loaded" : "not loaded"}
+                            {agent.loads ? (agent.path ? agent.state : "loaded") : "not loaded"}
                           </p>
                         </div>
                       ))}

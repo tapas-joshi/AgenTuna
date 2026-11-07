@@ -1,4 +1,4 @@
-import { test as base, expect } from "@playwright/test";
+import { test as base, expect, type Page } from "@playwright/test";
 
 /** Browser-only Tauri IPC substitute shared by every visual spec. */
 export const test = base.extend({
@@ -68,11 +68,13 @@ export const test = base.extend({
       const backupPreviewFixture = { id: backupFixture.id, original_path: driftRowFixture.path, created_at: backupFixture.created_at, diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1 +1 @@\n-# Code Review checklist\n+# Code Review\n", destination_exists: true, redacted: false };
       const migratePlanCounts = { items: 3, files_created: 6, files_backed_up: 2, links_written: 2, files_left_in_place: 0 };
       const migratePlanFixture = { plan_hash: "d".repeat(64), backup_dir: "/sandbox/support/backups/migration", strategy: "replace_with_links", counts: migratePlanCounts, scopes: [{ scope: "project", store_path: "/sandbox/Projects/AgenTuna/.config-studio", counts: migratePlanCounts, steps: [{ seq: 1, action: "backuporiginal", scope: "project", item_name: "Visual migration skill", source: "/sandbox/home/.claude/skills/visual-migration", destination: null, backup_path: "/sandbox/support/backups/migration/visual-migration", bytes: 128, agents: [] }, { seq: 2, action: "createstoreitem", scope: "project", item_name: "Visual migration skill", source: "/sandbox/home/.claude/skills/visual-migration", destination: "/sandbox/Projects/AgenTuna/.config-studio/skills/visual-migration", backup_path: null, bytes: 128, agents: ["claude_code"] }] }], files_checked: 2 };
-      const migrateScanFixture = { items: [{ kind: "skill", name: "Visual migration skill", agents: ["claude_code"], path: "/sandbox/home/.claude/skills/visual-migration", scope: "user", content_hash: "a".repeat(64), parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "not_in_agentuna" }, { kind: "mcp_server", name: "Local docs server", agents: ["codex", "omp"], path: "/sandbox/home/.claude.json", scope: "user", content_hash: "b".repeat(64), parse_error: null, store_link: false, state: "conflict", ownership: "conflict" }, { kind: "rule", name: "Project guidance", agents: ["claude_code"], path: "/sandbox/Projects/AgenTuna/CLAUDE.md", scope: "project", content_hash: "c".repeat(64), parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "not_in_agentuna" }], partial: false, skipped_roots: [], warnings: [], roots: [{ path: "/sandbox/home/.claude/skills", agents: ["claude_code"], new_items: 1, in_sync: 0 }, { path: "/sandbox/home/.claude.json", agents: ["codex", "omp"], new_items: 1, in_sync: 0 }, { path: "/sandbox/Projects/AgenTuna/CLAUDE.md", agents: ["claude_code"], new_items: 1, in_sync: 0 }] };
+      const migrateScanFixture = { items: [{ kind: "skill", name: "Visual migration skill", agents: ["claude_code"], path: "/sandbox/home/.claude/skills/visual-migration", scope: "user", content_hash: "a".repeat(64), parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "not_in_agentuna" }, { kind: "mcp_server", name: "Local docs server", agents: ["codex", "omp"], path: "/sandbox/home/.claude.json", scope: "user", content_hash: "b".repeat(64), parse_error: null, store_link: false, state: "conflict", ownership: "conflict" }, { kind: "rule", name: "Project guidance", agents: ["claude_code"], path: "/sandbox/Projects/AgenTuna/CLAUDE.md", scope: "project", content_hash: "c".repeat(64), parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "not_in_agentuna" }], partial: false, skipped_roots: [], warnings: [], roots: [{ path: "/sandbox/home/.claude/skills", kind: "skill", agents: ["claude_code"], found_items: 1, new_items: 1, skipped_items: 0, in_sync: 0, status: "scanned", unreadable_reason: null }, { path: "/sandbox/home/.codex/skills", kind: "skill", agents: ["codex", "omp"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "empty", unreadable_reason: null }, { path: "/sandbox/home/.claude.json", kind: "mcp_server", agents: ["codex", "omp"], found_items: 1, new_items: 1, skipped_items: 0, in_sync: 0, status: "scanned", unreadable_reason: null }, { path: "/sandbox/Projects/AgenTuna/CLAUDE.md", kind: "rule", agents: ["claude_code"], found_items: 1, new_items: 1, skipped_items: 0, in_sync: 0, status: "scanned", unreadable_reason: null }, { path: "/sandbox/home/.cursor/skills", kind: "skill", agents: ["cursor"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "not_present", unreadable_reason: null }, { path: "/sandbox/home/.agents/skills", kind: "skill", agents: ["codex", "omp"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "unreadable", unreadable_reason: "permission denied" }] };
       const ipc = {
         invoke: async (command: string, args?: { key?: string; value?: unknown; itemId?: string; path?: string; url?: string; reference?: string | null; kind?: string; importId?: string; scope?: string; event?: unknown; handler?: number; wizard?: unknown; request?: unknown; jobId?: string; commit?: string; confirmationToken?: string; groupId?: string; relativePath?: string; side?: string; resolution?: string; previewId?: string; confirmDeletions?: boolean }) => {
           mocks.calls.push(command);
-          if (Object.hasOwn(mocks.commandOverrides, command)) return mocks.commandOverrides[command];
+          const override = mocks.commandOverrides[command];
+          if (typeof override === "function") return (override as (args: unknown) => unknown)(args);
+          if (Object.hasOwn(mocks.commandOverrides, command)) return override;
           switch (command) {
             case "app_info": return { name: "AgenTuna", version: "0.1.0" };
             case "open_external_link": return null;
@@ -137,7 +139,34 @@ export const test = base.extend({
               const request = args?.request as { kind?: string } | undefined;
               const effectiveKind = request?.kind ?? "skill";
               const name = effectiveKind === "mcp_server" ? "Postgres" : effectiveKind === "rule" ? "Repository guidance" : "Code Review";
-              return { items: [{ logical_id: `logical_visual_${effectiveKind}`, item_id: skill.item_id, kind: effectiveKind, name, winner_scope: "user", source_path: `/sandbox/user/${effectiveKind}/${name.toLowerCase().replaceAll(" ", "-")}`, agents: [{ agent: "claude_code", state: "linked", loads: true }, { agent: "codex", state: "linked", loads: true }], loads_in_agents: 2, lock: null }], disabled_here: [], diagnostics: [], load_diagnostics: [] };
+              const agentStates = effectiveKind === "mcp_server"
+                ? [
+                    { agent: "claude_code", state: "native", loads: true, path: "~/.claude.json" },
+                    { agent: "codex", state: "native", loads: true, path: "~/.codex/config.toml" },
+                    { agent: "omp", state: "native", loads: true, path: "~/.omp/agent/mcp.json" },
+                  ]
+                : [
+                    { agent: "claude_code", state: "linked", loads: true, path: "~/.claude/skills/code-review" },
+                    { agent: "codex", state: "linked", loads: true, path: "~/.agents/skills/code-review" },
+                  ];
+              return {
+                items: [{
+                  logical_id: `logical_visual_${effectiveKind}`,
+                  item_id: skill.item_id,
+                  kind: effectiveKind,
+                  name,
+                  winner_scope: "user",
+                  source_path: effectiveKind === "mcp_server"
+                    ? "~/.claude.json · ~/.codex/config.toml · ~/.omp/agent/mcp.json"
+                    : `/sandbox/user/${effectiveKind}/${name.toLowerCase().replaceAll(" ", "-")}`,
+                  agents: agentStates,
+                  loads_in_agents: agentStates.filter((a) => a.loads).length,
+                  lock: null,
+                }],
+                disabled_here: [],
+                diagnostics: [],
+                load_diagnostics: [],
+              };
             }
             case "why_trace": return { trace: { item_id: "itm_visual_skill", active_scope: "user", agent: "claude_code", steps: [{ scope: "global", status: "Absent", location: null, reason: "No definition at Global." }, { scope: "user", status: "Winning", location: { path: "/sandbox/user/skills/code-review/SKILL.md", byte_span: null, line: null, rendering_path: null }, reason: "This User copy wins for Claude Code." }, { scope: "project", status: "Absent", location: null, reason: "No Project override." }, { scope: "local", status: "Absent", location: null, reason: "No Local override." }], verdict: { on: true, decisive_step: 1 } }, load_diagnostics: [] };
             case "migrate_scan": return migrateScanFixture;
@@ -264,7 +293,7 @@ export const test = base.extend({
             case "conflicts_reveal": return null;
             case "conflicts_resolve_preview": return remoteBackupPreview;
             case "conflicts_resolve_apply": return { operation_id: "op-remote-conflict-visual", files_changed: 1 };
-            case "skill_library_catalog": return { sources: [], skills: [], target_scope: String(args?.scope ?? "user") };
+            case "skill_library_catalog": return { sources: [], skills: [], target_scope: String(args?.scope ?? "user"), search_root: "/sandbox/user/skills", skipped: [] };
             case "project_sync_status": return [];
             case "project_sync_preview": return { preview_id: "preview-sync-visual", item_id: "itm_visual_skill", name: "Code Review", direction: "push", files: [{ path: "/sandbox/user/skills/code-review/SKILL.md", action: "write", diff: "--- old\n+++ new\n", backup_required: true }], missing_source_paths: [] };
             case "project_sync_apply": return { operation_id: "op-sync-visual", files_changed: 1 };
@@ -294,7 +323,18 @@ export const test = base.extend({
             case "skill_update_apply": return { operation_id: "op-update-visual", files_changed: 1 };
             case "skill_import_choose_folder": return "/sandbox/fixtures/skills";
             case "skill_import_choose_zip": return "/sandbox/fixtures/skills.zip";
-            case "mcp_plan_preview": return { change_set_id: "cs-visual-mcp", preview_id: "preview-visual-mcp", files: [], unsupported_fields: [], store_init: null };
+            case "mcp_plan_preview": return {
+              change_set_id: "cs-visual-mcp",
+              preview_id: "preview-visual-mcp",
+              files: [
+                { agent: "Claude Code", scope: "user", path: "~/.claude.json", additions: 6, deletions: 0, diff: "+++ ~/.claude.json > mcpServers\n+ \"github\": {\n+   \"command\": \"npx\",\n+   \"args\": [\"-y\", \"@modelcontextprotocol/server-github\"],\n+   \"env\": { \"GITHUB_PERSONAL_ACCESS_TOKEN\": \"${GITHUB_PERSONAL_ACCESS_TOKEN}\" }\n+ }", selected: true, cannot_write_reason: null },
+                { agent: "Codex", scope: "user", path: "~/.codex/config.toml", additions: 6, deletions: 0, diff: "", selected: true, cannot_write_reason: null },
+                { agent: "omp", scope: "user", path: "~/.omp/agent/mcp.json", additions: 6, deletions: 0, diff: "", selected: true, cannot_write_reason: null },
+              ],
+              unsupported_fields: [],
+              warnings: [],
+              store_init: null,
+            };
             case "mcp_save": return { operation_id: "op-visual-mcp", files_changed: 1 };
             case "mcp_launch_prepare": return { approval_id: "apr_visual_mcp", request_hash: "0".repeat(64), transport: "stdio", command: "/usr/bin/true", args: [], cwd: null, value_names: [], url: null, expires_in_ms: 120000 };
             case "mcp_test_draft": return { ok: true, server_name: "Visual server", server_version: null, transport: "stdio", latency_ms: 1, tools_count: 0, tools: [], error: null, stderr_excerpt: null };
@@ -424,7 +464,7 @@ export const test = base.extend({
             case "adopt_preview": {
               const path = args?.path ?? "/sandbox/user/agents/skill";
               const name = path.split("/").filter(Boolean).pop() ?? "skill";
-              return { source: path, store_root: "/sandbox/user", store_destination: `/sandbox/user/skills/${name}`, slug: name.toLowerCase(), native_name: name, kind: "skill", agents: ["claude_code"], handling: "link", renamed: false, current: "present" };
+              return { source: path, store_root: "/sandbox/user", store_destination: `/sandbox/user/skills/${name}`, backup_dir: "/sandbox/user/backups/2026-11-04-1432", slug: name.toLowerCase(), native_name: name, kind: "skill", agents: ["claude_code"], handling: "link", renamed: false, current: "present" };
             }
             case "adopt_apply": {
               const path = args?.path ?? "/sandbox/user/agents/skill";
@@ -501,5 +541,69 @@ export const test = base.extend({
     await use(page);
   },
 });
+
+/**
+ * Serves a `count`-row `skills_list` snapshot to the app before it boots.
+ *
+ * The rows are generated inside the page so a 3,000-row fixture costs no IPC
+ * payload. Ten per cent are native-only discoveries, which exercises the
+ * STATUS column's cross-row lookups; names are unique so every row takes the
+ * common path.
+ */
+export async function mockSkillsScale(page: Page, count: number): Promise<void> {
+  await page.addInitScript((total: number) => {
+    const host = window as unknown as {
+      __AT_TEST_MOCKS__?: { commandOverrides: Record<string, unknown> };
+    };
+    const mocks = host.__AT_TEST_MOCKS__;
+    if (mocks === undefined) {
+      throw new Error("mockSkillsScale needs the tauri-mock init script to run first");
+    }
+    const rows = Array.from({ length: total }, (_, index) => {
+      const native = index % 10 === 7;
+      const name = `perf-skill-${String(index).padStart(4, "0")}`;
+      const scope = index % 2 === 0 ? "user" : "project";
+      const path = `/sandbox/${scope}/skills/${name}`;
+      return {
+        item_id: native ? "" : `itm_perf_${index}`,
+        name,
+        scope,
+        state: native ? null : "active",
+        shadowed_by: null,
+        description: native ? null : `Fixture skill ${index}`,
+        native,
+        native_path: native ? `/sandbox/project/.agents/skills/${name}` : null,
+        update_available: false,
+        source: null,
+        source_commit_sha: null,
+        source_remote_sha: null,
+        source_last_checked_at: null,
+        updated_at: "2026-11-06T12:00:00Z",
+        agents: native
+          ? [
+              { agent: "codex", state: "native", enabled: true, config_path: `/sandbox/project/.agents/skills/${name}` },
+              { agent: "omp", state: "native", enabled: true, config_path: `/sandbox/project/.agents/skills/${name}` },
+            ]
+          : [
+              { agent: "codex", state: "linked", enabled: true, config_path: path },
+              { agent: "omp", state: index % 3 === 0 ? "off" : "linked", enabled: index % 3 !== 0, config_path: path },
+            ],
+        locked: false,
+        lock_scope: null,
+        lock_reason: null,
+      };
+    });
+    mocks.commandOverrides["skills_list"] = {
+      rows,
+      agents: [
+        { id: "claude_code", label: "Claude Code", presence: "installed" },
+        { id: "codex", label: "Codex", presence: "installed" },
+        { id: "omp", label: "omp", presence: "installed" },
+      ],
+      project_id: "prj_visual_fixture",
+      project_name: "AgenTuna",
+    };
+  }, count);
+}
 
 export { expect };

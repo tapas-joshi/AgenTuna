@@ -19,11 +19,11 @@ const SCOPE_LABEL: Readonly<Record<string, string>> = {
   project: "Project",
   local: "Local",
 };
-const SCOPE_BADGE: Readonly<Record<string, "locked" | "info" | "warning" | "success">> = {
+const SCOPE_BADGE: Readonly<Record<string, "locked" | "info" | "project" | "local" | "warning" | "success">> = {
   global: "locked",
   user: "info",
-  project: "warning",
-  local: "success",
+  project: "project",
+  local: "local",
 };
 const SCOPE_DOT: Readonly<Record<string, string>> = {
   global: "bg-scope-global",
@@ -32,15 +32,54 @@ const SCOPE_DOT: Readonly<Record<string, string>> = {
   local: "bg-scope-local",
 };
 
+/** Resolves the accurate scope according to CONTRACT.md (home agent files are User scope, Global is machine/org). */
+function resolvedRuleScope(file: { scope: string; path: string }): string {
+  if (file.scope === "global") {
+    const p = file.path.toLowerCase();
+    if (
+      p.includes("/.claude/") ||
+      p.includes("/.codex/") ||
+      p.includes("/.omp/") ||
+      p.includes("/.cursor/") ||
+      p.startsWith("~/")
+    ) {
+      return "user";
+    }
+  }
+  return file.scope;
+}
+
 /** Short, design-shaped description of what one rule file is for. */
 function rulePurpose(file: InstructionFileView): string {
+  const scope = resolvedRuleScope(file);
   const consumers = file.agents.length > 0 ? ` (${file.agents.join(", ")})` : "";
   const name = file.path.split(/[\\/]/).at(-1) ?? file.path;
-  if (file.scope === "global") return `Team coding standards${consumers}`;
-  if (file.scope === "user") return `Personal preferences${consumers}`;
-  if (file.scope === "local") return `Machine-only overrides${consumers}`;
+  if (scope === "global") return `Team coding standards${consumers}`;
+  if (scope === "user") return `Personal preferences${consumers}`;
+  if (scope === "local") return `Machine-only overrides${consumers}`;
   if (name.toUpperCase() === "AGENTS.MD") return `Repo conventions${consumers}`;
   return `Repo conventions${consumers}`;
+}
+
+function formatRulePath(file: { path: string; scope: string }): string {
+  const name = file.path.split(/[\\/]/).at(-1) ?? file.path;
+  const p = file.path;
+  if (p.startsWith("./") || p.startsWith("~/") || p.startsWith("managed/")) return p;
+  const scope = resolvedRuleScope(file);
+  if (scope === "global") {
+    return p.includes("managed") ? `managed/${name}` : `managed/${name}`;
+  }
+  if (scope === "user") {
+    if (p.includes(".claude")) return `~/.claude/${name}`;
+    if (p.includes(".codex")) return `~/.codex/${name}`;
+    if (p.includes(".omp")) return `~/.omp/agent/${name}`;
+    if (p.includes(".cursor")) return `~/.cursor/${name}`;
+    return `~/${name}`;
+  }
+  if (scope === "local" || scope === "project") {
+    return `./${name}`;
+  }
+  return p;
 }
 
 function fileName(path: string): string {
@@ -288,11 +327,13 @@ export function InstructionsScreen() {
 
   const scopes = ["global", "user", "project", "local"] as const;
   const grouped = scopes
-    .map((scope) => ({ scope, items: files.filter((file) => file.scope === scope) }))
+    .map((scope) => ({
+      scope,
+      items: files.filter((file) => resolvedRuleScope(file) === scope),
+    }))
     .filter((group) => group.items.length > 0);
-
   return (
-    <main aria-label="Instructions" className="mx-auto flex max-w-[1180px] flex-col gap-20 p-24">
+    <main aria-label="Instructions" className="mx-auto flex max-w-[1180px] flex-col gap-20 p-24 max-[1199px]:gap-24">
       <header className="flex items-start justify-between gap-16">
         <div>
           <h1 className="m-0 text-22 font-semibold text-text">Instructions</h1>
@@ -379,17 +420,17 @@ export function InstructionsScreen() {
                             <span className="inline-flex items-center gap-6 text-12 text-text-secondary">
                               <span
                                 aria-hidden="true"
-                                className={`size-8 rounded-full ${SCOPE_DOT[file.scope] ?? "bg-text-muted"}`}
+                                className={`size-8 rounded-full ${SCOPE_DOT[resolvedRuleScope(file)] ?? "bg-text-muted"}`}
                               />
-                              {SCOPE_LABEL[file.scope] ?? file.scope}
+                              {SCOPE_LABEL[resolvedRuleScope(file)] ?? file.scope}
                             </span>
                             <span className="min-w-0 truncate text-11 text-text-muted">
                               {rulePurpose(file)}
                             </span>
                           </span>
                           <span className="flex items-center gap-8">
-                            <span className="min-w-0 truncate font-mono text-13 text-text">
-                              {fileName(file.path)}
+                            <span className="min-w-0 truncate font-mono text-13 text-text" title={file.path}>
+                              {formatRulePath(file)}
                             </span>
                             {file.read_error !== null && (
                               <Badge tone="danger" dot>
@@ -416,11 +457,11 @@ export function InstructionsScreen() {
               <>
                 <div className="flex flex-wrap items-center justify-between gap-8 border-b border-border p-12">
                   <div className="flex min-w-0 items-center gap-8">
-                    <span className="truncate font-mono text-15 font-semibold text-text">
-                      ./{fileName(selected.path)}
+                    <span className="truncate font-mono text-15 font-semibold text-text" title={selected.path}>
+                      {formatRulePath(selected)}
                     </span>
-                    <Badge tone={SCOPE_BADGE[selected.scope] ?? "neutral"} dot>
-                      {SCOPE_LABEL[selected.scope] ?? selected.scope}
+                    <Badge tone={SCOPE_BADGE[resolvedRuleScope(selected)] ?? "neutral"} dot>
+                      {SCOPE_LABEL[resolvedRuleScope(selected)] ?? selected.scope}
                     </Badge>
                   </div>
                 </div>

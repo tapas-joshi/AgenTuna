@@ -76,6 +76,44 @@ pub struct ScanWarning {
     pub message: String,
 }
 
+/// Outcome of attempting to scan one adapter-provided discovery root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ScanRootStatus {
+    /// The root was read successfully and contained at least one item.
+    Scanned,
+    /// The root was read successfully and contained no items.
+    Empty,
+    /// The candidate root did not exist.
+    NotPresent,
+    /// The root could not be inspected safely.
+    Unreadable,
+}
+
+/// One actual discovery candidate, shared by every agent that reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScanRoot {
+    /// Candidate folder or configuration document.
+    pub path: PathBuf,
+    /// Kind of native item sought at this candidate.
+    pub kind: ItemKind,
+    /// Agents that attempted to read this candidate.
+    pub agents: BTreeSet<AgentId>,
+    /// Outcome of the attempt.
+    pub status: ScanRootStatus,
+    /// Safe, content-free reason when the root could not be read.
+    pub unreadable_reason: Option<String>,
+    /// Number of distinct item rows found, including item-level failures.
+    pub found_items: i64,
+    /// Readable rows not already managed by AgenTuna.
+    pub new_items: i64,
+    /// Item rows skipped because their contents could not be read or parsed.
+    pub skipped_items: i64,
+    /// Readable rows already managed by AgenTuna.
+    pub in_sync: i64,
+}
+
 /// Read-only results of one native scan.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScanReport {
@@ -87,6 +125,8 @@ pub struct ScanReport {
     pub skipped_roots: Vec<PathBuf>,
     /// Roots and configuration files that could not be read, naming each path.
     pub warnings: Vec<ScanWarning>,
+    /// Outcomes for every candidate root the adapters actually attempted.
+    pub roots: Vec<ScanRoot>,
 }
 
 /// One discovery step reported before it runs.
@@ -179,12 +219,17 @@ pub fn scan_with(
     observer: &mut dyn ScanObserver,
 ) -> Result<ScanReport, ScanError> {
     let mut report = ScanReport {
+        roots: Vec::new(),
         items: Vec::new(),
         partial: false,
         skipped_roots: Vec::new(),
         warnings: Vec::new(),
     };
     let mut physical: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    let allowed_roots = std::iter::once(&request.environment.home)
+        .chain(request.environment.project.iter())
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .collect::<Vec<_>>();
     let adapters = request.adapters.adapters().map_err(ScanError::Adapter)?;
     let total = adapters.len() * SCOPES.len() * (1 + CONFIG_KINDS.len());
     let mut completed = 0usize;
@@ -199,98 +244,77 @@ pub fn scan_with(
                 &mut completed,
                 total,
             )?;
-            let mut skill_roots = Vec::new();
             for candidate in adapter.paths(ItemKind::Skill, scope, request.environment) {
                 if candidate.kind != "skills_dir" {
                     continue;
                 }
-                if !candidate.path.exists() {
-                    report.skipped_roots.push(candidate.path.clone());
-                }
-                skill_roots.push(candidate.path);
-            }
-            let skills = match adapter
-                .list_native_skills_including_managed(request.environment, request.store_roots)
-            {
-                Ok(items) => items,
-                Err(error) => {
-                    report.partial = true;
-                    warn_roots(
+                let Some(metadata) = prepare_root(
+                    &mut report,
+                    &candidate.path,
+                    ItemKind::Skill,
+                    &agent,
+                    scope,
+                    &allowed_roots,
+                ) else {
+                    continue;
+                };
+                if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    record_root_failure(
                         &mut report,
-                        &skill_roots,
+                        &candidate.path,
                         ItemKind::Skill,
                         &agent,
                         scope,
-                        &error.to_string(),
+                        "skills root is not a directory",
                     );
                     continue;
                 }
-            };
-            for skill in skills.into_iter().filter(|item| item.scope == scope) {
-                let canonical =
-                    fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
-                if let Some(index) = physical.get(&canonical).copied() {
-                    report.items[index].agents.insert(agent.clone());
-                    continue;
+                let skills = match adapter.list_native_skills_including_managed(
+                    request.environment,
+                    request.store_roots,
+                    candidate.clone(),
+                ) {
+                    Ok(items) => items,
+                    Err(error) => {
+                        let reason = match error {
+                            at_adapters::adapter::AgentError::Permission { .. } => {
+                                "permission denied"
+                            }
+                            at_adapters::adapter::AgentError::Io { ref source, .. }
+                                if source.kind() == std::io::ErrorKind::PermissionDenied =>
+                            {
+                                "permission denied"
+                            }
+                            _ => "could not read discovery root",
+                        };
+                        record_root_failure(
+                            &mut report,
+                            &candidate.path,
+                            ItemKind::Skill,
+                            &agent,
+                            scope,
+                            reason,
+                        );
+                        continue;
+                    }
+                };
+                for skill in skills {
+                    if skill.path == candidate.path
+                        && skill.state
+                            == at_adapters::native_skills::NativeSkillState::PermissionDenied
+                    {
+                        record_root_failure(
+                            &mut report,
+                            &candidate.path,
+                            ItemKind::Skill,
+                            &agent,
+                            scope,
+                            "permission denied",
+                        );
+                        continue;
+                    }
+                    scan_skill(&mut report, &mut physical, skill, &request, &agent);
                 }
-                let digest = hash_skill_folder(&skill.path)
-                    .ok()
-                    .map(|hash| hash.to_string());
-                let raw_digest = raw_skill_hash(&skill.path).ok();
-                let is_store_link = skill.target.as_ref().is_some_and(|target| {
-                    let resolved = if target.is_absolute() {
-                        target.clone()
-                    } else {
-                        skill
-                            .path
-                            .parent()
-                            .map(|parent| parent.join(target))
-                            .unwrap_or_else(|| target.clone())
-                    };
-                    let resolved = fs::canonicalize(&resolved).unwrap_or(resolved);
-                    request.store_roots.iter().any(|root| {
-                        let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-                        resolved.starts_with(root)
-                    })
-                });
-                let status = if skill.valid && digest.is_some() && raw_digest.is_some() {
-                    ParseStatus::Parsed
-                } else {
-                    report.partial = true;
-                    ParseStatus::Error(
-                        skill
-                            .error
-                            .unwrap_or_else(|| "unreadable skill content".into()),
-                    )
-                };
-                // A link into an AgenTuna store is a managed deployment: it stays in the
-                // report so the UI can label it `in_agentuna`, and the native index excludes
-                // it from rows that describe unmanaged content.
-                let ownership = if is_store_link {
-                    Ownership::Managed
-                } else {
-                    ownership(
-                        ItemKind::Skill,
-                        &skill.name,
-                        digest.as_deref(),
-                        request.store_items,
-                    )
-                };
-                let mut agents = BTreeSet::new();
-                agents.insert(agent.clone());
-                physical.insert(canonical, report.items.len());
-                report.items.push(ScanItem {
-                    kind: ItemKind::Skill,
-                    name: skill.name,
-                    agents,
-                    path: skill.path,
-                    scope: skill.scope,
-                    content_hash: raw_digest,
-                    normalized_hash: digest.clone(),
-                    parse_status: status,
-                    store_link: is_store_link,
-                    ownership,
-                });
             }
         }
         for scope in SCOPES {
@@ -307,25 +331,25 @@ pub fn scan_with(
                     {
                         continue;
                     }
-                    let metadata = match fs::symlink_metadata(&candidate.path) {
-                        Ok(metadata) => metadata,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            report.skipped_roots.push(candidate.path);
-                            continue;
-                        }
-                        Err(error) => {
-                            report.partial = true;
-                            report.warnings.push(ScanWarning {
-                                path: candidate.path,
-                                kind,
-                                agent: agent.clone(),
-                                scope,
-                                message: error.to_string(),
-                            });
-                            continue;
-                        }
+                    let Some(metadata) = prepare_root(
+                        &mut report,
+                        &candidate.path,
+                        kind,
+                        &agent,
+                        scope,
+                        &allowed_roots,
+                    ) else {
+                        continue;
                     };
                     if metadata.file_type().is_symlink() {
+                        record_root_failure(
+                            &mut report,
+                            &candidate.path,
+                            kind,
+                            &agent,
+                            scope,
+                            "symbolic link to configuration is not followed",
+                        );
                         continue;
                     }
                     if kind == ItemKind::Rule {
@@ -333,14 +357,14 @@ pub fn scan_with(
                             let entries = match fs::read_dir(&candidate.path) {
                                 Ok(entries) => entries,
                                 Err(error) => {
-                                    report.partial = true;
-                                    report.warnings.push(ScanWarning {
-                                        path: candidate.path,
+                                    record_root_failure(
+                                        &mut report,
+                                        &candidate.path,
                                         kind,
-                                        agent: agent.clone(),
+                                        &agent,
                                         scope,
-                                        message: error.to_string(),
-                                    });
+                                        io_reason(&error),
+                                    );
                                     continue;
                                 }
                             };
@@ -363,14 +387,14 @@ pub fn scan_with(
                                     }
                                     Ok(_) => (),
                                     Err(error) => {
-                                        report.partial = true;
-                                        report.warnings.push(ScanWarning {
-                                            path: candidate.path.clone(),
+                                        record_root_failure(
+                                            &mut report,
+                                            &candidate.path,
                                             kind,
-                                            agent: agent.clone(),
+                                            &agent,
                                             scope,
-                                            message: error.to_string(),
-                                        });
+                                            io_reason(&error),
+                                        );
                                     }
                                 }
                             }
@@ -398,6 +422,7 @@ pub fn scan_with(
             }
         }
     }
+    summarize_roots(&mut report);
     report
         .items
         .sort_by(|a, b| (&a.path, &a.kind, &a.name).cmp(&(&b.path, &b.kind, &b.name)));
@@ -441,24 +466,267 @@ fn observe_step(
     }
 }
 
-/// Records one warning per root that a failed adapter enumeration was reading.
-fn warn_roots(
+/// Classifies an IO error without exposing paths or document content.
+fn io_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        std::io::ErrorKind::NotFound => "not present",
+        _ => "could not read discovery root",
+    }
+}
+
+/// Records a candidate before reading it, refusing symlinked roots outside the injected roots.
+fn prepare_root(
     report: &mut ScanReport,
-    roots: &[PathBuf],
+    path: &Path,
     kind: ItemKind,
     agent: &AgentId,
     scope: Scope,
-    message: &str,
-) {
-    for root in roots {
-        report.warnings.push(ScanWarning {
-            path: root.clone(),
+    allowed_roots: &[PathBuf],
+) -> Option<fs::Metadata> {
+    if let Some(root) = report
+        .roots
+        .iter_mut()
+        .find(|root| root.path == path && root.kind == kind)
+    {
+        root.agents.insert(agent.clone());
+    } else {
+        report.roots.push(ScanRoot {
+            path: path.to_path_buf(),
             kind,
-            agent: agent.clone(),
-            scope,
-            message: message.to_owned(),
+            agents: BTreeSet::from([agent.clone()]),
+            status: ScanRootStatus::Scanned,
+            unreadable_reason: None,
+            found_items: 0,
+            new_items: 0,
+            skipped_items: 0,
+            in_sync: 0,
         });
     }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            report.skipped_roots.push(path.to_path_buf());
+            if let Some(root) = report
+                .roots
+                .iter_mut()
+                .find(|root| root.path == path && root.kind == kind)
+                && root.status != ScanRootStatus::Unreadable
+            {
+                root.status = ScanRootStatus::NotPresent;
+            }
+            return None;
+        }
+        Err(error) => {
+            record_root_failure(report, path, kind, agent, scope, io_reason(&error));
+            return None;
+        }
+    };
+    let resolved = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) => {
+            let reason = if metadata.file_type().is_symlink()
+                && error.kind() == std::io::ErrorKind::NotFound
+            {
+                "symbolic link target is not present"
+            } else {
+                io_reason(&error)
+            };
+            record_root_failure(report, path, kind, agent, scope, reason);
+            return None;
+        }
+    };
+    // A configured custom-agent root may live outside the injected sandbox; only a link that
+    // resolves outside it can escape, so the containment check applies to symlinked candidates.
+    if metadata.file_type().is_symlink()
+        && !allowed_roots.iter().any(|root| resolved.starts_with(root))
+    {
+        record_root_failure(
+            report,
+            path,
+            kind,
+            agent,
+            scope,
+            "symbolic link target is outside injected roots",
+        );
+        return None;
+    }
+    if let Some(root) = report
+        .roots
+        .iter_mut()
+        .find(|root| root.path == path && root.kind == kind)
+        && root.status == ScanRootStatus::NotPresent
+    {
+        root.status = ScanRootStatus::Scanned;
+    }
+    Some(metadata)
+}
+
+/// Preserves a partial result and a content-free reason for a failed root.
+fn record_root_failure(
+    report: &mut ScanReport,
+    path: &Path,
+    kind: ItemKind,
+    agent: &AgentId,
+    scope: Scope,
+    reason: &str,
+) {
+    report.partial = true;
+    if let Some(root) = report
+        .roots
+        .iter_mut()
+        .find(|root| root.path == path && root.kind == kind)
+    {
+        root.status = ScanRootStatus::Unreadable;
+        root.unreadable_reason = Some(reason.to_owned());
+    }
+    report.warnings.push(ScanWarning {
+        path: path.to_path_buf(),
+        kind,
+        agent: agent.clone(),
+        scope,
+        message: reason.to_owned(),
+    });
+}
+
+/// Adds one native skill, preserving physical deduplication across shared roots.
+fn scan_skill(
+    report: &mut ScanReport,
+    physical: &mut BTreeMap<PathBuf, usize>,
+    skill: at_adapters::native_skills::NativeSkill,
+    request: &ScanRequest<'_>,
+    agent: &AgentId,
+) {
+    let canonical = fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
+    if let Some(index) = physical.get(&canonical).copied() {
+        report.items[index].agents.insert(agent.clone());
+        return;
+    }
+    // Invalid links may point outside the sandbox; never hash their targets.
+    let digest = if skill.valid {
+        hash_skill_folder(&skill.path)
+            .ok()
+            .map(|hash| hash.to_string())
+    } else {
+        None
+    };
+    let raw_digest = if skill.valid {
+        raw_skill_hash(&skill.path).ok()
+    } else {
+        None
+    };
+    let is_store_link = skill.target.as_ref().is_some_and(|target| {
+        let resolved = if target.is_absolute() {
+            target.clone()
+        } else {
+            skill
+                .path
+                .parent()
+                .map_or_else(|| target.clone(), |parent| parent.join(target))
+        };
+        let resolved = fs::canonicalize(&resolved).unwrap_or(resolved);
+        request.store_roots.iter().any(|root| {
+            let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            resolved.starts_with(root)
+        })
+    });
+    let status = if skill.valid && digest.is_some() && raw_digest.is_some() {
+        ParseStatus::Parsed
+    } else {
+        report.partial = true;
+        let reason = skill
+            .error
+            .unwrap_or_else(|| "unreadable skill content".to_owned());
+        ParseStatus::Error(if reason.starts_with("invalid YAML frontmatter:") {
+            "invalid YAML frontmatter".to_owned()
+        } else {
+            reason
+        })
+    };
+    let ownership = if is_store_link {
+        Ownership::Managed
+    } else {
+        ownership(
+            ItemKind::Skill,
+            &skill.name,
+            digest.as_deref(),
+            request.store_items,
+        )
+    };
+    physical.insert(canonical, report.items.len());
+    report.items.push(ScanItem {
+        kind: ItemKind::Skill,
+        name: skill.name,
+        agents: BTreeSet::from([agent.clone()]),
+        path: skill.path,
+        scope: skill.scope,
+        content_hash: raw_digest,
+        normalized_hash: digest,
+        parse_status: status,
+        store_link: is_store_link,
+        ownership,
+    });
+}
+
+/// Counts distinct rows against the adapter candidates, not against inferred item parents.
+fn summarize_roots(report: &mut ScanReport) {
+    let items = report
+        .items
+        .iter()
+        .map(|item| {
+            let parent = item
+                .path
+                .parent()
+                .and_then(|path| fs::canonicalize(path).ok());
+            let identity = fs::canonicalize(&item.path).unwrap_or_else(|_| item.path.clone());
+            (item, parent, identity)
+        })
+        .collect::<Vec<_>>();
+    for root in &mut report.roots {
+        if let Some(warning) = report.warnings.iter().find(|warning| {
+            warning.path == root.path
+                && warning.kind == root.kind
+                && root.agents.contains(&warning.agent)
+        }) {
+            root.status = ScanRootStatus::Unreadable;
+            root.unreadable_reason = Some(warning.message.clone());
+        }
+        let canonical_root = fs::canonicalize(&root.path).ok();
+        let mut seen = BTreeSet::new();
+        for (item, canonical_parent, identity) in &items {
+            if item.kind != root.kind || item.agents.is_disjoint(&root.agents) {
+                continue;
+            }
+            let parent_matches = item.path.parent().is_some_and(|parent| parent == root.path)
+                || canonical_root
+                    .as_ref()
+                    .is_some_and(|resolved| canonical_parent.as_ref() == Some(resolved));
+            if item.path != root.path && !parent_matches {
+                continue;
+            }
+            if !seen.insert((identity, &item.name)) {
+                continue;
+            }
+            root.found_items += 1;
+            if !matches!(item.parse_status, ParseStatus::Parsed) {
+                root.skipped_items += 1;
+                if item.path == root.path && root.kind == ItemKind::Rule {
+                    root.status = ScanRootStatus::Unreadable;
+                    root.unreadable_reason = Some("could not read rule document".to_owned());
+                }
+            } else if item.ownership == Ownership::Managed {
+                root.in_sync += 1;
+            } else {
+                root.new_items += 1;
+            }
+        }
+        if root.status == ScanRootStatus::Scanned && root.found_items == 0 {
+            root.status = ScanRootStatus::Empty;
+        }
+    }
+    report
+        .roots
+        .sort_by(|left, right| (&left.path, &left.kind).cmp(&(&right.path, &right.kind)));
 }
 
 /// Scan failure outside item-level filesystem or syntax errors.
@@ -609,9 +877,9 @@ fn read_document(path: &Path) -> Result<Vec<u8>, String> {
             ));
         }
         Ok(_) => {}
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(io_reason(&error).to_owned()),
     }
-    fs::read(path).map_err(|error| error.to_string())
+    fs::read(path).map_err(|error| io_reason(&error).to_owned())
 }
 
 fn item_error(
@@ -747,15 +1015,256 @@ fn scan_mcp(
                 }
             }
         }
-        Err(error) => {
+        Err(_) => {
             report.partial = true;
             report.warnings.push(ScanWarning {
                 path: path.to_path_buf(),
                 kind: ItemKind::McpServer,
                 agent: agent.clone(),
                 scope,
-                message: error,
+                message: "invalid MCP configuration".to_owned(),
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn root<'a>(report: &'a ScanReport, path: &Path, kind: ItemKind) -> &'a ScanRoot {
+        report
+            .roots
+            .iter()
+            .find(|root| root.path == path && root.kind == kind)
+            .expect("candidate root is recorded")
+    }
+
+    #[test]
+    fn configured_custom_root_outside_the_injected_roots_is_still_scanned() {
+        use at_adapters::custom_agent::{CustomAgentAdapter, CustomAgentSpec, CustomMcpFormat};
+
+        let temp = tempfile::tempdir().expect("temporary sandbox");
+        let home = temp.path().join("home");
+        let custom_root = temp.path().join("outside-agent");
+        let skills = custom_root.join("skills");
+        let found = skills.join("ported");
+        fs::create_dir_all(&found).expect("custom skill directory");
+        fs::create_dir_all(&home).expect("home");
+        fs::write(
+            found.join("SKILL.md"),
+            "---\nname: ported\ndescription: example\n---\n",
+        )
+        .expect("skill file");
+        let adapters = AgentAdapterRegistry::register();
+        adapters
+            .insert(Arc::new(
+                CustomAgentAdapter::new(CustomAgentSpec {
+                    id: "outside".to_owned(),
+                    display_name: "Outside".to_owned(),
+                    root: custom_root,
+                    skills_subfolder: PathBuf::from("skills"),
+                    mcp_file: None,
+                    mcp_format: CustomMcpFormat::None,
+                    rule_files: Vec::new(),
+                    supports_symlink: true,
+                })
+                .expect("valid custom spec"),
+            ))
+            .expect("register custom adapter");
+        let environment = AgentEnvironment {
+            home,
+            project: None,
+            variables: BTreeMap::new(),
+        };
+        let report = scan(ScanRequest {
+            environment: &environment,
+            adapters: &adapters,
+            store_roots: &[],
+            store_items: &[],
+        })
+        .expect("scan");
+        let custom = root(&report, &skills, ItemKind::Skill);
+        assert_eq!(custom.status, ScanRootStatus::Scanned);
+        assert_eq!((custom.found_items, custom.new_items), (1, 1));
+        assert!(report.items.iter().any(|item| item.name == "ported"));
+    }
+
+    #[test]
+    fn root_outcomes_include_found_empty_missing_and_redacted_parse_failures() {
+        let temp = tempfile::tempdir().expect("temporary sandbox");
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        let populated = home.join(".claude/skills");
+        for name in ["fresh", "managed", "broken"] {
+            fs::create_dir_all(populated.join(name)).expect("skill directory");
+        }
+        for name in ["fresh", "managed"] {
+            fs::write(
+                populated.join(name).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: example\n---\n\n# Skill\n"),
+            )
+            .expect("skill file");
+        }
+        fs::write(populated.join("broken/SKILL.md"), "invalid").expect("broken skill");
+        let empty = home.join(".codex/skills");
+        fs::create_dir_all(&empty).expect("empty skills root");
+        let omp_backup = home.join(".omp/agent/managed-skills/.bak-fixture");
+        fs::create_dir_all(&omp_backup).expect("omp backup directory");
+        fs::write(
+            omp_backup.join("SKILL.md"),
+            "---\nname: should-not-appear\ndescription: backup\n---\n",
+        )
+        .expect("omp backup skill");
+        fs::create_dir_all(&project).expect("project root");
+        let mcp = home.join(".codex/config.toml");
+        fs::write(&mcp, "token = \"fixture-secret-value\"\ninvalid = [").expect("malformed config");
+        let environment = AgentEnvironment {
+            home: home.clone(),
+            project: Some(project),
+            variables: BTreeMap::new(),
+        };
+        let adapters = AgentAdapterRegistry::register();
+        let managed_path = populated.join("managed");
+        let store_items = [StoreItem {
+            kind: ItemKind::Skill,
+            name: "managed".to_owned(),
+            content_hash: hash_skill_folder(&managed_path)
+                .expect("hash managed skill")
+                .to_string(),
+            scope: Scope::User,
+            path: managed_path,
+        }];
+        let report = scan(ScanRequest {
+            environment: &environment,
+            adapters: &adapters,
+            store_roots: &[],
+            store_items: &store_items,
+        })
+        .expect("scan");
+        assert!(
+            !report
+                .items
+                .iter()
+                .any(|item| item.name == "should-not-appear")
+        );
+        let omp_backup_root = root(
+            &report,
+            &home.join(".omp/agent/managed-skills"),
+            ItemKind::Skill,
+        );
+        assert_eq!(omp_backup_root.found_items, 0);
+        assert_eq!(omp_backup_root.status, ScanRootStatus::Empty);
+        let populated_root = root(&report, &populated, ItemKind::Skill);
+        assert_eq!(populated_root.status, ScanRootStatus::Scanned);
+        assert_eq!(
+            (
+                populated_root.found_items,
+                populated_root.new_items,
+                populated_root.skipped_items,
+                populated_root.in_sync
+            ),
+            (3, 1, 1, 1)
+        );
+        let empty_root = root(&report, &empty, ItemKind::Skill);
+        assert_eq!(empty_root.status, ScanRootStatus::Empty);
+        assert_eq!(empty_root.found_items, 0);
+        let missing_root = root(&report, &home.join(".agents/skills"), ItemKind::Skill);
+        assert_eq!(missing_root.status, ScanRootStatus::NotPresent);
+        assert_eq!(missing_root.found_items, 0);
+        let bad_mcp = root(&report, &mcp, ItemKind::McpServer);
+        assert_eq!(bad_mcp.status, ScanRootStatus::Unreadable);
+        assert_eq!(
+            bad_mcp.unreadable_reason.as_deref(),
+            Some("invalid MCP configuration")
+        );
+        assert!(
+            !serde_json::to_string(&report)
+                .expect("serialize scan")
+                .contains("fixture-secret-value")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denial_and_escaping_root_are_reported_without_losing_other_results() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        struct RestorePermissions(PathBuf, fs::Permissions);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("temporary sandbox");
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        let outside = temp.path().join("outside");
+        let found = home.join(".claude/skills/found");
+        let unreadable = home.join(".cursor/skills");
+        let shared = project.join(".agents/skills");
+        for path in [&found, &unreadable, &outside, &project.join(".agents")] {
+            fs::create_dir_all(path).expect("fixture directory");
+        }
+        fs::write(
+            found.join("SKILL.md"),
+            "---\nname: found\ndescription: example\n---\n",
+        )
+        .expect("skill");
+        fs::create_dir_all(outside.join("secret")).expect("outside skill");
+        fs::write(
+            outside.join("secret/SKILL.md"),
+            "---\nname: secret\ndescription: example\n---\n",
+        )
+        .expect("outside file");
+        symlink(&outside, &shared).expect("escaping shared root");
+        let original = fs::metadata(&unreadable)
+            .expect("permissions")
+            .permissions();
+        let _restore = RestorePermissions(unreadable.clone(), original);
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let permission_enforced = fs::read_dir(&unreadable).is_err();
+        let environment = AgentEnvironment {
+            home,
+            project: Some(project),
+            variables: BTreeMap::new(),
+        };
+        let adapters = AgentAdapterRegistry::register();
+        let report = scan(ScanRequest {
+            environment: &environment,
+            adapters: &adapters,
+            store_roots: &[],
+            store_items: &[],
+        })
+        .expect("scan");
+        assert!(report.partial);
+        assert!(report.items.iter().any(|item| item.name == "found"));
+        assert!(!report.items.iter().any(|item| item.name == "secret"));
+        let escaped = root(&report, &shared, ItemKind::Skill);
+        assert_eq!(escaped.status, ScanRootStatus::Unreadable);
+        assert_eq!(
+            escaped.unreadable_reason.as_deref(),
+            Some("symbolic link target is outside injected roots")
+        );
+        assert_eq!(
+            escaped.agents,
+            BTreeSet::from([AgentId::Codex, AgentId::Omp])
+        );
+        if permission_enforced {
+            let denied = root(&report, &unreadable, ItemKind::Skill);
+            assert_eq!(denied.status, ScanRootStatus::Unreadable);
+            assert_eq!(
+                denied.unreadable_reason.as_deref(),
+                Some("permission denied")
+            );
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.path == unreadable)
+            );
         }
     }
 }

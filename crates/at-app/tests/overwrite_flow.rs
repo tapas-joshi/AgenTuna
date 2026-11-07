@@ -117,6 +117,82 @@ fn undo_refuses_to_clobber_a_new_item_at_the_original_path() -> TestResult<()> {
 }
 
 #[test]
+fn adopting_refuses_a_source_that_changed_after_the_preview() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::ClaudeCode)?;
+    let skills_dir = sandbox.home.join(".claude/skills");
+    fs::create_dir_all(&skills_dir)?;
+    at_db::agents::upsert_agent_path(
+        database.connection(),
+        &AgentPathSpec {
+            agent: &AgentId::ClaudeCode,
+            scope: Scope::User,
+            kind: AgentPathKind::SkillsDir,
+            path: &skills_dir,
+            format: Some(AgentPathFormat::Dir),
+            is_primary: true,
+            exists: true,
+        },
+    )?;
+    let target = skills_dir.join("reviewed-once");
+    fs::create_dir_all(&target)?;
+    let skill_md = target.join("SKILL.md");
+    fs::write(
+        &skill_md,
+        b"---\nname: reviewed-once\ndescription: demo\n---\n\nReviewed body.\n",
+    )?;
+    let path = target.to_str().expect("utf-8 target").to_owned();
+
+    let state = sandbox.state()?;
+    let preview = at_app::app::overwrite::adopt_preview_inner(
+        &state,
+        &path,
+        None,
+        Some("link".to_owned()),
+        None,
+    )?;
+    assert_eq!(preview.current, "present");
+    assert_eq!(
+        preview.hash.len(),
+        64,
+        "the preview carries the digest it verified: {:?}",
+        preview.hash
+    );
+
+    // The agent's file changes between the review and the click.
+    fs::write(
+        &skill_md,
+        b"---\nname: reviewed-once\ndescription: demo\n---\n\nUnreviewed body.\n",
+    )?;
+
+    let applied = at_app::app::overwrite::adopt_apply_inner(
+        &state,
+        &path,
+        Some(preview.hash.clone()),
+        Some("link".to_owned()),
+        None,
+    );
+    match applied {
+        Ok(outcome) => panic!("a changed source must not be adopted: {outcome:?}"),
+        Err(error) => assert_eq!(
+            error.code,
+            at_app::app::commands::CommandErrorCode::Conflict,
+            "the apply reports the stale preview as a conflict: {error:?}"
+        ),
+    }
+    assert!(
+        target.is_dir() && !target.is_symlink(),
+        "the refused apply leaves the native item untouched"
+    );
+    assert_eq!(
+        fs::read(&skill_md)?,
+        b"---\nname: reviewed-once\ndescription: demo\n---\n\nUnreviewed body.\n"
+    );
+    Ok(())
+}
+
+#[test]
 fn adopt_authorized_roots_authorizes_backup_dir_outside_home() -> TestResult<()> {
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("fake_home");

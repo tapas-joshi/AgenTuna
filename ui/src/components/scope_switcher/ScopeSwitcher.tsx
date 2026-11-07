@@ -106,7 +106,7 @@ export function ScopeSwitcher({
             onClick={() => { if (!disabled) onScopeSelected(option.value); }}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
-              "inline-flex h-32 shrink-0 items-center justify-center whitespace-nowrap rounded-6 border px-12 text-13 transition-colors",
+              "inline-flex h-32 shrink-0 items-center justify-center whitespace-nowrap rounded-6 border px-12 text-13 transition-colors max-[1439px]:px-8",
               "border-transparent text-text-secondary hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
               "aria-disabled:cursor-not-allowed aria-disabled:text-text-secondary",
               scope === option.value && "border-border bg-raised font-medium text-text",
@@ -114,12 +114,17 @@ export function ScopeSwitcher({
             )}
           >
             <span aria-hidden="true" className={cn("h-8 w-8 shrink-0 rounded-full", SCOPE_DOT_CLASSES[option.value])} />
-            {option.label}
+            {option.value === "local" ? (
+              <>
+                <span className="hidden max-[1439px]:inline">Local</span>
+                <span className="max-[1439px]:hidden">{option.label}</span>
+              </>
+            ) : option.label}
           </button>
         );
       })}
       {!localEnabled ? (
-        <span aria-hidden="true" className="invisible inline-flex h-32 shrink-0 items-center gap-4 rounded-6 border border-transparent px-12 text-13">
+        <span aria-hidden="true" className="invisible inline-flex h-32 shrink-0 items-center gap-4 rounded-6 border border-transparent px-12 text-13 max-[1439px]:hidden">
           <span className={cn("h-8 w-8 shrink-0 rounded-full", SCOPE_DOT_CLASSES.local)} />
           Local (only you, this repo)
         </span>

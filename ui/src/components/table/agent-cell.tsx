@@ -35,6 +35,107 @@ function switchable(state: AgentCellState): state is Extract<AgentCellState, { k
   return state.kind === "linked" || state.kind === "off";
 }
 
+/** The discovery root of a skill path, for example `.agents/skills`. */
+export function discoveryRootLabel(path: string): string {
+  const segments = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+  const skills = segments.lastIndexOf("skills");
+  if (skills >= 1) return segments.slice(skills - 1, skills + 1).join("/");
+  return segments.slice(-2).join("/");
+}
+
+/** Props accepted by {@link SharedFolderCell}. */
+export interface SharedFolderCellProps {
+  /** Agents that read the one folder, in column order. */
+  readonly agents: readonly AgentDescriptor[];
+  /** Absolute folder all of them read. */
+  readonly path: string;
+  /** State of the folder; the first member's state names the control. */
+  readonly state: AgentCellState;
+  /** Reports the requested state. Without it a managed folder renders read-only. */
+  readonly onToggle?: (next: boolean) => void;
+  /** Disables the control independently of the state, for example while saving. */
+  readonly disabled?: boolean;
+  readonly className?: string;
+}
+
+/**
+ * One folder block for agents that share a discovery root.
+ *
+ * Codex and omp both read `<project>/.agents/skills`, so the folder is the unit
+ * that changes, not the agent: a single control writes the one folder, the
+ * visible line says `1 folder · N agents`, and the tooltip names every reader.
+ * Native folders render read-only because AgenTuna does not own them yet.
+ */
+export function SharedFolderCell({ agents, path, state, onToggle, disabled = false, className }: SharedFolderCellProps): JSX.Element {
+  const labels = agents.map((agent) => agent.label).join(" + ");
+  const root = discoveryRootLabel(path);
+  const readOnly = state.kind === "native" || state.kind === "shadowed";
+  const pending = state.kind === "linked" || state.kind === "off" ? state.pending === true : false;
+
+  let control: JSX.Element;
+  if (switchable(state)) {
+    control = (
+      <span className="flex items-center gap-6">
+        <Toggle
+          size="sm"
+          label={`${labels}: ${STATUS_META[state.kind].label}, one shared folder`}
+          labelPlacement="hidden"
+          checked={state.kind === "linked"}
+          disabled={
+            disabled ||
+            state.readOnly === true ||
+            pending ||
+            onToggle === undefined ||
+            Boolean(state.disabledReason)
+          }
+          onCheckedChange={(next) => onToggle?.(next)}
+        />
+        <span aria-hidden="true" className="text-11 text-text-muted">
+          {STATUS_META[state.kind].label}
+        </span>
+      </span>
+    );
+  } else if (state.kind === "native") {
+    control = (
+      <span className="flex flex-wrap items-center gap-4">
+        <Badge tone="muted" mono>
+          native
+        </Badge>
+        <Badge tone="muted">read-only</Badge>
+      </span>
+    );
+  } else if (state.kind === "shadowed") {
+    control = <StatusDot status="shadowed" title={`Shadowed by ${state.shadowedBy}`} />;
+  } else {
+    control = (
+      <span className="text-11 text-text-muted" aria-hidden="true">
+        —
+      </span>
+    );
+  }
+
+  return (
+    <span
+      role="group"
+      aria-label={`${labels}: one shared folder`}
+      aria-busy={pending || undefined}
+      data-slot="shared-folder"
+      data-state={state.kind}
+      data-read-only={readOnly || undefined}
+      title={`${path} · read by ${labels} · one folder on disk`}
+      className={cn("flex min-w-0 flex-col items-start gap-2", className)}
+    >
+      {control}
+      <span data-slot="agent-path" className="max-w-full truncate font-mono text-11 text-text-muted">
+        {root}
+      </span>
+      <span data-slot="shared-root" className="max-w-full truncate text-11 text-scope-user">
+        1 folder · {agents.length} agents
+      </span>
+    </span>
+  );
+}
+
 /**
  * Renders the state of one item in one agent.
  *
@@ -88,15 +189,19 @@ export function AgentCell({ agent, state, onToggle, disabled = false, className 
   } else if (state.kind === "native") {
     const shared = state.sharedWith !== undefined && state.sharedWith.length > 0;
     content = (
-      <span className="flex min-w-0 flex-col items-start gap-2">
+      <span className="flex min-w-0 w-full flex-col items-start gap-2">
         <span className="flex min-w-0 flex-wrap items-center gap-4">
           <Badge tone="muted" mono>
             native
           </Badge>
           {state.readOnly === true && shared ? <Badge tone="muted">read-only</Badge> : null}
         </span>
-        <span data-slot="agent-path" className="max-w-full truncate font-mono text-11 text-text-muted">
-          {state.path}
+        <span
+          data-slot="agent-path"
+          title={state.path}
+          className="w-full truncate font-mono text-11 text-text-muted"
+        >
+          {discoveryRootLabel(state.path)}
         </span>
         {shared ? (
           <span data-slot="agent-shared" className="max-w-full truncate text-11 text-scope-user">

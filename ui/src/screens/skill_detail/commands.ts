@@ -14,8 +14,20 @@ export function loadSkillDetail(itemId: string): Promise<SkillDetailView> {
 }
 
 /** Compares the selected copy with another indexed scope copy. */
-export function compareSkillCopies(itemId: string, otherScope: string): Promise<SkillCompareView> {
-  return invoke<SkillCompareView>("skill_compare_copies", { itemId, otherScope });
+export async function compareSkillCopies(itemId: string, otherScope: string): Promise<SkillCompareView> {
+  const view = await invoke<SkillCompareView>("skill_compare_copies", { itemId, otherScope });
+  // The shadow card renders both sides; an incomplete reply is an error, not a blank card.
+  if (
+    typeof view !== "object" ||
+    view === null ||
+    typeof view.winner !== "object" ||
+    view.winner === null ||
+    typeof view.shadow !== "object" ||
+    view.shadow === null
+  ) {
+    throw new Error("The copy comparison response was incomplete.");
+  }
+  return view;
 }
 
 

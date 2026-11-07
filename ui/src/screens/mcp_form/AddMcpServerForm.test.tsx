@@ -4,6 +4,14 @@ import type { McpChangeSetPreviewView } from "../../generated/McpChangeSetPrevie
 import type { McpLaunchApprovalView } from "../../generated/McpLaunchApprovalView";
 import type { McpTestResultView } from "../../generated/McpTestResultView";
 import { AddMcpServerForm } from "./AddMcpServerForm";
+if (typeof globalThis.ResizeObserver === "undefined") {
+  class ResizeObserverStub {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+}
 
 afterEach(cleanup);
 
@@ -45,7 +53,7 @@ describe("AddMcpServerForm", () => {
     await waitFor(() => expect(onPlan).toHaveBeenCalledTimes(1));
     expect(onSave).not.toHaveBeenCalled();
     expect(await screen.findByText("Files that will change")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save to / }));
     await waitFor(() => expect(onSave).toHaveBeenCalledWith("preview-1", ["Codex"], false));
     expect(onPlan.mock.calls[0]?.[0]).toMatchObject({ name: "Search", command: "npx", url: "https://example.invalid/mcp" });
     expect(await screen.findByText("MCP server saved.")).toBeTruthy();
@@ -170,7 +178,7 @@ describe("AddMcpServerForm", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "github-enterprise" } });
     fireEvent.click(screen.getByRole("button", { name: "Review edit" }));
     await screen.findByText("Files that will change");
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save to / }));
     const dialog = screen.getByRole("dialog", { name: /Rename/ });
     expect(dialog.textContent).toContain("github-enterprise");
     expect(dialog.textContent).toContain("/sandbox/.codex/config.toml");
@@ -178,7 +186,7 @@ describe("AddMcpServerForm", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog", { name: /Rename/ })).toBeNull();
     expect(onSave).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save to / }));
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(onSave).toHaveBeenCalledWith("preview-1", ["Codex"], false));
   });
@@ -191,10 +199,10 @@ describe("AddMcpServerForm", () => {
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npx" } });
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
     await screen.findByText(/will be dropped/);
-    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /^Save to / }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "Acknowledge dropped fields" }));
-    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((screen.getByRole("button", { name: /^Save to / }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /^Save to / }));
     await waitFor(() => expect(onSave).toHaveBeenCalledWith("preview-1", ["Codex"], true));
   });
 
@@ -206,7 +214,7 @@ describe("AddMcpServerForm", () => {
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npx" } });
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
     await screen.findByText("Files that will change");
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save to / }));
     const dialog = await screen.findByRole("dialog", { name: /changed outside AgenTuna/ });
     expect(within(dialog).getByRole("button", { name: "Keep mine (re-apply)" })).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "Reload" })).toBeTruthy();

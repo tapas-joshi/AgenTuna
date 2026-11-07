@@ -2,6 +2,7 @@
 import type { GlobalStoreView } from "./GlobalStoreView";
 import type { OverviewAttentionView } from "./OverviewAttentionView";
 import type { OverviewChangeView } from "./OverviewChangeView";
+import type { OverviewEffectiveView } from "./OverviewEffectiveView";
 import type { OverviewScopeView } from "./OverviewScopeView";
 import type { StartupWarningView } from "./StartupWarningView";
 
@@ -25,6 +26,10 @@ attention_total: number,
  * Recent operations, newest first.
  */
 changes: Array<OverviewChangeView>, 
+/**
+ * Per-kind totals for the active scope's summary block.
+ */
+effective: OverviewEffectiveView, 
 /**
  * Resolved user store directory for copy and path display.
  */

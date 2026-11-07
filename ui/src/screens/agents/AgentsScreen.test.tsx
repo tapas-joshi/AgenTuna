@@ -157,7 +157,7 @@ describe("AgentsScreen", () => {
       return Promise.resolve(undefined);
     };
     renderScreen();
-    const toggle = await screen.findByRole("switch", { name: "Manage Claude Code" });
+    const toggle = await screen.findByRole("switch", { name: "Let AgenTuna manage this agent" });
     fireEvent.click(toggle);
     await waitFor(() =>
       expect(ipc.calls.some((call) => call.command === "agent_manage_set")).toBe(true),
@@ -180,7 +180,7 @@ describe("AgentsScreen", () => {
       return Promise.resolve(undefined);
     };
     renderScreen();
-    await screen.findByRole("switch", { name: "Manage Claude Code" });
+    await screen.findByRole("switch", { name: "Let AgenTuna manage this agent" });
     fireEvent.click(screen.getByRole("button", { name: "Rescan all agents" }));
     expect(await screen.findByText(/Rescan failed: Error: detection failed/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));

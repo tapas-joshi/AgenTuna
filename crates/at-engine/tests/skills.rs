@@ -202,6 +202,7 @@ fn shadowed_badge_wins_over_available_update() {
         shadowed_by: Some(Scope::Project),
         deployed: BTreeMap::new(),
         native_path: None,
+        native_paths: BTreeMap::new(),
         update_available: true,
         updated_at: String::new(),
         description: None,
@@ -211,4 +212,103 @@ fn shadowed_badge_wins_over_available_update() {
         agents: BTreeMap::new(),
     };
     assert_eq!(row.badge(), SkillBadge::Shadowed);
+}
+
+/// An adapter whose skills root disappeared after installation: listing it now fails with
+/// `NotInstalled` instead of returning an empty set.
+struct DisappearedAdapter {
+    id: AgentId,
+    missing: std::path::PathBuf,
+}
+
+impl at_adapters::adapter::AgentAdapter for DisappearedAdapter {
+    fn id(&self) -> AgentId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self, _env: &AgentEnvironment) -> at_adapters::adapter::AgentCapabilities {
+        at_adapters::adapter::AgentCapabilities {
+            mcp: None,
+            supports_symlink: true,
+            supports_rules: false,
+        }
+    }
+
+    fn detect(&self, _env: &AgentEnvironment) -> at_adapters::adapter::AgentDetection {
+        at_adapters::adapter::AgentDetection {
+            state: at_adapters::adapter::DetectionState::ConfiguredOnly,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn paths(
+        &self,
+        _kind: at_model::ItemKind,
+        _scope: Scope,
+        _env: &AgentEnvironment,
+    ) -> Vec<at_adapters::adapter::AgentPathCandidate> {
+        Vec::new()
+    }
+
+    fn list_native_skills(
+        &self,
+        _env: &AgentEnvironment,
+        _store_roots: &[std::path::PathBuf],
+    ) -> Result<Vec<at_adapters::native_skills::NativeSkill>, at_adapters::adapter::AgentError>
+    {
+        Err(at_adapters::adapter::AgentError::NotInstalled {
+            agent: self.id.clone(),
+            path: self.missing.clone(),
+        })
+    }
+}
+
+#[test]
+fn a_disappeared_source_folder_yields_an_error_cell_with_remediation() {
+    let db = Database::open_in_memory().expect("database");
+    let temp = tempfile::tempdir().expect("temporary root");
+    let missing = temp.path().join("gone/skills");
+    let agent = AgentId::custom("gone-tool").expect("custom id");
+    let registry = AgentAdapterRegistry::register();
+    registry
+        .insert(std::sync::Arc::new(DisappearedAdapter {
+            id: agent.clone(),
+            missing: missing.clone(),
+        }))
+        .expect("register adapter");
+    let env = AgentEnvironment {
+        home: temp.path().join("home"),
+        project: Some(temp.path().join("project")),
+        variables: BTreeMap::new(),
+    };
+    let result = index(
+        db.connection(),
+        &SkillFilter::default(),
+        &registry,
+        &env,
+        &[],
+    )
+    .expect("a failed source is a row, not a panic");
+    let row = result
+        .rows
+        .iter()
+        .find(|row| row.skill.state.as_deref() == Some("error"))
+        .expect("the disappeared source produces an error row");
+    assert_eq!(
+        row.skill.native_path.as_deref(),
+        Some(missing.to_string_lossy().as_ref())
+    );
+    match row.agents.get(&agent) {
+        Some(SkillCellState::Error {
+            message,
+            remediation,
+        }) => {
+            assert!(
+                message.contains(&missing.display().to_string()),
+                "the error names the missing path: {message}"
+            );
+            assert!(!remediation.is_empty(), "the error carries a remediation");
+        }
+        other => panic!("expected an Error cell, got {other:?}"),
+    }
 }

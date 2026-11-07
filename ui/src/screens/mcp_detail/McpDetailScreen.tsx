@@ -8,13 +8,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Button, Badge } from "../../components";
+import { Button, Badge, Toggle } from "../../components";
 import type { McpServerDetailView } from "../../generated/McpServerDetailView";
 import type { McpServerDetailRequest } from "../../generated/McpServerDetailRequest";
 import type { McpServerActionRequest } from "../../generated/McpServerActionRequest";
 import type { McpServerActionOutcome } from "../../generated/McpServerActionOutcome";
 import type { McpServerTestView } from "../../generated/McpServerTestView";
 import { WhyTraceDialog } from "../../overlays";
+import { AdoptModal } from "../../overlays/dialogs/AdoptModal";
 import { FixTokenDialog } from "../secrets/FixTokenDialog";
 import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot, useAppState } from "../../state/context";
@@ -55,7 +56,7 @@ export function McpDetailScreen() {
   const [expandedTools, setExpandedTools] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
   const [showFixToken, setShowFixToken] = useState(false);
-
+  const [adoptModalOpen, setAdoptModalOpen] = useState(false);
   // "Fix token" from Overview sets a flag before opening this item; consume it once.
   useEffect(() => {
     if (app.getSnapshot().screenState["mcp-detail:fix-token"] !== true) return;
@@ -116,9 +117,8 @@ export function McpDetailScreen() {
   }, [detail, activeProject, testAbort, toast, load]);
 
   const handleToggleAgent = useCallback(
-    async (agentId: string, currentEnabled: boolean) => {
+    async (agentId: string, next: boolean) => {
       if (!detail) return;
-      const next = !currentEnabled;
       // Optimistically update within one render after engine reply
       const prevAgents = detail.agents;
       const updatedAgents = detail.agents.map((a) =>
@@ -240,6 +240,11 @@ export function McpDetailScreen() {
             >
               {detail.scope}
             </span>
+            {detail.item_id.startsWith("native:") && (
+              <Badge tone="muted">
+                not in AgenTuna
+              </Badge>
+            )}
             {detail.locked && (
               <span className="text-12 text-scope-global" title={detail.lock_reason ?? "Locked"}>
                 🔒 Locked
@@ -252,36 +257,49 @@ export function McpDetailScreen() {
         </div>
 
         <div className="flex flex-wrap items-center gap-8">
-          <Button variant="ghost" onClick={() => void handleDisableInRepo()}>
-            Disable in this repo
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={testing}
-            onClick={() => void handleTestConnection()}
-          >
-            {testing ? "Testing…" : "Test connection"}
-          </Button>
-          {testing && (
-            <Button size="sm" variant="ghost" onClick={() => setTestAbort(true)}>
-              Cancel
+          {detail.item_id.startsWith("native:") ? (
+            // Testing needs a canonical item with a stored definition and a consent record;
+            // a discovered server has neither, so the detail offers Adopt only.
+            <Button
+              variant="primary"
+              onClick={() => setAdoptModalOpen(true)}
+            >
+              Adopt server
             </Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={() => void handleDisableInRepo()}>
+                Disable in this repo
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={testing}
+                onClick={() => void handleTestConnection()}
+              >
+                {testing ? "Testing…" : "Test connection"}
+              </Button>
+              {testing && (
+                <Button size="sm" variant="ghost" onClick={() => setTestAbort(true)}>
+                  Cancel
+                </Button>
+              )}
+              <Button
+                onClick={() => {
+                  app.setSelection("mcp-form", [detail.item_id]);
+                  app.navigate("mcp-form");
+                }}
+              >
+                Edit
+              </Button>
+            </>
           )}
-          <Button
-            onClick={() => {
-              app.setSelection("mcp-form", [detail.item_id]);
-              app.navigate("mcp-form");
-            }}
-          >
-            Edit
-          </Button>
         </div>
       </header>
 
       {/* Two columns */}
       <div className="grid grid-cols-1 gap-24 md:grid-cols-2">
         {/* Left Column: Configuration, Tools, State */}
-        <div className="flex flex-col gap-20">
+        <div className="flex flex-col gap-24">
           <section className="flex flex-col gap-12 rounded-8 border border-border bg-surface p-16">
             <h2 className="m-0 text-15 font-semibold text-text">Configuration</h2>
             <div className="flex flex-col gap-8 text-13">
@@ -388,18 +406,24 @@ export function McpDetailScreen() {
         </div>
 
         {/* Right Column: Health, Loaded By, Why trace */}
-        <div className="flex flex-col gap-20">
+        <div className="flex flex-col gap-24">
           {/* Health */}
           <section className="flex flex-col gap-12 rounded-8 border border-border bg-surface p-16">
-            <div className="flex items-center justify-between">
-              <h2 className="m-0 text-15 font-semibold text-text">Health</h2>
-              <span className="text-11 text-text-muted">{detail.cadence_text}</span>
-            </div>
+            <h2 className="m-0 text-15 font-semibold text-text">Health</h2>
 
             <div className="flex items-center gap-8">
-              <span className="text-13 text-text-muted">Status:</span>
               <span
-                className={`font-semibold capitalize text-13 ${
+                className={`size-8 rounded-full ${
+                  detail.health_status === "ok"
+                    ? "bg-success"
+                    : detail.health_status === "failed"
+                      ? "bg-danger"
+                      : "bg-text-muted"
+                }`}
+                aria-hidden="true"
+              />
+              <span
+                className={`font-semibold text-13 ${
                   detail.health_status === "ok"
                     ? "text-success"
                     : detail.health_status === "failed"
@@ -407,13 +431,21 @@ export function McpDetailScreen() {
                       : "text-text-muted"
                 }`}
               >
-                {detail.health_status === "not_tested" ? "Not tested" : detail.health_status}
+                {detail.health_status === "ok"
+                  ? `Healthy${detail.last_checks[0]?.latency_ms ? ` · ${detail.last_checks[0].latency_ms} ms` : ""}`
+                  : detail.health_status === "failed"
+                    ? `Failing${detail.health_error_code ? ` · ${detail.health_error_code}` : ""}${detail.health_error_text ? ` ${detail.health_error_text}` : ""}`
+                    : "Not tested"}
               </span>
             </div>
 
-            {/* Exactly 5 slots, oldest last */}
-            <div className="flex flex-col gap-4">
-              <span className="text-11 text-text-muted">Last 5 checks:</span>
+            <div className="flex flex-col gap-6 pt-4">
+              <div className="flex items-center justify-between">
+                <span className="text-11 font-semibold uppercase tracking-wide text-text-muted">
+                  Last 5 checks
+                </span>
+                <span className="text-11 text-text-muted">{detail.cadence_text}</span>
+              </div>
               <div
                 className="flex items-center gap-6"
                 role="group"
@@ -445,7 +477,7 @@ export function McpDetailScreen() {
                         role="img"
                         title={tip}
                         aria-label={`Check ${index + 1}: ${slot.status}`}
-                        className={`h-16 w-16 rounded-3 ${color}`}
+                        className={`size-24 rounded-3 ${color}`}
                       />
                     );
                   })
@@ -455,7 +487,7 @@ export function McpDetailScreen() {
 
             {/* Contextual button: Fix token or Sign in */}
             {detail.needs_auth && (
-              <div className="pt-8 border-t border-border">
+              <div className="pt-8">
                 <Button
                   size="sm"
                   variant="primary"
@@ -470,44 +502,35 @@ export function McpDetailScreen() {
           {/* Loaded By */}
           <section className="flex flex-col gap-12 rounded-8 border border-border bg-surface p-16">
             <h2 className="m-0 text-15 font-semibold text-text">Loaded by</h2>
-            <div className="flex flex-col gap-8">
+            <div className="flex flex-col gap-12">
               {detail.agents.map((agent) => {
                 const isNotInstalled = agent.presence === "not_installed";
 
                 return (
                   <div
                     key={agent.id}
-                    className={`flex items-center justify-between gap-12 rounded-6 border border-border p-8 ${
-                      isNotInstalled ? "bg-raised/50 opacity-60" : "bg-raised"
-                    }`}
+                    className="flex items-center justify-between gap-12 py-2"
                   >
-                    <div className="flex flex-col gap-2">
-                      <span className="font-medium text-13 text-text">{agent.label}</span>
-                      {isNotInstalled && agent.reason && (
-                        <span className="text-11 text-text-muted">{agent.reason}</span>
-                      )}
-                      {!isNotInstalled && (
-                        <span className="text-11 text-text-secondary capitalize">{agent.state}</span>
-                      )}
-                    </div>
-
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={agent.enabled}
-                      aria-label={`${agent.label}: ${agent.enabled ? "enabled" : "disabled"}`}
-                      disabled={isNotInstalled || detail.locked}
-                      onClick={() => void handleToggleAgent(agent.id, agent.enabled)}
-                      className={`h-20 w-36 rounded-full transition-colors relative ${
-                        agent.enabled ? "bg-accent-fill" : "bg-border"
-                      } disabled:cursor-not-allowed`}
+                    <span
+                      className={`text-13 font-medium ${
+                        isNotInstalled ? "text-text-muted" : "text-text"
+                      }`}
                     >
-                      <span
-                        className={`absolute top-2 h-16 w-16 rounded-full bg-white transition-transform ${
-                          agent.enabled ? "left-18" : "left-2"
-                        }`}
+                      {agent.label}
+                    </span>
+
+                    {isNotInstalled ? (
+                      <span className="text-12 text-text-muted">not installed</span>
+                    ) : (
+                      <Toggle
+                        size="sm"
+                        labelPlacement="hidden"
+                        label={`${agent.label}: ${agent.enabled ? "enabled" : "disabled"}`}
+                        checked={agent.enabled}
+                        disabled={isNotInstalled || detail.locked || detail.item_id.startsWith("native:")}
+                        onCheckedChange={(next) => void handleToggleAgent(agent.id, next)}
                       />
-                    </button>
+                    )}
                   </div>
                 );
               })}
@@ -549,6 +572,19 @@ export function McpDetailScreen() {
             await load();
           }}
           onClose={() => setShowFixToken(false)}
+        />
+      )}
+      {adoptModalOpen && detail.defined_in[0] && (
+        <AdoptModal
+          path={detail.defined_in[0]}
+          name={detail.name}
+          onAdoptSuccess={() => {
+            toast.success(`Adopted ${detail.name} into AgenTuna`);
+            setAdoptModalOpen(false);
+            void load();
+          }}
+          onRescan={() => void load()}
+          onClose={() => setAdoptModalOpen(false)}
         />
       )}
     </main>

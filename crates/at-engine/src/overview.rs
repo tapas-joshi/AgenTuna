@@ -11,6 +11,8 @@ pub struct ScopeCard {
     pub counts: at_db::overview::ScopeCounts,
     /// Most recent operation timestamp, or `None` when not set up.
     pub last_edited: Option<String>,
+    /// Actor that performed the most recent operation, when known.
+    pub last_edited_by: Option<String>,
     /// Number of disabled items kept separate from effective counts.
     pub disabled_count: u64,
 }
@@ -28,6 +30,10 @@ pub struct Overview {
     pub needs_attention_total: usize,
     /// Twenty most recent operations.
     pub recent_changes: Vec<at_db::overview::RecentChangeRow>,
+    /// Skill copies a nearer scope wins over.
+    pub shadowed_skills: usize,
+    /// Disabled items at the active scope, from its store manifest.
+    pub disabled_in_active_scope: u64,
 }
 
 /// Builds the Overview payload using bounded, read-only database queries.
@@ -59,11 +65,16 @@ pub fn build(
             .iter()
             .find(|row| row.scope == scope)
             .and_then(|row| row.last_edited.clone());
+        let last_edited_by = edited
+            .iter()
+            .find(|row| row.scope == scope)
+            .and_then(|row| row.last_edited_by.clone());
         let disabled_count = 0;
         scopes.push(ScopeCard {
             scope,
             counts: count,
             last_edited,
+            last_edited_by,
             disabled_count,
         });
     }
@@ -75,6 +86,8 @@ pub fn build(
         needs_attention,
         needs_attention_total,
         recent_changes: at_db::overview::recent_changes(connection, 20)?,
+        shadowed_skills: shadowed.len(),
+        disabled_in_active_scope: 0,
     })
 }
 
@@ -123,6 +136,7 @@ pub fn build_with_disabled_counts(
     for card in &mut result.scopes {
         card.disabled_count = disabled_counts.get(&card.scope).copied().unwrap_or(0);
     }
+    result.disabled_in_active_scope = disabled_counts.get(&active_scope).copied().unwrap_or(0);
     Ok(result)
 }
 #[cfg(test)]

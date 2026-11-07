@@ -150,7 +150,7 @@ test("keyboard-only MCP list, detail and form editing", async ({ page }) => {
   const editButton = detail.getByRole("button", { name: "Edit" });
   const editTabs = await tabTo(page, editButton, "the MCP Edit button");
   await page.keyboard.press("Enter");
-  const form = page.getByRole("main", { name: "Edit MCP server" });
+  const form = page.locator('main[aria-labelledby="mcp-add-title"]');
   const name = form.getByRole("textbox", { name: "Name", exact: true });
   await expect(name).toBeVisible();
   const nameTabs = await tabTo(page, name, "the MCP server Name field");

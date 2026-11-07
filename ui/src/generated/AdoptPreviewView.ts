@@ -47,4 +47,11 @@ renamed: boolean,
 /**
  * Whether the path exists now (`present` or `missing`).
  */
-current: string, };
+current: string, 
+/**
+ * Content digest the preview verified.
+ *
+ * Pass it back to `adopt_apply` as `expected_hash`: the apply refuses with a conflict
+ * when the source no longer holds these bytes, so the reviewed item is the item adopted.
+ */
+hash: string, };

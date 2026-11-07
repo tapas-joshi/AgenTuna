@@ -65,6 +65,23 @@ impl AgentId {
     }
 }
 
+impl AgentId {
+    /// Human-readable name used in UI copy before an agent reports its own label.
+    ///
+    /// Detection records this as the `agents.display_name` seed, so screens never
+    /// fall back to the wire id (`claude_code`) unless the agent is custom.
+    #[must_use]
+    pub fn default_display_name(&self) -> &str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Omp => "omp",
+            Self::Cursor => "Cursor",
+            Self::Custom(name) => name,
+        }
+    }
+}
+
 impl fmt::Display for AgentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
@@ -88,8 +88,8 @@ const scan = {
   skipped_roots: ["/sandbox/home/.cursor/skills"],
   warnings: [] as { path: string; kind: string; agent: string; scope: string; message: string }[],
   roots: [
-    { path: "/sandbox/home/.claude/skills", agents: ["claude_code"], new_items: 1, in_sync: 1 },
-    { path: "/sandbox/home/.codex/config.toml", agents: ["codex", "omp"], new_items: 0, in_sync: 1 },
+    { path: "/sandbox/home/.claude/skills", kind: "skill", agents: ["claude_code"], found_items: 2, new_items: 1, skipped_items: 0, in_sync: 1, status: "scanned", unreadable_reason: null },
+    { path: "/sandbox/home/.codex/config.toml", kind: "mcp_server", agents: ["codex", "omp"], found_items: 1, new_items: 0, skipped_items: 0, in_sync: 1, status: "scanned", unreadable_reason: null },
   ],
 };
 const conflict = {
@@ -229,6 +229,44 @@ describe("MigrateScanScreen", () => {
     expect(screen.getByText("Symlink")).toBeTruthy();
   });
 
+  test("lists empty, missing and unreadable roots alongside found items", async () => {
+    ipc.reply = scanReply({
+      ...scan,
+      partial: true,
+      roots: [
+        ...scan.roots,
+        { path: "/sandbox/zero", kind: "skill", agents: ["codex", "omp"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "empty", unreadable_reason: null },
+        { path: "/sandbox/missing", kind: "rule", agents: ["claude_code"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "not_present", unreadable_reason: null },
+        { path: "/sandbox/unreadable", kind: "skill", agents: ["cursor"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "unreadable", unreadable_reason: "permission denied" },
+        { path: "/sandbox/escaping", kind: "skill", agents: ["omp"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "unreadable", unreadable_reason: "symbolic link target is outside injected roots" },
+        { path: "/sandbox/partial", kind: "skill", agents: ["codex"], found_items: 2, new_items: 1, skipped_items: 1, in_sync: 0, status: "scanned", unreadable_reason: null },
+      ],
+    });
+    renderScreen();
+    await screen.findByRole("heading", { name: "Found 3 items outside AgenTuna" });
+    const folders = within(screen.getByRole("complementary", { name: "Scanned folders" }));
+    for (const [path, status] of [
+      ["/sandbox/zero", "0 new"],
+      ["/sandbox/missing", "not present"],
+      ["/sandbox/unreadable", "permission denied"],
+      ["/sandbox/escaping", "symbolic link target is outside injected roots"],
+      ["/sandbox/partial", "2 found · 1 skipped"],
+    ] as const) {
+      const row = folders.getByText(path).closest("li");
+      expect(row?.textContent).toContain(status);
+    }
+    const emptyRow = folders.getByText("/sandbox/zero").closest("li")?.textContent ?? "";
+    expect(emptyRow).toContain("empty");
+    const missingRow = folders.getByText("/sandbox/missing").closest("li")?.textContent ?? "";
+    expect(missingRow).toContain("not present");
+    expect(missingRow).not.toContain("empty");
+    expect(emptyRow).not.toContain("not present");
+    expect(folders.getByText("/sandbox/zero").closest("li")?.textContent).toContain("codex, omp");
+    expect(folders.getByText("/sandbox/zero").closest("li")?.textContent).toContain("skills");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select pdf-extract" }));
+    expect(screen.getByRole("button", { name: "Continue with 1" })).toBeTruthy();
+  });
+
   test("shows per-step progress and cancels the running scan job", async () => {
     let polls = 0;
     ipc.reply = (command) => {
@@ -287,7 +325,7 @@ describe("MigrateScanScreen", () => {
       skipped_roots: [],
       warnings: [],
       roots: [
-        { path: "/sandbox/home/.claude/skills", agents: ["claude_code"], new_items: 0, in_sync: 0 },
+        { path: "/sandbox/home/.claude/skills", kind: "skill", agents: ["claude_code"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "empty", unreadable_reason: null },
       ],
     });
     renderScreen();
@@ -295,9 +333,10 @@ describe("MigrateScanScreen", () => {
     expect(screen.getByRole("complementary", { name: "Scanned folders" }).textContent).toContain(
       "/sandbox/home/.claude/skills",
     );
-    expect(screen.getByRole("complementary", { name: "Scanned folders" }).textContent).toContain(
-      "0 in sync",
-    );
+    const folders = screen.getByRole("complementary", { name: "Scanned folders" }).textContent ?? "";
+    expect(folders).toContain("0 new");
+    expect(folders).toContain("empty");
+    expect(folders).not.toContain("not present");
     expect(screen.getAllByRole("button", { name: "Rescan" }).length).toBeGreaterThan(0);
   });
 

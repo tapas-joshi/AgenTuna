@@ -95,7 +95,7 @@ describe("AgentCell", () => {
 
     const native = fixtures.get("native");
     expect(native?.querySelector("[data-slot='badge']")?.textContent).toBe("native");
-    expect(native?.textContent).toContain(".claude/skills/research");
+    expect(native?.textContent).toContain(".claude/skills");
     expect(native?.firstElementChild?.getAttribute("title")).toBe(
       ".claude/skills/research · read-only",
     );
@@ -135,7 +135,7 @@ describe("AgentCell", () => {
     expect(projection).toEqual([
       "linked\ngroup: Claude Code\ntooltip: Deployed to this agent by AgenTuna and unchanged since the last write.\nswitch: name=labelled checked=true disabled=false\nlabel: Linked",
       "off\ngroup: Claude Code\ntooltip: Not deployed to this agent.\nswitch: name=labelled checked=false disabled=false\nlabel: Off",
-      "native\ngroup: Claude Code\ntooltip: .claude/skills/research · read-only\nbadge: native\npath: .claude/skills/research",
+      "native\ngroup: Claude Code\ntooltip: .claude/skills/research · read-only\nbadge: native\npath: .claude/skills",
       "none\ngroup: Claude Code\ntooltip: Not present in this agent\ndash: present",
       "locked\ngroup: Claude Code\ntooltip: Locked by Global\nswitch: name=labelled checked=true disabled=true\nglyph: locked\nlabel: Locked",
       "shadowed\ngroup: Claude Code\ntooltip: Shadowed by Project\nstatus: Shadowed",

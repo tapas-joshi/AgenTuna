@@ -839,12 +839,37 @@ fn registered_project_store(
     )?)
 }
 
+/// One registered project the catalog skipped because its folder or store was unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibrarySkip {
+    /// Project label shown in the picker.
+    pub label: String,
+    /// Project folder that could not be read.
+    pub path: PathBuf,
+    /// Why it was skipped, with the remedy the caller should offer.
+    pub reason: String,
+}
+
+/// Library sources and skills, plus the registered projects that were skipped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryCatalog {
+    /// Source stores with at least one importable skill.
+    pub sources: Vec<LibrarySource>,
+    /// Importable skills across those sources.
+    pub skills: Vec<LibrarySkill>,
+    /// Registered projects that could not be enumerated, with the reason.
+    pub skipped: Vec<LibrarySkip>,
+}
+
 /// Enumerates global, user and registered project stores other than the current target.
 ///
 /// Project paths come from the registry; global and user roots are injected by the caller.
+/// A registered project whose folder or store cannot be read is reported in
+/// [`LibraryCatalog::skipped`] instead of failing the whole catalog: one stale project row
+/// must not make the wizard's library path unusable.
 ///
 /// # Errors
-/// Returns a typed database, path, store-layout or source-folder error.
+/// Returns a typed database or source-folder error for failures the user cannot skip.
 pub fn enumerate_registered_library(
     connection: &rusqlite::Connection,
     global_store: &Path,
@@ -852,8 +877,9 @@ pub fn enumerate_registered_library(
     target_scope: at_model::Scope,
     current_project_id: Option<&str>,
     current_project_path: Option<&Path>,
-) -> Result<(Vec<LibrarySource>, Vec<LibrarySkill>), LibraryCatalogError> {
+) -> Result<LibraryCatalog, LibraryCatalogError> {
     let mut stores = Vec::new();
+    let mut skipped = Vec::new();
     for (scope, label, path) in [
         (at_model::Scope::Global, "Global", global_store),
         (at_model::Scope::User, "User", user_store),
@@ -870,14 +896,22 @@ pub fn enumerate_registered_library(
     if target_scope != at_model::Scope::Local
         && let Some(project_path) = current_project_path
     {
-        let layout = registered_project_store(project_path, user_store)?;
-        if let Some(local_layout) = layout.local_scope() {
-            stores.push(LibraryStore {
+        match registered_project_store(project_path, user_store) {
+            Ok(layout) => {
+                if let Some(local_layout) = layout.local_scope() {
+                    stores.push(LibraryStore {
+                        label: "Local".to_owned(),
+                        path: local_layout.root().to_path_buf(),
+                        scope: Some(at_model::Scope::Local),
+                        last_used_at: None,
+                    });
+                }
+            }
+            Err(error) => skipped.push(LibrarySkip {
                 label: "Local".to_owned(),
-                path: local_layout.root().to_path_buf(),
-                scope: Some(at_model::Scope::Local),
-                last_used_at: None,
-            });
+                path: project_path.to_path_buf(),
+                reason: format!("The local store could not be read: {error}"),
+            }),
         }
     }
     for project in at_db::projects::list_projects(connection)? {
@@ -886,15 +920,58 @@ pub fn enumerate_registered_library(
         {
             continue;
         }
-        let layout = registered_project_store(Path::new(&project.path), user_store)?;
-        stores.push(LibraryStore {
-            label: project.name,
-            path: layout.root().to_path_buf(),
-            scope: None,
-            last_used_at: project.last_used_at,
-        });
+        let path = PathBuf::from(&project.path);
+        if let Some(reason) = unreadable_project_folder(&path) {
+            skipped.push(LibrarySkip {
+                label: project.name,
+                path,
+                reason,
+            });
+            continue;
+        }
+        match registered_project_store(&path, user_store) {
+            Ok(layout) => stores.push(LibraryStore {
+                label: project.name,
+                path: layout.root().to_path_buf(),
+                scope: None,
+                last_used_at: project.last_used_at,
+            }),
+            Err(error) => skipped.push(LibrarySkip {
+                label: project.name,
+                path,
+                reason: format!("The project store could not be read: {error}"),
+            }),
+        }
     }
-    enumerate_library(&stores, Path::new("")).map_err(LibraryCatalogError::Folder)
+    let (sources, skills) =
+        enumerate_library(&stores, Path::new("")).map_err(LibraryCatalogError::Folder)?;
+    Ok(LibraryCatalog {
+        sources,
+        skills,
+        skipped,
+    })
+}
+
+/// Why a registered project folder cannot be used, or `None` when it is a readable folder.
+///
+/// A folder that is gone and a folder the process may not read are different problems with
+/// different remedies, so the real IO error is kept instead of calling every failure
+/// "no longer exists" — which would hide a permissions problem behind a stale row.
+fn unreadable_project_folder(path: &Path) -> Option<String> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => None,
+        Ok(_) => Some(
+            "The project path is not a folder. Rescan projects or remove it from the list."
+                .to_owned(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(
+            "The project folder no longer exists. Rescan projects or remove it from the list."
+                .to_owned(),
+        ),
+        Err(error) => Some(format!(
+            "The project folder could not be read: {error}. Check its permissions, then rescan."
+        )),
+    }
 }
 
 /// Failure while resolving or importing a marketplace listing.
@@ -1125,7 +1202,7 @@ mod tests {
                 .id;
         at_db::projects::add_project(database.connection(), &other, Some("Other"), None)
             .expect("register other");
-        let (sources, skills) = enumerate_registered_library(
+        let catalog = enumerate_registered_library(
             database.connection(),
             &global,
             &temp.path().join("empty-user"),
@@ -1134,14 +1211,93 @@ mod tests {
             Some(&current),
         )
         .expect("registered library");
-        assert_eq!(sources.len(), 2);
-        assert_eq!(skills.len(), 2);
-        assert!(sources.iter().any(|source| source.label == "Global"));
-        assert!(sources.iter().any(|source| source.label == "Other"));
+        assert_eq!(catalog.sources.len(), 2);
+        assert_eq!(catalog.skills.len(), 2);
+        assert!(catalog.skipped.is_empty());
         assert!(
-            skills
+            catalog
+                .sources
+                .iter()
+                .any(|source| source.label == "Global")
+        );
+        assert!(catalog.sources.iter().any(|source| source.label == "Other"));
+        assert!(
+            catalog
+                .skills
                 .iter()
                 .all(|skill| skill.name.as_deref() != Some("current"))
+        );
+    }
+
+    #[test]
+    fn a_missing_registered_project_is_skipped_with_a_remedy() {
+        let temp = tempfile::tempdir().expect("temp");
+        let gone = temp.path().join("gone-project");
+        fs::create_dir_all(&gone).expect("project dir");
+        let global = temp.path().join("global");
+        let database = at_db::Database::open_in_memory().expect("database");
+        at_db::projects::add_project(database.connection(), &gone, Some("Gone"), None)
+            .expect("register project");
+        fs::remove_dir_all(&gone).expect("remove project folder");
+
+        let catalog = enumerate_registered_library(
+            database.connection(),
+            &global,
+            &temp.path().join("empty-user"),
+            at_model::Scope::User,
+            None,
+            None,
+        )
+        .expect("a stale project row must not fail the catalog");
+        assert!(catalog.sources.is_empty());
+        assert_eq!(catalog.skipped.len(), 1);
+        assert_eq!(catalog.skipped[0].label, "Gone");
+        assert!(
+            catalog.skipped[0].reason.contains("no longer exists"),
+            "the skip reason names the cause: {}",
+            catalog.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn an_unreadable_registered_project_keeps_the_io_error_instead_of_claiming_it_is_gone() {
+        let temp = tempfile::tempdir().expect("temp");
+        let file = temp.path().join("plain-file");
+        fs::write(&file, b"not a folder").expect("write file");
+        // A registered row whose path cannot be resolved: the error is not "not found".
+        let blocked = file.join("project");
+        let database = at_db::Database::open_in_memory().expect("database");
+        database
+            .connection()
+            .execute(
+                "INSERT INTO projects (id, name, path, last_opened_at, last_used_at) \
+                 VALUES ('prj_blocked', 'Blocked', ?1, \
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [blocked.to_string_lossy().into_owned()],
+            )
+            .expect("register project row");
+
+        let catalog = enumerate_registered_library(
+            database.connection(),
+            &temp.path().join("global"),
+            &temp.path().join("empty-user"),
+            at_model::Scope::User,
+            None,
+            None,
+        )
+        .expect("an unreadable project must not fail the catalog");
+
+        assert!(catalog.sources.is_empty());
+        assert_eq!(catalog.skipped.len(), 1);
+        let reason = &catalog.skipped[0].reason;
+        assert!(
+            !reason.contains("no longer exists"),
+            "a permissions or path error is not a deleted folder: {reason}"
+        );
+        assert!(
+            reason.contains("could not be read"),
+            "the skip reason keeps the real failure: {reason}"
         );
     }
     #[test]

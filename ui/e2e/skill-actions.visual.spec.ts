@@ -96,13 +96,16 @@ test("Skill detail exposes transfer, delete and repository disable actions", asy
 
   const detail = page;
   await expect(page.getByRole("main").getByRole("heading", { name: "Code Review", exact: true }).first()).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Promote" })).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Move" })).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Duplicate" })).toBeVisible();
+  // Design 09 groups the header: Edit primary, Promote…, Delete danger, the rest in the menu.
+  await expect(detail.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+  await expect(detail.getByRole("button", { name: "Promote…" })).toBeVisible();
   await expect(detail.getByRole("button", { name: "Delete" })).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Disable in this repo" })).toBeVisible();
+  await detail.getByRole("button", { name: "More actions" }).click();
+  await expect(detail.getByRole("menuitem", { name: "Move to scope…" })).toBeVisible();
+  await expect(detail.getByRole("menuitem", { name: "Duplicate…" })).toBeVisible();
+  await expect(detail.getByRole("menuitem", { name: "Disable in this repo" })).toBeVisible();
 
-  await detail.getByRole("button", { name: "Move" }).click();
+  await detail.getByRole("menuitem", { name: "Move to scope…" }).click();
   await expect(page.getByRole("dialog", { name: "Move skill to scope" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: "Move skill to scope" })).toBeHidden();

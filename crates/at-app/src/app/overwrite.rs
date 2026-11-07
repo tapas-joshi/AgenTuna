@@ -305,6 +305,11 @@ pub struct AdoptPreviewView {
     pub renamed: bool,
     /// Whether the path exists now (`present` or `missing`).
     pub current: String,
+    /// Content digest the preview verified.
+    ///
+    /// Pass it back to `adopt_apply` as `expected_hash`: the apply refuses with a conflict
+    /// when the source no longer holds these bytes, so the reviewed item is the item adopted.
+    pub hash: String,
 }
 
 /// Result of adopting one unmanaged native item.
@@ -579,6 +584,11 @@ pub fn adopt_preview_inner(
         handling,
     })
     .map_err(adopt_error)?;
+    let (current, hash) = match preview.current {
+        at_migrate::adopt::PathState::Present(hash) => ("present".to_owned(), hash),
+        at_migrate::adopt::PathState::Missing => ("missing".to_owned(), String::new()),
+        _ => ("unknown".to_owned(), String::new()),
+    };
     Ok(AdoptPreviewView {
         source: preview.source.display().to_string(),
         store_root: preview.store_root.display().to_string(),
@@ -590,11 +600,8 @@ pub fn adopt_preview_inner(
         agents: preview.agents.iter().map(ToString::to_string).collect(),
         handling: preview.handling.as_str().to_owned(),
         renamed: preview.renamed,
-        current: match preview.current {
-            at_migrate::adopt::PathState::Present(_) => "present".to_owned(),
-            at_migrate::adopt::PathState::Missing => "missing".to_owned(),
-            _ => "unknown".to_owned(),
-        },
+        current,
+        hash,
     })
 }
 

@@ -294,7 +294,7 @@ export function MigrateResolveScreen({
                         onChange={(event) =>
                           onNamesChange({ ...names, [key]: [event.target.value, pair[1]] })
                         }
-                        className="w-56"
+                        className="w-224"
                       />
                       <Input
                         label="Copy B name"
@@ -302,7 +302,7 @@ export function MigrateResolveScreen({
                         onChange={(event) =>
                           onNamesChange({ ...names, [key]: [pair[0], event.target.value] })
                         }
-                        className="w-56"
+                        className="w-224"
                       />
                       {error !== undefined && (
                         <p role="alert" className="m-0 text-12 text-danger">
@@ -320,7 +320,7 @@ export function MigrateResolveScreen({
 
       <footer className="mt-auto flex items-center justify-between gap-8 border-t border-border pt-16">
         <Button variant="secondary" onClick={onBack}>
-          Back to scan
+          Back
         </Button>
         <div className="flex items-center gap-12">
           {unresolved && conflicts.length > 0 && (
@@ -328,6 +328,9 @@ export function MigrateResolveScreen({
               Resolve every conflict to continue
             </span>
           )}
+          <Button variant="ghost" onClick={onBack}>
+            Cancel
+          </Button>
           <Button
             variant="primary"
             disabled={loading || error !== null || unresolved}

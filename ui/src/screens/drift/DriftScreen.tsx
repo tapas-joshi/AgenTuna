@@ -58,8 +58,8 @@ function WatcherBadge({ watcher }: { readonly watcher: DriftWatcherStatusView })
       ? "border-danger/30 bg-danger/10 text-danger"
       : "border-warning/30 bg-warning/10 text-warning";
   const label = watcher.status === "active" ? "Watching" : watcher.status === "error" ? "Watch error" : "Paused";
-  return <span className={`inline-flex items-center gap-6 rounded-full border px-10 py-5 text-12 ${style}`}>
-    <span aria-hidden="true" className={`h-7 w-7 rounded-full ${watcher.status === "active" ? "bg-success" : watcher.status === "error" ? "bg-danger" : "bg-warning"}`} />
+  return <span className={`inline-flex items-center gap-6 rounded-full border px-10 py-5 text-12 max-[1199px]:gap-8 max-[1199px]:px-12 max-[1199px]:py-4 ${style}`}>
+    <span aria-hidden="true" className={`h-7 w-7 rounded-full max-[1199px]:size-8 ${watcher.status === "active" ? "bg-success" : watcher.status === "error" ? "bg-danger" : "bg-warning"}`} />
     {label}
   </span>;
 }
@@ -238,14 +238,14 @@ export function DriftScreen(): JSX.Element {
 
   const watcher = snapshot?.watcher ?? { status: "error", path: null, error: "Watcher status is unavailable." };
 
-  return <main aria-label="Sync and drift" className="flex min-h-0 w-full flex-1 flex-col gap-16 p-20">
+  return <main aria-label="Sync and drift" className="flex min-h-0 w-full flex-1 flex-col gap-16 p-20 max-[1199px]:p-24">
     <header className="flex flex-wrap items-start justify-between gap-12">
       <div className="grid gap-5">
-        <h1 className="m-0 text-24 font-semibold text-text">Sync &amp; drift</h1>
-        <p className="m-0 text-13 text-text-secondary">Files edited outside AgenTuna. Review each change before AgenTuna adopts or restores it.</p>
+        <h1 className="m-0 text-26 font-semibold text-text">Sync &amp; drift</h1>
+        <p className="m-0 text-13 text-text-secondary">Files edited outside AgenTuna. Review each change before AgenTuna adopts it.</p>
       </div>
       <div className="flex items-center gap-8">
-        {snapshot && <span className="rounded-8 border border-border bg-raised px-10 py-7 text-12 text-text-secondary"><strong className="font-mono text-text">{snapshot.in_sync_count}</strong> items in sync</span>}
+        {snapshot && <span className="rounded-8 border border-border bg-raised px-10 py-7 text-12 text-text-secondary max-[1199px]:px-12 max-[1199px]:py-8"><strong className="font-mono text-text">{snapshot.in_sync_count}</strong> items in sync</span>}
         <WatcherBadge watcher={watcher} />
         <Button size="sm" variant="secondary" disabled={!snapshot || watcher.status === "error"} onClick={() => void toggleWatcher()}>
           {watcher.status === "active" ? "Pause watching" : "Resume watching"}
@@ -267,14 +267,14 @@ export function DriftScreen(): JSX.Element {
 
     {tab === "drift" ? <section role="tabpanel" aria-label="Drift" className="grid min-h-0 flex-1 grid-cols-[minmax(250px,340px)_minmax(0,1fr)] gap-12">
       <div className="flex min-h-0 flex-col rounded-10 border border-border bg-raised">
-        <div className="flex items-center justify-between border-b border-border px-12 py-10"><h2 className="m-0 text-13 font-semibold text-text">Changed items</h2><Button size="sm" variant="ghost" loading={loading} onClick={() => void rescan()}>Rescan</Button></div>
+        <div className="flex items-center justify-between border-b border-border px-12 py-10 max-[1199px]:py-12"><h2 className="m-0 text-13 font-semibold text-text">Changed items</h2><Button size="sm" variant="ghost" loading={loading} onClick={() => void rescan()}>Rescan</Button></div>
         {loading && snapshot === null ? <p role="status" className="m-12 text-12 text-text-muted">Checking watched files…</p> : snapshot?.rows.length ? <ul aria-label="Drifted items" className="m-0 min-h-0 list-none overflow-auto p-0">
           {snapshot.rows.map((row) => <li key={row.event_id} className="border-b border-border last:border-0">
-            <button type="button" aria-current={Number(row.event_id) === selectedEvent ? "true" : undefined} onClick={() => { setActionError(null); setSelectedEvent(Number(row.event_id)); app.setSelection("drift", [String(row.event_id)]); }} className={`grid w-full gap-4 px-12 py-10 text-left ${Number(row.event_id) === selectedEvent ? "bg-accent/10" : "hover:bg-overlay"}`}>
-              <span className="flex items-center justify-between gap-6"><strong className="truncate text-13 text-text">{row.item_name}</strong><span className="rounded-full bg-warning/10 px-7 py-3 text-10 text-warning">{KIND_LABEL[row.kind] ?? row.kind}</span></span>
+            <button type="button" aria-current={Number(row.event_id) === selectedEvent ? "true" : undefined} onClick={() => { setActionError(null); setSelectedEvent(Number(row.event_id)); app.setSelection("drift", [String(row.event_id)]); }} className={`grid w-full gap-4 px-12 py-10 text-left max-[1199px]:py-12 ${Number(row.event_id) === selectedEvent ? "bg-accent/10" : "hover:bg-overlay"}`}>
+              <span className="flex items-center justify-between gap-6 max-[1199px]:gap-8"><strong className="truncate text-13 text-text">{row.item_name}</strong><span className="rounded-full bg-warning/10 px-7 py-3 text-11 text-warning max-[1199px]:px-8 max-[1199px]:py-4">{KIND_LABEL[row.kind] ?? row.kind}</span></span>
               <span className="text-11 text-text-secondary">{row.agent} · {row.scope}</span>
-              <span className="truncate font-mono text-10 text-text-muted" title={row.path}>{row.path}</span>
-              <time className="text-10 text-text-muted" dateTime={row.detected_at}>{formattedTime(row.detected_at)}</time>
+              <span className="truncate font-mono text-11 text-text-muted" title={row.path}>{row.path}</span>
+              <time className="text-11 text-text-muted" dateTime={row.detected_at}>{formattedTime(row.detected_at)}</time>
             </button>
           </li>)}
         </ul> : <div className="grid flex-1 content-center justify-items-center gap-8 p-20 text-center"><span aria-hidden="true" className="grid h-36 w-36 place-items-center rounded-full bg-success/10 text-success">✓</span><h2 className="m-0 text-15 font-semibold text-text">Everything is in sync</h2><p className="m-0 text-12 text-text-muted">AgenTuna found no external changes in {snapshot?.watched_count ?? 0} watched paths.</p></div>}
@@ -308,9 +308,9 @@ export function DriftScreen(): JSX.Element {
         <table className="w-full border-collapse text-left text-12"><thead className="sticky top-0 bg-overlay text-text-muted"><tr><th className="p-8 font-medium">Created</th><th className="p-8 font-medium">Original path</th><th className="p-8 font-medium">Size</th><th className="p-8 font-medium">Operation</th><th className="p-8 font-medium">Action</th></tr></thead><tbody>
           {backups.map((backup) => <tr key={backup.id} aria-selected={backup.id === selectedBackupId} className={`border-t border-border ${backup.id === selectedBackupId ? "bg-accent/10" : ""}`}>
             <td className="whitespace-nowrap p-8 text-text-secondary">{formattedTime(backup.created_at)}</td>
-            <td className="max-w-[280px] p-8"><button type="button" className="block max-w-full truncate font-mono text-10 text-text hover:text-accent" title={backup.original_path ?? "Destination unavailable"} onClick={() => setSelectedBackupId(backup.id)}>{backup.original_path ?? "Destination unavailable"}</button></td>
+            <td className="max-w-[280px] p-8"><button type="button" className="block max-w-full truncate font-mono text-11 text-text hover:text-accent" title={backup.original_path ?? "Destination unavailable"} onClick={() => setSelectedBackupId(backup.id)}>{backup.original_path ?? "Destination unavailable"}</button></td>
             <td className="whitespace-nowrap p-8 text-text-secondary">{formattedSize(backup.size)}</td>
-            <td className="max-w-[120px] truncate p-8 font-mono text-10 text-text-muted" title={backup.operation_id ?? "Unknown operation"}>{backup.operation_id ?? "—"}</td>
+            <td className="max-w-[120px] truncate p-8 font-mono text-11 text-text-muted" title={backup.operation_id ?? "Unknown operation"}>{backup.operation_id ?? "—"}</td>
             <td className="p-8"><Button size="sm" variant="secondary" disabled={!backup.restorable} title={backup.unavailable_reason ?? undefined} onClick={() => { setSelectedBackupId(backup.id); setConfirmation({ kind: "backup", backup }); }}>Restore</Button></td>
           </tr>)}
         </tbody></table>

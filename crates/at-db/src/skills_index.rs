@@ -1,6 +1,6 @@
 //! Skills list projections and filters for the Skills screen and CLI.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use at_model::{AgentId, DeploymentState, ItemId, Scope};
 use rusqlite::{Connection, params};
@@ -41,6 +41,12 @@ pub struct SkillRow {
     pub deployed: BTreeMap<AgentId, DeploymentState>,
     /// Native path if the item exists only in an agent folder.
     pub native_path: Option<String>,
+    /// Native folder each agent reads this row from, one entry per native cell.
+    ///
+    /// Empty for canonical rows. Two agents that share a discovery root (Codex and
+    /// omp over `.agents/skills`) carry the same path here, which is what lets the
+    /// Skills screen render one folder block instead of independent switches.
+    pub native_paths: BTreeMap<AgentId, String>,
     /// Whether the source advertises an update the user has not ignored.
     pub update_available: bool,
     /// Last item update timestamp or native scan timestamp.
@@ -60,9 +66,14 @@ pub fn list_skills(
     filter: &SkillFilter,
 ) -> Result<Vec<SkillRow>, DbError> {
     let mut rows = Vec::new();
+    // Materialize once so both shadow lookups can use an automatic slug index
+    // instead of rescanning every skill for each item and agent.
     let mut statement = connection.prepare(
-        "SELECT i.id, i.name, i.scope, i.state, i.updated_at, \
-                (SELECT i2.scope FROM items i2 WHERE i2.kind='skill' AND i2.slug=i.slug \
+        "WITH skills_by_slug AS MATERIALIZED ( \
+             SELECT scope, slug, project_id FROM items WHERE kind='skill' \
+         ) \
+         SELECT i.id, i.name, i.scope, i.state, i.updated_at, \
+                (SELECT i2.scope FROM skills_by_slug i2 WHERE i2.slug=i.slug \
                    AND i2.scope IN ('global','user','project','local') \
                    AND i2.scope != i.scope \
                    AND (i2.scope NOT IN ('project','local') OR i2.project_id IS i.project_id) \
@@ -82,7 +93,7 @@ pub fn list_skills(
              AND (?1 IS NULL OR i.scope=?1) \
              AND (?2 IS NULL OR lower(i.name) LIKE '%' || lower(?2) || '%' OR lower(i.slug) LIKE '%' || lower(?2) || '%' OR lower(COALESCE(i.tags_json,'')) LIKE '%' || lower(?2) || '%' \
                   OR lower(COALESCE(json_extract(i.tags_json,'$.description'),'')) LIKE '%' || lower(?2) || '%') \
-             AND (?3=0 OR EXISTS (SELECT 1 FROM items i2 WHERE i2.kind='skill' AND i2.slug=i.slug AND i2.scope != i.scope \
+             AND (?3=0 OR EXISTS (SELECT 1 FROM skills_by_slug i2 WHERE i2.slug=i.slug AND i2.scope != i.scope \
                    AND (i2.scope NOT IN ('project','local') OR i2.project_id IS i.project_id) \
                    AND CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END > \
                        CASE i.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END)) \
@@ -158,6 +169,7 @@ pub fn list_skills(
                 shadowed_by,
                 deployed: BTreeMap::new(),
                 native_path,
+                native_paths: BTreeMap::new(),
                 update_available,
                 updated_at,
                 description,
@@ -215,6 +227,7 @@ pub fn list_skills(
                 ))
             },
         )?;
+        let mut native_indexes = BTreeMap::<(String, Scope), usize>::new();
         for row in native_rows {
             let (name, scope, path, updated_at, agent) = row?;
             let scope =
@@ -224,15 +237,29 @@ pub fn list_skills(
                         field: "native_items.scope",
                         reason: e.to_string(),
                     })?;
-            let agent =
-                agent
-                    .parse()
-                    .map_err(|e: at_model::AgentIdError| DbError::InvalidValue {
-                        field: "native_items.agent_id",
-                        reason: e.to_string(),
-                    })?;
+            let agent = agent
+                .parse::<AgentId>()
+                .map_err(|e: at_model::AgentIdError| DbError::InvalidValue {
+                    field: "native_items.agent_id",
+                    reason: e.to_string(),
+                })?;
+            // One row per skill name and scope: agents that share a discovery root
+            // (Codex + omp over `.agents/skills`) are cells of one folder block,
+            // never two independent copies of the same folder.
+            let key = (at_model::normalized_name(&name), scope);
+            if let Some(index) = native_indexes.get(&key).copied() {
+                let existing = &mut rows[index];
+                existing
+                    .deployed
+                    .insert(agent.clone(), DeploymentState::Native);
+                existing.native_paths.insert(agent, path);
+                continue;
+            }
             let mut deployed = BTreeMap::new();
-            deployed.insert(agent, DeploymentState::Native);
+            deployed.insert(agent.clone(), DeploymentState::Native);
+            let mut native_paths = BTreeMap::new();
+            native_paths.insert(agent, path.clone());
+            native_indexes.insert(key, rows.len());
             rows.push(SkillRow {
                 item_id: None,
                 name,
@@ -241,11 +268,13 @@ pub fn list_skills(
                 shadowed_by: None,
                 deployed,
                 native_path: Some(path),
+                native_paths,
                 update_available: false,
                 updated_at,
                 description: None,
             });
         }
+        apply_native_shadowing(&mut rows);
         rows.sort_by(|a, b| {
             a.name
                 .to_lowercase()
@@ -257,6 +286,66 @@ pub fn list_skills(
         rows.retain(|row| row.item_id.is_none());
     }
     Ok(rows)
+}
+
+/// Marks native-only rows a nearer scope overrides for at least one agent.
+///
+/// A native copy loads only for the agents that read its folder. It is shadowed
+/// when a copy of the same skill name at a nearer scope loads for at least one of
+/// those agents, so the list can say `Shadowed by Project` instead of counting the
+/// unmanaged copy as active. Same-scope copies never shadow each other: precedence
+/// is the only shadow rule here; identity and deployment state provide the rest.
+fn apply_native_shadowing(rows: &mut [SkillRow]) {
+    struct Winner {
+        scope: Scope,
+        agents: BTreeSet<AgentId>,
+    }
+
+    let mut winners = BTreeMap::<String, Vec<Winner>>::new();
+    for row in rows.iter() {
+        let agents = row
+            .deployed
+            .iter()
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    DeploymentState::Linked
+                        | DeploymentState::Native
+                        | DeploymentState::Conflict
+                        | DeploymentState::Drifted
+                )
+            })
+            .map(|(agent, _)| agent.clone())
+            .collect::<BTreeSet<_>>();
+        if agents.is_empty() {
+            continue;
+        }
+        winners
+            .entry(at_model::normalized_name(&row.name))
+            .or_default()
+            .push(Winner {
+                scope: row.scope,
+                agents,
+            });
+    }
+    let picks = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.item_id.is_none())
+        .filter_map(|(index, row)| {
+            let own = row.deployed.keys().cloned().collect::<BTreeSet<_>>();
+            let winner = winners
+                .get(&at_model::normalized_name(&row.name))?
+                .iter()
+                .filter(|winner| winner.scope.precedence() > row.scope.precedence())
+                .filter(|winner| !winner.agents.is_disjoint(&own))
+                .max_by_key(|winner| winner.scope.precedence())?;
+            Some((index, winner.scope))
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in picks {
+        rows[index].shadowed_by = Some(scope);
+    }
 }
 
 /// Counts canonical skills in each scope.

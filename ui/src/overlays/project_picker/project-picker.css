@@ -25,3 +25,24 @@
   min-block-size: min(160px, calc(100vh - 340px));
   flex: 0 1 auto;
 }
+
+.at-project-picker input[role="combobox"] {
+  color: var(--at-color-text);
+  background-color: transparent;
+  background-image: none;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  color-scheme: dark;
+}
+
+.at-project-picker input[role="combobox"]:focus,
+.at-project-picker input[role="combobox"]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.at-project-picker input[role="combobox"]::placeholder {
+  color: var(--at-color-text-muted);
+  opacity: 1;
+}

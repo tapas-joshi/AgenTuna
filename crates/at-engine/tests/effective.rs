@@ -35,21 +35,17 @@ fn query_resolves_nearest_scope_and_counts_only_installed_loaders() {
     ];
     let review = skill("review", "unused").logical_id();
     let agents = [
-        AgentLoads {
-            agent: AgentId::ClaudeCode,
-            installed: true,
-            loaded: [(review.clone(), ItemState::Linked)].into(),
-        },
-        AgentLoads {
-            agent: AgentId::Codex,
-            installed: true,
-            loaded: BTreeMap::new(),
-        },
-        AgentLoads {
-            agent: AgentId::Omp,
-            installed: false,
-            loaded: [(review.clone(), ItemState::Linked)].into(),
-        },
+        AgentLoads::new(
+            AgentId::ClaudeCode,
+            true,
+            [(review.clone(), ItemState::Linked)].into(),
+        ),
+        AgentLoads::new(AgentId::Codex, true, BTreeMap::new()),
+        AgentLoads::new(
+            AgentId::Omp,
+            false,
+            [(review.clone(), ItemState::Linked)].into(),
+        ),
     ];
     let result = query(EffectiveQuery {
         scope: Scope::Project,
@@ -90,11 +86,11 @@ fn inherited_effective_configuration_serializes_as_a_stable_snapshot() {
         },
     ];
     let review = skill("review", "unused").logical_id();
-    let agents = [AgentLoads {
-        agent: AgentId::Codex,
-        installed: true,
-        loaded: [(review, ItemState::Linked)].into(),
-    }];
+    let agents = [AgentLoads::new(
+        AgentId::Codex,
+        true,
+        [(review, ItemState::Linked)].into(),
+    )];
     let result = query(EffectiveQuery {
         scope: Scope::Project,
         layers: &layers,
@@ -127,16 +123,8 @@ fn agent_filter_returns_only_that_installed_agents_row() {
         definitions: vec![skill("review", "user/review/SKILL.md")],
     }];
     let agents = [
-        AgentLoads {
-            agent: AgentId::ClaudeCode,
-            installed: true,
-            loaded: BTreeMap::new(),
-        },
-        AgentLoads {
-            agent: AgentId::Codex,
-            installed: true,
-            loaded: BTreeMap::new(),
-        },
+        AgentLoads::new(AgentId::ClaudeCode, true, BTreeMap::new()),
+        AgentLoads::new(AgentId::Codex, true, BTreeMap::new()),
     ];
     let result = query(EffectiveQuery {
         scope: Scope::User,
@@ -230,21 +218,17 @@ fn mcp_kind_filter_returns_one_row_per_server_with_the_installed_loader_count() 
     }];
     let github_id = definition(ItemKind::McpServer, "github", "x", Some(github)).logical_id();
     let agents = [
-        AgentLoads {
-            agent: AgentId::ClaudeCode,
-            installed: true,
-            loaded: [(github_id.clone(), ItemState::Linked)].into(),
-        },
-        AgentLoads {
-            agent: AgentId::Codex,
-            installed: true,
-            loaded: [(github_id, ItemState::Linked)].into(),
-        },
-        AgentLoads {
-            agent: AgentId::Omp,
-            installed: false,
-            loaded: _Map::new(),
-        },
+        AgentLoads::new(
+            AgentId::ClaudeCode,
+            true,
+            [(github_id.clone(), ItemState::Linked)].into(),
+        ),
+        AgentLoads::new(
+            AgentId::Codex,
+            true,
+            [(github_id, ItemState::Linked)].into(),
+        ),
+        AgentLoads::new(AgentId::Omp, false, _Map::new()),
     ];
     let result = query(EffectiveQuery {
         scope: Scope::User,
@@ -304,11 +288,7 @@ fn agent_filter_reports_a_disabled_entry_in_disabled_here_with_reason_and_tombst
         reason: Some("superseded by the org preset".to_owned()),
         path: Some(PathBuf::from("user/store.json")),
     };
-    let agents = [AgentLoads {
-        agent: AgentId::Codex,
-        installed: true,
-        loaded: _Map::new(),
-    }];
+    let agents = [AgentLoads::new(AgentId::Codex, true, _Map::new())];
 
     let result = query(EffectiveQuery {
         scope: Scope::User,
@@ -350,11 +330,7 @@ fn locked_row_carries_the_lock_identity_and_reason() {
         )],
     }];
     let locks = locked_store(Scope::Global, review, "Managed by organization policy");
-    let agents = [AgentLoads {
-        agent: AgentId::Codex,
-        installed: true,
-        loaded: _Map::new(),
-    }];
+    let agents = [AgentLoads::new(AgentId::Codex, true, _Map::new())];
 
     let result = query(EffectiveQuery {
         scope: Scope::Global,
@@ -400,11 +376,7 @@ fn five_hundred_items_across_five_agents_sort_by_kind_then_name_under_the_budget
         AgentId::Custom("windsurf".to_owned()),
     ]
     .into_iter()
-    .map(|agent| AgentLoads {
-        agent,
-        installed: true,
-        loaded: _Map::new(),
-    })
+    .map(|agent| AgentLoads::new(agent, true, _Map::new()))
     .collect();
 
     let started = Instant::now();

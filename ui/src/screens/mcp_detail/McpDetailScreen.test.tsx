@@ -163,6 +163,18 @@ describe("McpDetailScreen (TM-021)", () => {
     });
   });
 
+  test("Loaded by switches are the shared design-system Toggle, not a hand-rolled control", async () => {
+    ipc.reply = (command) => {
+      if (command === "mcp_server_detail") return Promise.resolve(mockDetail());
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    const toggle = await screen.findByRole("switch", { name: "Claude Code: enabled" });
+    expect(toggle.getAttribute("data-slot")).toBe("toggle");
+    expect(toggle.getAttribute("class")).toContain("w-40");
+  });
+
   test("missing server error displays error and Back button instead of panicking", async () => {
     ipc.reply = (command) => {
       if (command === "mcp_server_detail") {
@@ -176,5 +188,32 @@ describe("McpDetailScreen (TM-021)", () => {
     const backBtn = screen.getByRole("button", { name: "Back to MCP Servers" });
     fireEvent.click(backBtn);
     expect(app.getSnapshot().route).toBe("mcp-list");
+  });
+  test("native MCP server opens read-only detail with Adopt server CTA and its own scope badge", async () => {
+    app.restore("prj_fixture", "global");
+    ipc.reply = (command) => {
+      if (command === "mcp_server_detail") {
+        return Promise.resolve({
+          ...mockDetail(),
+          item_id: "native:context7",
+          name: "context7",
+          scope: "user",
+          defined_in: ["/sandbox/home/.claude.json"],
+        });
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    expect(await screen.findByRole("button", { name: "Adopt server" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disable in this repo" })).toBeNull();
+    expect(screen.getByText("not in AgenTuna")).toBeTruthy();
+    // Scope badge reflects the item's own scope ("user"), not the top bar's "global"
+    expect(screen.getByText("user")).toBeTruthy();
+
+    // Clicking Adopt server opens AdoptModal
+    fireEvent.click(screen.getByRole("button", { name: "Adopt server" }));
+    expect(await screen.findByRole("dialog", { name: /Adopt context7/i })).toBeTruthy();
   });
 });

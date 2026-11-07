@@ -426,18 +426,23 @@ pub fn scan(
                 for path in paths {
                     match read_rule(&path) {
                         Ok((bytes, mtime, link_target)) => {
-                            let source =
-                                sources.entry((*scope, path.clone())).or_insert_with(|| {
-                                    RuleSource {
-                                        scope: *scope,
-                                        agent_consumers: Vec::new(),
-                                        path: path.clone(),
-                                        managed: contains_managed_marker(&bytes),
-                                        sha256: at_fs::sha256_hex(&bytes),
-                                        bytes,
-                                        mtime,
-                                        link_target,
-                                    }
+                            let resolved_scope =
+                                if *scope == Scope::Global && path.starts_with(&env.home) {
+                                    Scope::User
+                                } else {
+                                    *scope
+                                };
+                            let source = sources
+                                .entry((resolved_scope, path.clone()))
+                                .or_insert_with(|| RuleSource {
+                                    scope: resolved_scope,
+                                    agent_consumers: Vec::new(),
+                                    path: path.clone(),
+                                    managed: contains_managed_marker(&bytes),
+                                    sha256: at_fs::sha256_hex(&bytes),
+                                    bytes,
+                                    mtime,
+                                    link_target,
                                 });
                             if !source.agent_consumers.contains(agent) {
                                 source.agent_consumers.push(agent.clone());

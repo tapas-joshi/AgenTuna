@@ -42,6 +42,7 @@ fn item(copy: FixtureCopy, agent: AgentId) -> ScanItem {
 
 fn classify(copies: [FixtureCopy; 2]) -> (bool, bool, ProposedResolution) {
     let report = ScanReport {
+        roots: Vec::new(),
         items: vec![
             item(copies[0].clone(), AgentId::ClaudeCode),
             item(copies[1].clone(), AgentId::Codex),
@@ -278,6 +279,7 @@ fn identical_copies_and_single_copies_are_not_conflicts() {
     let one = rule(temp.path(), "same-a", b"# Rule\ncontent\n");
     let two = rule(temp.path(), "same-b", b"# Rule\ncontent\n");
     let report = ScanReport {
+        roots: Vec::new(),
         items: vec![
             item(one.clone(), AgentId::ClaudeCode),
             item(two, AgentId::Codex),
@@ -302,6 +304,7 @@ fn identical_copies_and_single_copies_are_not_conflicts() {
     );
 
     let single = ScanReport {
+        roots: Vec::new(),
         items: vec![item(one, AgentId::ClaudeCode)],
         partial: false,
         skipped_roots: Vec::new(),
@@ -342,6 +345,7 @@ fn a_store_env_value_change_is_a_real_conflict_with_a_redacted_diff() {
     let mut native = item(mcp(temp.path(), "native", &literal), AgentId::ClaudeCode);
     native.ownership = Ownership::Conflict;
     let report = ScanReport {
+        roots: Vec::new(),
         items: vec![native],
         partial: false,
         skipped_roots: Vec::new(),
@@ -374,6 +378,7 @@ fn a_store_env_value_change_is_a_real_conflict_with_a_redacted_diff() {
     );
     equivalent.ownership = Ownership::Managed;
     let report = ScanReport {
+        roots: Vec::new(),
         items: vec![equivalent],
         partial: false,
         skipped_roots: Vec::new(),
@@ -401,6 +406,7 @@ fn keep_both_names_avoid_the_store_and_every_agent_folder() {
         items.push(row);
     }
     let scan = ScanReport {
+        roots: Vec::new(),
         items,
         partial: false,
         skipped_roots: Vec::new(),

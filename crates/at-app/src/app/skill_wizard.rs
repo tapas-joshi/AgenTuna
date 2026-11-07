@@ -195,6 +195,18 @@ pub struct SkillLibrarySkillView {
     pub clash_reason: Option<String>,
 }
 
+/// One registered project the catalog could not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillLibrarySkipView {
+    /// Project label.
+    pub label: String,
+    /// Project folder that could not be read.
+    pub path: String,
+    /// Why it was skipped and what the user can do about it.
+    pub reason: String,
+}
+
 /// Read-only source and skill inventory for the library wizard step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -205,6 +217,10 @@ pub struct SkillLibraryCatalogView {
     pub skills: Vec<SkillLibrarySkillView>,
     /// Target scope summary shown beside the Copy/Link selector.
     pub target_scope: String,
+    /// Skills folder searched for the empty state, abbreviated with `~`.
+    pub search_root: String,
+    /// Registered projects that were skipped, with the reason.
+    pub skipped: Vec<SkillLibrarySkipView>,
 }
 
 /// Loads a read-only library catalog for a destination scope.
@@ -222,7 +238,7 @@ pub fn skill_library_catalog(
     let project = project_root(database.connection(), project_id.as_deref(), scope)?;
     let paths = resolve_process_paths(project.as_deref())
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
-    let (sources, skills) = at_engine::skill_import::enumerate_registered_library(
+    let catalog = at_engine::skill_import::enumerate_registered_library(
         database.connection(),
         paths.global_store(),
         paths.user_store(),
@@ -230,10 +246,17 @@ pub fn skill_library_catalog(
         project_id.as_deref(),
         project.as_deref(),
     )
-    .map_err(|_| CommandError::unavailable("the local skill library could not be read"))?;
+    .map_err(|error| {
+        tracing::warn!(error = %error, "skill library catalog could not be read");
+        CommandError::unavailable(format!(
+            "The local skill library could not be read: {error}. Check that the scope stores and project folders are readable, then retry."
+        ))
+    })?;
     let layout = StoreLayout::for_scope(&paths, scope)
         .map_err(|_| CommandError::unavailable("the target skill store is unavailable"))?;
-    let sources = sources
+    let search_root = display_home_path(&paths.user_store().join("skills"), paths.home_dir());
+    let sources = catalog
+        .sources
         .into_iter()
         .map(|source| SkillLibrarySourceView {
             id: source.path.to_string_lossy().into_owned(),
@@ -247,7 +270,8 @@ pub fn skill_library_catalog(
             last_used_at: source.last_used_at,
         })
         .collect();
-    let skills = skills
+    let skills = catalog
+        .skills
         .into_iter()
         .map(|skill| {
             let clash_reason = skill.name.as_deref().and_then(|name| {
@@ -272,11 +296,30 @@ pub fn skill_library_catalog(
             }
         })
         .collect();
+    let skipped = catalog
+        .skipped
+        .into_iter()
+        .map(|skip| SkillLibrarySkipView {
+            label: skip.label,
+            path: skip.path.display().to_string(),
+            reason: skip.reason,
+        })
+        .collect();
     Ok(SkillLibraryCatalogView {
         sources,
         skills,
         target_scope: scope.to_string(),
+        search_root,
+        skipped,
     })
+}
+
+/// Renders `path` with the injected home directory abbreviated to `~`.
+fn display_home_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 /// Host of an HTTPS Git import URL, refusing empty hosts and any embedded credentials.
@@ -1729,7 +1772,7 @@ fn resolve_library_packages(
             "select at least one valid library skill",
         ));
     }
-    let (_, candidates) = at_engine::skill_import::enumerate_registered_library(
+    let catalog = at_engine::skill_import::enumerate_registered_library(
         connection,
         paths.global_store(),
         paths.user_store(),
@@ -1737,7 +1780,13 @@ fn resolve_library_packages(
         target_project_id,
         project_root,
     )
-    .map_err(|_| CommandError::unavailable("the local skill library could not be read"))?;
+    .map_err(|error| {
+        tracing::warn!(error = %error, "skill library selections could not be resolved");
+        CommandError::unavailable(format!(
+            "The local skill library could not be read: {error}. Check that the scope stores and project folders are readable, then retry."
+        ))
+    })?;
+    let candidates = catalog.skills;
     let mode = wizard.details.library_mode;
     let mut selections =
         std::collections::HashSet::with_capacity(wizard.details.library_selections.len());

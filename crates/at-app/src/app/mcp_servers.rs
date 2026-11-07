@@ -6,6 +6,7 @@
 //! runs.
 
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{LazyLock, Mutex};
@@ -417,7 +418,7 @@ pub fn mcp_server_enable(
     run_action(&state, request, ActionKind::Enable)
 }
 
-/// Returns full details of one canonical MCP server definition.
+/// Returns full details of one canonical or native MCP server definition.
 ///
 /// # Errors
 /// Returns a typed [`CommandError`] with [`CommandErrorCode::NotFound`] if the server was
@@ -427,41 +428,76 @@ pub fn mcp_server_detail(
     state: State<'_, AppState>,
     request: McpServerDetailRequest,
 ) -> Result<McpServerDetailView, CommandError> {
-    let scope = Scope::from_str(&request.scope)
-        .map_err(|_| CommandError::invalid_argument("scope", "expected a supported scope"))?;
+    mcp_server_detail_inner(&state, &request)
+}
+
+/// Bridge-facing body of [`mcp_server_detail`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`mcp_server_detail`].
+pub fn mcp_server_detail_inner(
+    state: &AppState,
+    request: &McpServerDetailRequest,
+) -> Result<McpServerDetailView, CommandError> {
+    // If the request points at a native server, resolve through native discovery
+    if request.item_id.starts_with("native:") || ItemId::from_str(&request.item_id).is_err() {
+        return mcp_native_server_detail(state, request);
+    }
+
     let item_id = ItemId::from_str(&request.item_id)
         .map_err(|_| CommandError::invalid_argument("item_id", "expected a canonical item id"))?;
+    let target_scope = Scope::from_str(&request.scope)
+        .map_err(|_| CommandError::invalid_argument("scope", "expected a supported scope"))?;
     let database = state.database().map_err(CommandError::unavailable)?;
     let project = project_of(&database, request.project_id.as_deref())?;
     let paths = resolve_process_paths(project.as_ref().map(|p| Path::new(&p.path)))
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
-    let scoped = match project.as_ref() {
-        Some(project) if matches!(scope, Scope::Project | Scope::Local) => {
-            paths.for_project(Path::new(&project.path))
+
+    // Cross-scope resolution: try requested scope first, then all candidate scopes
+    let mut candidate_scopes = vec![target_scope];
+    for s in [Scope::User, Scope::Project, Scope::Global, Scope::Local] {
+        if !candidate_scopes.contains(&s) {
+            candidate_scopes.push(s);
         }
-        _ => Ok(paths.clone()),
     }
-    .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
-    let layout = at_store::layout::StoreLayout::for_scope(&scoped, scope)
-        .map_err(|_| CommandError::invalid_argument("scope", "canonical store is unavailable"))?;
-    let manifest = at_store::manifest::StoreManifest::load(&layout).map_err(|_| {
-        CommandError::new(
-            CommandErrorCode::NotFound,
-            "server is missing or was deleted externally",
-        )
-    })?;
-    let item = manifest.manifest.item(item_id).ok_or_else(|| {
-        CommandError::new(
-            CommandErrorCode::NotFound,
-            "server is missing or was deleted externally",
-        )
-    })?;
-    let loaded = at_store::mcp_store::McpStore::load(&layout).map_err(|_| {
-        CommandError::new(CommandErrorCode::NotFound, "server definition is missing")
-    })?;
-    let definition = loaded.store.get(item.slug.as_str()).ok_or_else(|| {
-        CommandError::new(CommandErrorCode::NotFound, "server definition is missing")
-    })?;
+
+    let mut found = None;
+    for cand in candidate_scopes {
+        let cand_scoped = match project.as_ref() {
+            Some(project) if matches!(cand, Scope::Project | Scope::Local) => {
+                paths.for_project(Path::new(&project.path))
+            }
+            _ => Ok(paths.clone()),
+        };
+        let Ok(scoped) = cand_scoped else { continue };
+        let Ok(layout) = at_store::layout::StoreLayout::for_scope(&scoped, cand) else {
+            continue;
+        };
+        let Ok(manifest) = at_store::manifest::StoreManifest::load(&layout) else {
+            continue;
+        };
+        if let Some(item) = manifest.manifest.item(item_id)
+            && let Ok(loaded) = at_store::mcp_store::McpStore::load(&layout)
+            && let Some(definition) = loaded.store.get(item.slug.as_str())
+        {
+            found = Some((cand, scoped, layout, item.clone(), definition.clone()));
+            break;
+        }
+    }
+
+    let (scope, _scoped, layout, _item, definition) = match found {
+        Some(f) => f,
+        None => {
+            // Fall back to checking if this is a native server by display name or slug
+            if let Ok(view) = mcp_native_server_detail(state, request) {
+                return Ok(view);
+            }
+            return Err(CommandError::new(
+                CommandErrorCode::NotFound,
+                "server is missing or was deleted externally",
+            ));
+        }
+    };
 
     let mut defined_in = vec![layout.mcp_file().display().to_string()];
     let deployments =
@@ -654,6 +690,226 @@ pub fn mcp_server_detail(
         locked,
         locked_by,
         lock_reason,
+        agents,
+        why_summary,
+    })
+}
+
+/// Placeholder shown instead of an environment value AgenTuna never imported.
+const REDACTED_ENV_VALUE: &str = "••••••";
+
+/// Largest agent-owned config file the detail view will parse, in bytes.
+const MAX_NATIVE_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Reads an agent-owned config file, refusing anything larger than the bound.
+///
+/// The file belongs to another tool and is untrusted: reading it must not allocate an
+/// unbounded amount of memory just to render a detail panel.
+fn read_bounded_text(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_NATIVE_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_NATIVE_CONFIG_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Drops credentials and query data from a URL read out of an agent-owned file.
+///
+/// HTTP MCP endpoints sometimes carry a token in the query string or userinfo
+/// (`https://user:token@host/mcp?api_key=…`). The detail panel keeps the scheme, host and
+/// path so the definition stays recognisable, and never echoes the parts that can hold a
+/// credential.
+fn redact_native_url(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or_default();
+    let Some((scheme, rest)) = without_query.split_once("://") else {
+        return without_query.to_owned();
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    format!("{scheme}://{host}{path}")
+}
+
+fn mcp_native_server_detail(
+    state: &AppState,
+    request: &McpServerDetailRequest,
+) -> Result<McpServerDetailView, CommandError> {
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let native_name = request
+        .item_id
+        .strip_prefix("native:")
+        .unwrap_or(&request.item_id);
+    let rows =
+        at_db::mcp_index::mcp_list_rows(database.connection(), None, request.project_id.as_deref())
+            .map_err(|e| CommandError::internal(format!("cannot read MCP servers: {e}")))?;
+    let row = rows
+        .into_iter()
+        .find(|r| r.native_only && r.display_name.eq_ignore_ascii_case(native_name))
+        .ok_or_else(|| {
+            CommandError::new(
+                CommandErrorCode::NotFound,
+                "server is missing or was deleted externally",
+            )
+        })?;
+
+    // The scanned source file is what the caller adopts, so it stays first; the other
+    // config files that carry the same server follow it.
+    let mut defined_in = Vec::new();
+    if let Some(src) = &row.source_path {
+        defined_in.push(src.clone());
+    }
+    let mut extra = Vec::new();
+    for cell in &row.agents {
+        if let Some(p) = &cell.config_path
+            && Some(p) != row.source_path.as_ref()
+        {
+            extra.push(p.clone());
+        }
+    }
+    extra.sort();
+    extra.dedup();
+    defined_in.extend(extra);
+
+    let mut transport = "stdio".to_owned();
+    let mut command = None;
+    let mut args = Vec::new();
+    let cwd = None;
+    let mut url = None;
+    let mut env = Vec::new();
+
+    // Read the agent-owned file to show the shape of the definition. Every env value is
+    // withheld: a discovered file may hold plaintext credentials and AgenTuna never
+    // imported them, so there is no Keychain reference to offer either.
+    if let Some(src) = &row.source_path
+        && let Some(content) = read_bounded_text(Path::new(src))
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(servers) = json.get("mcpServers").and_then(|v| v.as_object())
+        && let Some(srv) = servers
+            .get(&row.display_name)
+            .or_else(|| servers.get(native_name))
+    {
+        if let Some(cmd) = srv.get("command").and_then(|v| v.as_str()) {
+            command = Some(cmd.to_owned());
+        }
+        if let Some(arr) = srv.get("args").and_then(|v| v.as_array()) {
+            args = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(ToString::to_string))
+                .collect();
+        }
+        if let Some(u) = srv.get("url").and_then(|v| v.as_str()) {
+            url = Some(redact_native_url(u));
+            transport = "http".to_owned();
+        }
+        if let Some(env_obj) = srv.get("env").and_then(|v| v.as_object()) {
+            for (k, v) in env_obj {
+                let written = v.as_str().unwrap_or("");
+                // A `${VAR}` reference is what the file itself contains, so it can be shown
+                // verbatim; a literal value is withheld behind a marker.
+                let reference = written.starts_with("${") && written.ends_with('}');
+                env.push(McpDetailEnvRowView {
+                    key: k.clone(),
+                    value: if reference {
+                        written.to_owned()
+                    } else {
+                        REDACTED_ENV_VALUE.to_owned()
+                    },
+                    is_secret: false,
+                    keychain_account: None,
+                });
+            }
+        }
+    }
+
+    let checks = at_db::health::last_n(database.connection(), native_name, 5).unwrap_or_default();
+    let health_status = checks
+        .first()
+        .map(|c| c.status.as_str().to_owned())
+        .unwrap_or_else(|| "not_tested".to_owned());
+    let health_error_code = checks.first().and_then(|c| c.error_code.clone());
+    let health_error_text = checks.first().and_then(|c| c.error_text_redacted.clone());
+
+    let mut last_checks = Vec::new();
+    for c in checks.iter().rev() {
+        last_checks.push(McpHealthCheckSlotView {
+            checked_at: format!("{}", c.checked_at),
+            status: c.status.as_str().to_owned(),
+            latency_ms: c.latency_ms.map(|l| l.max(0) as u64),
+            trigger: format!("{:?}", c.trigger).to_lowercase(),
+            error_text: c.error_text_redacted.clone(),
+        });
+    }
+
+    let all_agents = at_db::agents::list_agents_on_mac(database.connection()).unwrap_or_default();
+    let mut agents = Vec::new();
+    for a in all_agents {
+        let presence = match a.presence {
+            at_db::agents::AgentPresence::Installed => "installed",
+            at_db::agents::AgentPresence::ConfiguredOnly => "configured_only",
+            _ => "not_installed",
+        };
+        let reason = if presence == "not_installed" {
+            Some("Agent is not installed on this machine".to_owned())
+        } else {
+            None
+        };
+        let cell = row.agents.iter().find(|c| c.agent_id == a.id);
+        let enabled = cell.is_some_and(|c| {
+            matches!(
+                c.state,
+                at_db::mcp_index::McpCellState::Linked
+                    | at_db::mcp_index::McpCellState::Native { .. }
+            )
+        });
+        agents.push(McpDetailAgentView {
+            id: a.id.to_string(),
+            label: a.display_name.unwrap_or_else(|| a.id.to_string()),
+            presence: presence.to_owned(),
+            reason,
+            enabled,
+            state: if cell.is_some() {
+                "native".to_owned()
+            } else {
+                "none".to_owned()
+            },
+            config_path: cell.and_then(|c| c.config_path.clone()),
+        });
+    }
+
+    let why_summary = format!(
+        "Discovered in native agent configuration files outside AgenTuna ({}).",
+        row.scope.wire_name()
+    );
+
+    Ok(McpServerDetailView {
+        item_id: format!("native:{}", row.display_name),
+        name: row.display_name.clone(),
+        scope: row.scope.wire_name().to_owned(),
+        description: Some("Native MCP server discovered in agent folders".to_owned()),
+        transport,
+        command,
+        args,
+        cwd,
+        url,
+        env,
+        defined_in,
+        tools: Vec::new(),
+        health_status,
+        health_error_code,
+        health_error_text,
+        last_checks,
+        cadence_text: "every 5 min".to_owned(),
+        is_oauth: false,
+        needs_auth: false,
+        locked: false,
+        locked_by: None,
+        lock_reason: None,
         agents,
         why_summary,
     })
