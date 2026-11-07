@@ -17,6 +17,18 @@ async function tabTo(page: Page, target: Locator, description: string): Promise<
   throw new Error(`Could not reach ${description} with Tab after 120 key presses`);
 }
 
+/**
+ * Open the app and wait until the shell that owns the shortcut dispatcher is mounted.
+ *
+ * `App` renders a "Loading AgenTuna…" status until the Tauri bootstrap resolves, and the
+ * keydown listener that serves the screen shortcuts is registered when the overlays host
+ * mounts after that. A shortcut sent between first paint and shell mount is dropped, so
+ * every keyboard flow waits for the visible workspace navigation before pressing keys.
+ */
+async function gotoShell(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
+}
 
 const managedRows = [
   {
@@ -44,8 +56,7 @@ const managedAgents = [
 
 test("keyboard-only project and scope switching, skill bulk actions, and dialogs", async ({ page }) => {
   const steps: KeyboardStep[] = [];
-  await page.goto("/");
-  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
+  await gotoShell(page);
 
   await page.keyboard.press("Meta+p");
   const picker = page.getByRole("dialog", { name: "Switch project" });
@@ -133,7 +144,7 @@ test("keyboard-only project and scope switching, skill bulk actions, and dialogs
 
 test("keyboard-only MCP list, detail and form editing", async ({ page }) => {
   const steps: KeyboardStep[] = [];
-  await page.goto("/");
+  await gotoShell(page);
   await page.keyboard.press("Meta+3");
   const list = page.getByRole("main", { name: "MCP Servers" });
   await expect(list.getByText("Visual server")).toBeVisible();
@@ -167,7 +178,7 @@ test("keyboard-only MCP list, detail and form editing", async ({ page }) => {
 
 test("keyboard-only drift review and four-step migration", async ({ page }) => {
   const steps: KeyboardStep[] = [];
-  await page.goto("/");
+  await gotoShell(page);
   await page.evaluate(() => {
     const mocks = (window as typeof window & { __AT_TEST_MOCKS__: { commandOverrides: Record<string, unknown> } }).__AT_TEST_MOCKS__;
     mocks.commandOverrides.drift_snapshot = {

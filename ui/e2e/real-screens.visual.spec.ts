@@ -74,6 +74,8 @@ test("Migrate scan renders several discovered items", async ({ page }) => {
 
 test("Remote-backup preferences show status and reviewed conflict actions without exposing the stored token", async ({ page }) => {
   await page.goto("/");
+  // The shortcut dispatcher mounts with the shell, after the bootstrap IPC resolves.
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
   await page.keyboard.press("Meta+,");
   await expect(page.getByRole("heading", { name: "Preferences" })).toBeVisible();
   const section = page.getByRole("region", { name: "Remote backup" });
