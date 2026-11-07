@@ -57,8 +57,8 @@ test("Keychain secrets and add-skill routes render real screen content", async (
   await expect(page).toHaveScreenshot("secrets-empty.png", { animations: "disabled", caret: "hide" });
 
   await page.getByRole("button", { name: "Overview", exact: true }).click();
-  await page.getByRole("button", { name: "Add to this repo" }).click();
+  await page.getByRole("button", { name: /^\+ Add to/ }).click();
   await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Where does the skill come from?" })).toBeVisible();
+  await expect(page.getByText("Choose where the skill comes from. Nothing is written until you review the plan.")).toBeVisible();
   await expect(page).toHaveScreenshot("add-skill-source.png", { animations: "disabled", caret: "hide" });
 });

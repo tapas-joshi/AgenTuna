@@ -29,10 +29,26 @@ locks: bigint,
  */
 last_edited: string | null, 
 /**
+ * Actor that performed the most recent change, when known (`ui`, `cli`, ...).
+ */
+last_edited_by: string | null, 
+/**
  * Number of disabled items.
  */
 disabled: bigint, 
 /**
  * Whether the scope already has a canonical store (`store.json` present).
  */
-store_ready: boolean, };
+store_ready: boolean, 
+/**
+ * AgenTuna store directory for this card, shown after the native roots.
+ */
+store_root: string, 
+/**
+ * Native discovery roots this scope's agents read, shown as `~/...` or `./...`.
+ */
+native_roots: Array<string>, 
+/**
+ * Uncommitted changes in a Project store's git work tree, when it has one.
+ */
+git_uncommitted: number | null, };

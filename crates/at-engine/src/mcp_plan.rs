@@ -863,8 +863,9 @@ fn plan_copy(request: McpCopyRequest<'_>) -> Result<McpItemPlan, McpPlanError> {
         scope: Some(target_scope),
         project_id: scoped_project_id,
         summary: format!(
-            "Plan MCP copy of {source_slug} into {} scope (store)",
-            target_scope.wire_name()
+            "Copied MCP server {} to {} scope",
+            target.slug,
+            scope_title(target_scope)
         ),
         ops: store_ops,
         created_at_unix_seconds: now_seconds(),
@@ -1139,7 +1140,7 @@ impl McpPlan {
             operation_kind: first.operation_kind.clone(),
             scope: first.scope,
             project_id: first.project_id.clone(),
-            summary: format!("{} (one operation)", first.summary),
+            summary: first.summary.clone(),
             ops,
             created_at_unix_seconds: first.created_at_unix_seconds,
         };
@@ -1408,7 +1409,7 @@ pub fn plan(request: McpPlanRequest<'_>) -> Result<McpPlan, McpPlanError> {
         &operation_kind,
         &request,
         now,
-        format!("Plan MCP {} (store)", intent_name(request.intent)),
+        store_summary(&request),
     )?;
     let native = make_change_set(
         &native_ops,
@@ -1416,7 +1417,7 @@ pub fn plan(request: McpPlanRequest<'_>) -> Result<McpPlan, McpPlanError> {
         &operation_kind,
         &request,
         now,
-        format!("Plan MCP {} (native)", intent_name(request.intent)),
+        native_summary(&request),
     )?;
     let store_rollback = store
         .as_ref()
@@ -1782,17 +1783,91 @@ fn model_expected(expected: at_fs::ExpectedState) -> Result<ExpectedState, McpPl
         }
     }
 }
-fn intent_name(intent: &McpIntent) -> &'static str {
-    match intent {
-        McpIntent::Add { .. } => "add",
-        McpIntent::Edit { .. } => "edit",
-        McpIntent::Rename { .. } => "rename",
-        McpIntent::SetEnabledForAgent { .. } => "toggle",
-        McpIntent::DisableInRepo { .. } => "disable",
-        McpIntent::Promote { .. } => "promote",
-        McpIntent::MoveToScope { .. } => "move",
-        McpIntent::CopyToScope { .. } => "copy",
-        McpIntent::Remove => "delete",
+/// One user-facing sentence for the store phase of a plan.
+///
+/// The summary becomes the operation-history line when the plan is applied, so it names
+/// the server and the action instead of planner internals.
+fn store_summary(request: &McpPlanRequest<'_>) -> String {
+    let name = request.definition.display_name.as_str();
+    match request.intent {
+        McpIntent::Add { .. } => format!("Added MCP server {name}"),
+        McpIntent::Edit { .. } => format!("Updated MCP server {name}"),
+        McpIntent::Rename { from, to } => format!("Renamed MCP server {from} to {to}"),
+        McpIntent::SetEnabledForAgent { enabled, .. } => enabled_summary(*enabled, name),
+        McpIntent::DisableInRepo { .. } => format!("Disabled MCP server {name} in this repo"),
+        McpIntent::Promote { target } => {
+            format!(
+                "Promoted MCP server {name} to {} scope",
+                scope_title(*target)
+            )
+        }
+        McpIntent::MoveToScope { target } => {
+            format!("Moved MCP server {name} to {} scope", scope_title(*target))
+        }
+        McpIntent::CopyToScope { .. } => format!("Copied MCP server {name} to another scope"),
+        McpIntent::Remove => format!("Removed MCP server {name}"),
+    }
+}
+
+/// One user-facing sentence for the native phase of a plan.
+fn native_summary(request: &McpPlanRequest<'_>) -> String {
+    let name = request.definition.display_name.as_str();
+    let agents = targets_label(request.targets);
+    match request.intent {
+        McpIntent::Add { .. } => format!("Wrote MCP server {name} to {agents}"),
+        McpIntent::Edit { .. } => format!("Updated MCP server {name} in {agents}"),
+        McpIntent::Rename { from, to } => {
+            format!("Renamed MCP server {from} to {to} in {agents}")
+        }
+        McpIntent::SetEnabledForAgent { enabled, agent, .. } => format!(
+            "{} MCP server {name} for {}",
+            if *enabled { "Enabled" } else { "Disabled" },
+            agent.default_display_name()
+        ),
+        McpIntent::DisableInRepo { .. } => {
+            format!("Disabled MCP server {name} in this repo for {agents}")
+        }
+        McpIntent::Promote { .. } | McpIntent::MoveToScope { .. } => {
+            format!("Updated MCP server {name} in {agents}")
+        }
+        McpIntent::CopyToScope { .. } => format!("Wrote MCP server {name} to {agents}"),
+        McpIntent::Remove => format!("Removed MCP server {name} from {agents}"),
+    }
+}
+
+fn enabled_summary(enabled: bool, name: &str) -> String {
+    format!(
+        "{} MCP server {name}",
+        if enabled { "Enabled" } else { "Disabled" }
+    )
+}
+
+/// Display names of the agents one plan writes to, joined for a sentence.
+fn targets_label(targets: &[McpTarget]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for target in targets {
+        let name = target.agent.default_display_name();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    match names.len() {
+        0 => "no agents".to_owned(),
+        1 => names[0].to_owned(),
+        _ => names
+            .split_last()
+            .map(|(last, rest)| format!("{} and {last}", rest.join(", ")))
+            .unwrap_or_else(|| names.join(", ")),
+    }
+}
+
+/// Title-cased scope name used in user-facing summaries.
+fn scope_title(scope: at_model::Scope) -> &'static str {
+    match scope {
+        at_model::Scope::Global => "Global",
+        at_model::Scope::User => "User",
+        at_model::Scope::Project => "Project",
+        at_model::Scope::Local => "Local",
     }
 }
 
@@ -3231,6 +3306,85 @@ mod tests {
         assert!(
             text.contains("fixture-server"),
             "Replace writes the managed definition: {text}"
+        );
+    }
+
+    #[test]
+    fn plan_summaries_read_as_user_copy_instead_of_planner_jargon() {
+        let registry = at_adapters::adapter::AgentAdapterRegistry::register();
+        let environment = at_adapters::adapter::AgentEnvironment {
+            home: PathBuf::from("/fixture/home"),
+            project: None,
+            variables: Default::default(),
+        };
+        let definition = fixture();
+        let targets = vec![target(AgentId::ClaudeCode, "/fixture/claude.json", "{}")];
+        fn request_for<'a>(
+            registry: &'a at_adapters::adapter::AgentAdapterRegistry,
+            environment: &'a at_adapters::adapter::AgentEnvironment,
+            intent: &'a McpIntent,
+            targets: &'a [McpTarget],
+            definition: &'a McpServerDef,
+        ) -> McpPlanRequest<'a> {
+            McpPlanRequest {
+                registry,
+                env: environment,
+                intent,
+                targets,
+                definition,
+                scope: Scope::User,
+                project_id: None,
+                locked_reason: None,
+                store_layout: None,
+                target_store_layout: None,
+            }
+        }
+
+        let enabled = McpIntent::SetEnabledForAgent {
+            agent: AgentId::ClaudeCode,
+            enabled: true,
+        };
+        let enabled_request = request_for(&registry, &environment, &enabled, &targets, &definition);
+        assert_eq!(
+            store_summary(&enabled_request),
+            "Enabled MCP server Fixture server"
+        );
+        assert_eq!(
+            native_summary(&enabled_request),
+            "Enabled MCP server Fixture server for Claude Code"
+        );
+        assert!(
+            !native_summary(&enabled_request).contains("Plan MCP"),
+            "planner jargon is gone"
+        );
+
+        let disabled = McpIntent::SetEnabledForAgent {
+            agent: AgentId::ClaudeCode,
+            enabled: false,
+        };
+        let disabled_request =
+            request_for(&registry, &environment, &disabled, &targets, &definition);
+        assert_eq!(
+            store_summary(&disabled_request),
+            "Disabled MCP server Fixture server"
+        );
+        assert_eq!(
+            native_summary(&disabled_request),
+            "Disabled MCP server Fixture server for Claude Code"
+        );
+
+        let add = McpIntent::Add {
+            slug: "fixture".to_owned(),
+            definition: fixture(),
+        };
+        let add_request = request_for(&registry, &environment, &add, &targets, &definition);
+        assert_eq!(
+            store_summary(&add_request),
+            "Added MCP server Fixture server"
+        );
+        assert_eq!(
+            native_summary(&add_request),
+            "Wrote MCP server Fixture server to Claude Code"
         );
     }
 

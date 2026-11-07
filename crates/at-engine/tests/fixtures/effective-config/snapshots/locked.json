@@ -8,6 +8,7 @@
           {
             "agent": "claude_code",
             "loads": true,
+            "path": "<agent>/configuration.json",
             "state": "linked"
           }
         ],

@@ -630,6 +630,7 @@ pub fn build_scope_plans(request: ScopePlansRequest<'_>) -> Result<Vec<Migration
             return Err(PlanError::MissingStore { scope: target });
         };
         let subset = ScanReport {
+            roots: Vec::new(),
             items: request
                 .scan
                 .items

@@ -3,7 +3,7 @@ import { cn } from "./cn";
 import { STATUS_META, StatusGlyph, type ItemStatus } from "./status";
 
 /** Neutral-to-semantic skins for a plain badge. */
-export type BadgeTone = "neutral" | "muted" | "accent" | "success" | "warning" | "danger" | "info" | "locked";
+export type BadgeTone = "neutral" | "muted" | "accent" | "success" | "warning" | "danger" | "info" | "locked" | "project" | "local";
 
 const TONE_CLASSES: Readonly<Record<BadgeTone, string>> = {
   neutral: "border-border bg-raised text-text-secondary",
@@ -14,6 +14,8 @@ const TONE_CLASSES: Readonly<Record<BadgeTone, string>> = {
   danger: "border-danger/40 bg-danger/10 text-danger",
   info: "border-scope-user/40 bg-scope-user/10 text-scope-user",
   locked: "border-scope-global/40 bg-scope-global/10 text-scope-global",
+  project: "border-scope-project/40 bg-scope-project/10 text-scope-project",
+  local: "border-scope-local/40 bg-scope-local/10 text-scope-local",
 };
 
 const DOT_CLASSES: Readonly<Record<BadgeTone, string>> = {
@@ -25,6 +27,8 @@ const DOT_CLASSES: Readonly<Record<BadgeTone, string>> = {
   danger: "bg-danger",
   info: "bg-scope-user",
   locked: "bg-scope-global",
+  project: "bg-scope-project",
+  local: "bg-scope-local",
 };
 
 const STATUS_TONE_TO_BADGE: Readonly<Record<ItemStatus, BadgeTone>> = {

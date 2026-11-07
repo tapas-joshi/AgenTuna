@@ -272,7 +272,7 @@ export function PresetsScreen() {
                       aria-label="Preset name"
                       value={renameValue}
                       onChange={(event) => setRenameValue(event.target.value)}
-                      className="w-48"
+                      className="w-192"
                     />
                     <Button
                       size="sm"

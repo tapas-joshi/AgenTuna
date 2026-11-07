@@ -40,7 +40,7 @@ test("axe audits every built screen, migration step, picker and modal", async ({
   test.setTimeout(120_000);
   await page.goto("/");
   await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Overview/ })).toBeVisible();
   await page.addScriptTag({ path: axeScriptPath });
   const failures: string[] = [];
   const check = async (name: string) => failures.push(...await audit(page, name));
@@ -57,7 +57,8 @@ test("axe audits every built screen, migration step, picker and modal", async ({
   await page.getByRole("menuitem", { name: "Open" }).click();
   await expect(page.getByRole("heading", { name: "Code Review", exact: true }).first()).toBeVisible();
   await check("Skill detail");
-  await page.getByRole("button", { name: "Move" }).click();
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Move to scope…" }).click();
   await check("Skill action dialog");
   await page.keyboard.press("Escape");
 
@@ -69,9 +70,9 @@ test("axe audits every built screen, migration step, picker and modal", async ({
   await expect(page.getByRole("heading", { name: "Visual server" })).toBeVisible();
   await check("MCP detail");
   await page.getByRole("button", { name: "Edit" }).click();
-  await expect(page.getByRole("main", { name: "Edit MCP server" })).toBeVisible();
+  await expect(page.getByRole("main", { name: /^Edit / })).toBeVisible();
   await check("MCP form");
-  await page.getByRole("main", { name: "Edit MCP server" }).getByRole("button", { name: "Cancel" }).first().click();
+  await page.getByRole("main", { name: /^Edit / }).getByRole("button", { name: "Cancel" }).first().click();
 
   await page.getByRole("button", { name: "Instructions", exact: true }).click();
   await expect(page.getByRole("main", { name: "Instructions" })).toBeVisible();
@@ -106,7 +107,8 @@ test("axe audits every built screen, migration step, picker and modal", async ({
   await expect(page.getByRole("heading", { name: "Preferences" })).toBeVisible();
   await check("Preferences");
   await page.getByRole("button", { name: "Skills", exact: true }).click();
-  await page.getByRole("button", { name: "Add skill", exact: true }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByRole("menuitem", { name: "New skill" }).click();
   await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
   await check("Add-skill wizard");
   await page.keyboard.press("Escape");

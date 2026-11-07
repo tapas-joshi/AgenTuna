@@ -261,6 +261,7 @@ fn cursor_user_paths(
             None,
             true,
         )],
+        ItemKind::Rule if scope == Scope::Global => Vec::new(),
         ItemKind::Rule => vec![candidate(
             "rules_dir",
             env.home.join(".cursor/rules"),

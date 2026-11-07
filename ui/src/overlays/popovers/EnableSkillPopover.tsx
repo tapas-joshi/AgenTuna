@@ -12,6 +12,13 @@ export type AgentChoice = {
   readonly label: string;
   readonly enabled: boolean;
   readonly disabledReason?: string;
+  /**
+   * Agents that read the same discovery folder as `id`. The choice is one row
+   * and one write; the popover never renders a second switch for them.
+   */
+  readonly coupledWith?: readonly string[];
+  /** Folder a coupled group writes, shown in the coupling warning. */
+  readonly sharedPath?: string | null;
 };
 
 export interface EnableSkillPopoverProps {
@@ -73,9 +80,12 @@ export function EnableSkillPopover({
         onClose();
         return;
       }
+      // A coupled group writes one folder; the representative's plan covers every reader.
+      const coupled = new Set(changed.flatMap((agent) => [...(agent.coupledWith ?? [])]));
 
       const outcomes: string[] = [];
       for (const agent of changed) {
+        if (coupled.has(agent.id)) continue;
         const request: SkillAgentPreviewRequest = {
           item_id: itemId,
           scope,
@@ -211,6 +221,9 @@ export function EnableSkillPopover({
                   className="rounded border-border text-accent focus:ring-accent"
                 />
                 <span className="text-text">{agent.label}</span>
+                {(agent.coupledWith?.length ?? 0) > 0 && (
+                  <span className="text-11 text-scope-user">one folder</span>
+                )}
               </span>
               {agent.disabledReason && (
                 <span className="text-11 text-text-muted">{agent.disabledReason}</span>
@@ -219,6 +232,19 @@ export function EnableSkillPopover({
           );
         })}
       </div>
+
+      {agents.some((agent) => (agent.coupledWith?.length ?? 0) > 0) && (
+        <div role="note" className="rounded-6 border border-warning/40 bg-warning/10 p-8 text-11 text-text">
+          <strong className="block text-12">Shared discovery root</strong>
+          {agents
+            .filter((agent) => (agent.coupledWith?.length ?? 0) > 0)
+            .map(
+              (agent) =>
+                `${agent.label} read ${agent.sharedPath ?? "one folder"} — one folder on disk. This switch changes every reader; AgenTuna never offers a separate one.`,
+            )
+            .join(" ")}
+        </div>
+      )}
 
       {conflict !== null && (
         <div role="alert" className="grid gap-8 rounded-6 border border-warning/40 bg-warning/10 p-8 text-11">

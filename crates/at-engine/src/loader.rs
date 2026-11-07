@@ -357,6 +357,7 @@ pub fn agent_loads(
         let deployments =
             at_db::deployments::list_deployments_for_agent(connection, &observation.agent)?;
         let mut loaded = BTreeMap::new();
+        let mut paths = BTreeMap::new();
         for definition in layers.iter().flat_map(|layer| &layer.definitions) {
             let deployment = deployments
                 .iter()
@@ -369,17 +370,22 @@ pub fn agent_loads(
                 .max_by_key(|row| row.scope.precedence());
             if let Some(deployment) = deployment {
                 loaded.insert(definition.logical_id(), deployment.state);
-            } else if observation.native.iter().any(|native| {
+                if let Some(path) = &deployment.target_path {
+                    paths.insert(definition.logical_id(), path.clone());
+                }
+            } else if let Some(native) = observation.native.iter().find(|native| {
                 native.kind == definition.kind
                     && at_model::normalized_name(&native.name) == definition.normalized_name()
             }) {
                 loaded.insert(definition.logical_id(), ItemState::Native);
+                paths.insert(definition.logical_id(), native.path.display().to_string());
             }
         }
         agents.push(crate::effective::AgentLoads {
             agent: observation.agent.clone(),
             installed: observation.installed,
             loaded,
+            paths,
         });
     }
     Ok(agents)

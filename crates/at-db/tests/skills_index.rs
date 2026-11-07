@@ -175,6 +175,67 @@ fn list_skills_over_500_seeded_skills_returns_within_the_ci_bound() {
 }
 
 #[test]
+fn mixed_scope_skills_projection_handles_three_thousand_rows_within_ci_bound() {
+    let mut db = common::open_with(common::ALL_VERSIONS);
+    db.connection()
+        .execute_batch(
+            "INSERT INTO agents(id,display_name,installed) VALUES \
+             ('claude_code','Claude Code',1),('codex','Codex',1),('omp','Oh My Pi',1)",
+        )
+        .expect("insert agents");
+    let transaction = db.connection_mut().transaction().expect("start fixture");
+    {
+        let mut items = transaction
+            .prepare(
+                "INSERT INTO items(id,kind,scope,project_id,slug,name,state,managed) \
+                 VALUES (?1,'skill',?2,?3,?4,?4,'active',1)",
+            )
+            .expect("prepare skills");
+        let mut deployments = transaction
+            .prepare(
+                "INSERT INTO deployments(item_id,agent_id,scope,project_id,state) \
+                 VALUES (?1,?2,?3,?4,'linked')",
+            )
+            .expect("prepare deployments");
+        for index in 0..3_000 {
+            let id = ItemId::new().to_string();
+            let slug = format!("perf-skill-{index:04}");
+            let (scope, project) = if index % 2 == 0 {
+                ("user", None)
+            } else {
+                ("project", Some("prj_perf"))
+            };
+            items
+                .execute(params![id, scope, project, slug])
+                .expect("insert skill");
+            for agent in ["claude_code", "codex", "omp"] {
+                deployments
+                    .execute(params![id, agent, scope, project])
+                    .expect("insert deployment");
+            }
+        }
+    }
+    transaction.commit().expect("commit fixture");
+
+    let started = std::time::Instant::now();
+    let rows = list_skills(
+        db.connection(),
+        &SkillFilter {
+            include_native: true,
+            ..SkillFilter::default()
+        },
+    )
+    .expect("list skills");
+    let elapsed = started.elapsed();
+    assert_eq!(rows.len(), 3_000);
+    assert!(rows.iter().all(|row| row.deployed.len() == 3));
+    assert!(
+        elapsed < std::time::Duration::from_millis(2_000),
+        "mixed-scope projection of 3,000 skills took {elapsed:?}"
+    );
+}
+
+#[test]
 fn ignored_upstream_commit_hides_the_update_badge_until_a_newer_one_is_checked() {
     let mut db = common::open_with(common::ALL_VERSIONS);
     let id = add_skill(&db, Scope::User, "code-review", "Code Review");

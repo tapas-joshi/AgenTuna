@@ -5,7 +5,9 @@ use super::{
     state::AppState,
 };
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest};
+use at_migrate::scan::{
+    Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest, ScanRoot, ScanRootStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -41,18 +43,47 @@ pub struct MigrateScanItemView {
     pub ownership: String,
 }
 
-/// One native folder or document that produced scan rows.
+/// Status of an attempted migration discovery root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub enum MigrateScanRootStatus {
+    /// The root was read successfully and contained items.
+    Scanned,
+    /// The root was read successfully and contained no items.
+    Empty,
+    /// The candidate does not exist.
+    NotPresent,
+    /// The candidate could not be safely read.
+    Unreadable,
+}
+
+/// One attempted native folder or document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct MigrateScanRootView {
     /// Native folder or document path.
     pub path: String,
+    /// Kind of native item sought in this root.
+    pub kind: String,
     /// Agents that read this root.
     pub agents: Vec<String>,
+    /// Number of distinct found items, including skipped items.
+    #[ts(type = "number")]
+    pub found_items: i64,
     /// Rows that would be moved into the store.
+    #[ts(type = "number")]
     pub new_items: i64,
+    /// Rows skipped due to read or parse errors.
+    #[ts(type = "number")]
+    pub skipped_items: i64,
     /// Rows that already point at the store.
+    #[ts(type = "number")]
     pub in_sync: i64,
+    /// Whether the candidate was scanned, empty, absent, or unreadable.
+    pub status: MigrateScanRootStatus,
+    /// Content-free reason when the root is unreadable.
+    pub unreadable_reason: Option<String>,
 }
 
 /// One scanned folder or document that could not be read, with the path that failed.
@@ -231,7 +262,6 @@ pub async fn migrate_scan_inner(
 
 /// Projects a scan report into the webview view with authoritative ownership labels.
 fn scan_view(report: ScanReport) -> MigrateScanView {
-    let roots = scan_roots(&report);
     MigrateScanView {
         items: report.items.into_iter().map(item_view).collect(),
         partial: report.partial,
@@ -251,7 +281,7 @@ fn scan_view(report: ScanReport) -> MigrateScanView {
                 message: warning.message,
             })
             .collect(),
-        roots,
+        roots: report.roots.into_iter().map(root_view).collect(),
     }
 }
 
@@ -420,37 +450,28 @@ pub fn migrate_scan_result_inner(
     ))
 }
 
-/// Groups scan rows by the native folder or document that produced them.
-fn scan_roots(report: &ScanReport) -> Vec<MigrateScanRootView> {
-    let mut grouped: BTreeMap<PathBuf, (std::collections::BTreeSet<String>, i64, i64)> =
-        BTreeMap::new();
-    for item in &report.items {
-        let root = match item.kind {
-            at_model::ItemKind::Skill => item
-                .path
-                .parent()
-                .map_or_else(|| item.path.clone(), std::path::Path::to_path_buf),
-            _ => item.path.clone(),
-        };
-        let entry = grouped.entry(root).or_default();
-        for agent in &item.agents {
-            entry.0.insert(agent.to_string());
-        }
-        if item.ownership == Ownership::Managed {
-            entry.2 += 1;
-        } else {
-            entry.1 += 1;
-        }
+/// Projects the scanner's actual candidate outcomes without inferring roots from items.
+fn root_view(root: ScanRoot) -> MigrateScanRootView {
+    MigrateScanRootView {
+        path: root.path.display().to_string(),
+        kind: root.kind.to_string(),
+        agents: root
+            .agents
+            .into_iter()
+            .map(|agent| agent.to_string())
+            .collect(),
+        found_items: root.found_items,
+        new_items: root.new_items,
+        skipped_items: root.skipped_items,
+        in_sync: root.in_sync,
+        status: match root.status {
+            ScanRootStatus::Scanned => MigrateScanRootStatus::Scanned,
+            ScanRootStatus::Empty => MigrateScanRootStatus::Empty,
+            ScanRootStatus::NotPresent => MigrateScanRootStatus::NotPresent,
+            _ => MigrateScanRootStatus::Unreadable,
+        },
+        unreadable_reason: root.unreadable_reason,
     }
-    grouped
-        .into_iter()
-        .map(|(path, (agents, new_items, in_sync))| MigrateScanRootView {
-            path: path.display().to_string(),
-            agents: agents.into_iter().collect(),
-            new_items,
-            in_sync,
-        })
-        .collect()
 }
 /// One comparable copy in a migration conflict.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -1656,6 +1677,7 @@ mod plan_tests {
         std::fs::write(&first, b"alpha").expect("write a");
         std::fs::write(&second, b"beta").expect("write b");
         let scan = ScanReport {
+            roots: Vec::new(),
             items: vec![
                 item(
                     "review",
@@ -1706,6 +1728,7 @@ mod plan_tests {
         std::fs::write(&first, b"alpha").expect("write a");
         std::fs::write(&second, b"beta").expect("write b");
         let scan = ScanReport {
+            roots: Vec::new(),
             items: vec![
                 item(
                     "review",
@@ -1756,6 +1779,7 @@ mod plan_tests {
         std::fs::create_dir_all(first.parent().expect("dir")).expect("mkdir a");
         std::fs::write(&first, b"alpha").expect("write a");
         let scan = ScanReport {
+            roots: Vec::new(),
             items: vec![item(
                 "solo",
                 &first.display().to_string(),
@@ -1800,6 +1824,7 @@ mod plan_tests {
         );
         project_item.scope = Scope::Project;
         let scan = ScanReport {
+            roots: Vec::new(),
             items: vec![project_item],
             partial: false,
             skipped_roots: Vec::new(),
@@ -1836,10 +1861,12 @@ mod scan_view_tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, ScanWarning};
+    use at_migrate::scan::{
+        Ownership, ParseStatus, ScanItem, ScanReport, ScanRoot, ScanRootStatus, ScanWarning,
+    };
     use at_model::{AgentId, ItemKind, Scope};
 
-    use super::{ownership_state, scan_view};
+    use super::{MigrateScanRootStatus, ownership_state, scan_view};
 
     fn item(name: &str, ownership: Ownership) -> ScanItem {
         ScanItem {
@@ -1863,6 +1890,7 @@ mod scan_view_tests {
         assert_eq!(ownership_state(Ownership::NotInAgenTuna), "not_in_agentuna");
 
         let report = ScanReport {
+            roots: Vec::new(),
             items: vec![
                 item("managed", Ownership::Managed),
                 item("conflict", Ownership::Conflict),
@@ -1884,9 +1912,51 @@ mod scan_view_tests {
     }
 
     #[test]
+    fn root_outcomes_are_projected_even_when_they_have_no_items() {
+        let root = |path: &str, status, reason: Option<&str>| ScanRoot {
+            path: PathBuf::from(path),
+            kind: ItemKind::Skill,
+            agents: BTreeSet::from([AgentId::Codex, AgentId::Omp]),
+            status,
+            unreadable_reason: reason.map(str::to_owned),
+            found_items: 0,
+            new_items: 0,
+            skipped_items: 0,
+            in_sync: 0,
+        };
+        let view = scan_view(ScanReport {
+            roots: vec![
+                root("/empty", ScanRootStatus::Empty, None),
+                root("/missing", ScanRootStatus::NotPresent, None),
+                root(
+                    "/denied",
+                    ScanRootStatus::Unreadable,
+                    Some("permission denied"),
+                ),
+            ],
+            items: vec![item("kept", Ownership::NotInAgenTuna)],
+            partial: true,
+            skipped_roots: Vec::new(),
+            warnings: Vec::new(),
+        });
+        assert_eq!(view.roots.len(), 3);
+        assert_eq!(view.roots[0].status, MigrateScanRootStatus::Empty);
+        assert_eq!(view.roots[0].new_items, 0);
+        assert_eq!(view.roots[0].agents, vec!["codex", "omp"]);
+        assert_eq!(view.roots[1].status, MigrateScanRootStatus::NotPresent);
+        assert_eq!(view.roots[2].status, MigrateScanRootStatus::Unreadable);
+        assert_eq!(
+            view.roots[2].unreadable_reason.as_deref(),
+            Some("permission denied")
+        );
+        assert_eq!(view.items.len(), 1);
+    }
+
+    #[test]
     fn a_warning_keeps_the_path_that_failed() {
         let path = PathBuf::from("/home/.claude.json");
         let report = ScanReport {
+            roots: Vec::new(),
             items: vec![item("kept", Ownership::NotInAgenTuna)],
             partial: true,
             skipped_roots: Vec::new(),

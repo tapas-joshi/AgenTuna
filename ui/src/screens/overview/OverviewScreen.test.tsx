@@ -10,10 +10,11 @@ const appState = createAppState();
 appState.restore("project-id", "project");
 const payload = {
   scopes: [
-    { scope: "global", skills: 1, mcp: 0, rules: 0, locks: 1, last_edited: "2026-11-05T10:00:00Z", disabled: 0, store_ready: true },
-    { scope: "user", skills: 2, mcp: 1, rules: 0, locks: 0, last_edited: "2026-11-06T10:00:00Z", disabled: 0, store_ready: true },
-    { scope: "project", skills: 3, mcp: 1, rules: 1, locks: 0, last_edited: null, disabled: 1, store_ready: true },
+    { scope: "global", skills: 1, mcp: 0, rules: 0, locks: 1, last_edited: "2026-11-05T10:00:00Z", last_edited_by: "ui", disabled: 0, store_ready: true, store_root: "/Library/Application Support/AgenTuna/global", native_roots: [], git_uncommitted: null },
+    { scope: "user", skills: 2, mcp: 1, rules: 0, locks: 0, last_edited: "2026-11-06T10:00:00Z", last_edited_by: "ui", disabled: 0, store_ready: true, store_root: "/home/tester/.agentuna", native_roots: ["~/.claude", "~/.codex", "~/.omp", "~/.agents"], git_uncommitted: null },
+    { scope: "project", skills: 3, mcp: 1, rules: 1, locks: 0, last_edited: null, last_edited_by: null, disabled: 1, store_ready: true, store_root: "./.agentuna", native_roots: ["./.claude", "./.agents", "./.mcp.json", "CLAUDE.md", "AGENTS.md"], git_uncommitted: 1 },
   ],
+  effective: { skills: 6, mcp: 2, rules: 1, shadowed_skills: 2, disabled: 1 },
   attention: [{ item_id: "itm_1", title: "Skill shadowed", subtitle: "Project copy wins", kind: "shadowed_skill", screen: "skills", row_id: "itm_1" }],
   attention_total: 1,
   changes: [{ id: "op-1", kind: "skill_added", summary: "Added skill", created_at: "2026-11-06T10:00:00Z", file_count: 2, scope: "project", files: [{ path: "./.agentuna/skills/sample/SKILL.md", scope: "project" }, { path: "./.agentuna/store.json", scope: "project" }] }],
@@ -43,14 +44,16 @@ describe("OverviewScreen", () => {
     );
     render(<AppStateProvider state={appState}><OverviewScreen /></AppStateProvider>);
     expect(await screen.findByText("Effective in this repo")).toBeTruthy();
-    expect(screen.getByText("9 indexed items")).toBeTruthy();
-    expect(screen.getByText("Global 11%")).toBeTruthy();
-    expect(screen.getByText("User 33%")).toBeTruthy();
-    expect(screen.getByText("Project 56%")).toBeTruthy();
-    expect(screen.getByLabelText("1 locked items")).toBeTruthy();
-    expect(screen.getByText("Source: settings · 1 lock")).toBeTruthy();
+    expect(screen.getByText("6 skills · 2 MCP servers · 1 instruction file")).toBeTruthy();
+    expect(screen.getByText("2 skills shadowed by a nearer scope · 1 item disabled in this repo")).toBeTruthy();
+    expect(screen.getByLabelText("Global 1 items")).toBeTruthy();
+    expect(screen.getByLabelText("User 3 items")).toBeTruthy();
+    expect(screen.getByLabelText("Project 5 items")).toBeTruthy();
+    expect(screen.getByText("1 locked")).toBeTruthy();
     expect(screen.getByText("/Library/Application Support/AgenTuna/global")).toBeTruthy();
-    expect(document.querySelector('[aria-label="Scope stores"] article')?.className).toContain("h-[214px]");
+    expect(screen.getByText("~/.claude · ~/.codex · ~/.omp · ~/.agents")).toBeTruthy();
+    expect(screen.getByText("git: 1 uncommitted")).toBeTruthy();
+    expect(document.querySelector('[aria-label="Scope stores"] article')?.className).toContain("min-h-[196px]");
     // The status word is text, not colour alone.
     expect(screen.getByText("Shadowed")).toBeTruthy();
     screen.getByRole("button", { name: /Added skill/ }).click();
@@ -61,6 +64,25 @@ describe("OverviewScreen", () => {
     expect(within(dialog).getByText(/- old/)).toBeTruthy();
     expect(ipc.calls.some((call) => call.command === "skill_compare_copies")).toBe(true);
     expect(ipc.calls[0]?.command).toBe("overview_load");
+  });
+  test("scope variants use the designed title, subtitle, CTA and summary heading", async () => {
+    const variants = [
+      { scope: "project" as const, title: "Overview", subtitle: "What your agents load in payments-service. Nearest scope wins: Project, then User, then Global.", cta: "+ Add to this repo", section: "Effective in this repo" },
+      { scope: "user" as const, title: "Overview · User scope", subtitle: "What loads for you in every repo. A repo's Project files can still override these.", cta: "+ Add to User", section: "Effective for you, every repo" },
+      { scope: "global" as const, title: "Overview · Global scope", subtitle: "What every user and agent on this Mac gets. Locked values can't be overridden below.", cta: "+ Add to Global", section: "Effective for everyone on this Mac" },
+    ];
+    ipc.reply = (command) => Promise.resolve(command === "project_sync_status" ? [] : payload);
+    for (const variant of variants) {
+      const state = createAppState();
+      state.restore("project-id", variant.scope);
+      const view = render(<AppStateProvider state={state}><OverviewScreen projectName="payments-service" /></AppStateProvider>);
+      expect(await screen.findByRole("heading", { level: 1, name: variant.title })).toBeTruthy();
+      expect(screen.getByText(variant.subtitle)).toBeTruthy();
+      expect(screen.getByRole("button", { name: variant.cta })).toBeTruthy();
+      expect(screen.getByText(variant.section)).toBeTruthy();
+      view.unmount();
+      cleanup();
+    }
   });
   test("renders the startup warning with its quarantine path", async () => {
     const warning = {
@@ -139,7 +161,7 @@ describe("OverviewScreen", () => {
 
     expect(await screen.findByText(/Global store is read-only: Managed by IT policy/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Enable global writes" })).toBeTruthy();
-    expect(screen.getByLabelText("1 locked items")).toBeTruthy();
+    expect(screen.getByText("1 locked")).toBeTruthy();
 
     cleanup();
 
@@ -155,9 +177,9 @@ describe("OverviewScreen", () => {
     ipc.reply = (command) => Promise.resolve(command === "project_sync_status" ? [] : writablePayload);
     render(<AppStateProvider state={state}><OverviewScreen /></AppStateProvider>);
 
-    expect(await screen.findByText("Effective in this repo")).toBeTruthy();
+    expect(await screen.findByText("Effective for everyone on this Mac")).toBeTruthy();
     expect(screen.queryByText(/Global store is read-only/)).toBeNull();
-    expect(screen.getByLabelText("1 locked items")).toBeTruthy();
+    expect(screen.getByText("1 locked")).toBeTruthy();
   });
 
   test("TA-051 AC3: User variant omits admin banner and shows ~/.agentuna path with Copy button", async () => {
@@ -170,11 +192,11 @@ describe("OverviewScreen", () => {
     ipc.reply = (command) => Promise.resolve(command === "project_sync_status" ? [] : payload);
     render(<AppStateProvider state={state}><OverviewScreen /></AppStateProvider>);
 
-    expect(await screen.findByText("Effective in this repo")).toBeTruthy();
+    expect(await screen.findByText("Effective for you, every repo")).toBeTruthy();
     // Admin banner omitted
     expect(screen.queryByText(/Global store is read-only/)).toBeNull();
     // Shows resolved user path
-    expect(screen.getByText("/home/tester/.agentuna")).toBeTruthy();
+    expect(screen.getByText(/\/home\/tester\/\.agentuna/)).toBeTruthy();
 
     // Copy path button copies to clipboard
     const copyBtn = screen.getByRole("button", { name: "Copy path" });
@@ -193,7 +215,7 @@ describe("OverviewScreen", () => {
 
     ipc.reply = (command) => Promise.resolve(command === "project_sync_status" ? [] : payload);
     const { rerender } = render(<AppStateProvider state={state}><OverviewScreen /></AppStateProvider>);
-    expect(await screen.findByText("Effective in this repo")).toBeTruthy();
+    expect(await screen.findByText("Effective for you, every repo")).toBeTruthy();
 
     // Simulate scrolling on user scope
     scrollContainer.scrollTop = 180;
@@ -202,7 +224,7 @@ describe("OverviewScreen", () => {
     // Switch scope to global
     state.receiveScope("global");
     rerender(<AppStateProvider state={state}><OverviewScreen /></AppStateProvider>);
-    await screen.findByText("Effective in this repo");
+    await screen.findByText("Effective for everyone on this Mac");
 
     // Global starts at 0 scroll
     expect(scrollContainer.scrollTop).toBe(0);
@@ -214,7 +236,7 @@ describe("OverviewScreen", () => {
     // Switch back to user scope
     state.receiveScope("user");
     rerender(<AppStateProvider state={state}><OverviewScreen /></AppStateProvider>);
-    await screen.findByText("Effective in this repo");
+    await screen.findByText("Effective for you, every repo");
 
     // User scroll position is restored
     expect(scrollContainer.scrollTop).toBe(180);
@@ -243,7 +265,7 @@ describe("OverviewScreen", () => {
     expect(await screen.findByText("Locked item not found")).toBeTruthy();
     expect(screen.getByText("Org policy lock references missing item")).toBeTruthy();
     expect(screen.getByText("Locked")).toBeTruthy();
-    expect(screen.getByLabelText("1 locked items")).toBeTruthy();
+    expect(screen.getByText("1 locked")).toBeTruthy();
   });
 });
 

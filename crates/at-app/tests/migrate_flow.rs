@@ -34,6 +34,57 @@ impl EventSink for RecordingSink {
 }
 
 #[tokio::test]
+async fn scan_command_keeps_empty_missing_and_unreadable_roots_with_found_items()
+-> Result<(), Box<dyn Error>> {
+    use at_app::app::migrate::MigrateScanRootStatus;
+
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let found = home.join(".claude/skills/example");
+    let empty = home.join(".codex/skills");
+    let missing = home.join(".agents/skills");
+    let malformed = home.join(".codex/config.toml");
+    std::fs::create_dir_all(&found)?;
+    std::fs::create_dir_all(&empty)?;
+    std::fs::write(
+        found.join("SKILL.md"),
+        "---\nname: example\ndescription: fixture\n---\n",
+    )?;
+    std::fs::write(&malformed, "token = \"fixture-secret\"\ninvalid = [")?;
+    let paths = AppPaths::resolve(&PathEnvironment {
+        home: HomeSource::Injected(home.clone()),
+        overrides: PathOverrides {
+            home: Some(home.join("support")),
+            user_store: Some(home.join("user-store")),
+            global_store: Some(home.join("global-store")),
+            ..Default::default()
+        },
+        project_root: None,
+    })?;
+    let sink = Arc::new(RecordingSink::default());
+    let bridge = Arc::new(JobBridge::new(sink, Arc::new(TracingOperationsLog)));
+    let app = AppState::new(bridge, None).with_paths(paths);
+    let view = migrate_scan_inner(&app, None).await?;
+    let get = |path: &Path| {
+        view.roots
+            .iter()
+            .find(|root| Path::new(&root.path) == path)
+            .expect("candidate is present in command result")
+    };
+    assert!(view.items.iter().any(|item| item.name == "example"));
+    assert_eq!(get(&empty).status, MigrateScanRootStatus::Empty);
+    assert_eq!(get(&empty).found_items, 0);
+    assert_eq!(get(&missing).status, MigrateScanRootStatus::NotPresent);
+    assert_eq!(get(&malformed).status, MigrateScanRootStatus::Unreadable);
+    assert_eq!(
+        get(&malformed).unreadable_reason.as_deref(),
+        Some("invalid MCP configuration")
+    );
+    assert!(!serde_json::to_string(&view)?.contains("fixture-secret"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn migrate_scan_plan_apply_and_undo_restores_original_tree() -> Result<(), Box<dyn Error>> {
     let fixture = MigrationFixture::new(LinkMode::Link)?;
     let filter = fixture.filter();

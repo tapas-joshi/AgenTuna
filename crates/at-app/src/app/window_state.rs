@@ -44,6 +44,30 @@ pub struct DisplayBounds {
     pub height: u32,
     /// Whether this is the primary display.
     pub primary: bool,
+    /// Display scale factor in percent (100 = 1x, 200 = Retina), so logical window minimums
+    /// can be compared with the physical pixel sizes the layout stores.
+    pub scale_percent: u32,
+}
+
+/// Smallest window width in logical pixels (matches `minWidth` in `tauri.conf.json`).
+const LOGICAL_MIN_WIDTH: u32 = 960;
+/// Smallest window height in logical pixels (matches `minHeight` in `tauri.conf.json`).
+const LOGICAL_MIN_HEIGHT: u32 = 640;
+/// Default window width in logical pixels on a first run.
+const LOGICAL_DEFAULT_WIDTH: u32 = 1440;
+/// Default window height in logical pixels on a first run.
+const LOGICAL_DEFAULT_HEIGHT: u32 = 900;
+
+/// Physical pixels of a logical minimum on `display`.
+fn minimum(logical: u32, display: &DisplayBounds) -> u32 {
+    logical
+        .saturating_mul(display.scale_percent)
+        .saturating_div(100)
+}
+
+/// 92% of a display dimension: leaves room for the menu bar and Dock.
+fn fit(physical: u32) -> u32 {
+    physical.saturating_mul(92).saturating_div(100)
 }
 
 /// Returns a safe layout, clamped to a connected display.
@@ -56,8 +80,8 @@ pub fn clamp_layout(saved: &WindowLayout, displays: &[DisplayBounds]) -> Option<
         .iter()
         .find(|display| display.primary)
         .or_else(|| displays.first())?;
-    if saved.width < 640
-        || saved.height < 480
+    if saved.width < minimum(LOGICAL_MIN_WIDTH, primary)
+        || saved.height < minimum(LOGICAL_MIN_HEIGHT, primary)
         || saved.sidebar_width < 120
         || saved.sidebar_width > 600
     {
@@ -67,11 +91,14 @@ pub fn clamp_layout(saved: &WindowLayout, displays: &[DisplayBounds]) -> Option<
         .iter()
         .find(|display| saved.monitor_id.as_deref() == Some(display.id.as_str()));
     let display = monitor.unwrap_or(primary);
-    let width = saved.width.min(display.width).max(640.min(display.width));
+    let width = saved
+        .width
+        .min(display.width)
+        .max(minimum(LOGICAL_MIN_WIDTH, display).min(display.width));
     let height = saved
         .height
         .min(display.height)
-        .max(480.min(display.height));
+        .max(minimum(LOGICAL_MIN_HEIGHT, display).min(display.height));
     let x = saved.x.clamp(
         display.x,
         display
@@ -114,9 +141,30 @@ pub fn clamp_layout(saved: &WindowLayout, displays: &[DisplayBounds]) -> Option<
     })
 }
 
+/// Converts a monitor scale factor (1.0, 2.0, …) to whole percent, bounded to 100–400.
+fn scale_percent(factor: f64) -> u32 {
+    let percent = (factor * 100.0).round();
+    if percent.is_finite() && (100.0..=400.0).contains(&percent) {
+        // The range check above makes the conversion exact.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let whole = percent as u32;
+        whole
+    } else {
+        100
+    }
+}
+
 fn default_layout(display: &DisplayBounds) -> WindowLayout {
-    let width = 1280.min(display.width);
-    let height = 800.min(display.height);
+    let width = LOGICAL_DEFAULT_WIDTH
+        .saturating_mul(display.scale_percent)
+        .saturating_div(100)
+        .min(fit(display.width))
+        .max(minimum(LOGICAL_MIN_WIDTH, display).min(display.width));
+    let height = LOGICAL_DEFAULT_HEIGHT
+        .saturating_mul(display.scale_percent)
+        .saturating_div(100)
+        .min(fit(display.height))
+        .max(minimum(LOGICAL_MIN_HEIGHT, display).min(display.height));
     WindowLayout {
         x: display
             .x
@@ -155,6 +203,7 @@ pub fn restore_window(window: &tauri::WebviewWindow, state: &super::state::AppSt
             y: monitor.position().y,
             width: monitor.size().width,
             height: monitor.size().height,
+            scale_percent: scale_percent(monitor.scale_factor()),
             primary: primary.as_ref().is_some_and(|screen| {
                 screen.position().x == monitor.position().x
                     && screen.position().y == monitor.position().y
@@ -254,7 +303,61 @@ mod tests {
             width: 1920,
             height: 1080,
             primary,
+            scale_percent: 100,
         }
+    }
+
+    #[test]
+    fn a_tiny_saved_size_on_a_retina_display_resets_to_a_usable_default() {
+        // 1280x800 physical pixels is only 640x400 logical points on a 2x display: below the
+        // 960x640 window minimum, so it must not be restored.
+        let retina = DisplayBounds {
+            id: "retina".to_owned(),
+            x: 0,
+            y: 0,
+            width: 3024,
+            height: 1964,
+            primary: true,
+            scale_percent: 200,
+        };
+        let saved = WindowLayout {
+            x: 100,
+            y: 100,
+            width: 1280,
+            height: 800,
+            monitor_id: Some("retina".to_owned()),
+            maximized: false,
+            sidebar_width: 250,
+            column_widths: BTreeMap::new(),
+        };
+        let clamped = clamp_layout(&saved, &[retina]).expect("display exists");
+        // 1440x900 logical = 2880x1800 physical, capped at 92% of the display width.
+        assert_eq!((clamped.width, clamped.height), (2782, 1800));
+    }
+
+    #[test]
+    fn the_default_never_exceeds_a_small_display_but_keeps_the_logical_minimum() {
+        let small = DisplayBounds {
+            id: "small".to_owned(),
+            x: 0,
+            y: 0,
+            width: 1366,
+            height: 768,
+            primary: true,
+            scale_percent: 100,
+        };
+        let saved = WindowLayout {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            monitor_id: None,
+            maximized: false,
+            sidebar_width: 250,
+            column_widths: BTreeMap::new(),
+        };
+        let clamped = clamp_layout(&saved, &[small]).expect("display exists");
+        assert_eq!((clamped.width, clamped.height), (1256, 706));
     }
 
     #[test]
@@ -292,7 +395,7 @@ mod tests {
         let clamped = clamp_layout(&saved, &[display("primary", true)]).expect("display exists");
         assert_eq!(
             (clamped.x, clamped.y, clamped.width, clamped.height),
-            (320, 140, 1280, 800)
+            (240, 90, 1440, 900)
         );
         assert!(!clamped.maximized);
     }

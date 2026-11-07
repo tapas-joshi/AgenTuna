@@ -281,4 +281,33 @@ describe("EffectiveScreen change-it-for-this-repo controls", () => {
     expect(editBtn.disabled).toBe(true);
     expect(editBtn.getAttribute("title")).toBe("Global policy managed by IT");
   });
+
+  test("shows loaded agent cards with native path and state matching design", async () => {
+    const loadedItem = {
+      logical_id: "item:itm_github",
+      item_id: "itm_github",
+      kind: "mcp_server",
+      name: "github",
+      winner_scope: "user",
+      source_path: "~/.claude.json · ~/.codex/config.toml · ~/.omp/agent/mcp.json",
+      agents: [
+        { agent: "claude_code", state: "native", loads: true, path: "~/.claude.json" },
+        { agent: "codex", state: "native", loads: true, path: "~/.codex/config.toml" },
+        { agent: "omp", state: "native", loads: true, path: "~/.omp/agent/mcp.json" },
+      ],
+      loads_in_agents: 3,
+      lock: null,
+    };
+    ipc.reply = (command) => {
+      if (command === "effective_query") return Promise.resolve({ ...unlocked, items: [loadedItem] });
+      if (command === "overview_load") return Promise.resolve({ global_store: { status: "available", reason: null } });
+      return Promise.resolve({ skills: 0, mcp_servers: 1, rules: 0 });
+    };
+    render(<AppStateProvider state={appState}><ToastProvider><EffectiveScreen /></ToastProvider></AppStateProvider>);
+
+    expect(await screen.findByText("Loaded for Claude Code, Codex, omp")).toBeTruthy();
+    expect(screen.getByText("~/.claude.json")).toBeTruthy();
+    expect(screen.getByText("~/.codex/config.toml")).toBeTruthy();
+    expect(screen.getByText("~/.omp/agent/mcp.json")).toBeTruthy();
+  });
 });

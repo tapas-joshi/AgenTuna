@@ -10,13 +10,13 @@ export type ToggleSize = "sm" | "md";
 export type ToggleLabelPlacement = "inline" | "below" | "hidden";
 
 const TRACK_CLASSES: Readonly<Record<ToggleSize, string>> = {
-  sm: "h-16 w-24 p-2",
-  md: "h-24 w-32 p-2",
+  sm: "h-20 w-40 p-2",
+  md: "h-24 w-48 p-2",
 };
 
 const THUMB_CLASSES: Readonly<Record<ToggleSize, string>> = {
-  sm: "size-12 data-[state=checked]:translate-x-8",
-  md: "size-16 data-[state=checked]:translate-x-12",
+  sm: "size-16 data-[state=checked]:translate-x-20",
+  md: "size-20 data-[state=checked]:translate-x-24",
 };
 
 const BASE_CLASSES =

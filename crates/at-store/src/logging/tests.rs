@@ -95,6 +95,13 @@ fn first_run_creates_daily_file_with_startup_line() {
         text.contains("AgenTuna started"),
         "startup line missing: {text}"
     );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("AgenTuna started"))
+            .count(),
+        1,
+        "exactly one startup line per run: {text}"
+    );
     assert!(
         text.contains("app_version=\"0.0.0-test\""),
         "app version missing: {text}"

@@ -13,8 +13,14 @@
  * `data-total-rows`; the performance test asserts on those counters instead of
  * guessing from a timing measurement.
  */
-import { useVirtualizer } from "@tanstack/react-virtual";
-import type { VirtualItem } from "@tanstack/react-virtual";
+import {
+  observeElementRect,
+  useVirtualizer,
+  type Rect,
+  type VirtualItem,
+  type Virtualizer,
+  type VirtualizerOptions,
+} from "@tanstack/react-virtual";
 import {
   FlexRender,
   flexRender,
@@ -50,6 +56,36 @@ const ACTIONS_COLUMN_WIDTH = 40;
 /** Clicks inside these elements select nothing; they belong to the widget. */
 const ROW_INTERACTIVE_SELECTOR =
   "[data-row-interactive],button,a,input,select,textarea,[role='switch'],[role='checkbox'],[role='menu'],[role='menuitem']";
+
+/** The rect observer `useVirtualizer` accepts, narrowed to this table's element. */
+type ViewportObserver = VirtualizerOptions<HTMLDivElement, Element>["observeElementRect"];
+
+/**
+ * Reports the height the table can *show*, never the height it occupies.
+ *
+ * TanStack Virtual sizes its render window from the scroll element's measured
+ * height. This table's section is a flex column whose height may be indefinite,
+ * and the scroll element then resolves its basis to its content — the whole
+ * virtual spacer, thousands of pixels tall — so the virtualizer mounts a row
+ * for every `rowHeight` slice of it. The 3,000-row release build mounted 188
+ * rows for a 600 px viewport that way (TF-035). The `viewportHeight` prop is
+ * authoritative when given; otherwise the measurement is capped by the window,
+ * so an unconstrained parent can never mount more than a screenful.
+ */
+/** Largest height a table can usefully occupy: never more than one screen. */
+export function tableHeightCeiling(viewportHeight: number | undefined): number {
+  const screen = typeof window === "undefined" ? 0 : window.innerHeight;
+  return Math.max(viewportHeight ?? 0, screen);
+}
+
+function viewportObserver(cap: number | undefined): ViewportObserver {
+  return (instance: Virtualizer<HTMLDivElement, Element>, cb: (rect: Rect) => void) =>
+    observeElementRect(instance, (rect) => {
+      const screen = instance.targetWindow?.innerHeight ?? rect.height;
+      const ceiling = Math.max(cap ?? 0, screen);
+      cb({ width: rect.width, height: Math.min(rect.height, ceiling) });
+    });
+}
 
 /** Props accepted by {@link DataTable}. */
 export interface DataTableProps<TData extends RowData> {
@@ -174,8 +210,15 @@ export function DataTable<TData extends RowData>({
 
   const rows = table.getRowModel().rows;
   const rowIds = useMemo(() => rows.map((row) => row.id), [rows]);
+  // Both scan every displayed row. Deriving them per render made every scroll
+  // frame of a 3,000-row table O(rows); they only change with the model or the
+  // selection. They must stay above the loading/empty early return: a hook
+  // below it runs on some renders and not others.
+  const bulkState = useMemo(() => bulkSelectionState(rowIds, selection), [rowIds, selection]);
+  const selectedCount = useMemo(() => countSelected(rowIds, selection), [rowIds, selection]);
   const leafColumns = table.getAllLeafColumns();
 
+  const observeViewportRect = useMemo(() => viewportObserver(viewportHeight), [viewportHeight]);
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
@@ -183,12 +226,19 @@ export function DataTable<TData extends RowData>({
     overscan,
     getItemKey: (index) => rows[index]?.id ?? index,
     initialRect: viewportHeight === undefined ? undefined : { width: 0, height: viewportHeight },
+    observeElementRect: observeViewportRect,
   });
   const measuredVirtualRows = rowVirtualizer.getVirtualItems();
+  // Before the first measurement (no scroll element yet) render one viewport
+  // plus overscan instead of a fixed 25 rows a short container may not show.
+  const initialWindow = Math.min(
+    rows.length,
+    Math.ceil((viewportHeight ?? rowHeight * 10) / rowHeight) + overscan,
+  );
   const virtualRows =
     measuredVirtualRows.length > 0
       ? measuredVirtualRows
-      : rows.slice(0, Math.min(rows.length, 25)).map((_, index) => ({
+      : rows.slice(0, initialWindow).map((_, index) => ({
           index,
           start: index * rowHeight,
           size: rowHeight,
@@ -262,11 +312,15 @@ export function DataTable<TData extends RowData>({
     ),
     ...(rowActions === undefined ? [] : [`${ACTIONS_COLUMN_WIDTH}px`]),
   ].join(" ");
+  // Keep declared column widths available in the scrollable content. Otherwise
+  // a narrow viewport collapses the growing name column and cells overlap.
+  const columnsWidth = leafColumns.reduce((width, column) => width + column.getSize(), 0)
+    + (selectionMode === "none" ? 0 : SELECTION_COLUMN_WIDTH)
+    + (rowActions === undefined ? 0 : ACTIONS_COLUMN_WIDTH);
+  const minContentWidth = `calc(${columnsWidth}px + 2 * var(--at-space-8))`;
 
   const columnCount =
     leafColumns.length + (selectionMode === "none" ? 0 : 1) + (rowActions === undefined ? 0 : 1);
-  const bulkState = bulkSelectionState(rowIds, selection);
-  const selectedCount = countSelected(rowIds, selection);
   const headers = table.getHeaderGroups()[0]?.headers ?? [];
 
   const headerSelection = (
@@ -293,12 +347,22 @@ export function DataTable<TData extends RowData>({
         data-total-rows={rows.length}
         data-rendered-rows={virtualRows.length}
         data-selected-rows={selectedCount}
-        style={viewportHeight === undefined ? undefined : { height: viewportHeight }}
+        /* `flex-1` resolves its basis to content inside an auto-height column,
+           where `height` alone can lose to the basis and the element grows past
+           a screen. The design lets the table fill the content area (baselines
+           show 9 rows at 1440x1000), so the size stays layout-driven; only a
+           table taller than the window is capped, which is what kept the
+           virtualizer mounting a row per pixel of a 15,000 px box. */
+        style={
+          viewportHeight === undefined
+            ? undefined
+            : { height: viewportHeight, maxHeight: tableHeightCeiling(viewportHeight) }
+        }
         className="min-h-0 flex-1 overflow-auto overscroll-contain"
       >
         <div
           role="rowgroup"
-          style={{ height: TABLE_HEADER_HEIGHT }}
+          style={{ height: TABLE_HEADER_HEIGHT, minWidth: minContentWidth }}
           className="sticky top-0 z-10 bg-raised"
         >
           <div
@@ -353,7 +417,7 @@ export function DataTable<TData extends RowData>({
             )}
           </div>
         </div>
-        <div role="rowgroup" style={{ height: totalSize, position: "relative" }}>
+        <div role="rowgroup" style={{ height: totalSize, minWidth: minContentWidth, position: "relative" }}>
           {virtualRows.map((item: VirtualItem) => {
             const row = rows[item.index];
             if (row === undefined) {

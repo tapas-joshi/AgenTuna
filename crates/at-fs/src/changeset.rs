@@ -1,11 +1,19 @@
 //! Journaled application of reviewed multi-file ChangeSets.
+//!
+//! Every apply holds an exclusive advisory `flock` on `<store>/.state/locks/store.lock` for its
+//! whole duration. The lock is shared with every other AgenTuna process that writes the same
+//! store, so contention is expected rather than exceptional: the acquisition retries for
+//! [`STORE_LOCK_WAIT`] and reports [`ChangeSetApplyError::StoreBusy`] only when the window
+//! expires.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use at_model::{ChangeSet, FileOp};
-use fs4::FileExt;
+use fs4::{FileExt, TryLockError};
 use time::OffsetDateTime;
 
 use crate::atomic::{BackupPolicy, WriteRequest, apply as apply_write};
@@ -354,6 +362,17 @@ pub enum ChangeSetApplyError {
     /// Journal failure.
     #[error("journal failure: {0}")]
     Journal(String),
+    /// Another writer held the store write lock for the whole wait window.
+    #[error(
+        "{}: the store write lock is held by another operation (waited {waited:?})",
+        path.display()
+    )]
+    StoreBusy {
+        /// The contended lock file.
+        path: PathBuf,
+        /// How long this call waited before giving up.
+        waited: Duration,
+    },
     /// Operation repository failure.
     #[error("operation history failure: {0}")]
     History(String),
@@ -373,13 +392,15 @@ pub enum ChangeSetApplyError {
 /// retain the full reviewed set and per-op progress; v1 recovery journals remain readable.
 ///
 /// # Errors
-/// Returns a validation, stale-state, IO, journal, or operation-history error. Failed rollback
+/// Returns a validation, stale-state, IO, journal, or operation-history error. A store lock held
+/// by another writer for the whole [`STORE_LOCK_WAIT`] window is reported as
+/// [`ChangeSetApplyError::StoreBusy`]; shorter contention is waited out. Failed rollback
 /// preserves its journal for manual recovery and marks the operation as requiring review.
 pub fn apply(
     set: &ChangeSet,
     context: &mut ApplyContext<'_>,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, None, None, false)
+    apply_inner(set, context, None, None, false, STORE_LOCK_WAIT)
 }
 
 /// Applies a ChangeSet with ownership checks for destructive operations on native paths.
@@ -395,7 +416,7 @@ pub fn apply_with_ownership_guard(
     context: &mut ApplyContext<'_>,
     guard: &dyn crate::guard::OverwriteGuard,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, None, Some(guard), false)
+    apply_inner(set, context, None, Some(guard), false, STORE_LOCK_WAIT)
 }
 
 /// Applies a ChangeSet that may include absolute paths beneath explicitly authorized roots.
@@ -411,7 +432,7 @@ pub fn apply_with_roots(
     context: &mut ApplyContext<'_>,
     roots: &ApplyRoots,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, Some(roots), None, false)
+    apply_inner(set, context, Some(roots), None, false, STORE_LOCK_WAIT)
 }
 /// Applies a reviewed ChangeSet while retaining a single-use in-process rollback token.
 ///
@@ -426,7 +447,7 @@ pub fn apply_with_roots_reversible(
     context: &mut ApplyContext<'_>,
     roots: &ApplyRoots,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, Some(roots), None, true)
+    apply_inner(set, context, Some(roots), None, true, STORE_LOCK_WAIT)
 }
 
 /// Reverses a completed reversible ChangeSet, refusing to overwrite later external edits.
@@ -443,22 +464,13 @@ pub fn apply_with_roots_reversible(
 ///
 /// # Errors
 /// Returns [`ChangeSetApplyError::Apply`] when the reviewed result has changed or restoration
-/// fails, and a journal error when its lock or journal cannot be maintained.
+/// fails, [`ChangeSetApplyError::StoreBusy`] when another writer kept the store lock for the
+/// whole wait window, and a journal error when its journal cannot be maintained.
 pub fn rollback_committed(
     handle: RollbackHandle,
     recorder: &mut dyn OperationRecorder,
 ) -> Result<(), ChangeSetApplyError> {
-    let lock_dir = handle.root.join(".state/locks");
-    fs::create_dir_all(&lock_dir)
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_dir.join("store.lock"))
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
-    FileExt::try_lock(&lock_file)
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    let _store_lock = lock_store_for_write(&handle.root, STORE_LOCK_WAIT)?;
     if let Err(failure) = rollback(
         &handle.set,
         &handle.root,
@@ -514,7 +526,70 @@ pub fn apply_with_roots_and_guard(
     roots: &ApplyRoots,
     guard: &dyn crate::guard::OverwriteGuard,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, Some(roots), Some(guard), false)
+    apply_inner(
+        set,
+        context,
+        Some(roots),
+        Some(guard),
+        false,
+        STORE_LOCK_WAIT,
+    )
+}
+
+/// How long an apply waits for a contended `<store>/.state/locks/store.lock`.
+///
+/// The lock is advisory and shared by every AgenTuna process that writes the store, so
+/// contention is normal rather than exceptional; a single non-blocking attempt turned ordinary
+/// contention into a spurious journal failure. This window covers a short-lived holder — another
+/// process, another thread of this one, or a forked child that inherited the lock description —
+/// before the acquisition reports [`ChangeSetApplyError::StoreBusy`].
+pub const STORE_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// Poll interval while waiting for the store write lock.
+const STORE_LOCK_POLL: Duration = Duration::from_millis(10);
+
+/// `<store>/.state/locks/store.lock`, the advisory lock serialising store writes.
+#[must_use]
+pub fn store_write_lock_path(store_root: &Path) -> PathBuf {
+    store_root.join(".state/locks/store.lock")
+}
+
+/// Takes the exclusive store write lock, retrying until `wait` expires.
+///
+/// `flock` is per open file description, so a second open in this same process conflicts exactly
+/// as another process would; the wait covers both. A persistent holder is reported as
+/// [`ChangeSetApplyError::StoreBusy`] so callers can tell contention from an IO failure.
+fn lock_store_for_write(
+    store_root: &Path,
+    wait: Duration,
+) -> Result<fs::File, ChangeSetApplyError> {
+    let path = store_write_lock_path(store_root);
+    if let Some(lock_dir) = path.parent() {
+        fs::create_dir_all(lock_dir)
+            .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match FileExt::try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(ChangeSetApplyError::StoreBusy { path, waited: wait });
+                }
+                thread::sleep(STORE_LOCK_POLL);
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(ChangeSetApplyError::Journal(error.to_string()));
+            }
+        }
+    }
 }
 
 fn apply_inner(
@@ -523,6 +598,7 @@ fn apply_inner(
     authorized_roots: Option<&ApplyRoots>,
     ownership_guard: Option<&dyn crate::guard::OverwriteGuard>,
     reversible: bool,
+    lock_wait: Duration,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
     set.validate()?;
     let mut paths = Vec::with_capacity(set.ops.len());
@@ -646,17 +722,9 @@ fn apply_inner(
         }
     }
 
-    let lock_dir = context.store_root.join(".state/locks");
-    fs::create_dir_all(&lock_dir)
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_dir.join("store.lock"))
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
-    FileExt::try_lock(&lock_file)
-        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
+    // Held for the rest of this call: it serialises the journal, the writes and their backups
+    // against every other writer of this store.
+    let _store_lock = lock_store_for_write(context.store_root, lock_wait)?;
     let operation_id = context
         .recorder
         .begin(set)
@@ -2261,5 +2329,122 @@ mod tests {
             hash_node(&root.join("missing")).expect("missing path"),
             None
         );
+    }
+
+    /// The store write lock is shared with every other writer of the store, so a second holder
+    /// that releases within the wait window must be waited out, not reported as a journal error.
+    /// `flock` is per open file description, so a lock file opened twice by this test conflicts
+    /// exactly like another process would.
+    #[test]
+    fn apply_waits_out_a_transiently_held_store_lock() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let backup_root = sandbox.path().join("backups");
+        fs::create_dir_all(&root).expect("store");
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("fresh.txt"),
+            bytes: b"written".to_vec(),
+            expected: ModelExpected::absent(),
+            follow_symlink: false,
+            backup: false,
+        }]);
+        let (held, holding) = std::sync::mpsc::channel();
+        let holder_root = root.clone();
+        let holder = std::thread::spawn(move || {
+            let path = store_write_lock_path(&holder_root);
+            fs::create_dir_all(path.parent().expect("lock dir")).expect("lock dir");
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .expect("lock file");
+            FileExt::lock(&file).expect("hold the store lock");
+            held.send(()).expect("signal the holder");
+            std::thread::sleep(Duration::from_millis(600));
+            FileExt::unlock(&file).expect("release the store lock");
+        });
+        holding.recv().expect("holder acquired the lock");
+
+        let started = Instant::now();
+        let mut recorder = Recorder::default();
+        {
+            let mut context = ApplyContext {
+                store_root: &root,
+                backup_folder: &backup_root,
+                recorder: &mut recorder,
+            };
+            apply(&set, &mut context).expect("apply waits for the lock instead of failing");
+        }
+        let elapsed = started.elapsed();
+        holder.join().expect("holder");
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "apply had to wait for the holder, not skip it: {elapsed:?}"
+        );
+        assert_eq!(
+            fs::read(root.join("fresh.txt")).expect("written target"),
+            b"written"
+        );
+        assert_eq!(recorder.starts, 1, "exactly one operation was recorded");
+    }
+
+    /// A lock held for the whole wait window is a typed, actionable failure: nothing is written,
+    /// no history row is opened, and the error names the lock file instead of a journal string.
+    #[test]
+    fn a_store_lock_held_for_the_whole_wait_reports_store_busy() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let backup_root = sandbox.path().join("backups");
+        fs::create_dir_all(&root).expect("store");
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("fresh.txt"),
+            bytes: b"written".to_vec(),
+            expected: ModelExpected::absent(),
+            follow_symlink: false,
+            backup: false,
+        }]);
+        let lock_path = store_write_lock_path(&root);
+        fs::create_dir_all(lock_path.parent().expect("lock dir")).expect("lock dir");
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .expect("lock file");
+        FileExt::lock(&held).expect("hold the store lock");
+        let wait = Duration::from_millis(500);
+
+        let started = Instant::now();
+        let mut recorder = Recorder::default();
+        let error = {
+            let mut context = ApplyContext {
+                store_root: &root,
+                backup_folder: &backup_root,
+                recorder: &mut recorder,
+            };
+            apply_inner(&set, &mut context, None, None, false, wait).expect_err("lock held")
+        };
+        let elapsed = started.elapsed();
+        FileExt::unlock(&held).expect("release the store lock");
+
+        match error {
+            ChangeSetApplyError::StoreBusy {
+                path,
+                waited: reported,
+            } => {
+                assert_eq!(path, lock_path, "the error names the contended lock file");
+                assert_eq!(reported, wait, "the error reports the wait policy it used");
+            }
+            other => panic!("expected StoreBusy, got {other:?}"),
+        }
+        assert!(
+            elapsed >= wait,
+            "the acquisition retried for the whole window: {elapsed:?}"
+        );
+        assert!(!root.join("fresh.txt").exists(), "nothing was written");
+        assert_eq!(recorder.starts, 0, "no history row was opened");
     }
 }

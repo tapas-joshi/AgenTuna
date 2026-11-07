@@ -17,6 +17,19 @@ const SCOPE_LABEL: Readonly<Record<string, { readonly label: string }>> = {
   local: { label: "Local" },
 };
 
+function formatPath(path: string): string {
+  if (path.startsWith("~/") || path.startsWith("./")) return path;
+  const homeMatch = path.match(/(?:^|\/)(?:Users\/[^/]+|home\/[^/]+|\.agentuna-shots-sandbox\/home)(.*)/);
+  if (homeMatch?.[1]) {
+    return `~${homeMatch[1]}`;
+  }
+  const projectMatch = path.match(/(?:^|\/)(?:payments-service|ai-coding-config-studio|AgenTuna)(.*)/);
+  if (projectMatch?.[1]) {
+    return `.${projectMatch[1]}`;
+  }
+  return path;
+}
+
 export interface MigrateDoneScreenProps {
   readonly result: MigrateApplyResultView | null;
   readonly failedStep?: string | null;
@@ -151,7 +164,7 @@ export function MigrateDoneScreen({
         >
           <div
             aria-hidden="true"
-            className="grid h-48 w-48 place-items-center rounded-full bg-danger/20 text-24 text-danger font-bold"
+            className="grid h-[48px] w-[48px] place-items-center rounded-full bg-danger/20 text-22 text-danger font-bold"
           >
             ✕
           </div>
@@ -175,7 +188,7 @@ export function MigrateDoneScreen({
         <>
           <div
             aria-hidden="true"
-            className="grid h-64 w-64 place-items-center rounded-full bg-success/20 text-32 text-success"
+            className="grid h-[64px] w-[64px] place-items-center rounded-full bg-success/20 text-26 text-success"
           >
             ✓
           </div>
@@ -199,7 +212,7 @@ export function MigrateDoneScreen({
                   <span>
                     {entry.counts.items} item{entry.counts.items === 1 ? "" : "s"} copied into the{" "}
                     {(SCOPE_LABEL[entry.scope] ?? { label: entry.scope }).label} store (
-                    {entry.store_path})
+                    {formatPath(entry.store_path)})
                   </span>
                 </li>
               ))}

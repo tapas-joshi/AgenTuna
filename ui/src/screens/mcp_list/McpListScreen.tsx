@@ -10,8 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Button, Input, Badge, Chip } from "../../components";
-import type { ScopeToken } from "../../theme";
-import { ScopeSwitcher } from "../../components/scope_switcher/ScopeSwitcher";
+import { useCompactLayout } from "../../components/use-compact-layout";
 import { DataTable } from "../../components/table";
 import { agentColumns } from "../../components/table";
 import type { AgentCellState, AgentDescriptor } from "../../components/table";
@@ -23,8 +22,6 @@ import type { McpServerActionRequest } from "../../generated/McpServerActionRequ
 import type { McpServerListView } from "../../generated/McpServerListView";
 import type { McpServerRowView } from "../../generated/McpServerRowView";
 import type { McpServerTestView } from "../../generated/McpServerTestView";
-import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
-import type { AdoptApplyView } from "../../generated/AdoptApplyView";
 import { Modal, WhyTraceDialog } from "../../overlays";
 import { AdoptModal } from "../../overlays/dialogs/AdoptModal";
 import { McpServerActions } from "../../overlays/menus";
@@ -86,8 +83,8 @@ function scopeLabel(scope: string | null): string {
 
 /** MCP server list with per-agent matrix, health status, filter chips, and row actions. */
 export function McpListScreen({
-  localEnabled = false,
-  globalLocked = false,
+  localEnabled: _localEnabled = false,
+  globalLocked: _globalLocked = false,
 }: {
   readonly localEnabled?: boolean;
   readonly globalLocked?: boolean;
@@ -104,7 +101,6 @@ export function McpListScreen({
   const [activeChip, setActiveChip] = useState<McpFilterChip>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [bannerHidden, setBannerHidden] = useState(false);
-  const [adoptingPath, setAdoptingPath] = useState<string | null>(null);
   const [adoptModalTarget, setAdoptModalTarget] = useState<McpServerRowView | null>(null);
 
   const [menuRow, setMenuRow] = useState<string | null>(null);
@@ -115,6 +111,8 @@ export function McpListScreen({
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [why, setWhy] = useState<{ itemId: string; agent: string } | null>(null);
+  /** Below the breakpoint the Health column leaves the model. */
+  const compactLayout = useCompactLayout();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -245,15 +243,16 @@ export function McpListScreen({
         preview_id: null,
       };
       switch (action) {
-        case "open":
-          if (row.native) {
-            app.navigate("migrate");
-            return;
-          }
-          app.recordVisitedItem(`server:${row.id}`);
-          app.setSelection("mcp-detail", [row.id]);
+        case "adopt":
+          setAdoptModalTarget(row);
+          return;
+        case "open": {
+          const detailId = row.id !== "" ? row.id : `native:${row.name}`;
+          app.recordVisitedItem(`server:${detailId}`);
+          app.setSelection("mcp-detail", [detailId]);
           app.navigate("mcp-detail");
           return;
+        }
         case "edit":
           app.setSelection("mcp-form", [row.id]);
           app.navigate("mcp-form");
@@ -333,37 +332,6 @@ export function McpListScreen({
     }
   }, [dialog, reason, toast, closeDialog, load]);
 
-  const handleAdopt = useCallback(
-    async (row: McpServerRowView) => {
-      if (!row.source_path) return;
-      setAdoptingPath(row.source_path);
-      try {
-        // A native MCP row names one server inside a shared document, so the adoption has to
-        // select that entry and not the first server the configuration happens to hold.
-        const preview = await invoke<AdoptPreviewView>("adopt_preview", {
-          path: row.source_path,
-          expectedHash: null,
-          handling: "link",
-          name: row.name,
-        });
-        await invoke<AdoptApplyView>("adopt_apply", {
-          path: preview.source,
-          expectedHash: null,
-          handling: "link",
-          name: row.name,
-        });
-        toast.success(`Adopted ${row.name} into AgenTuna`);
-        await load();
-      } catch (cause) {
-        const failure = commandError(cause);
-        toast.warning(failure.message, { title: "Adoption failed" });
-      } finally {
-        setAdoptingPath(null);
-      }
-    },
-    [load, toast]
-  );
-
   const handleHideBanner = useCallback(async () => {
     try {
       await invoke("settings_set", { key: "native_banner_hidden.mcp_server", value: true });
@@ -413,10 +381,12 @@ export function McpListScreen({
   // server currently targets it. Row cells fill in the rest for agents detection missed.
   const detectedAgents = useMemo<readonly AgentDescriptor[]>(() => {
     const ids = new Set<string>();
-    for (const card of agentCards) ids.add(card.id);
+    const installed = agentCards.filter((c) => c.installed || c.managed || c.presence !== "not_installed");
+    const pool = installed.length > 0 ? installed : agentCards;
+    for (const card of pool) ids.add(card.id);
     for (const server of allServers) {
       for (const cell of server.agents) {
-        if (cell.state !== "not_installed") ids.add(cell.agent);
+        if (cell.state !== "not_installed" && cell.state !== "none") ids.add(cell.agent);
       }
     }
     if (ids.size === 0) for (const id of AGENT_ORDER) ids.add(id);
@@ -495,17 +465,30 @@ export function McpListScreen({
       id: "name",
       accessorKey: "name",
       header: "Server",
-      size: 260,
+      // Compact mode declares a smaller minimum: the column grows to fill, and
+      // the row then fits a 960px window without scrolling sideways.
+      size: compactLayout ? 160 : 260,
       meta: { grow: true },
       cell: ({ row }) => {
         const item = row.original;
         const isAdopted = item.id !== "";
-        const isAdopting = adoptingPath === item.source_path;
 
         return (
           <div className="flex min-w-0 flex-col gap-2 py-4">
-            <div className="flex flex-wrap items-center gap-6">
-              <span className="font-medium text-text">{item.name}</span>
+            <div className="flex min-w-0 flex-wrap items-center gap-6">
+              <button
+                type="button"
+                onClick={() => {
+                  const detailId = item.id !== "" ? item.id : `native:${item.name}`;
+                  app.recordVisitedItem(`server:${detailId}`);
+                  app.setSelection("mcp-detail", [detailId]);
+                  app.navigate("mcp-detail");
+                }}
+                className="min-w-0 max-w-full truncate font-medium text-text hover:underline text-left cursor-pointer"
+                title={item.name}
+              >
+                {item.name}
+              </button>
               {item.locked && (
                 <span role="status" aria-label={`Locked: ${item.lock_reason ?? "locked"}`} className="text-12">
                   🔒 {item.lock_reason ?? "Locked"}
@@ -519,20 +502,20 @@ export function McpListScreen({
             </div>
             <span className="truncate text-12 text-text-secondary">{item.transport}</span>
             {item.native && item.source_path && (
-              <div className="flex items-center gap-6 pt-2">
+              <div className="flex items-center gap-6">
                 <span className="min-w-0 flex-1 truncate font-mono text-11 text-text-muted" title={item.source_path}>
                   {item.source_path}
                 </span>
                 <Button
                   size="sm"
                   variant="secondary"
-                  disabled={isAdopted || isAdopting}
+                  disabled={isAdopted}
                   onClick={(e) => {
                     e.stopPropagation();
                     setAdoptModalTarget(item);
                   }}
                 >
-                  {isAdopted ? "Adopted" : isAdopting ? "Adopting…" : "Adopt"}
+                  {isAdopted ? "Adopted" : "Adopt"}
                 </Button>
                 <Button
                   size="sm"
@@ -579,6 +562,9 @@ export function McpListScreen({
     const agentCols = agentColumns<McpServerRowView>({
       agents: detectedAgents,
       getState: agentStateFor,
+      // Design 06 gives the three agent columns ~150px so a full config path
+      // fits; the compact set cannot afford that and ellipsizes the path.
+      width: compactLayout ? 112 : 148,
       onToggle: (row, agent, next) => requestAgentChange(row, agent, next),
     });
 
@@ -601,8 +587,11 @@ export function McpListScreen({
       },
     };
 
-    return [nameCol, scopeCol, ...agentCols, healthCol];
-  }, [detectedAgents, agentStateFor, requestAgentChange, adoptingPath, handleAdopt, app]);
+    // Health is the secondary column; the row menu still offers the live test.
+    return compactLayout
+      ? [nameCol, scopeCol, ...agentCols]
+      : [nameCol, scopeCol, ...agentCols, healthCol];
+  }, [agentStateFor, compactLayout, detectedAgents, requestAgentChange, app]);
 
   const projectAgents = list?.project_agents ?? [];
   const repoAgents = useMemo(
@@ -642,17 +631,24 @@ export function McpListScreen({
       {/* Header with Title, Count line, and Add server CTA */}
       <header className="flex flex-col gap-12">
         <div className="flex flex-wrap items-center justify-between gap-12">
-          <div className="flex items-center gap-12">
-            <h1 className="m-0 text-22 font-semibold text-text">MCP Servers</h1>
-            <ScopeSwitcher
-              scope={scope as ScopeToken}
-              localEnabled={localEnabled}
-              hasProject={Boolean(activeProject)}
-              globalLocked={globalLocked}
-              onScopeSelected={(s) => app.receiveScope(s)}
-            />
+          <h1 className="m-0 text-22 font-semibold text-text">MCP Servers</h1>
+          <div className="flex items-center gap-8">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                app.setScreenState("migrate:kind", "mcp_server");
+                app.navigate("migrate");
+              }}
+            >
+              Import from apps
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => app.navigate("mcp-form")}
+            >
+              + Add server
+            </Button>
           </div>
-          <Button onClick={() => app.navigate("mcp-form")}>Add server</Button>
         </div>
         <div className="text-12 text-text-muted">
           {counts.all} servers, {managedCount} managed by AgenTuna, {counts.native} live only in agent config files
@@ -749,7 +745,7 @@ export function McpListScreen({
         columns={columns}
         getRowId={(row) => (row.id === "" ? `native:${row.name}` : row.id)}
         viewportHeight={600}
-        rowHeight={76}
+        rowHeight={88}
         selectionMode="none"
         getRowLabel={(row) => row.name}
         loading={loading}

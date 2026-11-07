@@ -62,6 +62,7 @@ fn skill_item(fixture: &Fixture, relative: &str, name: &str, agent: AgentId) -> 
 
 fn report(items: Vec<ScanItem>) -> ScanReport {
     ScanReport {
+        roots: Vec::new(),
         items,
         partial: false,
         skipped_roots: Vec::new(),

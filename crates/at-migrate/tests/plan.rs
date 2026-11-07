@@ -181,6 +181,7 @@ fn case_insensitive_names_are_rejected_before_the_plan_runs()
     let upper = native_skill(&native, "Foo")?;
     let lower = native_skill(&native, "foo")?;
     let scanned = ScanReport {
+        roots: Vec::new(),
         items: vec![
             scanned_item(upper.clone(), "Foo"),
             scanned_item(lower.clone(), "foo"),
@@ -214,6 +215,7 @@ fn case_insensitive_names_are_rejected_before_the_plan_runs()
     let store_root = temp.path().join("store");
     at_store::layout::init_store(Scope::User, &store_root)?;
     let single = ScanReport {
+        roots: Vec::new(),
         items: vec![scanned_item(one.clone(), "bar")],
         partial: false,
         skipped_roots: Vec::new(),
@@ -255,6 +257,7 @@ fn over_long_destinations_are_rejected_before_the_plan_runs()
     let temp = tempfile::tempdir()?;
     let folder = native_skill(&temp.path().join("native"), "long-name")?;
     let scanned = ScanReport {
+        roots: Vec::new(),
         items: vec![scanned_item(folder.clone(), "long-name")],
         partial: false,
         skipped_roots: Vec::new(),
@@ -312,6 +315,7 @@ fn shared_skills_root_is_planned_once_for_both_agents() -> Result<(), Box<dyn st
         .ok_or("shared project skill not discovered")?
         .clone();
     let single = ScanReport {
+        roots: Vec::new(),
         items: vec![shared.clone()],
         partial: false,
         skipped_roots: Vec::new(),

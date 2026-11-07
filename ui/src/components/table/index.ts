@@ -6,14 +6,14 @@
  * columns and `useRowMenu` for the row menu.
  */
 
-export { AGENT_COLUMN_WIDTH, agentColumns } from "./agent-columns";
-export type { AgentColumnOptions } from "./agent-columns";
-export { AgentCell } from "./agent-cell";
-export type { AgentCellProps } from "./agent-cell";
+export { AGENT_COLUMN_WIDTH, agentColumns, agentFolderGroups, folderSpan } from "./agent-columns";
+export type { AgentColumnOptions, AgentFolderGroup } from "./agent-columns";
+export { AgentCell, SharedFolderCell, discoveryRootLabel } from "./agent-cell";
+export type { AgentCellProps, SharedFolderCellProps } from "./agent-cell";
 export { dataTableFeatures } from "./features";
 export type { DataTableColumnMeta, DataTableFeatures } from "./features";
-export { RowMenuTrigger, useRowMenu } from "./row-menu";
-export type { RowMenuController, RowMenuTriggerProps } from "./row-menu";
+export { RowMenuTrigger, useRowMenu, useRowMenuPlacement } from "./row-menu";
+export type { RowMenuController, RowMenuPlacement, RowMenuTriggerProps } from "./row-menu";
 export {
   bulkSelectionState,
   countSelected,

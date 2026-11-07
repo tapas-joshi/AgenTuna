@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+use at_engine::tombstones::TombstoneSource as _;
 use at_store::layout::{STORE_DIR_MODE, StoreLayout};
 use at_store::paths::AppPaths;
 use serde::{Deserialize, Serialize};
@@ -29,10 +30,34 @@ pub struct OverviewScopeView {
     pub locks: i64,
     /// Timestamp of the most recent change, if any.
     pub last_edited: Option<String>,
+    /// Actor that performed the most recent change, when known (`ui`, `cli`, ...).
+    pub last_edited_by: Option<String>,
     /// Number of disabled items.
     pub disabled: u64,
     /// Whether the scope already has a canonical store (`store.json` present).
     pub store_ready: bool,
+    /// AgenTuna store directory for this card, shown after the native roots.
+    pub store_root: String,
+    /// Native discovery roots this scope's agents read, shown as `~/...` or `./...`.
+    pub native_roots: Vec<String>,
+    /// Uncommitted changes in a Project store's git work tree, when it has one.
+    pub git_uncommitted: Option<u32>,
+}
+
+/// Per-kind totals and the shadow/disabled line of the Overview summary block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct OverviewEffectiveView {
+    /// Skills indexed across every scope.
+    pub skills: i64,
+    /// MCP servers indexed across every scope.
+    pub mcp: i64,
+    /// Instruction files indexed across every scope.
+    pub rules: i64,
+    /// Skill copies a nearer scope wins over.
+    pub shadowed_skills: usize,
+    /// Disabled items at the active scope.
+    pub disabled: u64,
 }
 
 /// Needs-attention row and its safe route target.
@@ -94,6 +119,8 @@ pub struct OverviewView {
     pub attention_total: usize,
     /// Recent operations, newest first.
     pub changes: Vec<OverviewChangeView>,
+    /// Per-kind totals for the active scope's summary block.
+    pub effective: OverviewEffectiveView,
     /// Resolved user store directory for copy and path display.
     pub user_path: String,
     /// Global Scope card: resolved path, provenance, availability and its locks.
@@ -142,24 +169,72 @@ pub fn overview_load_inner(
         .map_err(|_| CommandError::internal("could not resolve application paths"))?;
     let global_store = super::privilege::overview_for_state(state)?;
     let database = state.database().map_err(CommandError::unavailable)?;
-    let payload = at_engine::overview::build(database.connection(), scope)
-        .map_err(|_| CommandError::internal("could not load Overview data"))?;
-    let scopes = payload
-        .scopes
+    let disabled = disabled_counts(state, project_root.as_deref());
+    let payload =
+        at_engine::overview::build_with_disabled_counts(database.connection(), scope, &disabled)
+            .map_err(|_| CommandError::internal("could not load Overview data"))?;
+    let at_engine::overview::Overview {
+        scopes: scope_cards,
+        agents: agent_records,
+        needs_attention,
+        needs_attention_total,
+        recent_changes,
+        shadowed_skills,
+        disabled_in_active_scope,
+    } = payload;
+    let home = paths.home_dir().map(Path::to_path_buf);
+    let environment = home
+        .as_ref()
+        .map(|home| at_adapters::adapter::AgentEnvironment {
+            home: home.clone(),
+            project: project_root.clone(),
+            variables: Default::default(),
+        });
+    let project_git = project_git_uncommitted(&paths);
+    let mut effective = OverviewEffectiveView {
+        skills: 0,
+        mcp: 0,
+        rules: 0,
+        shadowed_skills,
+        disabled: disabled_in_active_scope,
+    };
+    let scopes = scope_cards
         .into_iter()
-        .map(|card| OverviewScopeView {
-            scope: card.scope.to_string(),
-            skills: card.counts.skills,
-            mcp: card.counts.mcp,
-            rules: card.counts.rules,
-            locks: card.counts.locks,
-            last_edited: card.last_edited,
-            disabled: card.disabled_count,
-            store_ready: scope_store_ready(&paths, &global_store, card.scope),
+        .map(|card| {
+            effective.skills += card.counts.skills;
+            effective.mcp += card.counts.mcp;
+            effective.rules += card.counts.rules;
+            let native_roots = environment.as_ref().map_or_else(Vec::new, |environment| {
+                native_roots(
+                    state.adapters(),
+                    environment,
+                    &agent_records,
+                    card.scope,
+                    home.as_deref(),
+                    project_root.as_deref(),
+                )
+            });
+            OverviewScopeView {
+                scope: card.scope.to_string(),
+                skills: card.counts.skills,
+                mcp: card.counts.mcp,
+                rules: card.counts.rules,
+                locks: card.counts.locks,
+                last_edited: card.last_edited,
+                last_edited_by: card.last_edited_by,
+                disabled: card.disabled_count,
+                store_ready: scope_store_ready(&paths, &global_store, card.scope),
+                store_root: store_root_for(&paths, &global_store, card.scope),
+                native_roots,
+                git_uncommitted: if card.scope == at_model::Scope::Project {
+                    project_git
+                } else {
+                    None
+                },
+            }
         })
         .collect();
-    let mut attention = payload
-        .needs_attention
+    let mut attention = needs_attention
         .into_iter()
         .map(|row| OverviewAttentionView {
             item_id: row.item_id.map(|id| id.to_string()),
@@ -191,8 +266,7 @@ pub fn overview_load_inner(
             });
         }
     }
-    let changes = payload
-        .recent_changes
+    let changes = recent_changes
         .into_iter()
         .map(|row| {
             let detail = at_db::ops::operation_detail(database.connection(), &row.operation.id)
@@ -212,7 +286,7 @@ pub fn overview_load_inner(
                 kind: row
                     .operation
                     .kind
-                    .map(|kind| format!("{kind:?}").to_lowercase())
+                    .map(|kind| kind.as_str().to_owned())
                     .unwrap_or_else(|| "change".to_owned()),
                 summary: row.operation.summary,
                 created_at: row.operation.created_at,
@@ -225,8 +299,9 @@ pub fn overview_load_inner(
     Ok(OverviewView {
         scopes,
         attention,
-        attention_total: payload.needs_attention_total,
+        attention_total: needs_attention_total,
         changes,
+        effective,
         user_path: paths.user_store().display().to_string(),
         global_store,
         startup_warnings: state.startup_warnings().to_vec(),
@@ -561,6 +636,135 @@ fn scope_store_ready(
         },
     };
     StoreLayout::new(scope, root).is_ready()
+}
+
+/// Resolves the store directory a scope card shows under its native roots.
+fn store_root_for(
+    paths: &AppPaths,
+    global: &super::privilege::GlobalStoreView,
+    scope: at_model::Scope,
+) -> String {
+    let root = match scope {
+        at_model::Scope::Global => PathBuf::from(&global.path),
+        at_model::Scope::User => paths.user_store().to_path_buf(),
+        at_model::Scope::Project | at_model::Scope::Local => match paths.project_store() {
+            Some(store) => store.to_path_buf(),
+            None => return String::new(),
+        },
+    };
+    root.display().to_string()
+}
+
+/// Counts disabled items per scope from each store's `disabled[]` tombstones.
+///
+/// A store that cannot be read is left out: the Overview must still render when one
+/// scope is broken, and the screen already reports store diagnostics separately.
+fn disabled_counts(
+    state: &AppState,
+    project: Option<&Path>,
+) -> std::collections::BTreeMap<at_model::Scope, u64> {
+    let mut counts = std::collections::BTreeMap::new();
+    let Ok(loaded) = state.load_scope_snapshots(project) else {
+        return counts;
+    };
+    for scope in [
+        at_model::Scope::Global,
+        at_model::Scope::User,
+        at_model::Scope::Project,
+    ] {
+        if let Ok(entries) = loaded.tombstones.disabled(scope) {
+            counts.insert(scope, u64::try_from(entries.len()).unwrap_or(u64::MAX));
+        }
+    }
+    counts
+}
+
+/// Counts uncommitted changes inside the Project store's git work tree.
+///
+/// The Overview is a query the screen waits on, so the probe gets a short deadline of its
+/// own: a large or slow work tree reports nothing instead of stalling the card.
+fn project_git_uncommitted(paths: &AppPaths) -> Option<u32> {
+    let layout = StoreLayout::for_scope(paths, at_model::Scope::Project).ok()?;
+    if !layout.root().is_dir() {
+        return None;
+    }
+    let contract = at_store::git_contract::ProjectGitContract::new(layout).ok()?;
+    let runner = at_git::ProcessLocalGitRunner::new("git", OVERVIEW_GIT_TIMEOUT);
+    let state = contract.inspect(&runner).ok()?;
+    u32::try_from(state.status.len()).ok()
+}
+
+/// How long the Overview card waits for one `git status` of the Project store.
+const OVERVIEW_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Native discovery roots of managed agents at one scope, collapsed to `~/x` or `./x`.
+fn native_roots(
+    registry: &at_adapters::adapter::AgentAdapterRegistry,
+    environment: &at_adapters::adapter::AgentEnvironment,
+    agents: &[at_db::agents::AgentSummary],
+    scope: at_model::Scope,
+    home: Option<&Path>,
+    project: Option<&Path>,
+) -> Vec<String> {
+    if !matches!(scope, at_model::Scope::User | at_model::Scope::Project) {
+        return Vec::new();
+    }
+    let mut roots: Vec<String> = Vec::new();
+    for agent in agents.iter().filter(|agent| agent.managed) {
+        let Ok(Some(adapter)) = registry.get(&agent.id) else {
+            continue;
+        };
+        for kind in [
+            at_model::ItemKind::Skill,
+            at_model::ItemKind::McpServer,
+            at_model::ItemKind::Rule,
+        ] {
+            for candidate in adapter.paths(kind, scope, environment) {
+                let Some(root) = display_native_root(&candidate.path, home, project) else {
+                    continue;
+                };
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// The top-level entry of `path` under `base`, e.g. `.claude` for `~/.claude/skills`.
+fn top_level_entry(path: &Path, base: &Path) -> Option<String> {
+    let rest = path.strip_prefix(base).ok()?;
+    let mut components = rest.components();
+    let first = components
+        .next()?
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned();
+    if first.is_empty() || first == "~" {
+        return None;
+    }
+    Some(first)
+}
+
+/// Renders one native path as the root an agent reads: `~/<top>` or `./<top>`.
+fn display_native_root(path: &Path, home: Option<&Path>, project: Option<&Path>) -> Option<String> {
+    // The project is often inside the home directory, so test it first.
+    if let Some(project) = project
+        && let Some(entry) = top_level_entry(path, project)
+    {
+        return Some(if entry.starts_with('.') {
+            format!("./{entry}")
+        } else {
+            entry
+        });
+    }
+    if let Some(home) = home
+        && let Some(entry) = top_level_entry(path, home)
+    {
+        return Some(format!("~/{entry}"));
+    }
+    None
 }
 
 fn setup_paths(

@@ -1,4 +1,13 @@
 import { expect, test } from "./support/tauri-mock";
+import type { Page } from "@playwright/test";
+
+/**
+ * The wizard's `<main>` is labelled by its step heading, so its accessible name
+ * changes with each step ("Add a skill", "Import from git", "Review", …).
+ * `aria-labelledby="add-skill-title"` stays constant, so locate it by that.
+ */
+const wizardMain = (page: Page) => page.locator('main[aria-labelledby="add-skill-title"]');
+
 
 test("add-skill source matches the three-card design", async ({ page }) => {
   await page.goto("/");
@@ -18,7 +27,7 @@ test("marketplace source respects disabled network policy", async ({ page }) => 
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Marketplace" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByText("Marketplace browsing is unavailable because network policy disables it.", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Search marketplace" })).toHaveCount(0);
 });
@@ -35,7 +44,7 @@ test("offline marketplace shows cached policy and makes no request until searche
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Marketplace" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByText("Offline policy is active; cached marketplace results may be available.", { exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls)).not.toContain("skill_marketplace_search");
@@ -59,7 +68,7 @@ test("marketplace search runs only after explicit Search", async ({ page }) => {
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Marketplace" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByText("Marketplace search is enabled. Search runs only after you press Search.", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls.filter((command) => command === "skill_marketplace_search"))).toHaveLength(0);
   const query = page.getByRole("textbox", { name: "Search marketplace" });
@@ -80,7 +89,7 @@ test("Git import uses bridge-job progress, validates candidates, preserves selec
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Import from git/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByLabel("Repository URL").fill("https://example.invalid/skills.git");
   await page.getByLabel("Branch, tag or commit (optional)").fill("release-1");
   await expect(page.getByRole("button", { name: "Fetch skills" })).toBeEnabled();
@@ -106,10 +115,10 @@ test("Git import uses bridge-job progress, validates candidates, preserves selec
   await first.check();
   await expect(page.getByRole("region", { name: "Selected skill preview" })).toContainText("# Review checklist");
   await expect(page).toHaveScreenshot("add-skill-git-candidates.png", { animations: "disabled", caret: "hide" });
-  await page.getByRole("main", { name: "Add a skill" }).getByRole("button", { name: "Back" }).click();
-  await expect(page.getByRole("heading", { name: "Where does the skill come from?" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
-  await page.getByRole("button", { name: "Next" }).click();
+  await wizardMain(page).getByRole("button", { name: "Back" }).click();
+  await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Continue/ })).toBeEnabled();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByLabel("Repository URL")).toHaveValue("https://example.invalid/skills.git");
   await expect(page.getByLabel("Branch, tag or commit (optional)")).toHaveValue("release-1");
   await expect(first).toBeChecked();
@@ -132,7 +141,7 @@ test("Git Back and forward restores fetched candidates, selection, and scroll po
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Import from git/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByLabel("Repository URL").fill("https://example.invalid/scroll.git");
   await page.getByRole("button", { name: "Fetch skills" }).click();
   await expect(page.getByRole("button", { name: "Cancel import" })).toBeVisible();
@@ -147,9 +156,9 @@ test("Git Back and forward restores fetched candidates, selection, and scroll po
   });
   await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(100);
   await expect(list.locator('input[type="checkbox"]')).toHaveCount(8);
-  await page.getByRole("main", { name: "Add a skill" }).getByRole("button", { name: "Back" }).click();
-  await expect(page.getByRole("heading", { name: "Where does the skill come from?" })).toBeVisible();
-  await page.getByRole("button", { name: "Next" }).click();
+  await wizardMain(page).getByRole("button", { name: "Back" }).click();
+  await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByLabel("Repository URL")).toHaveValue("https://example.invalid/scroll.git");
   await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(100);
   await expect(selected).toBeChecked();
@@ -164,12 +173,12 @@ test("Git import with no skills shows an empty state without an error notificati
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Import from git/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByLabel("Repository URL").fill("https://example.invalid/empty.git");
   await page.getByRole("button", { name: "Fetch skills" }).click();
   await expect(page.getByRole("button", { name: "Cancel import" })).toBeVisible();
   await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-finished", { id: "job_visual_git_import", name: "Fetch git skills", state: "succeeded", error: null }));
-  await expect(page.getByRole("main", { name: "Add a skill" }).getByRole("status").filter({ hasText: "No skills found. Check that this public repository contains a SKILL.md." })).toBeVisible();
+  await expect(wizardMain(page).getByRole("status").filter({ hasText: "No skills found. Check that this public repository contains a SKILL.md." })).toBeVisible();
   await expect(page.getByRole("list", { name: "Notifications" }).getByText("No skills found")).toHaveCount(0);
 });
 
@@ -183,12 +192,12 @@ test("folder with no SKILL.md shows a clear empty state", async ({ page }) => {
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Local folder" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByLabel("Folder path").fill("/sandbox/fixtures/empty");
   await page.getByRole("button", { name: "Scan folder" }).click();
   await expect(page.getByRole("button", { name: "Cancel import" })).toBeVisible();
   await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-finished", { id: "job_visual_local_import", name: "Scan skill folder", state: "succeeded", error: null }));
-  await expect(page.getByRole("main", { name: "Add a skill" }).getByRole("status").filter({ hasText: "No SKILL.md files were found in this source." })).toBeVisible();
+  await expect(wizardMain(page).getByRole("status").filter({ hasText: "No SKILL.md files were found in this source." })).toBeVisible();
 });
 
 test("folder import browses a source, reports progress, and previews detected candidates", async ({ page }) => {
@@ -197,7 +206,7 @@ test("folder import browses a source, reports progress, and previews detected ca
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Local folder" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByRole("button", { name: "Browse…" }).click();
   await expect(page.getByLabel("Folder path")).toHaveValue("/sandbox/fixtures/skills");
   await page.getByRole("button", { name: "Scan folder" }).click();
@@ -219,7 +228,7 @@ test("ZIP import cancellation and traversal failures stay visible and never cont
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Zip file" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByRole("button", { name: "Browse…" }).click();
   await expect(page.getByLabel("ZIP path")).toHaveValue("/sandbox/fixtures/skills.zip");
   await page.getByRole("button", { name: "Scan ZIP" }).click();
@@ -230,12 +239,12 @@ test("ZIP import cancellation and traversal failures stay visible and never cont
   await page.getByRole("button", { name: "Cancel import" }).click();
   await expect.poll(async () => page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls.filter((command) => command === "jobs_cancel").length)).toBe(1);
   await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-finished", { id: "job_visual_local_import", name: "Scan ZIP file", state: "cancelled", error: null }));
-  await expect(page.getByRole("main", { name: "Add a skill" }).getByRole("alert")).toContainText("Import cancelled. You can retry");
+  await expect(wizardMain(page).getByRole("alert")).toContainText("Import cancelled. You can retry");
   await expect(page.getByRole("button", { name: "Scan ZIP" })).toBeEnabled();
   await page.getByRole("button", { name: "Scan ZIP" }).click();
   await expect(page.getByRole("button", { name: "Cancel import" })).toBeVisible();
   await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-finished", { id: "job_visual_local_import", name: "Scan ZIP file", state: "failed", error: { kind: "failed", message: "unsafe archive entry `../../escape/SKILL.md`: absolute paths and traversal are not allowed" } }));
-  await expect(page.getByRole("main", { name: "Add a skill" }).getByRole("alert")).toContainText("../../escape/SKILL.md");
+  await expect(wizardMain(page).getByRole("alert")).toContainText("../../escape/SKILL.md");
   await expect(page.getByRole("checkbox", { name: /Review checklist/ })).toHaveCount(0);
   await expect(page).toHaveScreenshot("add-skill-zip-traversal-error.png", { animations: "disabled", caret: "hide" });
   expect(await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls)).not.toContain("skill_import_job_result");
@@ -255,6 +264,8 @@ test("library import keeps cross-source selections, skips destination clashes, a
         { id: "clash-skill", source_id: "/sandbox/Projects/AgenTuna", source_label: "AgenTuna project", path: "/sandbox/Projects/AgenTuna/.config-studio/skills/existing-skill", name: "Existing Skill", description: null, error: null, clash_reason: "A skill with this name already exists in the target scope." },
       ],
       target_scope: "User skills",
+      search_root: "/sandbox/user/skills",
+      skipped: [],
     };
     mocks.commandOverrides.skill_add_preview = {
       preview_id: "preview-library-visual",
@@ -275,28 +286,29 @@ test("library import keeps cross-source selections, skips destination clashes, a
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /From your library/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByLabel("Library source")).toBeVisible();
-  await expect(page.getByLabel("Library source")).toContainText("AgenTuna project · 2 skills");
+  await page.getByRole("button", { name: /^Continue/ }).click();
+  await expect(page.getByRole("button", { name: /User scope/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /AgenTuna project/ })).toBeVisible();
   await page.getByRole("checkbox", { name: /User Skill/ }).check();
-  await page.getByLabel("Library source").selectOption("/sandbox/Projects/AgenTuna");
+  await page.getByRole("button", { name: /AgenTuna project/ }).click();
   const projectSkill = page.getByRole("checkbox", { name: /Project Skill/ });
   await expect(projectSkill).toBeVisible();
   const clash = page.getByRole("checkbox", { name: /Existing Skill/ });
   await expect(clash).toBeDisabled();
-  await expect(clash.locator("xpath=..")).toContainText("A skill with this name already exists in the target scope.");
-  await page.getByRole("button", { name: "Select all available in this source" }).click();
+  await expect(clash.locator("xpath=..")).toContainText("Already in this repo");
+  await expect(clash.locator("xpath=..")).toHaveAttribute("title", "A skill with this name already exists in the target scope.");
+  await page.getByRole("button", { name: "Select all" }).click();
   await expect(projectSkill).toBeChecked();
   await expect(clash).not.toBeChecked();
   await expect(page.getByRole("region", { name: "Selected library skills" })).toContainText("User Skill");
   await expect(page.getByRole("region", { name: "Selected library skills" })).toContainText("Project Skill");
   await page.getByRole("radio", { name: /Link/ }).check();
-  await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
-  await page.getByRole("button", { name: "Next" }).click();
-  await page.getByRole("main", { name: "Add a skill" }).getByRole("radio", { name: /User/ }).click();
+  await expect(page.getByRole("button", { name: /^Continue/ })).toBeEnabled();
+  await page.getByRole("button", { name: /^Continue/ }).click();
+  await wizardMain(page).getByRole("radio", { name: /User/ }).click();
   await page.getByLabel("Codex").check();
-  await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByRole("heading", { name: "Review skill" })).toBeVisible();
+  await page.getByRole("button", { name: /^Continue/ }).click();
+  await expect(page.getByRole("heading", { name: "Review" })).toBeVisible();
   await expect(page.getByText("Link · Project Skill")).toBeVisible();
   await expect(page.getByText("/sandbox/Projects/AgenTuna/.config-studio/skills/project-skill → /sandbox/user/skills/project-skill")).toBeVisible();
   await expect(page).toHaveScreenshot("add-skill-library-review.png", { animations: "disabled", caret: "hide" });
@@ -308,6 +320,8 @@ test("library Copy selection is shown as a copied folder in Review", async ({ pa
       sources: [{ id: "user", label: "User scope", kind: "scope", count: 1, last_used_at: null }],
       skills: [{ id: "library-skill", source_id: "user", source_label: "User scope", path: "/sandbox/user/skills/reusable", name: "Reusable Skill", description: "A library source.", error: null, clash_reason: null }],
       target_scope: "User skills",
+      search_root: "/sandbox/user/skills",
+      skipped: [],
     };
     mocks.commandOverrides.skill_add_preview = {
       preview_id: "preview-library-copy",
@@ -325,13 +339,13 @@ test("library Copy selection is shown as a copied folder in Review", async ({ pa
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /From your library/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByRole("checkbox", { name: /Reusable Skill/ }).check();
   await expect(page.getByRole("radio", { name: /Copy/ })).toBeChecked();
-  await page.getByRole("button", { name: "Next" }).click();
-  await page.getByRole("main", { name: "Add a skill" }).getByRole("radio", { name: /User/ }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
+  await wizardMain(page).getByRole("radio", { name: /User/ }).click();
   await page.getByLabel("Codex").check();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByText("Copy · Reusable Skill")).toBeVisible();
   await expect(page.getByText("/sandbox/user/skills/reusable → /sandbox/user/skills/reusable-copy")).toBeVisible();
   await expect(page).toHaveScreenshot("add-skill-library-copy-review.png", { animations: "disabled", caret: "hide" });
@@ -342,10 +356,10 @@ test("empty library state offers a direct Git-import shortcut", async ({ page })
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /From your library/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByText("No other skill sources are available.")).toBeVisible();
-  await page.getByRole("button", { name: "Import from Git instead" }).click();
-  await expect(page.getByLabel("Repository URL")).toBeVisible();
+  await page.getByRole("button", { name: /^Continue/ }).click();
+  await expect(page.getByText(/No skills found in/)).toBeVisible();
+  await page.getByRole("button", { name: "Choose a folder…" }).click();
+  await expect(page.getByLabel("Folder path")).toBeVisible();
 });
 
 test("review previews exact paths and Done reflects the applied Git result", async ({ page }) => {
@@ -353,13 +367,13 @@ test("review previews exact paths and Done reflects the applied Git result", asy
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Write a new skill/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByRole("radio", { name: /Blank/ }).click();
-  await page.getByRole("main", { name: "Add a skill" }).getByLabel("Skill name").first().fill("Visual Skill");
-  await page.getByRole("button", { name: "Next" }).click();
-  await page.getByRole("main", { name: "Add a skill" }).getByRole("radio", { name: /Project/ }).click();
+  await wizardMain(page).getByLabel("Skill name").first().fill("Visual Skill");
+  await page.getByRole("button", { name: /^Continue/ }).click();
+  await wizardMain(page).getByRole("radio", { name: /Project/ }).click();
   await page.getByLabel("omp").check();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByText("/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill", { exact: true })).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: "test-results/add-skill-review.png", animations: "disabled" });
@@ -371,6 +385,7 @@ test("review previews exact paths and Done reflects the applied Git result", asy
   await page.evaluate(() => window.scrollTo(0, 0));
   await expect(page).toHaveScreenshot("add-skill-apply-progress.png", { animations: "disabled", caret: "hide" });
   await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { emit: (event: string, payload: unknown) => void } }).__AT_TEST_MOCKS__.emit("agentuna:job-finished", { id: "job_visual_skill_apply", name: "Create skill", state: "succeeded", error: null }));
+  await page.getByText("Details", { exact: true }).click();
   await expect(page.getByText("Operation: op_visual_skill_add")).toBeVisible();
   await expect(page.getByText(/Git staging: staged/)).toBeVisible();
   await expect(page.getByRole("list", { name: "Written file paths" })).toContainText("/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill/SKILL.md");
@@ -384,12 +399,12 @@ test("new skill scope and agents review exact destinations before writing", asyn
   await page.getByRole("button", { name: "Add" }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Write a new skill/ }).click();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: /^Continue/ }).click();
   await page.getByRole("radio", { name: /Blank/ }).click();
-  await page.getByRole("main", { name: "Add a skill" }).getByLabel("Skill name").first().fill("Visual Skill");
-  await page.getByRole("button", { name: "Next" }).click();
+  await wizardMain(page).getByLabel("Skill name").first().fill("Visual Skill");
+  await page.getByRole("button", { name: /^Continue/ }).click();
 
-  const wizard = page.getByRole("main", { name: "Add a skill" });
+  const wizard = wizardMain(page);
   await expect(wizard.getByRole("heading", { name: "Scope & agents" })).toBeVisible();
   await wizard.getByRole("radio", { name: /Project/ }).click();
   await wizard.getByLabel("Codex").check();
@@ -402,9 +417,9 @@ test("new skill scope and agents review exact destinations before writing", asyn
   await wizard.getByRole("radio", { name: /Local/ }).click();
   await expect(wizard.getByText("/sandbox/Projects/AgenTuna/.agentuna/local", { exact: true })).toBeVisible();
   await wizard.getByRole("radio", { name: /^Project/ }).click();
-  await expect(wizard.getByRole("button", { name: "Next" })).toBeEnabled();
-  await wizard.getByRole("button", { name: "Next" }).click();
-  await expect(wizard.getByRole("heading", { name: "Review skill" })).toBeVisible();
+  await expect(wizard.getByRole("button", { name: /^Continue/ })).toBeEnabled();
+  await wizard.getByRole("button", { name: /^Continue/ }).click();
+  await expect(wizard.getByRole("heading", { name: "Review" })).toBeVisible();
   await expect(wizard.getByText("/sandbox/Projects/AgenTuna/.config-studio/skills/visual-skill", { exact: true })).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
   await expect(page).toHaveScreenshot("add-skill-scope-review.png", { animations: "disabled", caret: "hide" });

@@ -20,7 +20,8 @@ export type McpServerAction =
   | "disable-agent"
   | "delete"
   | "lock"
-  | "unlock";
+  | "unlock"
+  | "adopt";
 
 /** Properties of {@link McpServerActions}. */
 export interface McpServerActionsProps {
@@ -71,11 +72,26 @@ export function McpServerActions({
         </button>
       }
     >
-      <MenuItem
-        label={native ? "Adopt…" : "Open"}
-        mnemonic="o"
-        onSelect={select("open")}
-      />
+      {native ? (
+        <>
+          <MenuItem
+            label="Open"
+            mnemonic="o"
+            onSelect={select("open")}
+          />
+          <MenuItem
+            label="Adopt…"
+            mnemonic="a"
+            onSelect={select("adopt")}
+          />
+        </>
+      ) : (
+        <MenuItem
+          label="Open"
+          mnemonic="o"
+          onSelect={select("open")}
+        />
+      )}
       <MenuItem
         label="Edit"
         mnemonic="e"

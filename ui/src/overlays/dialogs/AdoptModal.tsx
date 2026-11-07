@@ -46,7 +46,7 @@ export function AdoptModal({
     })
       .then((view) => {
         if (active) {
-          setPreview(view);
+          if (view) setPreview(view);
           setLoading(false);
         }
       })
@@ -70,9 +70,11 @@ export function AdoptModal({
     setError(null);
     try {
       const outcome = await invoke<AdoptApplyView>("adopt_apply", {
-        path,
+        // Apply the previewed item: the digest the preview verified travels back as
+        // expectedHash, so a file that changed after the review is refused, not adopted.
+        path: preview?.source ?? path,
         name: itemPropName ?? null,
-        expectedHash: expectedHash ?? null,
+        expectedHash: (preview as { hash?: string | null } | null)?.hash ?? expectedHash ?? null,
         handling: "link",
       });
       onAdoptSuccess(outcome);
@@ -88,9 +90,8 @@ export function AdoptModal({
     }
   }
 
-  const name = preview?.native_name ?? path.split("/").filter(Boolean).pop() ?? "item";
+  const name = preview?.native_name ?? itemPropName ?? path.split("/").filter(Boolean).pop() ?? "item";
   const agentsText = preview?.agents.join(" + ") ?? "agent";
-
   return (
     <Modal
       open={true}
@@ -137,7 +138,7 @@ export function AdoptModal({
               </div>
             )}
           </div>
-        ) : preview !== null ? (
+        ) : preview ? (
           <>
             <section className="flex flex-col gap-4">
               <span className="text-11 font-semibold uppercase tracking-wide text-text-muted">
@@ -163,20 +164,16 @@ export function AdoptModal({
               </p>
             </section>
 
-            <section className="flex flex-col gap-4">
-              <span className="text-11 font-semibold uppercase tracking-wide text-text-muted">
-                Backup directory
-              </span>
-              <p className="m-0 font-mono text-13 text-text">{preview.backup_dir}</p>
-              <p className="m-0 text-12 text-text-secondary">
-                original copy preserved before changes
-              </p>
-            </section>
+            <p className="m-0 text-12 text-text-secondary">
+              <span className="font-semibold text-text">Backup: </span>
+              <span className="font-mono text-text-muted">{preview.backup_dir}</span>
+            </p>
+            <hr className="my-4 border-border" />
             <section className="rounded-8 border border-border bg-raised p-12">
               <h3 className="m-0 text-13 font-semibold text-text">What changes</h3>
               <ul className="m-0 mt-6 flex list-disc flex-col gap-4 pl-16 text-12 text-text-secondary">
                 <li>Original is copied, then replaced by a link</li>
-                <li>{agentsText} will continue loading it</li>
+                <li>{agentsText} {preview.agents.length > 1 ? "both" : "will"} keep loading it</li>
                 <li>Undo restores it only if unchanged since adoption</li>
               </ul>
             </section>

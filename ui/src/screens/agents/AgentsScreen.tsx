@@ -34,7 +34,7 @@ function SkeletonCard() {
   return (
     <article aria-hidden="true" className="animate-pulse rounded-10 border border-border bg-raised p-16">
       <div className="flex items-center gap-12">
-        <div className="size-40 rounded-8 bg-overlay" />
+        <div className="size-[44px] rounded-8 bg-overlay" />
         <div className="flex-1">
           <div className="h-14 w-1/2 rounded-4 bg-overlay" />
           <div className="mt-6 h-10 w-1/3 rounded-4 bg-overlay" />
@@ -156,7 +156,7 @@ export function AgentsScreen() {
 
 
   return (
-    <main aria-label="Agents" className="mx-auto flex max-w-[1180px] flex-col gap-20 p-24">
+    <main aria-label="Agents" className="mx-auto flex max-w-[1180px] flex-col gap-20 p-24 max-[1199px]:gap-24">
       <header className="flex items-start justify-between gap-16">
         <div>
           <h1 className="m-0 text-22 font-semibold text-text">Agents</h1>
@@ -214,7 +214,7 @@ export function AgentsScreen() {
                 <header className="flex items-start gap-12">
                   <span
                     aria-hidden="true"
-                    className={`grid h-40 w-40 shrink-0 place-items-center rounded-8 text-13 font-semibold ${
+                    className={`grid size-[44px] shrink-0 place-items-center rounded-8 text-13 font-semibold ${
                       missing ? "bg-overlay text-text-muted" : "bg-overlay text-text"
                     }`}
                   >
@@ -239,8 +239,10 @@ export function AgentsScreen() {
                 <dl className="m-0 grid grid-cols-2 gap-x-16 gap-y-8 text-12">
                   <div className="min-w-0">
                     <dt className="text-11 uppercase tracking-wide text-text-muted">Config</dt>
-                    <dd className="m-0 truncate font-mono text-12 text-text-secondary" title={agent.paths.join("  ·  ")}>
-                      {agent.paths.length > 0 ? agent.paths.join("  ·  ") : "not found"}
+                    <dd className="m-0 min-w-0 font-mono text-12 text-text-secondary">
+                      {agent.paths.length > 0
+                        ? agent.paths.map((path) => <span key={path} className="block truncate" title={path}>{path}</span>)
+                        : "not found"}
                     </dd>
                   </div>
                   <div className="min-w-0">
@@ -290,7 +292,7 @@ export function AgentsScreen() {
                   ) : (
                     <div className="flex flex-wrap items-center justify-between gap-12">
                       <Toggle
-                        label={`Manage ${agent.name}`}
+                        label="Let AgenTuna manage this agent"
                         labelPlacement="inline"
                         checked={agent.managed}
                         disabled={busy === `manage:${agent.id}`}

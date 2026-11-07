@@ -173,9 +173,10 @@ describe("SkillDetailScreen residuals (TS-030)", () => {
     );
     render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
 
-    expect(await screen.findByText(/Effective winner: project/)).toBeTruthy();
+    expect(await screen.findByText(/Shadowed by Project/)).toBeTruthy();
+    expect(screen.getByText(/every copy still loads where the nearest one is absent/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Compare copies" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Keep user copy only" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep User copy only" }));
 
     await waitFor(() => {
       expect(ipc.calls).toContainEqual({

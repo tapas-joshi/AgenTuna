@@ -171,6 +171,7 @@ fn replace_plan(fixture: &MigrationFixture) -> Result<MigrationPlan, Box<dyn Err
         return Err("the project skill must be shared by Codex and omp".into());
     }
     let single = ScanReport {
+        roots: Vec::new(),
         items: vec![shared.clone()],
         partial: false,
         skipped_roots: Vec::new(),

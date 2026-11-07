@@ -204,7 +204,11 @@ pub(crate) fn skills_list_inner(
                     .iter()
                     .find(|cell| &cell.agent_id == agent_id && cell.scope == row.scope)
                     .and_then(|cell| cell.target_path.clone()),
-                None => row.native_path.clone(),
+                None => row
+                    .native_paths
+                    .get(agent_id)
+                    .cloned()
+                    .or_else(|| row.native_path.clone()),
             };
             let (state, enabled) = deployment_cell(*deployment_state);
             cells.push(SkillAgentCellView {

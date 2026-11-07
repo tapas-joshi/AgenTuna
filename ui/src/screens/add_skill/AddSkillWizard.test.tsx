@@ -71,8 +71,8 @@ afterEach(() => { cleanup(); ipc.calls.length = 0; ipc.listeners.clear(); });
     };
     renderWizard(() => undefined);
     fireEvent.click(screen.getByRole("button", { name: "Marketplace" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     expect(await screen.findByText(/network policy disables it/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Search" })).toBeNull();
     expect(ipc.calls.some(({ command }) => command === "skill_marketplace_search")).toBe(false);
@@ -95,8 +95,8 @@ describe("AddSkillWizard", () => {
     renderWizard(() => undefined);
     await waitFor(() => expect(ipc.listeners.has("agentuna:job-finished")).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Local folder" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Browse…" }));
     await waitFor(() => expect((screen.getByLabelText("Folder path") as HTMLInputElement).value).toBe("/sandbox/library"));
     fireEvent.click(screen.getByRole("button", { name: "Scan folder" }));
@@ -117,7 +117,7 @@ describe("AddSkillWizard", () => {
     fireEvent.click(candidate);
     await waitFor(() => expect((candidate as HTMLInputElement).checked).toBe(true));
     expect((await screen.findByRole("region", { name: "Selected skill preview" })).textContent).toContain("name: folder-skill");
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
     expect(ipc.calls.some(({ command }) => command === "skill_import_local_start")).toBe(true);
   });
   test("cancels a Git bridge job and keeps the wizard open for retry", async () => {
@@ -134,8 +134,8 @@ describe("AddSkillWizard", () => {
     renderWizard(() => undefined);
     await waitFor(() => expect(ipc.listeners.has("agentuna:job-finished")).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: /Import from git/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     fireEvent.change(await screen.findByLabelText("Repository URL"), { target: { value: "https://example.invalid/skills.git" } });
     await waitFor(() => expect((screen.getByLabelText("Repository URL") as HTMLInputElement).value).toBe("https://example.invalid/skills.git"));
     await waitFor(() => expect((screen.getByRole("button", { name: "Fetch skills" }) as HTMLButtonElement).disabled).toBe(false));
@@ -165,7 +165,7 @@ describe("AddSkillWizard", () => {
       if (command === "agent_path_candidates") return [];
       if (command === "agent_path_validate") return { exists: false, is_directory: false, structure_warning: null, reason: "Choose an existing folder." };
       if (command === "skill_scope_options") return scopeOptionsReply(args);
-      if (command === "skill_library_catalog") return { sources, skills, target_scope: "User skills" };
+      if (command === "skill_library_catalog") return { sources, skills, target_scope: "User skills", search_root: "/sandbox/user/skills", skipped: [] };
       if (command === "skill_add_preview") return {
         preview_id: "library-preview",
         import_id: null,
@@ -200,26 +200,27 @@ describe("AddSkillWizard", () => {
     };
     renderWizard(() => undefined, "prj_demo");
     fireEvent.click(screen.getByRole("button", { name: /From your library/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await screen.findByRole("combobox", { name: "Library source" });
-    expect(screen.getByRole("option", { name: /Project workspace.*\/sandbox\/projects\/demo/ })).toBeTruthy();
-    expect(screen.getByText(/2 sources · 3 skills · Target scope: User skills/)).toBeTruthy();
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+    await screen.findByRole("button", { name: /User scope/ });
+    expect(screen.getByRole("button", { name: /Project workspace/ })).toBeTruthy();
+    expect(screen.getByText("user")).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox", { name: /User Skill/ }));
     await waitFor(() => expect(screen.getByLabelText("Selected library skills").textContent).toContain("Selected (1)"));
-    fireEvent.change(screen.getByRole("combobox", { name: "Library source" }), { target: { value: "/sandbox/projects/demo" } });
+    fireEvent.click(screen.getByRole("button", { name: /Project workspace/ }));
+    expect(screen.getByText("/sandbox/projects/demo")).toBeTruthy();
     const clashCheckbox = screen.getByRole("checkbox", { name: /Existing Skill/ }) as HTMLInputElement;
     expect(clashCheckbox.disabled).toBe(true);
     expect(clashCheckbox.closest("label")?.getAttribute("title")).toContain("already exists");
-    fireEvent.click(screen.getByRole("button", { name: "Select all available in this source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all" }));
     await waitFor(() => expect(screen.getByLabelText("Selected library skills").textContent).toContain("Selected (2)"));
     expect(screen.getByLabelText("Selected library skills").textContent).toContain("User Skill");
     expect(screen.getByLabelText("Selected library skills").textContent).toContain("Project Skill");
     expect((screen.getByRole("checkbox", { name: /Project Skill/ }) as HTMLInputElement).checked).toBe(true);
     expect((clashCheckbox as HTMLInputElement).checked).toBe(false);
     fireEvent.click(screen.getByRole("radio", { name: /Link/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     await screen.findByRole("radiogroup", { name: "Skill destination scope" });
     fireEvent.click(await screen.findByRole("radio", { name: /User/ }));
     const cursorCheckbox = screen.getByRole("checkbox", { name: /Cursor/ }) as HTMLInputElement;
@@ -244,9 +245,9 @@ describe("AddSkillWizard", () => {
     expect(screen.getByText("/sandbox/project/.agentuna/local")).toBeTruthy();
     fireEvent.click(screen.getByRole("radio", { name: /User/ }));
     await waitFor(() => expect(screen.getByText("Project Skill: /sandbox/user/skills/project-skill")).toBeTruthy());
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByRole("heading", { name: "Review skill" })).toBeTruthy();
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeTruthy();
     expect(await screen.findByText("Link · Project Skill")).toBeTruthy();
     expect(screen.getByText("/sandbox/projects/demo/.agents/skills/project-skill → /sandbox/user/skills/project-skill")).toBeTruthy();
     expect(screen.getByLabelText("Planned file paths").textContent).toContain("/sandbox/user/skills/project-skill/SKILL.md");
@@ -268,8 +269,8 @@ describe("AddSkillWizard", () => {
     };
     renderWizard(() => undefined);
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     fireEvent.click(await screen.findByRole("radio", { name: /Blank/ }));
     await waitFor(() => expect(screen.getByRole("radio", { name: /Blank/ }).getAttribute("aria-checked")).toBe("true"));
     fireEvent.click(screen.getByRole("radio", { name: /Checklist/ }));
@@ -283,7 +284,7 @@ describe("AddSkillWizard", () => {
     expect(await screen.findByText("Slug: daily-review")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Use when description"), { target: { value: "x".repeat(1024) } });
     expect(await screen.findByText("1024/1024")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(true);
   });
   test("gates invalid navigation and preserves source detail when backing up", async () => {
     ipc.reply = async (_command, args) => {
@@ -298,18 +299,18 @@ describe("AddSkillWizard", () => {
       return [structuredClone(state), []];
     };
     renderWizard(() => undefined);
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByText("Where does the skill come from?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+    expect(await screen.findByRole("heading", { name: "Add a skill" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Import from git/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     expect(await screen.findByLabelText("Repository URL")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Repository URL"), { target: { value: "https://example.invalid/skills.git" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "Back" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(await screen.findByText("Where does the skill come from?")).toBeTruthy();
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByRole("heading", { name: "Add a skill" })).toBeTruthy();
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     const repoInput = await screen.findByLabelText("Repository URL") as HTMLInputElement;
     expect(repoInput.value).toBe("https://example.invalid/skills.git");
     expect(screen.getByText(/Only public HTTPS repositories are supported/)).toBeTruthy();
@@ -372,7 +373,7 @@ describe("AddSkillWizard", () => {
     };
     renderWizard(() => undefined);
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.keyDown(window, { key: "Enter" });
     expect(await screen.findByRole("radio", { name: /Blank/ })).toBeTruthy();
   });
@@ -386,10 +387,10 @@ describe("AddSkillWizard", () => {
     };
     renderWizard(() => undefined);
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     await waitFor(() => expect(screen.getByRole("radio", { name: /Blank/ })).toBeTruthy());
-    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(true);
   });
   test("streams apply progress, stays on Review after failure, and shows Done only after success", async () => {
     const writtenPath = "/sandbox/user/skills/plan-skill/SKILL.md";
@@ -444,19 +445,19 @@ describe("AddSkillWizard", () => {
     };
     renderWizard(() => undefined);
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     fireEvent.click(await screen.findByRole("radio", { name: /Blank/ }));
     await waitFor(() => expect(screen.getByRole("radio", { name: /Blank/ }).getAttribute("aria-checked")).toBe("true"));
     fireEvent.change(screen.getByLabelText("Skill name"), { target: { value: "Plan Skill" } });
     fireEvent.change(screen.getByLabelText("Use when description"), { target: { value: "Use this skill to plan work." } });
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     await screen.findByRole("radiogroup", { name: "Skill destination scope" });
     fireEvent.click(await screen.findByRole("radio", { name: /User/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: "omp" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     expect(await screen.findByText("/sandbox/user/skills/plan-skill")).toBeTruthy();
     const storeLine = screen.getByLabelText("Store creation").textContent ?? "";
     expect(storeLine).toContain("Create store at");
@@ -466,7 +467,7 @@ describe("AddSkillWizard", () => {
     expect(screen.queryByRole("heading", { name: "Plan Skill is ready" })).toBeNull();
     ipc.listeners.get("agentuna:job-finished")?.({ payload: { id: "skill-add-job-1", name: "Create skill", state: "failed", error: { kind: "failed", message: "Safe write rejected the plan." } } });
     expect(await screen.findByText("Safe write rejected the plan. Review the refreshed plan before trying again.")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Review skill" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Review" })).toBeTruthy();
     await waitFor(() => expect((screen.getByRole("button", { name: "Create skill" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Create skill" }));
     await screen.findByText("Creating skill…");
@@ -495,13 +496,13 @@ describe("AddSkillWizard", () => {
     };
     renderWizard(() => undefined, "prj_demo", "project");
     fireEvent.click(screen.getByRole("button", { name: /Write a new skill/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     fireEvent.click(await screen.findByRole("radio", { name: /Blank/ }));
     fireEvent.change(screen.getByLabelText("Skill name"), { target: { value: "Scope Check" } });
     fireEvent.change(screen.getByLabelText("Use when description"), { target: { value: "Check active scope." } });
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     const projectScope = await screen.findByRole("radio", { name: /Project/ });
     expect(projectScope.getAttribute("aria-checked")).toBe("true");
     expect(hasSkillScopeRequestFor("project")).toBe(true);
@@ -521,8 +522,8 @@ function transition(args: unknown) {
 async function openSource(name: string | RegExp) {
   await waitFor(() => expect(ipc.listeners.has("agentuna:job-finished")).toBe(true));
   fireEvent.click(screen.getByRole("button", { name }));
-  await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
 }
 
 describe("AddSkillWizard source steps", () => {
@@ -595,16 +596,17 @@ describe("AddSkillWizard source steps", () => {
     expect(ipc.calls.some(({ command }) => command === "skill_import_job_result")).toBe(true);
   });
 
-  test("the library step offers the git import when no other source exists", async () => {
+  test("the empty library names the searched path and offers a folder fallback", async () => {
     ipc.reply = async (command, args) => {
-      if (command === "skill_library_catalog") return { sources: [], skills: [], target_scope: "user" };
+      if (command === "skill_library_catalog") return { sources: [], skills: [], target_scope: "user", search_root: "/sandbox/user/skills", skipped: [{ label: "Gone", path: "/sandbox/gone", reason: "The project folder no longer exists." }] };
       return transition(args);
     };
     renderWizard(() => undefined);
     await openSource(/From your library/);
-    expect(await screen.findByText("No other skill sources are available.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Import from Git instead" }));
-    expect(await screen.findByLabelText("Repository URL")).toBeTruthy();
+    expect(await screen.findByText(/No skills found in/)).toBeTruthy();
+    expect(screen.getByText("Gone")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Choose a folder…" }));
+    expect(await screen.findByLabelText("Folder path")).toBeTruthy();
   });
 
   test("the offline marketplace shows cached formatting and waits for an explicit Search", async () => {
@@ -683,9 +685,9 @@ describe("AddSkillWizard source steps", () => {
     fireEvent.scroll(list);
 
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(await screen.findByText("Where does the skill come from?")).toBeTruthy();
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByRole("heading", { name: "Add a skill" })).toBeTruthy();
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
 
     const restored = await screen.findByTestId("git-import-candidate-list");
     await waitFor(() => expect(restored.scrollTop).toBe(173));
@@ -709,7 +711,7 @@ describe("AddSkillWizard source steps", () => {
     ipc.reply = async (command, args) => {
       if (command === "skill_scope_options") return scopeOptionsReply(args);
       if (command === "skill_library_catalog") {
-        return { sources: [{ id: "user", label: "User scope", kind: "scope", count: 1, last_used_at: null }], skills: [sourceSkill], target_scope: "Project skills" };
+        return { sources: [{ id: "user", label: "User scope", kind: "scope", count: 1, last_used_at: null }], skills: [sourceSkill], target_scope: "Project skills", search_root: "/sandbox/user/skills", skipped: [] };
       }
       if (command === "skill_add_preview") {
         const { request } = args as { request: { wizard: StubState } };
@@ -745,15 +747,15 @@ describe("AddSkillWizard source steps", () => {
     };
     renderWizard(() => undefined, "prj_demo", "project");
     fireEvent.click(screen.getByRole("button", { name: /From your library/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /Shared Skill/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     await screen.findByRole("radiogroup", { name: "Skill destination scope" });
     fireEvent.click(await screen.findByRole("checkbox", { name: "Codex" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
 
     expect(await screen.findByText("Copy · Shared Skill")).toBeTruthy();
     expect(within(screen.getByLabelText("Planned file paths")).getByText("/sandbox/project/.config-studio/skills/shared-skill/SKILL.md")).toBeTruthy();
@@ -764,10 +766,10 @@ describe("AddSkillWizard source steps", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "Back" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     fireEvent.click(await screen.findByRole("radio", { name: /Link/ }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
 
     expect(await screen.findByText("Link · Shared Skill")).toBeTruthy();
     expect(within(screen.getByLabelText("Planned file paths")).getByText("/sandbox/project/.config-studio/skills/shared-skill")).toBeTruthy();

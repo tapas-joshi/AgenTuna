@@ -94,6 +94,7 @@ impl AgentAdapter for OmpAdapter {
                     ),
                 ]
             }),
+            ItemKind::Rule if scope == Scope::Global => Vec::new(),
             ItemKind::Rule if user_scope => {
                 let path = env
                     .variables
@@ -153,16 +154,13 @@ impl AgentAdapter for OmpAdapter {
         &self,
         env: &AgentEnvironment,
         store_roots: &[PathBuf],
+        root: AgentPathCandidate,
     ) -> Result<Vec<crate::native_skills::NativeSkill>, crate::adapter::AgentError> {
-        let roots = [Scope::User, Scope::Project]
-            .into_iter()
-            .flat_map(|scope| self.paths(ItemKind::Skill, scope, env))
-            .collect::<Vec<_>>();
         let mut skills = crate::native_skills::list_native_skills_with_options(
             &self.id(),
             env,
             store_roots,
-            roots,
+            std::iter::once(root),
             true,
         )?;
         skills.retain(|skill| {

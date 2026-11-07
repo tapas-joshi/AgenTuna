@@ -1,7 +1,8 @@
 //! Agent detection and filesystem-change loop.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_adapters::detect::{VersionProbe, detect_one, find_executable};
@@ -23,6 +24,9 @@ pub const EVENT_EXTERNAL_REFRESH: &str = "agentuna:external-refresh";
 
 /// Event emitted for each non-fatal diagnostic the detection loop records.
 pub const EVENT_DETECTION_DIAGNOSTIC: &str = "agentuna:detection-diagnostic";
+
+/// Quiet period for combining watcher invalidations into one detection pass.
+const DETECTION_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// A non-fatal problem the detection loop recorded and worked around (TA-081).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -82,46 +86,67 @@ impl DetectionPass {
     }
 }
 
-/// Coalesces rescan requests so a burst that arrives while a scan runs yields exactly one
-/// follow-up scan instead of one scan per event (TA-081 AC3).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct RescanCoalescer {
-    running: bool,
-    pending: bool,
+/// Pending invalidations are bounded and collected even while the scan worker is busy.
+#[derive(Debug, Default)]
+struct PendingDetection {
+    deadline: Option<Instant>,
+    paths: BTreeSet<String>,
+    full_rescan: bool,
 }
 
-impl RescanCoalescer {
-    /// Requests one scan; returns `true` when the caller must run it now.
-    ///
-    /// A request while a scan runs is folded into a single pending follow-up.
-    pub fn request(&mut self) -> bool {
-        if self.running {
-            self.pending = true;
-            false
-        } else {
-            self.running = true;
-            true
+impl PendingDetection {
+    fn enqueue(&mut self, now: Instant, event: ExternalRefreshEvent) {
+        self.deadline = Some(now + DETECTION_DEBOUNCE);
+        if event.full_rescan {
+            self.paths.clear();
+            self.full_rescan = true;
+        } else if !self.full_rescan {
+            for path in event.paths {
+                if self.paths.len() >= at_fs::DEFAULT_MAX_BATCH_PATHS && !self.paths.contains(&path)
+                {
+                    self.paths.clear();
+                    self.full_rescan = true;
+                    break;
+                }
+                self.paths.insert(path);
+            }
         }
     }
 
-    /// Marks the running scan finished; returns `true` when one folded request still owes a scan.
-    ///
-    /// The coalescer is running again in that case, so the caller scans once more and calls
-    /// this method again when that scan finishes.
-    pub fn finished(&mut self) -> bool {
-        self.running = false;
-        if std::mem::take(&mut self.pending) {
-            self.running = true;
-            true
-        } else {
-            false
+    fn take_ready(&mut self, now: Instant) -> Option<ExternalRefreshEvent> {
+        let deadline = self.deadline?;
+        if now < deadline {
+            return None;
         }
+        self.deadline = None;
+        Some(ExternalRefreshEvent {
+            paths: std::mem::take(&mut self.paths).into_iter().collect(),
+            full_rescan: std::mem::take(&mut self.full_rescan),
+        })
     }
+}
 
-    /// Whether a scan is currently marked as running.
-    #[must_use]
-    pub fn is_running(&self) -> bool {
-        self.running
+type DetectionSchedule = (Mutex<PendingDetection>, Condvar);
+
+fn wait_for_detection(schedule: &DetectionSchedule) -> ExternalRefreshEvent {
+    let (pending, changed) = schedule;
+    let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        let now = Instant::now();
+        if let Some(refresh) = pending.take_ready(now) {
+            return refresh;
+        }
+        pending = match pending.deadline {
+            Some(deadline) => {
+                changed
+                    .wait_timeout(pending, deadline.saturating_duration_since(now))
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0
+            }
+            None => changed
+                .wait(pending)
+                .unwrap_or_else(PoisonError::into_inner),
+        };
     }
 }
 
@@ -256,45 +281,31 @@ pub fn start(
             tracing::warn!(%error, "detection diagnostic event emission failed");
         }
     }
-    let watcher = Arc::new(watcher);
-
-    let initial_app = app.clone();
-    let initial_adapters = adapters.clone();
-    let initial_environment = environment.clone();
-    let initial_database = Arc::clone(&database);
+    let schedule: Arc<DetectionSchedule> =
+        Arc::new((Mutex::new(PendingDetection::default()), Condvar::new()));
+    let scan_schedule = Arc::clone(&schedule);
     tauri::async_runtime::spawn_blocking(move || {
-        detect_and_persist(
-            &initial_app,
-            &initial_adapters,
-            &initial_environment,
-            &initial_database,
-        );
+        // Keep the initial pass on the same worker so watcher requests cannot overlap it.
+        detect_and_persist(&app, &adapters, &environment, &database);
+        loop {
+            let refresh = wait_for_detection(&scan_schedule);
+            detect_and_persist(&app, &adapters, &environment, &database);
+            if let Err(error) = app.emit(EVENT_EXTERNAL_REFRESH, refresh) {
+                tracing::warn!(%error, "external refresh event emission failed");
+            }
+        }
     });
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut coalescer = RescanCoalescer::default();
         loop {
             let Some(event) = watcher.next_event(Duration::from_secs(1)) else {
                 continue;
             };
-            let refresh = external_refresh_event(&event);
-            // WatchEvent can grow; an event we do not know needs no rescan.
-            let invalidates = matches!(
-                &event,
-                WatchEvent::Batch(_)
-                    | WatchEvent::RescanRequired { .. }
-                    | WatchEvent::PathGone { .. }
-            );
-            if invalidates && coalescer.request() {
-                detect_and_persist(&app, &adapters, &environment, &database);
-                while coalescer.finished() {
-                    detect_and_persist(&app, &adapters, &environment, &database);
-                }
-            }
-            if let Some(payload) = refresh
-                && let Err(error) = app.emit(EVENT_EXTERNAL_REFRESH, payload)
-            {
-                tracing::warn!(%error, "external refresh event emission failed");
+            if let Some(refresh) = external_refresh_event(&event) {
+                let (pending, changed) = &*schedule;
+                let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+                pending.enqueue(Instant::now(), refresh);
+                changed.notify_one();
             }
         }
     });
@@ -517,4 +528,149 @@ fn version_probe_for(
         executable,
         args: vec![String::from("--version")],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refresh(paths: impl IntoIterator<Item = String>) -> ExternalRefreshEvent {
+        ExternalRefreshEvent {
+            paths: paths.into_iter().collect(),
+            full_rescan: false,
+        }
+    }
+
+    #[test]
+    fn split_watcher_batches_within_the_debounce_produce_one_complete_refresh() {
+        let start = Instant::now();
+        let mut pending = PendingDetection::default();
+        let paths: Vec<String> = (0..20).map(|index| format!("rule-{index:02}.md")).collect();
+
+        pending.enqueue(start, refresh(paths[..18].iter().cloned()));
+        assert!(
+            pending
+                .take_ready(start + Duration::from_millis(299))
+                .is_none()
+        );
+        pending.enqueue(
+            start + Duration::from_millis(300),
+            refresh(paths[18..].iter().cloned()),
+        );
+        assert!(
+            pending
+                .take_ready(start + Duration::from_millis(799))
+                .is_none()
+        );
+
+        let event = pending
+            .take_ready(start + Duration::from_millis(800))
+            .expect("one scan is ready after the trailing quiet window");
+        assert_eq!(event.paths, paths);
+        assert!(!event.full_rescan);
+        assert!(pending.take_ready(start + Duration::from_secs(2)).is_none());
+    }
+
+    #[test]
+    fn events_received_during_a_scan_need_only_one_follow_up_scan() {
+        let start = Instant::now();
+        let mut pending = PendingDetection::default();
+        pending.enqueue(start, refresh([String::from("first.md")]));
+        assert!(
+            pending
+                .take_ready(start + Duration::from_millis(500))
+                .is_some()
+        );
+
+        // The scan worker has taken the first request and has not finished it yet.
+        pending.enqueue(
+            start + Duration::from_millis(600),
+            refresh([String::from("second.md")]),
+        );
+        pending.enqueue(
+            start + Duration::from_millis(700),
+            refresh([String::from("third.md"), String::from("second.md")]),
+        );
+        let follow_up = pending
+            .take_ready(start + Duration::from_secs(2))
+            .expect("one follow-up covers every event received during the scan");
+        assert_eq!(follow_up.paths, ["second.md", "third.md"]);
+        assert!(!follow_up.full_rescan);
+        assert!(pending.take_ready(start + Duration::from_secs(3)).is_none());
+    }
+
+    #[test]
+    fn a_running_scan_does_not_block_watcher_requests() {
+        let schedule: Arc<DetectionSchedule> =
+            Arc::new((Mutex::new(PendingDetection::default()), Condvar::new()));
+        let worker_schedule = Arc::clone(&schedule);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
+        let (follow_tx, follow_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let first = wait_for_detection(&worker_schedule);
+            started_tx.send(first).expect("report the started scan");
+            finish_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("finish the controlled scan");
+            let follow_up = wait_for_detection(&worker_schedule);
+            follow_tx.send(follow_up).expect("report the follow-up");
+        });
+
+        let (pending, changed) = &*schedule;
+        {
+            let mut pending = pending.lock().expect("schedule lock");
+            pending.enqueue(
+                Instant::now() - Duration::from_secs(2),
+                refresh([String::from("first.md")]),
+            );
+            changed.notify_one();
+        }
+        let first = started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the scan starts");
+        assert_eq!(first.paths, ["first.md"]);
+
+        let paths: Vec<String> = (0..20).map(|index| format!("rule-{index:02}.md")).collect();
+        {
+            let mut pending = pending.lock().expect("watcher can enqueue while scan runs");
+            let first_batch = Instant::now() - Duration::from_secs(2);
+            pending.enqueue(first_batch, refresh(paths[..18].iter().cloned()));
+            pending.enqueue(
+                first_batch + Duration::from_millis(300),
+                refresh(paths[18..].iter().cloned()),
+            );
+            changed.notify_one();
+        }
+        finish_tx.send(()).expect("release the controlled scan");
+        let follow_up = follow_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("one follow-up scan starts");
+        worker.join().expect("join the scan worker");
+        assert_eq!(follow_up.paths, paths);
+        assert!(!follow_up.full_rescan);
+        assert!(
+            pending
+                .lock()
+                .expect("schedule lock")
+                .take_ready(Instant::now())
+                .is_none(),
+            "the burst must not leave another scan queued"
+        );
+    }
+
+    #[test]
+    fn an_oversized_pending_refresh_becomes_a_bounded_full_rescan() {
+        let start = Instant::now();
+        let mut pending = PendingDetection::default();
+        pending.enqueue(
+            start,
+            refresh((0..=at_fs::DEFAULT_MAX_BATCH_PATHS).map(|index| format!("rule-{index}.md"))),
+        );
+        let event = pending
+            .take_ready(start + Duration::from_millis(500))
+            .expect("the full rescan is ready");
+        assert!(event.full_rescan);
+        assert!(event.paths.is_empty());
+    }
 }

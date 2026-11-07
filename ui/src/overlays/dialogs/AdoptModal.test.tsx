@@ -36,6 +36,7 @@ describe("AdoptModal", () => {
           handling: "link",
           renamed: false,
           current: "present",
+          hash: "sha256-previewed-bytes",
         });
       }
       if (command === "adopt_apply") {
@@ -70,6 +71,14 @@ describe("AdoptModal", () => {
           operation_id: "op_adopt_123",
         }),
       );
+    });
+    // The write carries the identity of the preview the user reviewed, so a source that
+    // changed between review and apply is refused instead of adopted.
+    expect(MOCK_INVOKE).toHaveBeenCalledWith("adopt_apply", {
+      path: "/home/.agents/skills/release-notes",
+      name: null,
+      expectedHash: "sha256-previewed-bytes",
+      handling: "link",
     });
     expect(onClose).toHaveBeenCalled();
   });

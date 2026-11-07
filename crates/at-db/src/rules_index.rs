@@ -195,4 +195,135 @@ mod tests {
             "missing"
         );
     }
+
+    fn rule(path: &str, agent: &str, managed: bool) -> ScannedRule {
+        ScannedRule {
+            scope: Scope::Project,
+            project_id: Some("project-1".into()),
+            agent: agent.into(),
+            path: path.into(),
+            link_target: None,
+            bytes: path.as_bytes().to_vec(),
+            mtime: Some(7),
+            managed,
+        }
+    }
+
+    #[test]
+    fn three_rule_files_insert_three_items_and_a_rescan_keeps_ids_and_updates_last_seen_only() {
+        let database = Database::open_in_memory().expect("db");
+        let connection = database.connection();
+        let inputs = [
+            rule("/repo/AGENTS.md", "codex", true),
+            rule("/repo/CLAUDE.md", "claude_code", false),
+            rule("/repo/.cursor/rules/style.mdc", "cursor", false),
+        ];
+        let mut first_ids = Vec::new();
+        for input in &inputs {
+            first_ids.push(upsert_on_scan(connection, input).expect("first scan"));
+        }
+        let counts: (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM items WHERE kind='rule'), \
+                        (SELECT count(*) FROM item_versions)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("counts");
+        assert_eq!(counts, (3, 3), "one item and one version per rule file");
+
+        connection
+            .execute(
+                "UPDATE item_versions SET last_seen_at='2000-01-01T00:00:00.000Z'",
+                [],
+            )
+            .expect("backdate last_seen_at");
+        let mut second_ids = Vec::new();
+        for input in &inputs {
+            second_ids.push(upsert_on_scan(connection, input).expect("rescan"));
+        }
+        assert_eq!(first_ids, second_ids, "rescan keeps every item id");
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM items WHERE kind='rule'), \
+                        (SELECT count(*) FROM item_versions), \
+                        (SELECT count(*) FROM item_versions \
+                          WHERE last_seen_at='2000-01-01T00:00:00.000Z')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("counts after rescan");
+        assert_eq!(
+            counts,
+            (3, 3, 0),
+            "unchanged content adds no version and refreshes last_seen only"
+        );
+        let rows = rules_for_scope(connection, Scope::Project, Some("project-1"))
+            .expect("rules for scope");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.agent.as_str())
+                .collect::<Vec<_>>(),
+            ["claude_code", "codex", "cursor"],
+            "rows are ordered by agent"
+        );
+        assert!(rows.iter().any(|row| row.managed));
+    }
+
+    #[test]
+    fn a_symlink_and_its_target_resolve_to_one_row_with_link_target() {
+        let database = Database::open_in_memory().expect("db");
+        let connection = database.connection();
+        let target = rule("/repo/AGENTS.md", "codex", false);
+        let target_id = upsert_on_scan(connection, &target).expect("target scan");
+        let mut link = rule("/repo/links/AGENTS.md", "codex", false);
+        link.link_target = Some("/repo/AGENTS.md".into());
+        let link_id = upsert_on_scan(connection, &link).expect("link scan");
+        assert_eq!(target_id, link_id, "the link reuses the target's item id");
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM items WHERE kind='rule'", [], |row| {
+                row.get(0)
+            })
+            .expect("item count");
+        assert_eq!(count, 1, "the same real path is one row");
+        let rows = rules_for_scope(connection, Scope::Project, Some("project-1"))
+            .expect("rules for scope");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].link_target.as_deref(), Some("/repo/AGENTS.md"));
+    }
+
+    #[test]
+    fn concurrent_upserts_of_the_same_natural_key_do_not_duplicate_rows() {
+        let sandbox = tempfile::TempDir::new().expect("sandbox");
+        let path = sandbox.path().join("history.sqlite");
+        drop(Database::open_file(&path).expect("initialize schema"));
+        let input = rule("/repo/AGENTS.md", "codex", true);
+        let barrier = std::sync::Barrier::new(2);
+        let (left, right) = std::thread::scope(|scope| {
+            let left = scope.spawn(|| {
+                let database = Database::open_file(&path).expect("watcher connection");
+                barrier.wait();
+                upsert_on_scan(database.connection(), &input).expect("watcher upsert")
+            });
+            let right = scope.spawn(|| {
+                let database = Database::open_file(&path).expect("manual connection");
+                barrier.wait();
+                upsert_on_scan(database.connection(), &input).expect("manual upsert")
+            });
+            (left.join().expect("watcher"), right.join().expect("manual"))
+        });
+        assert_eq!(left, right, "both writers report the same item");
+        let database = Database::open_file(&path).expect("verify connection");
+        let counts: (i64, i64) = database
+            .connection()
+            .query_row(
+                "SELECT (SELECT count(*) FROM items WHERE kind='rule'), \
+                        (SELECT count(*) FROM item_versions)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("counts");
+        assert_eq!(counts, (1, 1), "one row despite two concurrent writers");
+    }
 }

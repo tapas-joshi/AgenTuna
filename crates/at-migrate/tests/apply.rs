@@ -380,6 +380,7 @@ impl SharedRootReplacement {
             "codex and omp read one physical .agents/skills root"
         );
         let single = ScanReport {
+            roots: Vec::new(),
             items: vec![shared.clone()],
             partial: false,
             skipped_roots: Vec::new(),

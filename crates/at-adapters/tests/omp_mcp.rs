@@ -711,3 +711,170 @@ fn saving_through_a_symlinked_config_updates_the_target() {
     assert!(written.contains("\"local-tool\": {"));
     assert_eq!(written.matches("\"$schema\"").count(), 1);
 }
+
+fn omp_skill(name: &str) -> String {
+    format!("---\nname: {name}\ndescription: fixture skill\n---\n# {name}\n")
+}
+
+#[test]
+fn managed_skills_only_fixture_reports_the_managed_root_with_two_skills() {
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment};
+    use at_adapters::omp_adapter::OmpAdapter;
+    use at_model::{ItemKind, Scope};
+
+    let home = TempDir::new().expect("home");
+    let managed = agent_root(home.path()).join("managed-skills");
+    for name in ["alpha", "beta"] {
+        let folder = managed.join(name);
+        fs::create_dir_all(&folder).expect("managed skill folder");
+        fs::write(folder.join("SKILL.md"), omp_skill(name)).expect("skill document");
+    }
+    let env = AgentEnvironment {
+        home: home.path().to_path_buf(),
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let skills = OmpAdapter
+        .list_native_skills(&env, &[])
+        .expect("managed skills only");
+    assert_eq!(skills.len(), 2, "the managed root contributes both skills");
+    assert!(
+        skills.iter().all(|skill| skill.path.starts_with(&managed)),
+        "every row comes from the managed root: {skills:?}"
+    );
+    let resolved =
+        at_adapters::paths::resolve(&OmpAdapter, ItemKind::Skill, Scope::User, &env, None, None)
+            .expect("managed root resolves");
+    assert_eq!(resolved.primary, managed);
+    let unmanaged = resolved
+        .candidates
+        .iter()
+        .find(|candidate| candidate.candidate.path == skills_path(home.path()))
+        .expect("unmanaged skills candidate is still reported");
+    assert!(!unmanaged.exists, "the skills root exists=false");
+}
+
+#[test]
+fn deleting_the_managed_skills_directory_flips_to_needs_path_on_the_next_scan() {
+    use at_adapters::adapter::AgentEnvironment;
+    use at_adapters::omp_adapter::OmpAdapter;
+    use at_model::{ItemKind, Scope};
+
+    let home = TempDir::new().expect("home");
+    let managed = agent_root(home.path()).join("managed-skills");
+    fs::create_dir_all(managed.join("alpha")).expect("managed skill folder");
+    fs::write(managed.join("alpha/SKILL.md"), omp_skill("alpha")).expect("skill document");
+    let env = AgentEnvironment {
+        home: home.path().to_path_buf(),
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let first =
+        at_adapters::paths::resolve(&OmpAdapter, ItemKind::Skill, Scope::User, &env, None, None)
+            .expect("first scan finds the managed root");
+    assert_eq!(first.primary, managed);
+
+    fs::remove_dir_all(&managed).expect("delete the managed root");
+    let needs_path = at_adapters::paths::resolve(
+        &OmpAdapter,
+        ItemKind::Skill,
+        Scope::User,
+        &env,
+        None,
+        Some(&managed),
+    )
+    .expect_err("no skills root remains");
+    assert_eq!(
+        needs_path.last_known_path.as_deref(),
+        Some(managed.as_path())
+    );
+    assert!(
+        needs_path
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.verified),
+        "both candidates are unverified after the deletion"
+    );
+}
+
+#[derive(Default)]
+struct RecordingOmpMcpDelegate {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl at_adapters::adapter::McpAdapterDelegate for RecordingOmpMcpDelegate {
+    fn read_io(
+        &self,
+        _: at_model::Scope,
+        env: &at_adapters::adapter::AgentEnvironment,
+    ) -> Result<at_adapters::adapter::AgentIoDocument, at_adapters::adapter::AgentError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = mcp_path(&env.home);
+        let content = fs::read(&path).map_err(|source| at_adapters::adapter::AgentError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(at_adapters::adapter::AgentIoDocument { path, content })
+    }
+
+    fn render_io(
+        &self,
+        _: &at_adapters::adapter::AgentDeployment,
+    ) -> Result<Vec<u8>, at_adapters::adapter::AgentError> {
+        Err(at_adapters::adapter::AgentError::Unsupported {
+            agent: at_model::AgentId::Omp,
+            kind: String::from("render is not exercised by a read"),
+        })
+    }
+
+    fn write_io(
+        &self,
+        _: &at_adapters::adapter::AgentDeployment,
+    ) -> Result<at_adapters::adapter::AgentIoDocument, at_adapters::adapter::AgentError> {
+        Err(at_adapters::adapter::AgentError::Unsupported {
+            agent: at_model::AgentId::Omp,
+            kind: String::from("write is not exercised by a read"),
+        })
+    }
+}
+
+#[test]
+fn mcp_read_through_the_registry_delegates_once_and_leaves_the_document_unchanged() {
+    use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
+    use at_model::{AgentId, ItemKind, Scope};
+
+    let home = TempDir::new().expect("home");
+    fs::create_dir_all(agent_root(home.path())).expect("agent root");
+    let path = mcp_path(home.path());
+    fs::write(&path, GOLDEN).expect("seed mcp.json");
+    let before = at_fs::sha256_hex(&fs::read(&path).expect("fixture bytes"));
+    let env = AgentEnvironment {
+        home: home.path().to_path_buf(),
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let registry = AgentAdapterRegistry::register();
+    let delegate = std::sync::Arc::new(RecordingOmpMcpDelegate::default());
+    registry
+        .register_mcp_delegate(AgentId::Omp, delegate.clone())
+        .expect("register the TM-007 delegate");
+    let document = registry
+        .read_io(&AgentId::Omp, ItemKind::McpServer, Scope::User, &env)
+        .expect("delegated MCP read");
+    assert_eq!(
+        delegate.reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the document comes from exactly one delegation call"
+    );
+    assert_eq!(document.path, path);
+    assert_eq!(
+        document.content,
+        fs::read(&path).expect("fixture bytes"),
+        "the delegated read returns the native bytes"
+    );
+    assert_eq!(
+        at_fs::sha256_hex(&fs::read(&path).expect("fixture bytes after read")),
+        before,
+        "reading leaves the on-disk mcp.json hash unchanged"
+    );
+}

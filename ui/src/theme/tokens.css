@@ -39,9 +39,15 @@
   --color-scope-local: var(--at-color-scope-local);
 
   /*
-   * Numeric spacing utilities are the pixel values from the token table:
-   * `p-4` is 4px (not Tailwind's 16px default), `p-16` is 16px.
+   * The number in a numeric utility is the pixel value: `p-4` is 4px,
+   * `gap-6` is 6px, `h-40` is 40px. Tailwind's default base is 0.25rem, which
+   * silently made every step that is not one of the named tokens below four
+   * times too large (`px-14` was 56px), so the base is pinned to 1px. The
+   * named steps stay equal to their own pixel value, which `scale.test.ts`
+   * enforces.
    */
+  --spacing: 1px;
+
   --spacing-2: var(--at-space-2);
   --spacing-4: var(--at-space-4);
   --spacing-8: var(--at-space-8);
@@ -50,9 +56,13 @@
   --spacing-24: var(--at-space-24);
   --spacing-32: var(--at-space-32);
 
+  --radius-2: var(--at-radius-2);
   --radius-3: var(--at-radius-3);
+  --radius-4: var(--at-radius-4);
   --radius-6: var(--at-radius-6);
+  --radius-8: var(--at-radius-8);
   --radius-10: var(--at-radius-10);
+  --radius-12: var(--at-radius-12);
 
   --text-11: var(--at-text-11);
   --text-12: var(--at-text-12);
@@ -100,9 +110,13 @@
   --at-space-24: 24px;
   --at-space-32: 32px;
 
+  --at-radius-2: 2px;
   --at-radius-3: 3px;
+  --at-radius-4: 4px;
   --at-radius-6: 6px;
+  --at-radius-8: 8px;
   --at-radius-10: 10px;
+  --at-radius-12: 12px;
 
   --at-text-11: 11px;
   --at-text-12: 12px;

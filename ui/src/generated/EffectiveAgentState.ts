@@ -15,4 +15,8 @@ state: string,
 /**
  * Whether the item is loaded by this agent.
  */
-loads: boolean, };
+loads: boolean, 
+/**
+ * Path from which the agent loads this item, or where it is deployed.
+ */
+path: string | null, };

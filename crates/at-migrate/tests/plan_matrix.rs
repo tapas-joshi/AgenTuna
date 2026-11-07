@@ -153,6 +153,7 @@ impl Case {
 
 fn plan_for(workspace: &Workspace, case: &Case) -> Result<MigrationPlan, PlanError> {
     let scan = ScanReport {
+        roots: Vec::new(),
         items: case.items.clone(),
         partial: false,
         skipped_roots: Vec::new(),
@@ -637,6 +638,7 @@ fn a_store_copy_conflict_requires_a_choice_before_the_store_is_overwritten() {
         path: store_path.clone(),
     }];
     let scan = ScanReport {
+        roots: Vec::new(),
         items: vec![native.clone()],
         partial: false,
         skipped_roots: Vec::new(),

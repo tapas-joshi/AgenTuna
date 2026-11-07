@@ -165,17 +165,17 @@ export function TopBar({
         aria-keyshortcuts={paletteModifier === "meta" ? "Meta+K" : "Control+K"}
         aria-label={`Open command palette (${paletteHint})`}
         className={cn(
-          "flex h-[28px] w-[220px] shrink-0 items-center gap-8 rounded-6 border border-border bg-raised px-8",
+          "flex h-[28px] w-[220px] shrink-0 items-center gap-8 rounded-6 border border-border bg-raised px-8 max-[1439px]:w-[40px] max-[1439px]:justify-center",
           "text-12 text-text-muted",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
           "hover:border-text-muted hover:text-text-secondary",
         )}
       >
         <SearchIcon />
-        <span className="min-w-0 flex-1 truncate text-left">Search skills, servers, files</span>
+        <span className="min-w-0 flex-1 truncate text-left max-[1439px]:hidden">Search skills, servers, files</span>
         <kbd
           aria-hidden="true"
-          className="shrink-0 rounded-3 border border-border bg-overlay px-4 py-[2px] font-mono text-11 text-text-secondary"
+          className="shrink-0 rounded-3 border border-border bg-overlay px-4 py-[2px] font-mono text-11 text-text-secondary max-[1439px]:hidden"
         >
           {paletteHint}
         </kbd>

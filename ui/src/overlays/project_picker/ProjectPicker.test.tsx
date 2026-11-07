@@ -3,7 +3,7 @@ import { axe } from "jest-axe";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectPicker } from "./ProjectPicker";
-import { filterProjects } from ".";
+import { filterProjects, projectParentPath } from ".";
 import type { ProjectPickerProject } from "./ProjectPicker";
 
 afterEach(cleanup);
@@ -19,14 +19,19 @@ function renderPicker(overrides: Partial<React.ComponentProps<typeof ProjectPick
 }
 
 describe("ProjectPicker", () => {
-  it("filters and highlights matches in both names and paths", async () => {
+  it("filters and highlights matches in the project name", async () => {
     renderPicker();
     await userEvent.type(screen.getByRole("combobox", { name: "Search projects" }), "Agen");
     const highlighted = screen.getByRole("option", { name: /AgenTuna/ }).querySelectorAll("mark");
-    expect(highlighted).toHaveLength(2);
+    expect(highlighted).toHaveLength(1);
     expect(highlighted[0]?.textContent).toBe("Agen");
-    expect(highlighted[1]?.textContent).toBe("Agen");
     expect(screen.queryByRole("option", { name: /Studio/ })).toBeNull();
+  });
+  it("shows the parent folder and counts under each project name", () => {
+    renderPicker();
+    const option = screen.getByRole("option", { name: /AgenTuna/ });
+    expect(option.textContent).toContain("/work · 3 skills · 2 servers");
+    expect(projectParentPath("/Users/tester/Projects/Personal/nutrition-app")).toBe("~/Projects/Personal");
   });
   it("selects the active row with Enter and closes", async () => {
     const props = renderPicker();
@@ -55,7 +60,7 @@ describe("ProjectPicker", () => {
   it("identifies the currently active project separately from keyboard selection", () => {
     renderPicker({ currentProjectId: "p2" });
     expect(screen.getByRole("option", { name: /Studio/ }).getAttribute("aria-current")).toBe("true");
-    expect(screen.getByText("Current")).toBeTruthy();
+    expect(screen.getByText("current")).toBeTruthy();
     expect(screen.getByRole("option", { name: /AgenTuna/ }).getAttribute("aria-selected")).toBe("true");
   });
 
@@ -64,7 +69,7 @@ describe("ProjectPicker", () => {
     const props = renderPicker({ projects: [matching] });
     const input = screen.getByRole("combobox", { name: "Search projects" });
     await userEvent.type(input, "agentuna");
-    expect(screen.getByRole("option", { name: /Repo/ }).querySelectorAll("mark")).toHaveLength(2);
+    expect(screen.getByRole("option", { name: /Repo/ }).querySelectorAll("mark")).toHaveLength(1);
     fireEvent.keyDown(input, { key: "Escape" });
     expect(props.onSelect).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledOnce();

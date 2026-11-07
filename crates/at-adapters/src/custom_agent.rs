@@ -187,6 +187,7 @@ impl AgentAdapter for CustomAgentAdapter {
                     true,
                 )]
             }
+            ItemKind::Rule if scope == Scope::Global => Vec::new(),
             ItemKind::Rule => self
                 .spec
                 .rule_files

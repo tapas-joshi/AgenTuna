@@ -49,6 +49,22 @@ const MORE_SOURCES: readonly { id: SourceKind; label: string }[] = [
   { id: "zip", label: "Zip file" },
 ];
 
+/** Stepper labels and order, matching the four designed steps. */
+const STEP_LABELS: readonly { readonly id: WizardStep; readonly label: string }[] = [
+  { id: "source", label: "Source" },
+  { id: "details", label: "Details" },
+  { id: "scope_agents", label: "Scope & agents" },
+  { id: "review", label: "Review" },
+];
+
+/** Display names for agent ids in done-step copy. */
+const AGENT_LABELS: Readonly<Record<string, string>> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  omp: "omp",
+  cursor: "Cursor",
+};
+
 const EMPTY: WizardState = {
   step: "source",
   source: null,
@@ -76,8 +92,12 @@ type ActiveSkillImport = SkillImportJobStartView & { readonly source: SkillImpor
 type SkillImportSessionRef = { readonly id: string; readonly source: SkillImportSource };
 
 /** Add-skill flow driven by the Rust typed state machine and reviewed file plan. */
-export function AddSkillWizard({ onClose, projectId = null, initialScope = "user" }: { readonly onClose: () => void; readonly projectId?: string | null; readonly initialScope?: ScopeToken }): JSX.Element {
-  const initialState = emptyForScope(initialScope);
+export function AddSkillWizard({ onClose, projectId = null, initialScope = "user", initialSource = null }: { readonly onClose: () => void; readonly projectId?: string | null; readonly initialScope?: ScopeToken; /** Source chosen by the button that opened the wizard; skips the source picker. */ readonly initialSource?: SourceKind | null }): JSX.Element {
+  // A named entry point ("Import from git") opens the form for that source;
+  // the source step stays reachable through Back.
+  const initialState: WizardState = initialSource === null
+    ? emptyForScope(initialScope)
+    : { ...emptyForScope(initialScope), step: "details", source: initialSource };
   const [wizard, setWizard] = useState<WizardState>(initialState);
   const wizardRef = useRef(initialState);
   const detailsDraftRef = useRef(initialState.details);
@@ -523,7 +543,7 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
   const previewedCandidate = importCandidates.find((candidate) => candidate.id === previewedCandidateId) ?? null;
   const previewCandidate = (candidate: SkillImportCandidateView | null) => {
     if (!candidate) return null;
-    return <section aria-label="Selected skill preview" className="grid gap-6 rounded-8 border border-border p-10"><h3 className="m-0 text-13 font-semibold text-text">{candidate.name ?? "Skill"} · SKILL.md preview</h3>{candidate.markdown ? <pre className="m-0 max-h-[320px] overflow-auto whitespace-pre-wrap rounded-6 bg-surface p-8 text-11 text-text">{candidate.markdown}</pre> : <p className="m-0 text-12 text-muted">No SKILL.md preview is available.</p>}</section>;
+    return <section aria-label="Selected skill preview" className="grid gap-4 rounded-8 border border-border p-12"><h3 className="m-0 text-13 font-semibold text-text">{candidate.name ?? "Skill"} · SKILL.md preview</h3>{candidate.markdown ? <pre className="m-0 max-h-[320px] overflow-auto whitespace-pre-wrap rounded-6 bg-surface p-8 text-11 text-text">{candidate.markdown}</pre> : <p className="m-0 text-12 text-muted">No SKILL.md preview is available.</p>}</section>;
   };
   const toggleLibrarySkill = (id: string, checked: boolean) => {
     const selected = new Set(detailsDraftRef.current.library_selections);
@@ -670,21 +690,46 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
   };
   refreshPreviewRef.current = refreshPreview;
 
-  return <main className="mx-auto flex w-full max-w-[1240px] flex-col gap-20 p-24" aria-labelledby={wizard.step === "done" ? undefined : "add-skill-title"} aria-label={wizard.step === "done" ? "Add skill result" : undefined}>
+  const currentStepIndex = STEP_LABELS.findIndex((step) => step.id === wizard.step);
+  const stepTitle = wizard.step === "details"
+    ? wizard.source === "library" ? "From your library"
+      : wizard.source === "git" ? "Import from git"
+      : wizard.source === "new" ? "Write a new skill"
+      : "Source details"
+    : wizard.step === "scope_agents" ? "Scope & agents"
+    : wizard.step === "review" ? "Review"
+    : "Add a skill";
+  const stepSubtitle = wizard.step === "details"
+    ? wizard.source === "library" ? "Pick skills that already exist in another scope or project on this Mac."
+      : wizard.source === "git" ? "AgenTuna clones the repo into a temp folder and lists its skills."
+      : wizard.source === "new" ? "Name it and say when an agent should use it. The description is what agents match on."
+      : "Review the source details before choosing a scope."
+    : wizard.step === "scope_agents" ? "Pick who gets the skill and which agents load it."
+    : wizard.step === "review" ? "Nothing is written until you press Create skill."
+    : "Choose where the skill comes from. Nothing is written until you review the plan.";
+  const doneAgents = outcome === null ? [] : [...new Set(outcome.deployments.map((deployment) => AGENT_LABELS[deployment.agent] ?? deployment.agent))];
+  return <main className="mx-auto flex w-full max-w-[1240px] flex-col gap-16 p-24" aria-labelledby={wizard.step === "done" ? undefined : "add-skill-title"} aria-label={wizard.step === "done" ? "Add skill result" : undefined}>
     {wizard.step !== "done" && <header className="flex items-start justify-between gap-16">
-      <div><p className="m-0 text-12 font-medium uppercase tracking-wide text-muted">Skills / Add</p><h1 id="add-skill-title" className="mb-0 mt-4 text-24 font-semibold text-text">Add a skill</h1><p className="mb-0 mt-6 text-14 text-muted">Choose a source, review its details, then select where to install it.</p></div>
-      <button type="button" disabled={busy} className="rounded-8 border border-border px-12 py-8 text-13 text-text disabled:opacity-50" onClick={() => void send({ type: "cancel" })}>Cancel</button>
+      <div><p className="m-0 text-12 font-medium text-muted">Skills / Add skill</p><h1 id="add-skill-title" className="mb-0 mt-4 text-26 font-semibold text-text">{stepTitle}</h1><p className="mb-0 mt-6 text-14 text-muted">{stepSubtitle}</p></div>
     </header>}
-    {wizard.step !== "done" && <nav aria-label="Wizard progress" className="grid max-w-[760px] grid-cols-4 gap-8">
-      {(["source", "details", "scope_agents", "review"] as WizardStep[]).map((step, index) => <div key={step} aria-current={wizard.step === step ? "step" : undefined} className={`border-b-2 pb-8 text-12 ${wizard.step === step ? "border-accent font-semibold text-text" : "border-border text-muted"}`}><span className="mr-6">{index + 1}.</span>{step === "scope_agents" ? "Scope & agents" : step[0]?.toUpperCase() + step.slice(1)}</div>)}
+    {wizard.step !== "done" && <nav aria-label="Wizard progress" className="flex w-full max-w-[760px] items-center gap-8">
+      {STEP_LABELS.map((step, index) => {
+        const done = index < currentStepIndex;
+        const current = index === currentStepIndex;
+        return <div key={step.id} aria-current={current ? "step" : undefined} className="flex flex-1 items-center gap-8">
+          <span aria-hidden="true" className={`grid size-24 shrink-0 place-items-center rounded-full border text-11 font-semibold ${done ? "border-success bg-success/15 text-success" : current ? "border-accent text-text" : "border-border text-text-muted"}`}>{done ? "✓" : index + 1}</span>
+          <span className={`whitespace-nowrap text-12 ${current ? "font-semibold text-text" : done ? "text-text-secondary" : "text-text-muted"}`}>{step.label}</span>
+          {index < STEP_LABELS.length - 1 && <span aria-hidden="true" className="h-px flex-1 bg-border" />}
+        </div>;
+      })}
     </nav>}
-    {error && <div role="alert" className="rounded-8 border border-danger/40 bg-danger/10 px-12 py-10 text-13 text-text">{error}</div>}
-    {wizard.step === "source" && <section className="flex flex-col gap-16" aria-labelledby="source-heading"><h2 id="source-heading" className="m-0 text-18 font-semibold text-text">Where does the skill come from?</h2><div className="grid grid-cols-1 gap-14 md:grid-cols-3">{SOURCES.map((source) => <button type="button" data-source-card="true" key={source.id} aria-pressed={wizard.source === source.id} onClick={() => void send({ type: "select_source", payload: source.id })} className={`flex min-h-[330px] flex-col items-start rounded-12 border p-6 text-left ${wizard.source === source.id ? "border-accent bg-accent/10" : "border-border bg-surface"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}><span aria-hidden="true" className="grid h-12 w-12 place-items-center rounded-8 bg-accent/10 text-18 text-accent">{source.icon}</span><span className="mt-4 block text-17 font-semibold text-text">{source.label}</span><span className="mt-2 block text-13 text-muted">{source.description}</span><span className="mt-auto pt-6 text-13 font-semibold text-accent">Choose →</span></button>)}</div><details className="text-13 text-muted"><summary className="w-fit cursor-pointer">More import options</summary><div className="mt-8 flex flex-wrap gap-8">{MORE_SOURCES.map((source) => <button type="button" key={source.id} aria-pressed={wizard.source === source.id} onClick={() => void send({ type: "select_source", payload: source.id })} className={`rounded-8 border px-12 py-8 text-text ${wizard.source === source.id ? "border-accent bg-accent/10" : "border-border bg-surface"}`}>{source.label}</button>)}</div><p className="mb-0 mt-8">Marketplace availability follows your network policy.</p></details><p className="m-0 text-12 text-muted">Tip: skills are folders with a SKILL.md. AgenTuna copies them into each agent’s skills folder for the scope you pick.</p></section>}
-    {wizard.step === "details" && <section className="flex flex-col gap-14" aria-labelledby="details-heading"><h2 id="details-heading" className="m-0 text-18 font-semibold text-text">{labelForSource} details</h2>
-      {activeImport && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-10 rounded-8 border border-accent/30 bg-accent/5 p-10 text-13 text-text"><span>{importProgress?.label ?? `Starting ${activeImport.source} import…`}</span><progress aria-label="Import progress" max={1} value={importProgress?.fraction ?? undefined} className="min-w-[120px] flex-1" /><button type="button" onClick={releaseActiveSkillImport} className="rounded-8 border border-border px-10 py-6 text-12 text-text">Cancel import</button></div>}
+    {error && <div role="alert" className="rounded-8 border border-danger/40 bg-danger/10 px-12 py-8 text-13 text-text">{error}</div>}
+    {wizard.step === "source" && <section className="flex flex-col gap-16" aria-label="Choose a skill source"><div className="grid grid-cols-1 gap-12 md:grid-cols-3">{SOURCES.map((source) => <button type="button" data-source-card="true" key={source.id} aria-pressed={wizard.source === source.id} onClick={() => void send({ type: "select_source", payload: source.id })} className={`flex min-h-[330px] flex-col items-start rounded-12 border p-6 text-left max-[1199px]:min-h-[220px] ${wizard.source === source.id ? "border-accent bg-accent/10" : "border-border bg-surface"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}><span aria-hidden="true" className="grid h-12 w-12 place-items-center rounded-8 bg-accent/10 text-18 text-accent">{source.icon}</span><span className="mt-4 block text-16 font-semibold text-text">{source.label}</span><span className="mt-2 block text-13 text-muted">{source.description}</span><span className="mt-auto pt-6 text-13 font-semibold text-accent">Choose →</span></button>)}</div><details className="text-13 text-muted"><summary className="w-fit cursor-pointer">More import options</summary><div className="mt-8 flex flex-wrap gap-8">{MORE_SOURCES.map((source) => <button type="button" key={source.id} aria-pressed={wizard.source === source.id} onClick={() => void send({ type: "select_source", payload: source.id })} className={`rounded-8 border px-12 py-8 text-text ${wizard.source === source.id ? "border-accent bg-accent/10" : "border-border bg-surface"}`}>{source.label}</button>)}</div><p className="mb-0 mt-8">Marketplace availability follows your network policy.</p></details><p className="m-0 text-12 text-muted">Tip: skills are folders with a SKILL.md. AgenTuna copies them into each agent’s skills folder for the scope you pick.</p></section>}
+    {wizard.step === "details" && <section className="flex flex-col gap-12" aria-label="Source details">
+      {activeImport && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-12 rounded-8 border border-accent/30 bg-accent/5 p-12 text-13 text-text"><span>{importProgress?.label ?? `Starting ${activeImport.source} import…`}</span><progress aria-label="Import progress" max={1} value={importProgress?.fraction ?? undefined} className="min-w-[120px] flex-1" /><button type="button" onClick={releaseActiveSkillImport} className="rounded-8 border border-border px-12 py-8 text-12 text-text">Cancel import</button></div>}
       {wizard.source === "new" && <section aria-label="Skill template" className="grid grid-cols-1 gap-8 sm:grid-cols-3">{([{ id: "blank", title: "Blank", note: "A clean starting point" }, { id: "checklist", title: "Checklist", note: "A sequence of checks" }, { id: "workflow", title: "Workflow", note: "Inputs, outputs and steps" }] as const).map(({ id, title, note }) => <button key={id} type="button" role="radio" aria-checked={wizard.details.template === id} onClick={() => setDetails({ template: id })} className={`rounded-8 border p-12 text-left ${wizard.details.template === id ? "border-accent bg-accent/10" : "border-border bg-surface"}`}><span className="block text-14 font-semibold text-text">{title}</span><span className="mt-4 block text-12 text-muted">{note}</span></button>)}</section>}
-      {wizard.source === "git" && <><label className="flex flex-col gap-5 text-13 text-text">Repository URL<input aria-label="Repository URL" value={wizard.details.repo_url} onChange={(event) => setDetails({ repo_url: event.target.value, fetched_repo_selections: [] })} placeholder="https://host/owner/repository.git" className="rounded-8 border border-border bg-surface px-10 py-8" /></label><label className="flex flex-col gap-5 text-13 text-text">Branch, tag or commit (optional)<input value={wizard.details.repo_reference} onChange={(event) => setDetails({ repo_reference: event.target.value, fetched_repo_selections: [] })} className="rounded-8 border border-border bg-surface px-10 py-8" /></label><p className="m-0 text-12 text-muted">Only public HTTPS repositories are supported. AgenTuna does not request or store Git credentials.</p></>}
-      {wizard.source === "git" && <section aria-label="Fetched repository skills" className="grid gap-10">
+      {wizard.source === "git" && <><label className="flex flex-col gap-4 text-13 text-text">Repository URL<input aria-label="Repository URL" value={wizard.details.repo_url} onChange={(event) => setDetails({ repo_url: event.target.value, fetched_repo_selections: [] })} placeholder="https://host/owner/repository.git" className="rounded-8 border border-border bg-surface px-12 py-8" /></label><label className="flex flex-col gap-4 text-13 text-text">Branch, tag or commit (optional)<input value={wizard.details.repo_reference} onChange={(event) => setDetails({ repo_reference: event.target.value, fetched_repo_selections: [] })} className="rounded-8 border border-border bg-surface px-12 py-8" /></label><p className="m-0 text-12 text-muted">Only public HTTPS repositories are supported. AgenTuna does not request or store Git credentials.</p></>}
+      {wizard.source === "git" && <section aria-label="Fetched repository skills" className="grid gap-12">
         <div className="flex flex-wrap items-center gap-8">
           <button type="button" disabled={busy || Boolean(activeImport) || !wizard.details.repo_url.trim()} onClick={() => void startSkillImport("git")} className="w-fit rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">{activeImport?.source === "git" ? "Fetching…" : "Fetch skills"}</button>
           <button type="button" disabled={!importCandidates.some((candidate) => candidate.name && !candidate.error)} onClick={() => selectAllValidImportCandidates("git")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Select all</button>
@@ -694,58 +739,72 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
         {candidateError && /auth|credential|permission denied|private|401|403/i.test(candidateError) && <p className="m-0 text-12 text-muted">This repository needs authentication. AgenTuna imports public repositories only — open the project page and use its public clone URL; no credentials are requested or stored.</p>}
         {candidateStatus && <p role="status" className="m-0 text-12 text-muted">{candidateStatus}</p>}
         {importCandidates.length === 0 && !candidateError && !activeImport && <p role="status" className="m-0 text-12 text-muted">Fetch a public repository to see its available skills.</p>}
-        <div className="grid min-w-0 gap-10 lg:grid-cols-2">
+        <div className="grid min-w-0 gap-12 lg:grid-cols-2">
           <div data-testid="git-import-candidate-list" ref={candidateListRef} onScroll={(event) => { candidateScrollTop.current = event.currentTarget.scrollTop; }} className="grid min-h-[320px] max-h-[420px] content-start gap-8 overflow-auto rounded-8 border border-border p-8">
             {importCandidates.map((candidate) => {
               const disabledReason = candidate.error ?? (!candidate.name ? "This folder does not contain a valid SKILL.md." : null);
               const selected = wizard.details.fetched_repo_selections.includes(candidate.id);
-              return <label key={candidate.id} title={disabledReason ?? undefined} className={`flex items-start gap-8 rounded-8 border p-10 text-13 text-text ${selected ? "border-accent bg-accent/10" : "border-border"}`}>
+              return <label key={candidate.id} title={disabledReason ?? undefined} className={`flex items-start gap-8 rounded-8 border p-12 text-13 text-text ${selected ? "border-accent bg-accent/10" : "border-border"}`}>
                 <input type="checkbox" disabled={Boolean(disabledReason)} checked={selected} onFocus={() => setPreviewedCandidateId(candidate.id)} onChange={(event) => toggleImportCandidate("git", candidate.id, event.target.checked)} />
-                <span className="grid gap-4"><span className="flex items-center gap-6"><strong>{candidate.name ?? "Invalid skill"}</strong><span className={`rounded-full px-6 py-2 text-10 ${disabledReason ? "bg-danger/10 text-danger" : "bg-success/10 text-success"}`}>{disabledReason ? "Invalid" : "Valid"}</span></span><span className="text-12 text-muted">{candidate.error ?? candidate.description ?? candidate.id}</span></span>
+                <span className="grid gap-4"><span className="flex items-center gap-4"><strong>{candidate.name ?? "Invalid skill"}</strong><span className={`rounded-full px-6 py-2 text-11 ${disabledReason ? "bg-danger/10 text-danger" : "bg-success/10 text-success"}`}>{disabledReason ? "Invalid" : "Valid"}</span></span><span className="text-12 text-muted">{candidate.error ?? candidate.description ?? candidate.id}</span></span>
               </label>;
             })}
           </div>
           {previewCandidate(previewedCandidate) ?? <p className="m-0 self-start rounded-8 border border-border p-12 text-12 text-muted">Select a valid skill to preview its SKILL.md.</p>}
         </div>
       </section>}
-      {wizard.source === "library" && <section aria-label="Library import" className="grid gap-12 rounded-10 border border-border p-12">
-        {libraryCatalogError && <p role="alert" className="m-0 text-13 text-danger">{libraryCatalogError}</p>}
-        {!libraryCatalog && !libraryCatalogError && <p role="status" className="m-0 text-13 text-muted">Loading skills from other scopes and projects…</p>}
-        {libraryCatalog && libraryCatalog.sources.length === 0 && <div role="status" className="grid gap-8 text-13 text-muted"><p className="m-0">No other skill sources are available.</p><button type="button" onClick={() => chooseSource("git")} className="w-fit rounded-8 border border-border px-12 py-8 text-13 text-text">Import from Git instead</button></div>}
-        {libraryCatalog && libraryCatalog.sources.length > 0 && <>
-          <label className="flex flex-col gap-5 text-13 text-text">Source
-            <select aria-label="Library source" value={librarySourceId} onChange={(event) => setLibrarySourceId(event.target.value)} className="rounded-8 border border-border bg-surface px-10 py-8">
-              {libraryCatalog.sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.count} skills{source.kind === "project" ? ` · ${source.id}` : ""}{source.last_used_at ? ` · last used ${new Date(source.last_used_at).toLocaleDateString()}` : ""}</option>)}
-            </select>
-          </label>
-          <p className="m-0 text-12 text-muted">{libraryCatalog.sources.length} sources · {libraryCatalog.sources.reduce((total, source) => total + source.count, 0)} skills · Target scope: {libraryCatalog.target_scope}</p>
-          <button type="button" disabled={!libraryCatalog.skills.some((skill) => skill.source_id === librarySourceId && !skill.error && !skill.clash_reason)} onClick={selectAllAvailableLibrarySkills} className="w-fit rounded-8 border border-border px-12 py-8 text-13 text-text">Select all available in this source</button>
-          <ul aria-label="Skills in selected source" className="m-0 grid gap-8 p-0">
-            {libraryCatalog.skills.filter((skill) => skill.source_id === librarySourceId).map((skill) => {
-              const disabledReason = skill.error ?? skill.clash_reason;
-              const selected = wizard.details.library_selections.includes(skill.id);
-              return <li key={skill.id} className={`list-none rounded-8 border p-10 ${selected ? "border-accent bg-accent/10" : "border-border"}`}>
-                <label title={disabledReason ?? undefined} className="flex items-start gap-8 text-13 text-text">
-                  <input type="checkbox" disabled={Boolean(disabledReason)} checked={selected} onChange={(event) => toggleLibrarySkill(skill.id, event.target.checked)} />
-                  <span className="grid gap-3"><span className="font-medium">{skill.name ?? "Invalid skill"}</span><span className="break-all text-11 text-muted">{skill.path}</span>{skill.description && <span className="text-12 text-muted">{skill.description}</span>}{disabledReason && <span className="text-12 text-danger">{disabledReason}</span>}</span>
-                </label>
-              </li>;
-            })}
-          </ul>
-          <section aria-label="Selected library skills" className="grid gap-6 rounded-8 bg-surface px-10 py-8 text-12 text-muted">
-            <strong className="font-medium text-text">Selected ({selectedLibrarySkills.length})</strong>
-            {selectedLibrarySkills.length ? selectedLibrarySkills.map((skill) => <span key={skill.id}>{skill.name ?? skill.id} · {skill.source_label}</span>) : <span>No skills selected</span>}
-          </section>
-          <fieldset className="grid gap-8 rounded-8 border border-border p-10">
-            <legend className="px-4 text-13 font-medium text-text">Import behavior</legend>
-            <label className="flex items-start gap-8 text-13 text-text"><input type="radio" name="library-transfer-mode" checked={libraryTransferMode === "copy"} onChange={() => setDetails({ library_mode: "copy" })} /><span><strong>Copy</strong><span className="block text-12 text-muted">Make an independent copy in the target library.</span></span></label>
-            <label className="flex items-start gap-8 text-13 text-text"><input type="radio" name="library-transfer-mode" checked={libraryTransferMode === "link"} onChange={() => setDetails({ library_mode: "link" })} /><span><strong>Link</strong><span className="block text-12 text-muted">Keep the source package in place and link to it.</span></span></label>
-          </fieldset>
-        </>}
-      </section>}
-      {wizard.source === "folder" && <div className="flex items-end gap-8"><label className="flex flex-1 flex-col gap-5 text-13 text-text">Folder path<input aria-label="Folder path" value={wizard.details.folder_path} onChange={(event) => setDetails({ folder_path: event.target.value, folder_selections: [] })} placeholder="Choose a folder" className="rounded-8 border border-border bg-surface px-10 py-8" /></label><button type="button" disabled={busy} onClick={() => void chooseImportPath("folder")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Browse…</button><button type="button" disabled={busy || Boolean(activeImport) || !wizard.details.folder_path} onClick={() => void startSkillImport("folder")} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">{activeImport?.source === "folder" ? "Scanning…" : "Scan folder"}</button></div>}
-      {wizard.source === "zip" && <div className="flex items-end gap-8"><label className="flex flex-1 flex-col gap-5 text-13 text-text">ZIP archive path<input aria-label="ZIP path" value={wizard.details.zip_path} onChange={(event) => setDetails({ zip_path: event.target.value, zip_selections: [] })} placeholder="Choose a .zip file" className="rounded-8 border border-border bg-surface px-10 py-8" /></label><button type="button" disabled={busy} onClick={() => void chooseImportPath("zip")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Browse…</button><button type="button" disabled={busy || Boolean(activeImport) || !wizard.details.zip_path} onClick={() => void startSkillImport("zip")} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">{activeImport?.source === "zip" ? "Scanning…" : "Scan ZIP"}</button></div>}
-      {(wizard.source === "folder" || wizard.source === "zip") && <section aria-label="Detected skills" className="grid gap-10">
+      {wizard.source === "library" && (() => {
+        const selectedSource = libraryCatalog?.sources.find((source) => source.id === librarySourceId) ?? null;
+        const sourceSkills = libraryCatalog?.skills.filter((skill) => skill.source_id === librarySourceId) ?? [];
+        const emptyLibrary = libraryCatalog !== null && libraryCatalog.sources.length === 0;
+        return <section aria-label="Library import" className="grid gap-12 rounded-10 border border-border bg-surface p-12 lg:grid-cols-[240px_minmax(0,1fr)]">
+          <div className="grid content-start gap-4">
+            <h3 className="mb-2 mt-0 text-11 font-semibold uppercase tracking-wide text-text-muted">Sources</h3>
+            {libraryCatalogError && <p role="alert" className="m-0 text-13 text-danger">{libraryCatalogError}</p>}
+            {!libraryCatalog && !libraryCatalogError && <p role="status" className="m-0 text-13 text-text-muted">Loading skills from other scopes and projects…</p>}
+            {emptyLibrary && <div role="status" className="grid gap-8 rounded-8 border border-border p-12 text-13 text-text-secondary">
+              <p className="m-0">No skills found in <code className="break-all font-mono text-12 text-text">{libraryCatalog.search_root}</code>. Choose a folder…</p>
+              <button type="button" onClick={() => chooseSource("folder")} className="w-fit rounded-8 border border-border px-12 py-8 text-12 text-text">Choose a folder…</button>
+            </div>}
+            {libraryCatalog?.sources.map((source) => <button type="button" key={source.id} aria-pressed={source.id === librarySourceId} onClick={() => setLibrarySourceId(source.id)} className={`flex items-center justify-between gap-8 rounded-8 border px-12 py-8 text-left text-13 ${source.id === librarySourceId ? "border-border bg-raised font-medium text-text" : "border-transparent text-text-secondary hover:bg-overlay"}`}><span className="min-w-0 truncate">{source.label}</span><span className="shrink-0 font-mono text-12 text-text-muted">{source.count}</span></button>)}
+            {libraryCatalog && libraryCatalog.skipped.length > 0 && <div className="mt-4 grid gap-4 rounded-8 border border-warning/30 bg-warning/10 p-8 text-11 text-warning">{libraryCatalog.skipped.map((skip) => <p key={skip.path} className="m-0"><strong>{skip.label}</strong>: {skip.reason}</p>)}</div>}
+          </div>
+          <div className="grid min-w-0 content-start gap-12">
+            {selectedSource === null ? <p className="m-0 text-12 text-text-muted">Choose a source to list its skills.</p> : <>
+              <p className="m-0 truncate rounded-6 bg-overlay px-12 py-8 font-mono text-11 text-text-secondary" title={selectedSource.id}>{selectedSource.id}</p>
+              <div className="flex items-center justify-between gap-8"><span className="text-11 uppercase tracking-wide text-text-muted">{sourceSkills.length} skill{sourceSkills.length === 1 ? "" : "s"}</span><button type="button" disabled={!sourceSkills.some((skill) => !skill.error && !skill.clash_reason)} onClick={selectAllAvailableLibrarySkills} className="rounded-6 border border-border px-12 py-8 text-11 text-text">Select all</button></div>
+              <ul aria-label="Skills in selected source" className="m-0 flex max-h-[360px] flex-col gap-4 overflow-auto p-0">
+                {sourceSkills.map((skill) => {
+                  const alreadyInRepo = skill.clash_reason !== null;
+                  const disabledReason = skill.error ?? skill.clash_reason;
+                  const selected = wizard.details.library_selections.includes(skill.id);
+                  return <li key={skill.id} className={`list-none rounded-8 border p-12 ${selected ? "border-accent bg-accent/10" : "border-border"}`}>
+                    <label title={disabledReason ?? undefined} className="flex items-start gap-8 text-13 text-text">
+                      <input type="checkbox" disabled={Boolean(disabledReason)} checked={selected} onChange={(event) => toggleLibrarySkill(skill.id, event.target.checked)} />
+                      <span className="grid min-w-0 gap-4"><span className="flex flex-wrap items-center gap-8"><strong>{skill.name ?? "Invalid skill"}</strong>{alreadyInRepo && <span className="inline-flex items-center gap-4 rounded-4 bg-warning/15 px-6 py-2 text-11 text-warning"><i aria-hidden="true" className="size-4 rounded-full bg-warning" />Already in this repo</span>}</span><span className="text-12 text-text-muted">{skill.description ?? skill.path}</span>{disabledReason && !alreadyInRepo && <span className="text-11 text-danger">{disabledReason}</span>}</span>
+                    </label>
+                  </li>;
+                })}
+              </ul>
+              <section aria-label="Selected library skills" className="grid gap-4 rounded-8 bg-overlay px-12 py-8 text-12 text-text-muted">
+                <strong className="font-medium text-text">Selected ({selectedLibrarySkills.length})</strong>
+                {selectedLibrarySkills.length ? selectedLibrarySkills.map((skill) => <span key={skill.id}>{skill.name ?? skill.id} · {skill.source_label}</span>) : <span>No skills selected</span>}
+              </section>
+              <fieldset className="grid gap-8 rounded-8 border border-border p-12">
+                <legend className="px-4 text-13 font-medium text-text">How to add them</legend>
+                <div role="radiogroup" aria-label="Library import behavior" className="grid grid-cols-2 gap-4 rounded-6 bg-overlay p-4">
+                  <button type="button" role="radio" aria-checked={libraryTransferMode === "copy"} onClick={() => setDetails({ library_mode: "copy" })} className={`rounded-6 px-12 py-8 text-12 font-medium ${libraryTransferMode === "copy" ? "bg-raised text-text" : "text-text-secondary"}`}>Copy</button>
+                  <button type="button" role="radio" aria-checked={libraryTransferMode === "link"} onClick={() => setDetails({ library_mode: "link" })} className={`rounded-6 px-12 py-8 text-12 font-medium ${libraryTransferMode === "link" ? "bg-raised text-text" : "text-text-secondary"}`}>Link <span className="font-normal text-text-muted">(stays in sync)</span></button>
+                </div>
+                <p className="m-0 px-4 text-11 text-text-muted">Copy makes an independent copy. Link points at the original folder, so edits there show up here.</p>
+              </fieldset>
+            </>}
+          </div>
+        </section>;
+      })()}
+      {wizard.source === "folder" && <div className="flex items-end gap-8"><label className="flex flex-1 flex-col gap-4 text-13 text-text">Folder path<input aria-label="Folder path" value={wizard.details.folder_path} onChange={(event) => setDetails({ folder_path: event.target.value, folder_selections: [] })} placeholder="Choose a folder" className="rounded-8 border border-border bg-surface px-12 py-8" /></label><button type="button" disabled={busy} onClick={() => void chooseImportPath("folder")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Browse…</button><button type="button" disabled={busy || Boolean(activeImport) || !wizard.details.folder_path} onClick={() => void startSkillImport("folder")} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">{activeImport?.source === "folder" ? "Scanning…" : "Scan folder"}</button></div>}
+      {wizard.source === "zip" && <div className="flex items-end gap-8"><label className="flex flex-1 flex-col gap-4 text-13 text-text">ZIP archive path<input aria-label="ZIP path" value={wizard.details.zip_path} onChange={(event) => setDetails({ zip_path: event.target.value, zip_selections: [] })} placeholder="Choose a .zip file" className="rounded-8 border border-border bg-surface px-12 py-8" /></label><button type="button" disabled={busy} onClick={() => void chooseImportPath("zip")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Browse…</button><button type="button" disabled={busy || Boolean(activeImport) || !wizard.details.zip_path} onClick={() => void startSkillImport("zip")} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">{activeImport?.source === "zip" ? "Scanning…" : "Scan ZIP"}</button></div>}
+      {(wizard.source === "folder" || wizard.source === "zip") && <section aria-label="Detected skills" className="grid gap-12">
         <div className="flex flex-wrap items-center gap-8">
           <button type="button" disabled={!importCandidates.some((candidate) => candidate.name && !candidate.error)} onClick={() => selectAllValidImportCandidates(wizard.source as "folder" | "zip")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Select all</button>
           <button type="button" disabled={wizard.source === "folder" ? wizard.details.folder_selections.length === 0 : wizard.details.zip_selections.length === 0} onClick={() => clearImportSelection(wizard.source as "folder" | "zip")} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Select none</button>
@@ -753,44 +812,43 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
         {candidateError && <p role="alert" className="m-0 text-13 text-danger">{candidateError}</p>}
         {candidateStatus && <p role="status" className="m-0 text-12 text-muted">{candidateStatus}</p>}
         {importCandidates.length === 0 && !candidateError && !activeImport && <p role="status" className="m-0 text-12 text-muted">Scan a folder or ZIP file to find SKILL.md files.</p>}
-        <div className="grid min-w-0 gap-10 lg:grid-cols-2">
+        <div className="grid min-w-0 gap-12 lg:grid-cols-2">
           <div ref={candidateListRef} onScroll={(event) => { candidateScrollTop.current = event.currentTarget.scrollTop; }} className="grid min-h-[320px] max-h-[420px] content-start gap-8 overflow-auto rounded-8 border border-border p-8">
             {importCandidates.map((candidate) => {
               const source = wizard.source === "folder" ? "folder" : "zip";
               const disabledReason = candidate.error ?? (!candidate.name ? "This folder does not contain a valid SKILL.md." : null);
               const selected = selectedImportIds(source).includes(candidate.id);
-              return <label key={candidate.id} title={disabledReason ?? undefined} className={`flex items-start gap-8 rounded-8 border p-10 text-13 text-text ${selected ? "border-accent bg-accent/10" : "border-border"}`}>
+              return <label key={candidate.id} title={disabledReason ?? undefined} className={`flex items-start gap-8 rounded-8 border p-12 text-13 text-text ${selected ? "border-accent bg-accent/10" : "border-border"}`}>
                 <input type="checkbox" disabled={Boolean(disabledReason)} checked={selected} onFocus={() => setPreviewedCandidateId(candidate.id)} onChange={(event) => toggleImportCandidate(source, candidate.id, event.target.checked)} />
-                <span className="grid gap-4"><span className="flex items-center gap-6"><strong>{candidate.name ?? "Invalid skill"}</strong><span className={`rounded-full px-6 py-2 text-10 ${disabledReason ? "bg-danger/10 text-danger" : "bg-success/10 text-success"}`}>{disabledReason ? "Invalid" : "Valid"}</span></span><span className="text-12 text-muted">{candidate.description ?? candidate.error ?? candidate.id}</span></span>
+                <span className="grid gap-4"><span className="flex items-center gap-4"><strong>{candidate.name ?? "Invalid skill"}</strong><span className={`rounded-full px-6 py-2 text-11 ${disabledReason ? "bg-danger/10 text-danger" : "bg-success/10 text-success"}`}>{disabledReason ? "Invalid" : "Valid"}</span></span><span className="text-12 text-muted">{candidate.description ?? candidate.error ?? candidate.id}</span></span>
               </label>;
             })}
           </div>
           {previewCandidate(previewedCandidate) ?? <p className="m-0 self-start rounded-8 border border-border p-12 text-12 text-muted">Select a valid skill to preview its SKILL.md.</p>}
         </div>
       </section>}
-      {requiresName && <label className="flex flex-col gap-5 text-13 text-text">Skill name<input aria-label="Skill name" value={wizard.name} onChange={(event) => void send({ type: "set_name", payload: event.target.value })} placeholder="Name your skill" className="rounded-8 border border-border bg-surface px-10 py-8" /></label>}
-      {wizard.source === "marketplace" && <div className="grid gap-10 rounded-8 border border-border bg-surface p-12"><p role="status" className="m-0 text-13 text-muted">{marketplacePolicy ? marketplacePolicy.marketplace_enabled ? "Marketplace search is enabled. Search runs only after you press Search." : marketplacePolicy.offline ? "Offline policy is active; cached marketplace results may be available." : "Marketplace browsing is unavailable because network policy disables it." : "Checking marketplace network policy…"}</p>{marketplacePolicy && (marketplacePolicy.marketplace_enabled || marketplacePolicy.offline) && <div className="flex gap-8"><input aria-label="Search marketplace" value={marketplaceQuery} onChange={(event) => setMarketplaceQuery(event.target.value)} placeholder="Search skills.sh" className="min-w-0 flex-1 rounded-8 border border-border bg-surface px-10 py-8" /><button type="button" disabled={busy || !marketplaceQuery.trim()} onClick={() => void searchMarketplace(false)} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">Search</button><button type="button" disabled={busy || !marketplaceQuery.trim()} onClick={() => void searchMarketplace(true)} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Refresh</button></div>}{marketplaceError && <p role="alert" className="m-0 text-13 text-danger">{marketplaceError}</p>}{marketplaceResults && <><p className="m-0 text-12 text-muted">{marketplaceResults.provenance}{marketplaceResults.offline ? " · cached/offline" : ""}{marketplaceResults.stale ? " · stale" : ""}</p>{marketplaceResults.results.map((result) => <button key={result.id} type="button" aria-pressed={wizard.details.marketplace_id === result.id} onClick={() => { setDetails({ marketplace_id: result.id, repo_url: result.source }); void send({ type: "set_name", payload: result.name }); }} className={`grid gap-4 rounded-8 border p-10 text-left ${wizard.details.marketplace_id === result.id ? "border-accent bg-accent/10" : "border-border"}`}><span className="text-14 font-semibold text-text">{result.name}</span><span className="text-12 text-muted">{result.author} · {formatInstalls(result.installs)} installs</span><span className="break-all text-12 text-muted">Source: {result.source}</span><span className="text-12 text-muted">{result.description}</span></button>)}</>}</div>}
-      {wizard.source === "new" && <><label className="flex flex-col gap-5 text-13 text-text">Use when<textarea aria-label="Use when description" maxLength={1024} value={wizard.details.description} onChange={(event) => setDetails({ description: event.target.value })} className="min-h-80 rounded-8 border border-border bg-surface px-10 py-8" /><span aria-live="polite" className={`text-12 ${wizard.details.description.length >= 1024 ? "text-danger" : "text-muted"}`}>{wizard.details.description.length}/1024</span></label><div className="grid gap-12 lg:grid-cols-2"><section className="rounded-8 border border-border p-12"><h3 className="m-0 mb-8 text-13 font-semibold text-text">Preview</h3>{wizard.name.trim() ? <pre aria-label="Generated SKILL.md preview" className="m-0 max-h-[400px] overflow-auto whitespace-pre-wrap text-12 text-text">{templatePreview?.markdown ?? "Generating preview…"}</pre> : <p className="m-0 text-12 text-muted">Enter a name to preview the generated SKILL.md.</p>}</section><div className="self-start rounded-8 border border-border p-12 text-12 text-muted">Slug: {templatePreview?.slug ?? "—"}{templatePreview?.name_error && <p role="alert" className="text-danger">{templatePreview.name_error}</p>}{templatePreview?.description_error && <p role="alert" className="text-danger">{templatePreview.description_error}</p>}</div></div></>}
+      {requiresName && <label className="flex flex-col gap-4 text-13 text-text">Skill name<input aria-label="Skill name" value={wizard.name} onChange={(event) => void send({ type: "set_name", payload: event.target.value })} placeholder="Name your skill" className="rounded-8 border border-border bg-surface px-12 py-8" /></label>}
+      {wizard.source === "marketplace" && <div className="grid gap-12 rounded-8 border border-border bg-surface p-12"><p role="status" className="m-0 text-13 text-muted">{marketplacePolicy ? marketplacePolicy.marketplace_enabled ? "Marketplace search is enabled. Search runs only after you press Search." : marketplacePolicy.offline ? "Offline policy is active; cached marketplace results may be available." : "Marketplace browsing is unavailable because network policy disables it." : "Checking marketplace network policy…"}</p>{marketplacePolicy && (marketplacePolicy.marketplace_enabled || marketplacePolicy.offline) && <div className="flex gap-8"><input aria-label="Search marketplace" value={marketplaceQuery} onChange={(event) => setMarketplaceQuery(event.target.value)} placeholder="Search skills.sh" className="min-w-0 flex-1 rounded-8 border border-border bg-surface px-12 py-8" /><button type="button" disabled={busy || !marketplaceQuery.trim()} onClick={() => void searchMarketplace(false)} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">Search</button><button type="button" disabled={busy || !marketplaceQuery.trim()} onClick={() => void searchMarketplace(true)} className="rounded-8 border border-border px-12 py-8 text-13 text-text">Refresh</button></div>}{marketplaceError && <p role="alert" className="m-0 text-13 text-danger">{marketplaceError}</p>}{marketplaceResults && <><p className="m-0 text-12 text-muted">{marketplaceResults.provenance}{marketplaceResults.offline ? " · cached/offline" : ""}{marketplaceResults.stale ? " · stale" : ""}</p>{marketplaceResults.results.map((result) => <button key={result.id} type="button" aria-pressed={wizard.details.marketplace_id === result.id} onClick={() => { setDetails({ marketplace_id: result.id, repo_url: result.source }); void send({ type: "set_name", payload: result.name }); }} className={`grid gap-4 rounded-8 border p-12 text-left ${wizard.details.marketplace_id === result.id ? "border-accent bg-accent/10" : "border-border"}`}><span className="text-14 font-semibold text-text">{result.name}</span><span className="text-12 text-muted">{result.author} · {formatInstalls(result.installs)} installs</span><span className="break-all text-12 text-muted">Source: {result.source}</span><span className="text-12 text-muted">{result.description}</span></button>)}</>}</div>}
+      {wizard.source === "new" && <><label className="flex flex-col gap-4 text-13 text-text">Use when<textarea aria-label="Use when description" maxLength={1024} value={wizard.details.description} onChange={(event) => setDetails({ description: event.target.value })} className="min-h-80 rounded-8 border border-border bg-surface px-12 py-8" /><span aria-live="polite" className={`text-12 ${wizard.details.description.length >= 1024 ? "text-danger" : "text-muted"}`}>{wizard.details.description.length}/1024</span></label><div className="grid gap-12 lg:grid-cols-2"><section className="rounded-8 border border-border p-12"><h3 className="m-0 mb-8 text-13 font-semibold text-text">Preview</h3>{wizard.name.trim() ? <pre aria-label="Generated SKILL.md preview" className="m-0 max-h-[400px] overflow-auto whitespace-pre-wrap text-12 text-text">{templatePreview?.markdown ?? "Generating preview…"}</pre> : <p className="m-0 text-12 text-muted">Enter a name to preview the generated SKILL.md.</p>}</section><div className="self-start rounded-8 border border-border p-12 text-12 text-muted">Slug: {templatePreview?.slug ?? "—"}{templatePreview?.name_error && <p role="alert" className="text-danger">{templatePreview.name_error}</p>}{templatePreview?.description_error && <p role="alert" className="text-danger">{templatePreview.description_error}</p>}</div></div></>}
     </section>}
-    {wizard.step === "scope_agents" && <section className="flex flex-col gap-14" aria-labelledby="scope-heading">
-      <div><h2 id="scope-heading" className="m-0 text-18 font-semibold text-text">Scope &amp; agents</h2><p className="m-0 mt-5 text-13 text-muted">Pick where the skill lives and which agents load it.</p></div>
-      {scopeOptionsError && <p role="alert" className="m-0 rounded-8 border border-danger/30 bg-danger/10 p-10 text-12 text-danger">{scopeOptionsError}</p>}
+    {wizard.step === "scope_agents" && <section className="flex flex-col gap-12" aria-label="Scope & agents">
+      {scopeOptionsError && <p role="alert" className="m-0 rounded-8 border border-danger/30 bg-danger/10 p-12 text-12 text-danger">{scopeOptionsError}</p>}
       <section aria-label="Destination scope" className="grid gap-8">
         <h3 className="m-0 text-13 font-semibold text-text">Scope</h3>
-        <div role="radiogroup" aria-label="Skill destination scope" className="grid grid-cols-1 gap-10 md:grid-cols-3">
+        <div role="radiogroup" aria-label="Skill destination scope" className="grid grid-cols-1 gap-12 md:grid-cols-3">
           {scopeOptions?.scopes.filter((card) => card.scope !== "local" || localScopeExpanded || wizard.scope === "local").map((card) => {
             const selected = wizard.scope === card.scope;
             const label = card.scope === "global" ? "Global" : card.scope === "user" ? "User" : card.scope === "project" ? "Project" : "Local";
             return <button key={card.scope} type="button" role="radio" aria-checked={selected} disabled={!card.available || busy} onClick={() => void send({ type: "set_scope", payload: card.scope })} className={`grid min-h-[122px] content-start gap-7 rounded-10 border p-12 text-left ${selected ? "border-accent bg-accent/10" : "border-border bg-surface"} disabled:cursor-not-allowed disabled:opacity-55`}>
               <span className="flex items-center justify-between gap-8"><strong className="text-14 text-text">{label}</strong>{selected && <span className="text-11 font-semibold text-accent">Selected</span>}</span>
               <span className="text-12 text-muted">{card.note}</span>
-              {card.store_path && <code className="break-all text-10 text-text-secondary">{card.store_path}</code>}
+              {card.store_path && <code className="break-all text-11 text-text-secondary">{card.store_path}</code>}
               {card.disabled_reason && <span className="text-11 text-danger">{card.disabled_reason}</span>}
               {card.lock_note && <span role="note" className="text-11 text-warning">{card.lock_note}</span>}
             </button>;
           })}
         </div>
-        <button type="button" aria-expanded={localScopeExpanded || wizard.scope === "local"} onClick={() => setLocalScopeExpanded((expanded) => !expanded)} className="w-fit rounded-6 px-8 py-5 text-12 text-accent hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus">{localScopeExpanded || wizard.scope === "local" ? "Hide Local scope" : "Show Local scope"}</button>
+        <button type="button" aria-expanded={localScopeExpanded || wizard.scope === "local"} onClick={() => setLocalScopeExpanded((expanded) => !expanded)} className="w-fit rounded-6 px-8 py-8 text-12 text-accent hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus">{localScopeExpanded || wizard.scope === "local" ? "Hide Local scope" : "Show Local scope"}</button>
       </section>
       <section aria-label="Destination agents" className="grid gap-8">
         <h3 className="m-0 text-13 font-semibold text-text">Agents</h3>
@@ -801,16 +859,16 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
             const checked = wizard.agents.includes(agent.agent);
             const disabled = agent.disabled_reason !== null;
             const targetPaths = agent.targets.filter((target) => selectedSkillNames.includes(target.name));
-            return <div key={agent.agent} className="grid gap-5 border-b border-border py-8 last:border-0">
+            return <div key={agent.agent} className="grid gap-4 border-b border-border py-8 last:border-0">
               <div className="flex flex-wrap items-start justify-between gap-8">
                 <label className={`flex min-w-0 items-start gap-8 text-13 ${disabled ? "text-text-muted" : "text-text"}`}>
                   <input type="checkbox" disabled={disabled || busy} checked={checked} onChange={(event) => {
                     const agents = event.target.checked ? [...wizard.agents, agent.agent] : wizard.agents.filter((entry) => entry !== agent.agent);
                     void send({ type: "set_agents", payload: agents });
                   }} />
-                  <span className="grid gap-3"><strong>{agent.name}</strong>{agent.disabled_reason && <span className="text-11 text-danger">{agent.disabled_reason}</span>}</span>
+                  <span className="grid gap-4"><strong>{agent.name}</strong>{agent.disabled_reason && <span className="text-11 text-danger">{agent.disabled_reason}</span>}</span>
                 </label>
-                {disabled && <button type="button" disabled={agentPathLoading} onClick={() => void setAgentPath(agent.agent)} className="rounded-6 border border-border px-8 py-5 text-11 text-text hover:bg-overlay disabled:opacity-50">{agentPathLoading ? "Loading…" : "Set path"}</button>}
+                {disabled && <button type="button" disabled={agentPathLoading} onClick={() => void setAgentPath(agent.agent)} className="rounded-6 border border-border px-8 py-8 text-11 text-text hover:bg-overlay disabled:opacity-50">{agentPathLoading ? "Loading…" : "Set path"}</button>}
               </div>
               {agent.skills_dir && <code className="break-all pl-24 text-11 text-text-secondary">Skills path: {agent.skills_dir}</code>}
               {checked && targetPaths.map((target) => <code key={`${agent.agent}:${target.name}`} className="break-all pl-24 text-11 text-text-secondary">{target.name}: {target.path}</code>)}
@@ -821,47 +879,58 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
         </fieldset>
       </section>
       {scopeOptions?.clashes.length ? <section aria-label="Skill name checks" className="grid gap-8">
-        {scopeOptions.clashes.map((clash) => <div key={clash.name} role={clash.blocking.length ? "alert" : "status"} className={`grid gap-4 rounded-8 border p-10 text-12 ${clash.blocking.length ? "border-danger/30 bg-danger/10 text-danger" : clash.warnings.length ? "border-warning/30 bg-warning/10 text-warning" : "border-success/30 bg-success/10 text-success"}`}>
+        {scopeOptions.clashes.map((clash) => <div key={clash.name} role={clash.blocking.length ? "alert" : "status"} className={`grid gap-4 rounded-8 border p-12 text-12 ${clash.blocking.length ? "border-danger/30 bg-danger/10 text-danger" : clash.warnings.length ? "border-warning/30 bg-warning/10 text-warning" : "border-success/30 bg-success/10 text-success"}`}>
           <strong>{clash.blocking.length ? "Name clash" : clash.warnings.length ? "Existing copies" : "No name clash"} · {clash.name}</strong>
           {clash.blocking.map((message) => <span key={message}>{message}</span>)}
           {clash.warnings.map((message) => <span key={message}>{message}</span>)}
         </div>)}
-      </section> : scopeOptions && selectedSkillNames.length > 0 && wizard.scope && <p role="status" className="m-0 rounded-8 border border-success/30 bg-success/10 p-10 text-12 text-success">No name clash for {selectedSkillNames.join(", ")} in {wizard.scope}.</p>}
+      </section> : scopeOptions && selectedSkillNames.length > 0 && wizard.scope && <p role="status" className="m-0 rounded-8 border border-success/30 bg-success/10 p-12 text-12 text-success">No name clash for {selectedSkillNames.join(", ")} in {wizard.scope}.</p>}
     </section>}
-    {wizard.step === "review" && activeApplyJob && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-10 rounded-8 border border-accent/30 bg-accent/5 p-10 text-13 text-text"><span>{applyProgress?.label ?? "Creating skill…"}</span><progress aria-label="Skill creation progress" max={1} value={applyProgress?.fraction ?? undefined} className="min-w-[120px] flex-1" /></div>}
-    {wizard.step === "review" && <section className="flex flex-col gap-12">
-      <h2 className="m-0 text-18 font-semibold text-text">Review skill</h2>
-      <div className="grid grid-cols-1 items-start gap-14 lg:grid-cols-2">
+    {wizard.step === "review" && activeApplyJob && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-12 rounded-8 border border-accent/30 bg-accent/5 p-12 text-13 text-text"><span>{applyProgress?.label ?? "Creating skill…"}</span><progress aria-label="Skill creation progress" max={1} value={applyProgress?.fraction ?? undefined} className="min-w-[120px] flex-1" /></div>}
+    {wizard.step === "review" && <section className="flex flex-col gap-12" aria-label="Review">
+      <div className="grid grid-cols-1 items-start gap-12 lg:grid-cols-2">
         <section aria-label="Summary" className="grid content-start gap-12 rounded-10 border border-border bg-surface p-16">
           <h3 className="m-0 text-14 font-semibold text-text">Summary</h3>
-          <dl className="grid gap-10 text-13">
-            <div className="grid gap-3"><dt className="text-10 uppercase text-muted">Name</dt><dd className="m-0 text-text">{wizard.name || preview?.items.map((item) => item.name).join(", ") || sourceSelection}</dd></div>
-            <div className="grid gap-3"><dt className="text-10 uppercase text-muted">Source</dt><dd className="m-0 text-text">{labelForSource}</dd></div>
-            <div className="grid gap-3"><dt className="text-10 uppercase text-muted">Source selection</dt><dd className="m-0 text-text">{sourceSelection}</dd></div>
-            <div className="grid gap-3"><dt className="text-10 uppercase text-muted">Scope</dt><dd className="m-0 text-text">{wizard.scope}</dd></div>
-            <div className="grid gap-3"><dt className="text-10 uppercase text-muted">Agents</dt><dd className="m-0 text-text">{wizard.agents.join(", ")}</dd></div>
+          <dl className="grid gap-12 text-13">
+            <div className="grid gap-4"><dt className="text-11 uppercase text-muted">Name</dt><dd className="m-0 text-text">{wizard.name || preview?.items.map((item) => item.name).join(", ") || sourceSelection}</dd></div>
+            <div className="grid gap-4"><dt className="text-11 uppercase text-muted">Source</dt><dd className="m-0 text-text">{labelForSource}</dd></div>
+            <div className="grid gap-4"><dt className="text-11 uppercase text-muted">Source selection</dt><dd className="m-0 text-text">{sourceSelection}</dd></div>
+            <div className="grid gap-4"><dt className="text-11 uppercase text-muted">Scope</dt><dd className="m-0 text-text">{wizard.scope}</dd></div>
+            <div className="grid gap-4"><dt className="text-11 uppercase text-muted">Agents</dt><dd className="m-0 text-text">{wizard.agents.join(", ")}</dd></div>
           </dl>
-          {wizard.scope === "local" && <p className="m-0 rounded-8 border border-warning/30 bg-warning/10 p-10 text-12 text-warning"><strong>Local</strong> — only you in this repo; its files are not committed to Git.</p>}
+          {wizard.scope === "local" && <p className="m-0 rounded-8 border border-warning/30 bg-warning/10 p-12 text-12 text-warning"><strong>Local</strong> — only you in this repo; its files are not committed to Git.</p>}
         </section>
         {preview ? <section aria-label="Where files go" className="grid content-start gap-12 rounded-10 border border-border bg-surface p-16">
           <h3 className="m-0 text-14 font-semibold text-text">Where files go</h3>
-          {preview.store_init && <p aria-label="Store creation" className="m-0 flex flex-wrap items-baseline gap-6 rounded-8 border border-border bg-surface p-8 text-12 text-text" data-slot="skill-store-init"><strong>Create store at</strong><code className="break-all">{preview.store_init.path}</code><span className="text-muted">({preview.store_init.files_created} new entries, reviewed with this import)</span></p>}
-          {preview.files.length > 0 && <ul aria-label="Planned file paths" className="m-0 grid gap-6 p-0 text-12 text-text">{preview.files.map((file) => <li key={`${file.path}:${file.package_path}`} className="list-inside list-disc break-all">{file.path}{file.diff && <details className="ml-16"><summary className="cursor-pointer">Review existing-file diff</summary><pre className="overflow-auto whitespace-pre-wrap">{file.diff}</pre></details>}</li>)}</ul>}
-          {preview.deployments.length > 0 && <ul aria-label="Planned deployments" className="m-0 grid gap-6 p-0 text-12 text-text">{preview.deployments.map((deployment) => <li key={deployment.agent} className="list-inside list-disc break-all">{deployment.agent}: {deployment.mode} → {deployment.path}</li>)}</ul>}
-          {preview.items.length > 0 && <ul aria-label="Reviewed skill package transfers" className="m-0 grid gap-6 rounded-8 border border-border p-10 text-12 text-text">{preview.items.map((item) => <li key={`${item.name}:${item.target_path}`} className="grid gap-3 break-all"><strong>{item.mode === "link" ? "Link" : "Copy"} · {item.name}</strong><span>{item.source_path ?? "New skill"} → {item.target_path}</span></li>)}</ul>}
+          {preview.store_init && <p aria-label="Store creation" className="m-0 flex flex-wrap items-baseline gap-4 rounded-8 border border-border bg-surface p-8 text-12 text-text" data-slot="skill-store-init"><strong>Create store at</strong><code className="break-all">{preview.store_init.path}</code><span className="text-muted">({preview.store_init.files_created} new entries, reviewed with this import)</span></p>}
+          {preview.files.length > 0 && <ul aria-label="Planned file paths" className="m-0 grid gap-4 p-0 text-12 text-text">{preview.files.map((file) => <li key={`${file.path}:${file.package_path}`} className="list-inside list-disc break-all">{file.path}{file.diff && <details className="ml-16"><summary className="cursor-pointer">Review existing-file diff</summary><pre className="overflow-auto whitespace-pre-wrap">{file.diff}</pre></details>}</li>)}</ul>}
+          {preview.deployments.length > 0 && <ul aria-label="Planned deployments" className="m-0 grid gap-4 p-0 text-12 text-text">{preview.deployments.map((deployment) => <li key={deployment.agent} className="list-inside list-disc break-all">{deployment.agent}: {deployment.mode} → {deployment.path}</li>)}</ul>}
+          {preview.items.length > 0 && <ul aria-label="Reviewed skill package transfers" className="m-0 grid gap-4 rounded-8 border border-border p-12 text-12 text-text">{preview.items.map((item) => <li key={`${item.name}:${item.target_path}`} className="grid gap-4 break-all"><strong>{item.mode === "link" ? "Link" : "Copy"} · {item.name}</strong><span>{item.source_path ?? "New skill"} → {item.target_path}</span></li>)}</ul>}
           {preview.stage_available && <label className="flex items-center gap-8 text-13 text-text"><input type="checkbox" checked={stageRequested} onChange={(event) => { const stage = event.target.checked; setStageRequested(stage); void refreshPreview(stage); }} />Stage these project-scope paths with Git</label>}
           {preview.requires_overwrite_confirmation && <label className="flex items-start gap-8 text-13 text-text"><input type="checkbox" checked={confirmOverwrites} onChange={(event) => setConfirmOverwrites(event.target.checked)} />I reviewed the diffs and confirm replacing these existing files.</label>}
           <div className="grid gap-4 border-t border-border pt-10">
-            <span className="text-10 uppercase text-muted">AgenTuna store</span>
+            <span className="text-11 uppercase text-muted">AgenTuna store</span>
             <code className="break-all text-12 text-text">{preview.canonical_dir}</code>
             <span className="text-11 text-muted">Paths and deployment modes match the reviewed plan.</span>
           </div>
         </section> : <p role="status" className="m-0 text-12 text-muted">Preparing the exact file plan…</p>}
       </div>
     </section>}
-    {wizard.step === "done" && outcome && <section role="status" className="mx-auto flex w-full max-w-[650px] flex-col items-center gap-14 py-24 text-center"><span aria-hidden="true" className="grid h-20 w-20 place-items-center rounded-full bg-success/15 text-success"><svg viewBox="0 0 24 24" className="h-10 w-10" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m5 12 4 4L19 6" /></svg></span><h2 className="m-0 text-24 font-semibold text-text">{outcome.skill_names.length === 1 ? `${outcome.skill_names[0]} is ready` : `${outcome.skill_names.length} skills are ready`}</h2><p className="m-0 text-13 text-muted">{outcome.skill_names.join(", ")}</p><div className="grid w-full gap-8 rounded-12 border border-border bg-surface p-16 text-left text-12 text-text"><p className="m-0 break-all">Operation: {outcome.operation_id}</p><ul aria-label="Written file paths" className="m-0 grid gap-6 p-0">{outcome.paths_written.map((path) => <li key={path} className="list-inside list-disc break-all">Wrote {path}</li>)}</ul><ul aria-label="Actual deployments" className="m-0 grid gap-6 p-0">{outcome.deployments.map((deployment) => <li key={deployment.agent} className="list-inside list-disc break-all">{deployment.agent} ({deployment.mode}): {deployment.path}</li>)}</ul><p className="m-0">{outcome.staged ? `Git staging: staged ${outcome.staged_paths.join(", ")}` : "Git staging: not staged"}</p>{outcome.stage_error && <p role="alert" className="m-0 text-danger">{outcome.stage_error}</p>}<p className="m-0 break-all text-muted">{outcome.backup_hint}</p></div></section>}
-    {wizard.step === "done" ? <footer className="flex justify-center gap-8"><button type="button" onClick={() => { const fresh = emptyForScope(initialScope); wizardRef.current = fresh; setWizard(fresh); setError(null); setPreview(null); setOutcome(null); setStageRequested(false); setConfirmOverwrites(false); }} className="rounded-8 border border-border px-14 py-8 text-13 text-text">Add another</button><button type="button" onClick={onClose} className="rounded-8 bg-accent-fill px-14 py-8 text-13 font-medium text-on-accent">Back to Skills</button></footer> : <footer className="flex justify-between border-t border-border pt-14"><button type="button" disabled={wizard.step === "source" || busy} onClick={() => void send({ type: "back" })} className="rounded-8 border border-border px-14 py-8 text-13 text-text">Back</button><button type="button" data-wizard-next="true" disabled={busy || !canAdvance} onClick={() => void send({ type: "next" })} className="rounded-8 bg-accent-fill px-14 py-8 text-13 font-medium text-on-accent disabled:opacity-50">{wizard.step === "review" ? "Create skill" : "Next"}</button></footer>}
-    {discardConfirm && <div role="alertdialog" aria-modal="true" aria-labelledby="discard-title" className="fixed inset-0 z-50 grid place-items-center bg-black/40"><div className="w-full max-w-[380px] rounded-12 border border-border bg-surface p-20"><h2 id="discard-title" className="m-0 text-18 font-semibold text-text">Discard this skill draft?</h2><p className="text-13 text-muted">Your entered details will be lost. No files have been written.</p><div className="flex justify-end gap-8"><button type="button" onClick={() => setDiscardConfirm(false)} className="rounded-8 border border-border px-12 py-8 text-13">Keep editing</button><button type="button" onClick={() => { setDiscardConfirm(false); void send({ type: "confirm_discard" }); }} className="rounded-8 bg-danger px-12 py-8 text-13 text-white">Discard</button></div></div></div>}
+    {wizard.step === "done" && outcome && <section role="status" className="mx-auto flex w-full max-w-[720px] flex-col items-center gap-16 py-24 text-center">
+      <span aria-hidden="true" className="grid size-[84px] place-items-center rounded-full bg-success/15 text-success"><svg viewBox="0 0 24 24" className="h-10 w-10" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m5 12 4 4L19 6" /></svg></span>
+      <div className="grid gap-4">
+        <h2 className="m-0 text-26 font-semibold text-text">{outcome.skill_names.length === 1 ? `${outcome.skill_names[0]} is ready` : `${outcome.skill_names.length} skills are ready`}</h2>
+        <p className="m-0 text-13 text-text-muted">{doneAgents.length > 0 ? `${doneAgents.join(" and ")} ${doneAgents.length === 1 ? "loads" : "load"} ${outcome.skill_names.length === 1 ? "it" : "them"} in their next session${wizard.scope === "project" ? " in this repo" : wizard.scope === "user" ? " in every repo" : ""}.` : "Saved in the AgenTuna store; no agent deployment was requested."}</p>
+      </div>
+      <div className="grid w-full gap-8 rounded-12 border border-border bg-surface p-16 text-left text-12 text-text">
+        {outcome.paths_written.length > 0 && <ul aria-label="Written file paths" className="m-0 grid gap-4 p-0">{outcome.paths_written.map((path) => <li key={path} className="flex items-start gap-8 break-all"><span aria-hidden="true" className="text-success">✓</span>Wrote {path}</li>)}</ul>}
+        {outcome.deployments.length > 0 && <ul aria-label="Actual deployments" className="m-0 grid gap-4 p-0">{outcome.deployments.map((deployment) => <li key={deployment.agent} className="flex items-start gap-8 break-all"><span aria-hidden="true" className="text-success">✓</span>{AGENT_LABELS[deployment.agent] ?? deployment.agent} ({deployment.mode}): {deployment.path}</li>)}</ul>}
+        <p className="m-0 flex items-start gap-8 text-text-muted"><span aria-hidden="true" className="text-success">✓</span>{outcome.backup_hint}</p>
+        <details className="text-11 text-text-muted"><summary className="cursor-pointer">Details</summary><p className="m-0 break-all">Operation: {outcome.operation_id}</p><p className="m-0">{outcome.staged ? `Git staging: staged ${outcome.staged_paths.join(", ")}` : "Git staging: not staged"}</p>{outcome.stage_error && <p role="alert" className="m-0 text-danger">{outcome.stage_error}</p>}</details>
+      </div>
+    </section>}
+    {wizard.step === "done" ? <footer className="flex justify-end gap-8 border-t border-border pt-14"><button type="button" onClick={() => { const fresh = emptyForScope(initialScope); wizardRef.current = fresh; setWizard(fresh); setError(null); setPreview(null); setOutcome(null); setStageRequested(false); setConfirmOverwrites(false); }} className="rounded-8 border border-border px-14 py-8 text-13 text-text">Add another</button><button type="button" onClick={onClose} className="rounded-8 bg-accent-fill px-14 py-8 text-13 font-medium text-on-accent">Back to Skills</button></footer> : <footer className="flex items-center justify-between border-t border-border pt-14"><button type="button" disabled={wizard.step === "source" || busy} onClick={() => void send({ type: "back" })} className="rounded-8 border border-border px-14 py-8 text-13 text-text disabled:opacity-50">Back</button><div className="flex gap-8"><button type="button" disabled={busy} onClick={() => void send({ type: "cancel" })} className="rounded-8 border border-border px-14 py-8 text-13 text-text disabled:opacity-50">Cancel</button><button type="button" data-wizard-next="true" disabled={busy || !canAdvance} onClick={() => void send({ type: "next" })} className="rounded-8 bg-accent-fill px-14 py-8 text-13 font-medium text-on-accent disabled:opacity-50">{wizard.step === "review" ? "Create skill" : wizard.source === "library" && selectedLibrarySkills.length > 0 ? `Continue with ${selectedLibrarySkills.length}` : "Continue"}</button></div></footer>}
+    {discardConfirm && <div role="alertdialog" aria-modal="true" aria-labelledby="discard-title" className="fixed inset-0 z-50 grid place-items-center bg-black/40"><div className="w-full max-w-[380px] rounded-12 border border-border bg-surface p-16"><h2 id="discard-title" className="m-0 text-18 font-semibold text-text">Discard this skill draft?</h2><p className="text-13 text-muted">Your entered details will be lost. No files have been written.</p><div className="flex justify-end gap-8"><button type="button" onClick={() => setDiscardConfirm(false)} className="rounded-8 border border-border px-12 py-8 text-13">Keep editing</button><button type="button" onClick={() => { setDiscardConfirm(false); void send({ type: "confirm_discard" }); }} className="rounded-8 bg-danger px-12 py-8 text-13 text-white">Discard</button></div></div></div>}
     <ConnectAgentDialog agent={pathAgent} onClose={() => setPathAgent(null)} onSaved={() => { setScopeRefreshVersion((version) => version + 1); }} />
   </main>;
 }

@@ -1,10 +1,10 @@
 //! TA-081: the detection loop's observable behaviour.
 //!
-//! Each test builds a throwaway, canonicalized tree and drives the real debounced watcher, so
-//! the assertions are about events and recorded detection results rather than internal state.
-//! Wall-clock windows stay well above the debounce so a slow machine cannot make a test flaky.
+//! Watcher tests use throwaway, canonicalized trees and allow for platform batch boundaries.
+//! The detection scheduler's debounce and coalescing are tested with an injected time instead
+//! of assuming that the operating system reports a burst in one callback.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_app::app::detection::{
-    DetectionResult, Diagnostic, PlatformWatcher, RescanCoalescer, WatchStarter,
-    external_refresh_event, rescan, start_retaining_watchable_roots,
+    DetectionResult, Diagnostic, PlatformWatcher, WatchStarter, external_refresh_event, rescan,
+    start_retaining_watchable_roots,
 };
 use at_db::Database;
 use at_fs::{
@@ -154,57 +154,62 @@ fn an_agentuna_self_write_produces_zero_events() {
 }
 
 #[test]
-fn twenty_events_collapse_into_one_rescan_and_coalesce_with_the_running_scan() {
+fn twenty_writes_are_reported_across_bounded_watcher_batches() {
     let _platform = watch_test_lock();
     let fixture = Fixture::new();
     let service = fixture.service(vec![fixture.root()], Arc::new(RecentWrites::new()));
 
-    let mut written = Vec::new();
+    let mut written = BTreeSet::new();
     for index in 0..20 {
         let path = fixture.root.join(format!("rule-{index:02}.md"));
         fs::write(&path, b"# rule\n").expect("burst write");
-        written.push(path);
+        written.insert(path);
     }
 
-    // The platform may fold the tail of a burst into the same debounce cycle without naming
-    // every path; the countable claim is that the whole burst produced exactly one rescan.
-    let batch = next_batch(&service);
+    // Per-path debounce timers and OS scheduling can split the writes across callbacks.
+    // Collect every affected path instead of requiring one particular batch boundary.
+    let deadline = Instant::now() + BATCH_BUDGET;
+    let mut reported = BTreeSet::new();
+    let mut batch_count = 0;
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let wait = if reported == written {
+            remaining.min(QUIET_WINDOW)
+        } else {
+            remaining
+        };
+        let Some(event) = service.next_event(wait) else {
+            break;
+        };
+        match event {
+            WatchEvent::Batch(batch) => {
+                let unique: BTreeSet<_> = batch.paths.iter().collect();
+                assert_eq!(
+                    unique.len(),
+                    batch.paths.len(),
+                    "duplicate path in {batch:?}"
+                );
+                assert!(
+                    batch.paths.len() <= at_fs::DEFAULT_MAX_BATCH_PATHS,
+                    "the watcher batch must stay bounded: {batch:?}"
+                );
+                reported.extend(
+                    batch
+                        .paths
+                        .into_iter()
+                        .filter(|path| written.contains(path)),
+                );
+                batch_count += 1;
+                assert!(service.queue_len() <= at_fs::DEFAULT_QUEUE_CAPACITY);
+            }
+            other => panic!("unexpected watcher event in the 20-file burst: {other:?}"),
+        }
+    }
+    assert_eq!(reported, written, "every written path must be reported");
     assert!(
-        written
-            .iter()
-            .any(|path| batch.paths.iter().any(|reported| reported == path)),
-        "the burst is reported in one batch: {:?}",
-        batch.paths
+        batch_count > 0,
+        "the watcher must report at least one batch"
     );
-    assert_quiet(&service, "a 20-event burst collapses into one rescan");
-    assert_eq!(
-        service.stats().batches,
-        1,
-        "the burst is one batch, not twenty: {:?}",
-        service.stats()
-    );
-
-    let mut coalescer = RescanCoalescer::default();
-    assert!(
-        coalescer.request(),
-        "the first invalidation starts a scan immediately"
-    );
-    assert!(
-        !coalescer.request(),
-        "a rescan requested during a scan is folded, not queued a second time"
-    );
-    assert!(
-        coalescer.finished(),
-        "the folded request owes exactly one follow-up scan"
-    );
-    assert!(
-        !coalescer.finished(),
-        "the follow-up scan absorbs every folded request"
-    );
-    assert!(
-        !coalescer.is_running(),
-        "the coalescer is idle once the follow-up scan finishes"
-    );
+    assert_eq!(service.stats().batches, batch_count as u64);
     service.stop().expect("stop the watch service");
 }
 

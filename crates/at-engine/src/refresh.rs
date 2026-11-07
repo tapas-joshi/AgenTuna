@@ -64,7 +64,7 @@ impl DetectedAgent {
     ) -> Self {
         Self {
             id: agent.clone(),
-            display_name: agent.to_string(),
+            display_name: agent.default_display_name().to_owned(),
             version,
             installed: matches!(presence.state, DetectionState::Installed),
             probed: false,

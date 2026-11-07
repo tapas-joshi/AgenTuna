@@ -95,7 +95,7 @@ export function SkillUpdateBadge({ row, onUpdate, onIgnore, busy = false }: Skil
             className="absolute left-0 top-full z-50 mt-4 min-w-[220px] rounded-6 border border-border bg-raised p-4 text-12 text-text shadow-lg"
             onClick={(event) => event.stopPropagation()}
           >
-            <p className="m-0 px-8 py-6 font-mono text-10 leading-4 text-text-muted">{updateTooltip(row)}</p>
+            <p className="m-0 px-8 py-6 font-mono text-11 leading-4 text-text-muted">{updateTooltip(row)}</p>
             <button
               type="button"
               role="menuitem"

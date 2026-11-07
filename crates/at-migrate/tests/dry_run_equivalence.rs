@@ -100,6 +100,7 @@ fn fixture() -> Fixture {
 
 fn plan(fixture: &Fixture, strategy: MigrationStrategy) -> MigrationPlan {
     let scan = ScanReport {
+        roots: Vec::new(),
         items: fixture.items.clone(),
         partial: false,
         skipped_roots: Vec::new(),

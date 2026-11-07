@@ -8,7 +8,7 @@ mod support;
 
 use at_app::app::flow_harness;
 use at_app::app::mcp_form::{McpFormValue, McpPlanPreviewRequest, McpSaveRequest};
-use at_app::app::mcp_servers::McpServerActionRequest;
+use at_app::app::mcp_servers::{McpServerActionRequest, McpServerDetailRequest};
 use at_model::{AgentId, ItemKind, Scope};
 use support::{Sandbox, TestResult};
 
@@ -758,5 +758,72 @@ fn a_project_scope_save_records_its_project() -> TestResult<()> {
         "the Project deployment belongs to the same project"
     );
     assert!(sync_label.is_some());
+    Ok(())
+}
+
+#[test]
+fn native_server_detail_withholds_env_values_and_never_invents_a_keychain_reference()
+-> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::ClaudeCode)?;
+    let config = sandbox.home.join(".claude.json");
+    std::fs::write(
+        &config,
+        br#"{"mcpServers": {"leaky": {"command": "node", "args": ["srv.js"], "env": {"DATABASE_URL": "postgres://user:pw@db.local/app", "PLAIN": "not-a-secret-looking-key"}}, "remote": {"type": "http", "url": "https://user:query-token@mcp.example.invalid/mcp?api_key=query-token"}}}"#,
+    )?;
+
+    let opened = at_app::app::startup::open_database(&sandbox.paths()?);
+    assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+    drop(opened);
+    let state = sandbox.state()?;
+
+    let view = at_app::app::mcp_servers::mcp_server_detail_inner(
+        &state,
+        &McpServerDetailRequest {
+            item_id: "native:leaky".to_owned(),
+            scope: "user".to_owned(),
+            project_id: None,
+        },
+    )?;
+    assert_eq!(view.item_id, "native:leaky");
+    assert_eq!(
+        view.defined_in.first().map(String::as_str),
+        Some(config.display().to_string().as_str()),
+        "the scanned file stays first so Adopt targets the item the scan indexed"
+    );
+    assert_eq!(
+        view.env.len(),
+        2,
+        "both variables are listed: {:?}",
+        view.env
+    );
+    for row in &view.env {
+        assert!(
+            !row.value.contains("postgres://") && !row.value.contains("not-a-secret-looking-key"),
+            "a discovered value is never rendered: {:?}",
+            row
+        );
+        assert!(
+            row.keychain_account.is_none(),
+            "AgenTuna never imported this value, so it has no Keychain account to name: {:?}",
+            row
+        );
+    }
+
+    let remote = at_app::app::mcp_servers::mcp_server_detail_inner(
+        &state,
+        &McpServerDetailRequest {
+            item_id: "native:remote".to_owned(),
+            scope: "user".to_owned(),
+            project_id: None,
+        },
+    )?;
+    assert_eq!(remote.transport, "http");
+    assert_eq!(
+        remote.url.as_deref(),
+        Some("https://mcp.example.invalid/mcp"),
+        "a discovered URL keeps its host and path and drops credentials"
+    );
     Ok(())
 }

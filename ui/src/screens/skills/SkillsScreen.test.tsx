@@ -160,7 +160,7 @@ describe("SkillsScreen (TS-028)", () => {
     expect(within(bulkActions).getByText("1 selected")).toBeTruthy();
     expect(within(bulkActions).getByText("1 hidden by filter")).toBeTruthy();
 
-    fireEvent.click(within(bulkActions).getByRole("button", { name: "Enable for agent" }));
+    fireEvent.click(within(bulkActions).getByRole("button", { name: "Enable for agent…" }));
     const picker = screen.getByRole("dialog", { name: "Enable skills for agents" });
     fireEvent.click(within(picker).getByRole("checkbox", { name: "Codex" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Enable for selected agents" }));
@@ -220,9 +220,10 @@ describe("SkillsScreen (TS-028)", () => {
     };
     renderScreen();
 
-    const addSkillBtns = await screen.findAllByRole("button", { name: "Add skill" });
+    const addSkillBtns = await screen.findAllByRole("button", { name: "+ New skill" });
     if (addSkillBtns[0]) fireEvent.click(addSkillBtns[0]);
     expect(app.getSnapshot().route).toBe("add-skill");
+    expect(app.getSnapshot().screenState["add-skill:source"]).toBe("new");
   });
 
   test("error state renders retry and re-runs query", async () => {
@@ -483,7 +484,69 @@ describe("SkillsScreen STATUS column (design 02-skills)", () => {
     };
     renderScreen();
 
-    expect(await screen.findByText("1 copy · shared root")).toBeTruthy();
+    expect(await screen.findByText("2 agents · 1 shared root")).toBeTruthy();
+    expect(screen.getAllByText("1 folder · 2 agents").length).toBeGreaterThan(0);
+    // One folder is one block: the second agent column is merged, not a second cell.
+    const blocks = document.querySelectorAll('[data-slot="shared-folder"]');
+    expect(blocks.length).toBe(1);
+    expect(blocks[0]?.getAttribute("data-state")).toBe("native");
+    expect(blocks[0]?.getAttribute("title")).toContain("/sandbox/project/.agents/skills/shared-helper");
+    expect(screen.queryAllByRole("switch").length).toBe(0);
+  });
+
+  test("a coupled managed toggle asks before writing the shared folder", async () => {
+    const rows = [
+      mockSkill({
+        agents: [
+          {
+            agent: "codex",
+            state: "linked",
+            enabled: true,
+            config_path: "/sandbox/project/.agents/skills/code-review",
+          },
+          {
+            agent: "omp",
+            state: "linked",
+            enabled: true,
+            config_path: "/sandbox/project/.agents/skills/code-review",
+          },
+        ],
+      }),
+    ];
+    ipc.reply = (command) => {
+      if (command === "skills_list") return Promise.resolve(mockView({ rows }));
+      if (command === "skill_agent_preview") {
+        return Promise.resolve({
+          preview_id: "pv_coupled",
+          enabled: false,
+          mode: "link",
+          paths: ["/sandbox/project/.agents/skills/code-review"],
+          coupled_agents: ["omp"],
+          warnings: ["Codex and omp share .agents/skills, so this changes both agents."],
+          no_op: false,
+        });
+      }
+      if (command === "skill_agent_apply") {
+        return Promise.resolve({ operation_id: "op_coupled", enabled: false, changed: true });
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    fireEvent.click(
+      await screen.findByRole("switch", { name: "Codex + omp: Linked, one shared folder" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Shared discovery root" });
+    expect(within(dialog).getByText(/Codex and omp share/)).toBeTruthy();
+    // Review first: nothing is written until the coupling is confirmed.
+    expect(ipc.calls.some((call) => call.command === "skill_agent_apply")).toBe(false);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disable for both agents" }));
+    await waitFor(() =>
+      expect(ipc.calls).toContainEqual({
+        command: "skill_agent_apply",
+        args: { previewId: "pv_coupled" },
+      }),
+    );
   });
 
   test("TC-025: clicking Adopt on a native row opens AdoptModal naming store target and backup directory", async () => {

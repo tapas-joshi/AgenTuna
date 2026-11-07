@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../../components/button";
+import { useCompactLayout } from "../../components/use-compact-layout";
 import { Input } from "../../components/input";
 import { Badge } from "../../components/badge";
 import type { BadgeTone } from "../../components/badge";
@@ -18,15 +19,17 @@ import { PresetsScreen } from "../presets/PresetsScreen";
 import { SkillUpdateBadge } from "./SkillUpdateBadge";
 import { Modal } from "../../overlays/dialogs/Modal";
 import { DiffViewer } from "../../components/diff";
-import { ScopeSwitcher } from "../../components/scope_switcher/ScopeSwitcher";
 import {
   DataTable,
   agentColumns,
+  agentFolderGroups,
+  folderSpan,
   useRowMenu,
+  useRowMenuPlacement,
   RowMenuTrigger,
   type AgentDescriptor,
+  type AgentFolderGroup,
 } from "../../components/table";
-import type { ScopeToken } from "../../theme";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { DataTableFeatures } from "../../components/table/features";
 import type { SkillsListView } from "../../generated/SkillsListView";
@@ -41,8 +44,6 @@ import { AdoptModal } from "../../overlays/dialogs/AdoptModal";
 import type { SkillAgentPreviewRequest } from "../../generated/SkillAgentPreviewRequest";
 import type { SkillAgentPreviewView } from "../../generated/SkillAgentPreviewView";
 import type { SkillAgentApplyView } from "../../generated/SkillAgentApplyView";
-import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
-import type { AdoptApplyView } from "../../generated/AdoptApplyView";
 import type { SkillUpdatePreviewView } from "../../generated/SkillUpdatePreviewView";
 import type { SkillUpdateApplyView } from "../../generated/SkillUpdateApplyView";
 import { useToast } from "../../overlays/toasts";
@@ -85,11 +86,15 @@ export interface SkillStatus {
   readonly title?: string;
 }
 
+/** Short agent name for status copy: `Claude Code` reads as `Claude only`. */
+const AGENT_SHORT_NAME: Readonly<Record<string, string>> = {
+  "Claude Code": "Claude",
+};
+
 /** Distinct native folder paths recorded for one native skill name. */
-function nativeCopyPaths(row: SkillRowView, allRows: readonly SkillRowView[]): readonly string[] {
+function nativeCopyPaths(copies: readonly SkillRowView[]): readonly string[] {
   const paths = new Set<string>();
-  for (const other of allRows) {
-    if (!other.native || other.name !== row.name) continue;
+  for (const other of copies) {
     if (other.native_path) paths.add(other.native_path);
     for (const cell of other.agents) {
       if (cell.state === "native" && cell.config_path) paths.add(cell.config_path);
@@ -98,16 +103,95 @@ function nativeCopyPaths(row: SkillRowView, allRows: readonly SkillRowView[]): r
   return [...paths];
 }
 
+/** Agent display names per native folder path for one skill name. */
+function nativeOwners(
+  copies: readonly SkillRowView[],
+  agentLabel: (id: string) => string,
+): ReadonlyMap<string, readonly string[]> {
+  const owners = new Map<string, Set<string>>();
+  for (const other of copies) {
+    for (const cell of other.agents) {
+      if (cell.state !== "native" || cell.config_path === null) continue;
+      const labels = owners.get(cell.config_path) ?? new Set<string>();
+      labels.add(agentLabel(cell.agent));
+      owners.set(cell.config_path, labels);
+    }
+  }
+  return new Map([...owners].map(([path, labels]) => [path, [...labels]]));
+}
+
+const NO_COPIES: readonly SkillRowView[] = [];
+
+/**
+ * Cross-row lookups one Skills snapshot needs, built once per snapshot.
+ *
+ * The STATUS and shadowed-agent cells used to scan all rows for every rendered
+ * cell: at 3,000 rows that was millions of comparisons per render and every
+ * scroll frame paid it again. Every lookup here is a map read.
+ */
+export interface SkillLookup {
+  /** Native discoveries with exactly this display name, in snapshot order. */
+  readonly nativeCopies: (row: SkillRowView) => readonly SkillRowView[];
+  /** First same-name copy with a lower scope rank, in snapshot order. */
+  readonly overriddenBy: (row: SkillRowView) => SkillRowView | undefined;
+  /** First non-native same-name row at `scope`, ignoring case. */
+  readonly firstAtScope: (row: SkillRowView, scope: string) => SkillRowView | undefined;
+}
+
+/** Builds the {@link SkillLookup} for one snapshot; see its docs for the rules. */
+export function buildSkillLookup(rows: readonly SkillRowView[]): SkillLookup {
+  const nativeByName = new Map<string, SkillRowView[]>();
+  // Name (lowercased) → first array index seen at each scope rank. Array order
+  // is the snapshot's order, so the lowest index wins exactly as `find` did.
+  const firstIndexByRank = new Map<string, Array<number | undefined>>();
+  const firstNonNativeByScope = new Map<string, SkillRowView>();
+
+  rows.forEach((row, index) => {
+    const plainName = row.name.toLowerCase();
+    if (row.native) {
+      const copies = nativeByName.get(row.name);
+      if (copies === undefined) nativeByName.set(row.name, [row]);
+      else copies.push(row);
+    } else {
+      const scoped = `${row.scope}\u0000${plainName}`;
+      if (!firstNonNativeByScope.has(scoped)) firstNonNativeByScope.set(scoped, row);
+    }
+    const rank = SCOPE_RANK[row.scope] ?? 0;
+    const slots = firstIndexByRank.get(plainName) ?? [];
+    if (slots[rank] === undefined) slots[rank] = index;
+    firstIndexByRank.set(plainName, slots);
+  });
+
+  return {
+    nativeCopies: (row) => nativeByName.get(row.name) ?? NO_COPIES,
+    overriddenBy: (row) => {
+      const slots = firstIndexByRank.get(row.name.toLowerCase());
+      if (slots === undefined) return undefined;
+      const rank = SCOPE_RANK[row.scope] ?? 0;
+      let earliest: number | undefined;
+      for (let lower = 0; lower < rank; lower += 1) {
+        const index = slots[lower];
+        if (index !== undefined && (earliest === undefined || index < earliest)) earliest = index;
+      }
+      return earliest === undefined ? undefined : rows[earliest];
+    },
+    firstAtScope: (row, scope) =>
+      firstNonNativeByScope.get(`${scope}\u0000${row.name.toLowerCase()}`),
+  };
+}
+
 /**
  * Derives the STATUS column for one skill row.
  *
  * Every branch names real state read from the list projection: a lock, a
- * higher-precedence copy, the native copies found in agent folders, or a
- * lower-scope copy this row overrides. Nothing is inferred from colour.
+ * higher-precedence copy, the native folders found in agent folders, or a
+ * lower-scope copy this row overrides. Native copy wording follows the design
+ * (`Claude only`, `2 copies · 1 shared root`, `Shadowed by Project`); nothing
+ * is inferred from colour.
  */
 export function skillStatus(
   row: SkillRowView,
-  allRows: readonly SkillRowView[],
+  lookup: SkillLookup,
   agentLabel: (id: string) => string,
 ): SkillStatus {
   if (row.locked) {
@@ -121,43 +205,34 @@ export function skillStatus(
     return { label: `Shadowed by ${statusScope(row.shadowed_by)}`, tone: "neutral" };
   }
   if (row.native) {
-    const paths = nativeCopyPaths(row, allRows);
-    const ownersPerPath = new Map<string, Set<string>>();
-    for (const other of allRows) {
-      if (!other.native || other.name !== row.name) continue;
-      for (const cell of other.agents) {
-        if (cell.state !== "native" || cell.config_path === null) continue;
-        const owners = ownersPerPath.get(cell.config_path) ?? new Set<string>();
-        owners.add(agentLabel(cell.agent));
-        ownersPerPath.set(cell.config_path, owners);
-      }
-    }
-    const sharedRoot = [...ownersPerPath.values()].some((owners) => owners.size > 1);
+    const copies = lookup.nativeCopies(row);
+    const paths = nativeCopyPaths(copies);
+    const owners = nativeOwners(copies, agentLabel);
+    const sharedRoot = [...owners.values()].some((labels) => labels.length > 1);
     if (paths.length > 1) {
       return sharedRoot
         ? { label: `${paths.length} copies · 1 shared root`, tone: "info", title: paths.join("\n") }
-        : {
-            label: `${paths.length} copies in different folders`,
-            tone: "warning",
-            title: paths.join("\n"),
-          };
+        : { label: `${paths.length} copies`, tone: "warning", title: paths.join("\n") };
     }
     if (sharedRoot) {
-      return { label: "1 copy · shared root", tone: "info", title: paths.join("\n") };
+      const readers = Math.max(...[...owners.values()].map((labels) => labels.length));
+      return {
+        label: `${readers} agents · 1 shared root`,
+        tone: "info",
+        title: paths.join("\n"),
+      };
     }
-    const owners = [...ownersPerPath.values()].flatMap((set) => [...set]);
+    const only = [...owners.values()].flat();
+    const sole = only[0];
     return {
-      label: owners.length > 0 ? `${owners.join(" + ")} only` : "Native only",
-      tone: "info",
+      label: sole === undefined ? "Native only" : `${AGENT_SHORT_NAME[sole] ?? sole} only`,
+      tone: "warning",
+      title: paths.join("\n"),
     };
   }
-  const overridden = allRows.find(
-    (other) =>
-      !other.native &&
-      other.scope !== row.scope &&
-      other.name === row.name &&
-      (SCOPE_RANK[other.scope] ?? 0) < (SCOPE_RANK[row.scope] ?? 0),
-  );
+  // A canonical row overrides every lower-precedence copy of its name, including
+  // a native copy that lives only in an agent folder.
+  const overridden = lookup.overriddenBy(row);
   if (overridden !== undefined) {
     return { label: `Overrides ${statusScope(overridden.scope)} copy`, tone: "warning" };
   }
@@ -180,17 +255,20 @@ function skillRowId(row: SkillRowView): string {
   return row.item_id !== "" ? row.item_id : `native:${row.native_path ?? row.name}`;
 }
 
-export function SkillsScreen({
-  localEnabled = false,
-  globalLocked = false,
-}: {
-  readonly localEnabled?: boolean;
-  readonly globalLocked?: boolean;
-} = {}) {
-  const { scope, activeProject, externalRefreshVersion } = useAppSnapshot();
+export function SkillsScreen(
+  // The routed caller still passes the scope flags; the shell top bar owns the
+  // one scope switcher, so this screen keeps the contract without rendering a
+  // second control for the same state.
+  _props: {
+    readonly localEnabled?: boolean;
+    readonly globalLocked?: boolean;
+  } = {},
+) {
+  const { activeProject, externalRefreshVersion } = useAppSnapshot();
   const app = useAppState();
   const toast = useToast();
   const rowMenu = useRowMenu();
+  const menuPlacement = useRowMenuPlacement(rowMenu.anchor, rowMenu.openRowId !== null);
   useEffect(() => {
     if (rowMenu.openRowId === null) return;
     const row = Array.from(document.querySelectorAll<HTMLElement>("[data-row-menu-id]"))
@@ -208,7 +286,6 @@ export function SkillsScreen({
   const [activeChip, setActiveChip] = useState<FilterChip>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [bannerHidden, setBannerHidden] = useState(false);
-  const [adoptingPath, setAdoptingPath] = useState<string | null>(null);
   const [adoptModalTarget, setAdoptModalTarget] = useState<SkillRowView | null>(null);
   const [whyTrace, setWhyTrace] = useState<{ itemId: string; scope: string; agent: string } | null>(null);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -222,6 +299,17 @@ export function SkillsScreen({
   const [bulkTransfer, setBulkTransfer] = useState<"promote" | "move" | null>(null);
   const [updateReview, setUpdateReview] = useState<{ name: string; preview: SkillUpdatePreviewView } | null>(null);
   const [updateBusy, setUpdateBusy] = useState<string | null>(null);
+  /**
+   * Preview waiting for the shared-root confirmation. A shared folder changes
+   * every agent that reads it, so the write waits until the coupling is shown.
+   */
+  const [coupledConfirm, setCoupledConfirm] = useState<{
+    row: SkillRowView;
+    agent: AgentDescriptor;
+    preview: SkillAgentPreviewView;
+  } | null>(null);
+  /** Below the breakpoint the Status column leaves the model; its actions stay. */
+  const compactLayout = useCompactLayout();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -249,6 +337,9 @@ export function SkillsScreen({
   }, [load]);
 
   const allRows = useMemo(() => view?.rows ?? [], [view]);
+
+  // One pass over the snapshot replaces the per-cell scans (see SkillLookup).
+  const skillLookup = useMemo(() => buildSkillLookup(allRows), [allRows]);
 
   // Live chip counts computed directly from the row set so counts and visible rows always match
   const counts = useMemo(() => {
@@ -299,38 +390,66 @@ export function SkillsScreen({
 
   const agents: readonly AgentDescriptor[] = useMemo(() => {
     if (!view?.agents) return [];
-    return view.agents.map((a) => ({
-      id: a.id,
-      label: a.label,
-    }));
+    // The design shows the agents this Mac actually has: a missing agent has no
+    // row to render and an empty column would read as a broken deployment.
+    return view.agents
+      .filter((agent) => agent.presence !== "not_installed")
+      .map((agent) => ({
+        id: agent.id,
+        label: agent.label,
+      }));
   }, [view?.agents]);
 
-  const handleAdopt = useCallback(
-    async (row: SkillRowView) => {
-      if (!row.native_path) return;
-      setAdoptingPath(row.native_path);
-      try {
-        const preview = await invoke<AdoptPreviewView>("adopt_preview", {
-          path: row.native_path,
-          expectedHash: null,
-          handling: "link",
-        });
-        await invoke<AdoptApplyView>("adopt_apply", {
-          path: preview.source,
-          expectedHash: null,
-          handling: "link",
-        });
-        toast.success(`Adopted ${row.name} into AgenTuna`);
-        await load();
-      } catch (cause) {
-        const failure = parseCommandError(cause);
-        toast.warning(failure.message, { title: "Adoption failed" });
-      } finally {
-        setAdoptingPath(null);
-      }
-    },
-    [load, toast]
+  /**
+   * One folder block for agents that share a discovery root. Native cells always
+   * carry their folder; a managed cell only proves the folder once a deployment
+   * path is recorded, so an unrecorded target stays a separate column.
+   */
+  const folderGroupsFor = useCallback(
+    (row: SkillRowView): ReadonlyMap<string, AgentFolderGroup> =>
+      agentFolderGroups(agents, (agent) => {
+        const cell = row.agents.find((entry) => entry.agent === agent.id);
+        if (cell === undefined) return null;
+        if (row.native) return cell.config_path;
+        return cell.state === "linked" || cell.state === "conflict" ? cell.config_path : null;
+      }),
+    [agents],
   );
+
+  /**
+   * Bulk agent choices folded by the folder they write for every selected skill.
+   * Agents whose cells point at one folder in all selected rows are one checkbox;
+   * the coupling note in the picker says why they cannot be selected apart.
+   */
+  const bulkAgentGroups = useMemo(() => {
+    const rows = selectedRows.filter((row) => !row.native && row.item_id !== "");
+    if (rows.length === 0) return agents.map((agent) => [agent]);
+    const signatures = new Map<string, string | null>();
+    for (const agent of agents) {
+      const paths = rows.map(
+        (row) => row.agents.find((cell) => cell.agent === agent.id)?.config_path ?? null,
+      );
+      signatures.set(agent.id, paths.every((path) => path !== null) ? paths.join("|") : null);
+    }
+    const groups: AgentDescriptor[][] = [];
+    const groupIndex = new Map<string, number>();
+    for (const agent of agents) {
+      const signature = signatures.get(agent.id) ?? null;
+      if (signature === null) {
+        groups.push([agent]);
+        continue;
+      }
+      const existing = groupIndex.get(signature);
+      if (existing === undefined) {
+        groupIndex.set(signature, groups.length);
+        groups.push([agent]);
+      } else {
+        groups[existing] = [...(groups[existing] ?? []), agent];
+      }
+    }
+    return groups;
+  }, [agents, selectedRows]);
+
   const handleToggleAgent = useCallback(
     async (row: SkillRowView, agent: AgentDescriptor, next: boolean) => {
       if (row.native || row.item_id === "") return;
@@ -345,6 +464,19 @@ export function SkillsScreen({
         const preview = await invoke<SkillAgentPreviewView>("skill_agent_preview", {
           request: previewReq,
         });
+        if (preview.no_op) {
+          toast.info(
+            `Already ${next ? "enabled" : "disabled"} for ${agent.label}.`,
+            { title: "No change" },
+          );
+          return;
+        }
+        // A shared discovery root changes every agent reading the folder. Show
+        // that coupling before any file is written instead of applying silently.
+        if (preview.coupled_agents.length > 0) {
+          setCoupledConfirm({ row, agent, preview });
+          return;
+        }
 
         await invoke<SkillAgentApplyView>("skill_agent_apply", {
           previewId: preview.preview_id,
@@ -363,15 +495,45 @@ export function SkillsScreen({
           failure.code === "RefusedOverwrite" ||
           failure.message.toLowerCase().includes("native conflict")
         ) {
-          showAdoptFirstToast(toast, () => void handleAdopt(row));
+          // Adopt is a reviewed write: open the dialog instead of adopting silently.
+          showAdoptFirstToast(toast, () => setAdoptModalTarget(row));
         } else {
           toast.warning(failure.message, { title: "Could not update skill" });
         }
         await load();
       }
     },
-    [activeProject, handleAdopt, load, toast]
+    [activeProject, load, toast]
   );
+
+  /** Applies the reviewed shared-root change after the coupling was shown. */
+  const applyCoupledChange = useCallback(async () => {
+    if (coupledConfirm === null) return;
+    const { row, agent, preview } = coupledConfirm;
+    setCoupledConfirm(null);
+    try {
+      await invoke<SkillAgentApplyView>("skill_agent_apply", {
+        previewId: preview.preview_id,
+      });
+      toast.success(
+        `${preview.enabled ? "Enabled" : "Disabled"} ${row.name} for ${agent.label} and the agents that share its folder.`,
+        { title: "Shared folder updated" },
+      );
+      await load();
+    } catch (cause) {
+      toast.warning(parseCommandError(cause).message, { title: "Could not update skill" });
+      await load();
+    }
+  }, [coupledConfirm, load, toast]);
+
+  /** Drops the unreviewed change and leaves every agent untouched. */
+  const cancelCoupledChange = useCallback(() => {
+    if (coupledConfirm === null) return;
+    void invoke("skill_agent_discard", {
+      previewId: coupledConfirm.preview.preview_id,
+    }).catch(() => undefined);
+    setCoupledConfirm(null);
+  }, [coupledConfirm]);
 
 
   const handleHideBanner = useCallback(async () => {
@@ -442,17 +604,17 @@ export function SkillsScreen({
       id: "name",
       accessorKey: "name",
       header: "Skill",
-      size: 280,
+      // Compact mode declares a smaller minimum: the column grows to fill, and
+      // 160px keeps the whole row inside a 960px window without side scrolling.
+      size: compactLayout ? 160 : 280,
       meta: { grow: true },
       cell: ({ row }) => {
         const item = row.original;
-        const isAdopted = item.state === "adopted";
-        const isAdopting = adoptingPath === item.native_path;
 
         return (
           <div className="flex min-w-0 flex-col gap-2 py-4">
-            <div className="flex flex-wrap items-center gap-6">
-              <span className="font-medium text-text">{item.name}</span>
+            <div className="flex min-w-0 flex-wrap items-center gap-6">
+              <span className="min-w-0 max-w-full truncate font-medium text-text" title={item.name}>{item.name}</span>
               {!item.native && (
                 <SkillUpdateBadge
                   row={item}
@@ -462,42 +624,9 @@ export function SkillsScreen({
                 />
               )}
               {item.native && <Badge tone="muted">not in AgenTuna</Badge>}
-              {item.state && !item.native && (
-                <Badge tone="muted">
-                  {item.state}
-                </Badge>
-              )}
             </div>
             {item.description && (
               <span className="truncate text-12 text-text-muted">{item.description}</span>
-            )}
-            {item.native && item.native_path && (
-              <div className="flex items-center gap-6 pt-2">
-                <span className="min-w-0 flex-1 truncate font-mono text-11 text-text-muted" title={item.native_path}>
-                  {item.native_path}
-                </span>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={isAdopted || isAdopting}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setAdoptModalTarget(item);
-                  }}
-                >
-                  {isAdopted ? "Adopted" : isAdopting ? "Adopting…" : "Adopt"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    app.navigate("migrate");
-                  }}
-                >
-                  Resolve
-                </Button>
-              </div>
             )}
           </div>
         );
@@ -526,30 +655,31 @@ export function SkillsScreen({
 
     const agentCols = agentColumns<SkillRowView>({
       agents,
+      getFolderGroups: folderGroupsFor,
       getState: (row, agent) => {
+        const cell = row.agents.find((entry) => entry.agent === agent.id);
         if (row.shadowed_by) {
-          return {
-            kind: "shadowed",
-            shadowedBy: row.shadowed_by,
-          };
+          // A shadowed copy still loads for agents the winning copy does not cover.
+          const winner = skillLookup.firstAtScope(row, row.shadowed_by);
+          const winnerCell = winner?.agents.find((entry) => entry.agent === agent.id);
+          if (winnerCell === undefined || winnerCell.enabled) {
+            return { kind: "shadowed", shadowedBy: row.shadowed_by };
+          }
         }
-        const cell = row.agents.find((c) => c.agent === agent.id);
-        if (!cell) {
+        if (cell === undefined) {
           return { kind: "none" };
         }
-        if (cell.state === "linked") {
+        if (cell.state === "linked" || cell.state === "conflict") {
           return { kind: "linked" };
         }
         if (cell.state === "off") {
           return { kind: "off" };
         }
         if (cell.state === "native") {
-          const isShared =
-            (agent.id === "codex" || agent.id === "omp") && row.scope === "project";
           return {
             kind: "native",
             path: cell.config_path ?? row.native_path ?? "",
-            sharedWith: isShared ? [agent.id === "codex" ? "omp" : "codex"] : undefined,
+            readOnly: true,
           };
         }
         return { kind: "none" };
@@ -566,21 +696,52 @@ export function SkillsScreen({
       enableSorting: false,
       cell: ({ row }) => {
         const item = row.original;
-        const status = skillStatus(item, allRows, (id) =>
+        const status = skillStatus(item, skillLookup, (id) =>
           agents.find((agent) => agent.id === id)?.label ?? id,
         );
+        const copies = item.native ? nativeCopyPaths(skillLookup.nativeCopies(item)).length : 0;
         return (
-          <span data-slot="skill-status" className="flex min-w-0 flex-col items-start gap-2 py-4">
+          <span data-slot="skill-status" className="flex min-w-0 flex-col items-start gap-4 py-4">
             <Badge tone={status.tone} dot title={status.title}>
               {status.label}
             </Badge>
+            {item.native && item.native_path && (
+              <span className="flex flex-wrap items-center gap-6">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setAdoptModalTarget(item);
+                  }}
+                >
+                  Adopt
+                </Button>
+                {copies > 1 && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      app.navigate("migrate");
+                    }}
+                  >
+                    Resolve
+                  </Button>
+                )}
+              </span>
+            )}
           </span>
         );
       },
     };
 
-    return [nameCol, scopeCol, ...agentCols, statusCol];
-  }, [agents, allRows, adoptingPath, handleAdopt, handleIgnoreUpdate, handleReviewUpdate, handleToggleAgent, app, updateBusy]);
+    // Status is the secondary column: dropping it keeps a row inside a 960px
+    // window, where its two acts (Adopt, Resolve) move to the row menu.
+    return compactLayout
+      ? [nameCol, scopeCol, ...agentCols]
+      : [nameCol, scopeCol, ...agentCols, statusCol];
+  }, [agents, compactLayout, skillLookup, folderGroupsFor, handleIgnoreUpdate, handleReviewUpdate, handleToggleAgent, app, updateBusy]);
 
   const handleBulkAgentChange = useCallback(async () => {
     const selected = selectedRows;
@@ -593,8 +754,17 @@ export function SkillsScreen({
     setBulkFailures([]);
     try {
       const results = await Promise.all(
-        selected.flatMap((row) =>
-          selectedAgents.map(async (agent) => {
+        selected.flatMap((row) => {
+          // A shared folder is written once per row: fold agents by deployed path.
+          const folderTaken = new Set<string>();
+          const applicableAgents = selectedAgents.filter((agent) => {
+            const path = row.agents.find((cell) => cell.agent === agent.id)?.config_path ?? null;
+            if (path === null) return true;
+            if (folderTaken.has(path)) return false;
+            folderTaken.add(path);
+            return true;
+          });
+          return applicableAgents.map(async (agent) => {
             if (row.native || row.item_id === "") {
               return { row, agent, preview: null, reason: "Native skill is not managed by AgenTuna." };
             }
@@ -615,8 +785,8 @@ export function SkillsScreen({
             } catch (cause) {
               return { row, agent, preview: null, reason: parseCommandError(cause).message };
             }
-          }),
-        ),
+          });
+        }),
       );
       const failures = results.flatMap((result) =>
         result.reason === null
@@ -692,8 +862,12 @@ export function SkillsScreen({
       switch (action) {
         case "open":
           if (row.native) {
-            app.navigate("migrate");
+            app.setScreenState("detail:itemId", "");
+            app.setScreenState("detail:nativePath", row.native_path ?? "");
+            app.recordVisitedItem(`native-skill:${row.native_path ?? row.name}`);
+            app.navigate("skill-detail");
           } else {
+            app.setScreenState("detail:nativePath", null);
             app.recordVisitedItem(`skill:${row.item_id}`);
             app.setScreenState("detail:itemId", row.item_id);
             app.navigate("skill-detail");
@@ -739,6 +913,13 @@ export function SkillsScreen({
     setActionDialog(null);
     setBulkTransfer(transfer);
   };
+
+  const coupledAgentLabels =
+    coupledConfirm === null
+      ? []
+      : coupledConfirm.preview.coupled_agents.map(
+          (id) => agents.find((agent) => agent.id === id)?.label ?? id,
+        );
 
   if (activeTab === "presets") {
     return (
@@ -804,7 +985,7 @@ export function SkillsScreen({
         }
       }}
     >
-      {/* Top bar with ScopeSwitcher, Title, Counts, Add skill CTA */}
+      {/* Title and actions; the shell top bar owns the one scope switcher. */}
       <header className="flex flex-col gap-12">
         <div className="flex flex-wrap items-center justify-between gap-12">
           <div className="flex items-center gap-12">
@@ -827,18 +1008,31 @@ export function SkillsScreen({
                 Presets
               </button>
             </div>
-            <ScopeSwitcher
-              scope={scope as ScopeToken}
-              localEnabled={localEnabled}
-              hasProject={Boolean(activeProject)}
-              globalLocked={globalLocked}
-              onScopeSelected={(s) => app.receiveScope(s)}
-            />
           </div>
-          <Button onClick={() => app.navigate("add-skill")}>Add skill</Button>
+          <div className="flex flex-wrap items-center gap-8">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                // Both entries skip the source picker: the button names the source.
+                app.setScreenState("add-skill:source", "git");
+                app.navigate("add-skill");
+              }}
+            >
+              Import from git
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                app.setScreenState("add-skill:source", "new");
+                app.navigate("add-skill");
+              }}
+            >
+              + New skill
+            </Button>
+          </div>
         </div>
         <div className="text-12 text-text-muted">
-          {counts.all} skill{counts.all === 1 ? "" : "s"} ({counts.all - counts.native} managed by AgenTuna, {counts.native} live only in agent folders)
+          {counts.all} skill{counts.all === 1 ? "" : "s"} found: {counts.all - counts.native} managed by AgenTuna, {counts.native} still live only in agent folders.
         </div>
       </header>
 
@@ -937,13 +1131,14 @@ export function SkillsScreen({
                 {selectedRows.length - visibleSelectedCount} hidden by filter
               </span>
             ) : null}
-            <Button size="sm" disabled={bulkBusy} onClick={() => openBulkTransfer("promote")}>Promote</Button>
-            <Button size="sm" disabled={bulkBusy} onClick={() => openBulkAgent("enable")}>Enable for agent</Button>
-            <Button size="sm" disabled={bulkBusy} onClick={() => openBulkTransfer("move")}>Move to scope</Button>
+            <Button size="sm" disabled={bulkBusy} onClick={() => openBulkTransfer("promote")}>Promote to…</Button>
+            <Button size="sm" disabled={bulkBusy} onClick={() => openBulkAgent("enable")}>Enable for agent…</Button>
+            <Button size="sm" disabled={bulkBusy} onClick={() => openBulkTransfer("move")}>Move to scope…</Button>
             <Button size="sm" disabled={bulkBusy} onClick={() => openBulkAgent("disable")}>Disable</Button>
             <Button
               size="sm"
               variant="ghost"
+              aria-label="Clear selection"
               disabled={bulkBusy}
               onClick={() => {
                 setSelectedIds(new Set());
@@ -951,7 +1146,7 @@ export function SkillsScreen({
                 setBulkFailures([]);
               }}
             >
-              Clear
+              ✕
             </Button>
             {bulkProgress !== null ? <span role="status" className="text-12 text-text-muted">{bulkProgress}</span> : null}
           </div>
@@ -961,24 +1156,33 @@ export function SkillsScreen({
                 <legend className="mb-4 text-12 font-semibold text-text">
                   Choose agents for all {selectedRows.length} selected skills
                 </legend>
-                {agents.map((agent) => (
-                  <label key={agent.id} className="flex items-center gap-8 text-12 text-text">
-                    <input
-                      type="checkbox"
-                      checked={bulkAgentIds.has(agent.id)}
-                      disabled={bulkBusy}
-                      onChange={(event) => {
-                        setBulkAgentIds((current) => {
-                          const next = new Set(current);
-                          if (event.target.checked) next.add(agent.id);
-                          else next.delete(agent.id);
-                          return next;
-                        });
-                      }}
-                    />
-                    {agent.label}
-                  </label>
-                ))}
+                {bulkAgentGroups.map((group) => {
+                  const ids = group.map((agent) => agent.id);
+                  const checked = ids.every((id) => bulkAgentIds.has(id));
+                  return (
+                    <label key={ids.join(":")} className="flex items-center gap-8 text-12 text-text">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={bulkBusy}
+                        onChange={(event) => {
+                          setBulkAgentIds((current) => {
+                            const next = new Set(current);
+                            for (const id of ids) {
+                              if (event.target.checked) next.add(id);
+                              else next.delete(id);
+                            }
+                            return next;
+                          });
+                        }}
+                      />
+                      {group.map((agent) => agent.label).join(" + ")}
+                      {group.length > 1 && (
+                        <span className="text-11 text-scope-user">one folder</span>
+                      )}
+                    </label>
+                  );
+                })}
               </fieldset>
               <div className="flex flex-wrap gap-8">
                 <Button
@@ -1019,6 +1223,8 @@ export function SkillsScreen({
         selectedIds={selectedIds}
         onSelectionChange={setSelectedIds}
         rowActionsOpen={(row) => rowMenu.isOpen(skillRowId(row))}
+        rowHeight={84}
+        getColumnSpan={(row, columnId) => folderSpan(columnId, folderGroupsFor(row), agents)}
         getRowId={skillRowId}
         getRowLabel={(r) => r.name}
         loading={loading}
@@ -1031,8 +1237,11 @@ export function SkillsScreen({
         emptyTitle="No skills found"
         emptyBody="Add a skill or adjust your filters."
         emptyAction={{
-          label: "Add skill",
-          onClick: () => app.navigate("add-skill"),
+          label: "+ New skill",
+          onClick: () => {
+            app.setScreenState("add-skill:source", "new");
+            app.navigate("add-skill");
+          },
         }}
         rowActions={(row) => (
           <div className="relative flex items-center justify-center" data-row-menu data-row-menu-id={skillRowId(row)}>
@@ -1040,7 +1249,7 @@ export function SkillsScreen({
               label={`Actions for ${row.name}`}
               open={rowMenu.isOpen(skillRowId(row))}
               disabled={bulkBusy}
-              onToggle={() => rowMenu.toggle(skillRowId(row))}
+              onToggle={(event) => rowMenu.toggle(skillRowId(row), event.currentTarget)}
             />
             {rowMenu.isOpen(skillRowId(row)) && (
               <div
@@ -1072,7 +1281,10 @@ export function SkillsScreen({
                   const next = event.relatedTarget;
                   if (!(next instanceof Node) || !event.currentTarget.contains(next)) rowMenu.close();
                 }}
-                className="absolute right-0 top-full z-50 mt-4 min-w-[140px] rounded-6 border border-border bg-raised p-4 shadow-lg text-12 text-text"
+                className={`absolute right-0 z-50 min-w-[140px] rounded-6 border border-border bg-raised p-4 shadow-lg text-12 text-text overflow-y-auto overscroll-contain ${
+                  menuPlacement.side === "above" ? "bottom-full mb-4" : "top-full mt-4"
+                }`}
+                style={{ maxHeight: menuPlacement.maxHeight }}
               >
                 <button
                   type="button"
@@ -1092,6 +1304,38 @@ export function SkillsScreen({
                 >
                   Why is this on?
                 </button>
+                {row.native && row.native_path && (
+                  <>
+                    {/* The Status column owns these below the breakpoint; the
+                        menu keeps them reachable once that column is dropped. */}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      tabIndex={-1}
+                      className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      onClick={() => {
+                        rowMenu.close();
+                        setAdoptModalTarget(row);
+                      }}
+                    >
+                      Adopt
+                    </button>
+                    {nativeCopyPaths(skillLookup.nativeCopies(row)).length > 1 && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        tabIndex={-1}
+                        className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                        onClick={() => {
+                          rowMenu.close();
+                          app.navigate("migrate");
+                        }}
+                      >
+                        Resolve copies
+                      </button>
+                    )}
+                  </>
+                )}
                 {!row.native && (
                   <>
                     <button
@@ -1149,6 +1393,53 @@ export function SkillsScreen({
         )}
       />
       <Modal
+        open={coupledConfirm !== null}
+        title="Shared discovery root"
+        description={
+          coupledConfirm === null
+            ? undefined
+            : `${coupledConfirm.agent.label}${coupledAgentLabels.length > 0 ? ` and ${coupledAgentLabels.join(" + ")}` : ""} read the same folder on disk, so one change writes the folder both agents load.`
+        }
+        onOpenChange={(open) => {
+          if (!open) cancelCoupledChange();
+        }}
+        footer={
+          <>
+            <Button variant="ghost" onClick={cancelCoupledChange}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={() => void applyCoupledChange()}>
+              {coupledConfirm?.preview.enabled ? "Enable for both agents" : "Disable for both agents"}
+            </Button>
+          </>
+        }
+      >
+        {coupledConfirm !== null && (
+          <div className="grid gap-12">
+            <div
+              role="note"
+              className="rounded-8 border border-warning/40 bg-warning/10 p-12 text-12 text-text"
+            >
+              <strong className="block text-13">One folder, not two switches</strong>
+              <span className="mt-4 block text-text-secondary">
+                {coupledConfirm.preview.warnings[0] ??
+                  `A shared discovery root means enabling or disabling this skill changes every agent that reads the folder; AgenTuna never offers a separate switch for it.`}
+              </span>
+            </div>
+            <dl className="m-0 grid gap-6 text-12">
+              <div>
+                <dt className="text-11 text-text-muted">Folder</dt>
+                <dd className="m-0 mt-2 break-all font-mono text-11 text-text-secondary">
+                  {coupledConfirm.preview.paths.length > 0
+                    ? coupledConfirm.preview.paths.join("\n")
+                    : coupledConfirm.row.native_path ?? "No path recorded"}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+      </Modal>
+      <Modal
         open={updateReview !== null}
         title="Review skill update"
         description={
@@ -1175,7 +1466,7 @@ export function SkillsScreen({
             {updateReview.preview.files.map((file) => (
               <li key={file.path} className="rounded-6 border border-border p-8">
                 <strong className="block break-all font-mono text-11 text-text">{file.path}</strong>
-                {file.backup_required && <span className="text-10 text-text-muted">Will be backed up</span>}
+                {file.backup_required && <span className="text-11 text-text-muted">Will be backed up</span>}
                 <DiffViewer diff={file.diff} displayPath={file.path} />
               </li>
             ))}
