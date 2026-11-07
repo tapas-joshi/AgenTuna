@@ -203,9 +203,14 @@ mod tests {
         let elapsed = started.elapsed();
         assert_eq!(overview.recent_changes.len(), 20);
         assert_eq!(overview.recent_changes[0].operation.id, "operation-09999");
+        let budget = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(5)
+        } else {
+            std::time::Duration::from_millis(50)
+        };
         assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "overview query took {elapsed:?} (CI bound 500 ms; target 50 ms on a quiet machine)"
+            elapsed < budget,
+            "overview query took {elapsed:?}, above {budget:?}"
         );
     }
 

@@ -1,0 +1,97 @@
+{
+  "effective": {
+    "diagnostics": [],
+    "disabled_here": [],
+    "items": [
+      {
+        "agents": [
+          {
+            "agent": "claude_code",
+            "loads": true,
+            "state": "linked"
+          }
+        ],
+        "item_id": "itm_018f47aa-7a3d-7000-8000-000000000004",
+        "kind": "mcp_server",
+        "loads_in_agents": 1,
+        "lock": null,
+        "logical_id": {
+          "key": {
+            "Declared": "search-server"
+          },
+          "kind": "mcp_server"
+        },
+        "name": "Search",
+        "source_path": "<project/mcp.json",
+        "winner_scope": "project"
+      }
+    ]
+  },
+  "trace": {
+    "active_scope": "project",
+    "agent": "claude_code",
+    "item_id": "itm_018f47aa-7a3d-7000-8000-000000000005",
+    "steps": [
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 1,
+          "path": "<global>/mcp.json",
+          "rendering_path": "<agent>/settings.json"
+        },
+        "reason": "A higher-precedence definition wins",
+        "scope": "global",
+        "status": "Shadowed"
+      },
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 2,
+          "path": "<user>/mcp.json",
+          "rendering_path": "<agent>/settings.json"
+        },
+        "reason": "A higher-precedence definition wins",
+        "scope": "user",
+        "status": "Shadowed"
+      },
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 3,
+          "path": "<project>/mcp.json",
+          "rendering_path": "<agent>/settings.json"
+        },
+        "reason": "A higher-precedence definition wins",
+        "scope": "project",
+        "status": "Shadowed"
+      },
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 4,
+          "path": "<local>/mcp.json",
+          "rendering_path": "<agent>/settings.json"
+        },
+        "reason": "This definition is effective",
+        "scope": "local",
+        "status": "Winning"
+      }
+    ],
+    "verdict": {
+      "decisive_step": 3,
+      "on": true
+    }
+  }
+}

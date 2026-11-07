@@ -45,6 +45,10 @@ pub enum FaultPoint {
     DeployCopyWrite,
     /// Immediately before an individual ChangeSet operation executes.
     ChangeSetOperation,
+    /// Immediately after a `Delete` operation renames the original node into its operation
+    /// backup folder, before journal progress or the operation history record it. A crash here
+    /// leaves a saved `.deleted` node the journal does not yet name.
+    DeleteBackupRename,
     /// After a directory backup was staged and verified, before the restore re-reads the
     /// live target tree. `path` is the restore target directory; an injector may modify a
     /// file inside it to simulate a concurrent external writer.
@@ -52,6 +56,12 @@ pub enum FaultPoint {
     /// Immediately before the verified staging tree is renamed onto the restore target.
     /// `path` is the target directory.
     RestoreInstall,
+    /// Immediately before the installed application bundle is renamed aside to its rollback
+    /// path. `path` is the rollback path the bundle is moved to.
+    BundleSwapAside,
+    /// Immediately before the verified staged application bundle is renamed onto the install
+    /// path. `path` is the installed bundle path.
+    BundleSwapInstall,
 }
 
 /// What an injector does when its point is hit. Test and `faults`/`testkit` features only.

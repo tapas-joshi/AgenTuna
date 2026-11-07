@@ -370,14 +370,18 @@ fn successful_apply_updates_the_existing_project_sync_baseline() {
         )
         .expect("seed agent");
     let initial_baseline = "b".repeat(64);
-    let spec = at_db::deployments::DeploymentSpec::new(
+    let hashes = at_db::deployments::DeploymentHashes::new(None, None, Some(&initial_baseline));
+    let spec = at_db::deployments::DeploymentSpec::applied(
         &item_id,
         &at_model::AgentId::ClaudeCode,
         at_model::Scope::Project,
         at_model::ItemState::Linked,
+        None,
+        None,
+        hashes,
     )
     .with_project(project_id)
-    .with_hashes(None, None, Some(&initial_baseline));
+    .with_sync_label(SyncLabel::ProjectNewer);
     at_db::deployments::upsert_deployment(db.connection(), &spec).expect("seed deployment");
 
     let mut request = sync_request(SyncLabel::ProjectNewer);
@@ -426,5 +430,115 @@ fn successful_apply_updates_the_existing_project_sync_baseline() {
     assert_eq!(
         std::fs::read(root.join("skills/demo/SKILL.md")).expect("read applied content"),
         b"new content"
+    );
+}
+
+/// A stored deployment row whose hashes would classify as `Conflict`, so a reader that
+/// recomputes instead of consuming the column is caught.
+fn stored_cell(
+    label: Option<SyncLabel>,
+    state: at_model::ItemState,
+) -> at_db::shared::DeploymentCell {
+    at_db::shared::DeploymentCell {
+        item_id: ItemId::new(),
+        agent_id: at_model::AgentId::ClaudeCode,
+        scope: at_model::Scope::Project,
+        project_id: Some("project-test".to_owned()),
+        state,
+        mode: Some("symlink".to_owned()),
+        link_mode: Some(at_model::LinkMode::Link),
+        target_path: Some("skills/demo".to_owned()),
+        link_target: Some("store/skills/demo".to_owned()),
+        store_hash: Some("store-hash".to_owned()),
+        target_hash: Some("target-hash".to_owned()),
+        baseline_hash: Some("baseline-hash".to_owned()),
+        sync_label: label,
+        updated_at: "2026-01-01T00:00:00Z".to_owned(),
+        last_verified_at: None,
+        operation_id: None,
+    }
+}
+
+#[test]
+fn a_stored_row_is_followed_verbatim_even_when_its_hashes_disagree() {
+    use at_engine::project_sync::sync_record_from_rows;
+
+    // TA-005's own `classify` would call these hashes a conflict; the consumer must return
+    // whatever label the row stores.
+    let record = sync_record_from_rows(
+        &[stored_cell(
+            Some(SyncLabel::LibraryNewer),
+            at_model::ItemState::Linked,
+        )],
+        "project-test",
+    )
+    .expect("stored label");
+    assert_eq!(record.label, SyncLabel::LibraryNewer);
+    assert_eq!(record.evidence.project_hash.as_deref(), Some("store-hash"));
+    assert_eq!(record.evidence.library_hash.as_deref(), Some("target-hash"));
+    assert_eq!(record.evidence.base_hash.as_deref(), Some("baseline-hash"));
+}
+
+#[test]
+fn conflict_and_drift_states_supply_their_query_derived_labels() {
+    use at_engine::project_sync::sync_record_from_rows;
+
+    let conflict = sync_record_from_rows(
+        &[stored_cell(None, at_model::ItemState::Conflict)],
+        "project-test",
+    )
+    .expect("conflict label");
+    assert_eq!(conflict.label, SyncLabel::Conflict);
+
+    // Drift means the store still equals the baseline, which TA-005 labels `ProjectNewer`.
+    let drifted = sync_record_from_rows(
+        &[stored_cell(None, at_model::ItemState::Drifted)],
+        "project-test",
+    )
+    .expect("drifted relation");
+    assert_eq!(drifted.label, SyncLabel::ProjectNewer);
+
+    // A row with neither a label nor a state TA-005 can read a label from is untracked.
+    assert!(
+        sync_record_from_rows(
+            &[stored_cell(None, at_model::ItemState::Linked)],
+            "project-test"
+        )
+        .is_none()
+    );
+
+    // A row for another project, or no project row at all, is untracked rather than guessed.
+    assert!(sync_record_from_rows(&[], "project-test").is_none());
+    assert!(
+        sync_record_from_rows(
+            &[stored_cell(
+                Some(SyncLabel::InSync),
+                at_model::ItemState::Linked
+            )],
+            "another-project"
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn sync_wiring_never_derives_labels_from_hashes() {
+    const SOURCE: &str = include_str!("../src/project_sync.rs");
+    for forbidden in [
+        "classify(",
+        "DeploymentFacts",
+        "DerivedState::",
+        "derive_label",
+        "is_conflict",
+        "is_drifted",
+    ] {
+        assert!(
+            !SOURCE.contains(forbidden),
+            "at-engine sync wiring must consume TA-005's label, not recompute it: found {forbidden}"
+        );
+    }
+    assert!(
+        SOURCE.contains("sync_label"),
+        "the wiring must read the stored deployment label"
     );
 }

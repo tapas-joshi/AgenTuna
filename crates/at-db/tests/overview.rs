@@ -290,9 +290,16 @@ fn overview_queries_run_under_50ms_on_10k_operations() {
     let _ = recent_changes(conn, 20).expect("recent_changes");
     let elapsed = start.elapsed();
 
+    // The story budget is 50 ms in the shipped (release) build. A debug build on a loaded CI
+    // runner is much slower than that, so debug only has to catch a catastrophic regression.
+    let budget = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_millis(50)
+    };
     assert!(
-        elapsed < Duration::from_millis(500),
-        "overview queries took {elapsed:?} on 10k operations, above 50 ms"
+        elapsed < budget,
+        "overview queries took {elapsed:?} on 10k operations, above {budget:?}"
     );
 }
 

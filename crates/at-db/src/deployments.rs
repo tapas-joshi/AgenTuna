@@ -5,8 +5,6 @@
 //!
 //! - [`upsert_deployment`] — insert or update the cell for
 //!   `(item_id, agent_id, scope, project_id)` in place.
-//! - [`effective_rows`] — the per-agent effective-config rows the TA-009
-//!   overview and the effective screen consume.
 //! - [`health_counts`] — managed / in-sync / total for one agent.
 //! - [`find_deployment`], [`list_deployments_for_item`],
 //!   [`list_deployments_for_agent`] — single-item and per-agent reads.
@@ -14,23 +12,14 @@
 //! All reads go through one prepared statement; none hold a write
 //! transaction, so the UI can render while a scan runs elsewhere.
 
+use std::path::Path;
+
 use at_model::{AgentId, ItemId, ItemState, Scope, SyncLabel};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::DbError;
 use crate::shared::DeploymentCell;
-
-/// One `deployments` row plus the item it deploys, for effective-config views.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EffectiveDeploymentRow {
-    /// The deployment cell.
-    pub cell: DeploymentCell,
-    /// The item being deployed.
-    pub item: crate::shared::ItemRow,
-    /// Agent display name, when the agent row exists.
-    pub agent_display_name: Option<String>,
-}
 
 /// Per-agent health line: how many deployments are managed, in sync and total.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +30,53 @@ pub struct HealthCounts {
     pub in_sync: i64,
     /// Every deployment row for the agent.
     pub total: i64,
+}
+
+/// Content hashes recording the evidence for a deployment row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeploymentHashes<'a> {
+    /// Content hash of the canonical store copy.
+    pub store_hash: Option<&'a str>,
+    /// Content hash found at the deployed target.
+    pub target_hash: Option<&'a str>,
+    /// Baseline hash recorded when AgenTuna last wrote or verified the deployment.
+    pub baseline_hash: Option<&'a str>,
+}
+
+impl<'a> DeploymentHashes<'a> {
+    /// Construct empty hashes (`None`, `None`, `None`).
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            store_hash: None,
+            target_hash: None,
+            baseline_hash: None,
+        }
+    }
+
+    /// Construct hashes for a freshly deployed target where store, target, and baseline match `hash`.
+    #[must_use]
+    pub const fn in_sync(hash: &'a str) -> Self {
+        Self {
+            store_hash: Some(hash),
+            target_hash: Some(hash),
+            baseline_hash: Some(hash),
+        }
+    }
+
+    /// Construct hashes from individual components.
+    #[must_use]
+    pub const fn new(
+        store_hash: Option<&'a str>,
+        target_hash: Option<&'a str>,
+        baseline_hash: Option<&'a str>,
+    ) -> Self {
+        Self {
+            store_hash,
+            target_hash,
+            baseline_hash,
+        }
+    }
 }
 
 /// Everything [`upsert_deployment`] needs to write one cell.
@@ -75,6 +111,49 @@ pub struct DeploymentSpec<'a> {
 }
 
 impl<'a> DeploymentSpec<'a> {
+    /// Builds a deployment row from (item, agent, target path, mode, hashes) and
+    /// assigns the correct TA-005 label for a freshly applied state.
+    #[must_use]
+    pub fn applied(
+        item_id: &'a ItemId,
+        agent_id: &'a AgentId,
+        scope: Scope,
+        state: ItemState,
+        mode: Option<&'a str>,
+        target_path: Option<&'a str>,
+        hashes: DeploymentHashes<'a>,
+    ) -> Self {
+        Self {
+            item_id,
+            agent_id,
+            scope,
+            project_id: None,
+            state,
+            mode,
+            target_path,
+            link_target: None,
+            store_hash: hashes.store_hash,
+            target_hash: hashes.target_hash,
+            baseline_hash: hashes.baseline_hash,
+            sync_label: Some(SyncLabel::InSync),
+            operation_id: None,
+        }
+    }
+
+    /// Alias for [`Self::applied`] building a deployment row for a freshly applied state.
+    #[must_use]
+    pub fn fresh(
+        item_id: &'a ItemId,
+        agent_id: &'a AgentId,
+        scope: Scope,
+        state: ItemState,
+        mode: Option<&'a str>,
+        target_path: Option<&'a str>,
+        hashes: DeploymentHashes<'a>,
+    ) -> Self {
+        Self::applied(item_id, agent_id, scope, state, mode, target_path, hashes)
+    }
+
     /// A minimal spec: item, agent, scope, state; everything else `None`.
     #[must_use]
     pub fn new(item_id: &'a ItemId, agent_id: &'a AgentId, scope: Scope, state: ItemState) -> Self {
@@ -152,6 +231,21 @@ impl<'a> DeploymentSpec<'a> {
     }
 }
 
+/// Builds a deployment row from (item, agent, target path, mode, hashes) and
+/// assigns the correct TA-005 label for a freshly applied state.
+#[must_use]
+pub fn applied_deployment<'a>(
+    item_id: &'a ItemId,
+    agent_id: &'a AgentId,
+    scope: Scope,
+    state: ItemState,
+    mode: Option<&'a str>,
+    target_path: Option<&'a str>,
+    hashes: DeploymentHashes<'a>,
+) -> DeploymentSpec<'a> {
+    DeploymentSpec::applied(item_id, agent_id, scope, state, mode, target_path, hashes)
+}
+
 /// Insert or update the deployment cell for
 /// `(item_id, agent_id, scope, COALESCE(project_id, ''))`.
 ///
@@ -166,9 +260,16 @@ pub fn upsert_deployment(
     connection: &Connection,
     spec: &DeploymentSpec<'_>,
 ) -> Result<(), DbError> {
+    let Some(sync_label) = spec.sync_label else {
+        return Err(DbError::InvalidValue {
+            field: "sync_label",
+            reason: "sync_label is required; deployments must not be written with a missing label"
+                .to_owned(),
+        });
+    };
     if matches!(
-        spec.sync_label,
-        Some(SyncLabel::LibraryOnly | SyncLabel::Conflict | SyncLabel::Drifted)
+        sync_label,
+        SyncLabel::LibraryOnly | SyncLabel::Conflict | SyncLabel::Drifted
     ) {
         return Err(DbError::InvalidValue {
             field: "sync_label",
@@ -242,6 +343,136 @@ pub fn update_project_sync_baseline(
         params![baseline_hash, item_id.to_string(), project_id],
     )?;
     Ok(changed)
+}
+
+/// Updates store, target, and baseline hashes for deployments matching `target_path` and `kind`.
+///
+/// If `store_hash` is `Some`, `store_hash` is updated; otherwise existing `store_hash` is kept.
+/// `target_hash` and `baseline_hash` are set to `target_and_baseline_hash`.
+///
+/// Returns the number of rows updated.
+///
+/// # Errors
+/// Returns [`DbError`] when the database update fails.
+pub fn update_hashes_for_target_path(
+    connection: &Connection,
+    target_path: &Path,
+    scope: Option<Scope>,
+    kind: &str,
+    store_hash: Option<&str>,
+    target_and_baseline_hash: &str,
+) -> Result<usize, DbError> {
+    let path_text = target_path.to_string_lossy();
+    let scope_text = scope.map(Scope::wire_name);
+    let updated = connection.execute(
+        "UPDATE deployments SET store_hash = COALESCE(?1, store_hash), \
+                target_hash = ?2, baseline_hash = ?2 \
+          WHERE target_path = ?3 AND (?4 IS NULL OR scope = ?4) \
+            AND item_id IN (SELECT id FROM items WHERE kind = ?5)",
+        params![
+            store_hash,
+            target_and_baseline_hash,
+            path_text.as_ref(),
+            scope_text,
+            kind
+        ],
+    )?;
+    Ok(updated)
+}
+
+/// Records one canonical store hash on every deployment row in a scope.
+///
+/// A shared store document (`mcp.json`) has one bytes-level hash for every server it holds.
+/// Writing one entry changes the document for all of them, so a per-row refresh of only the
+/// written native document leaves the other rows describing an older canonical file. Callers
+/// that change the store document refresh the whole scope here.
+///
+/// Returns the number of rows updated.
+///
+/// # Errors
+/// Returns [`DbError`] when the update fails.
+pub fn update_store_hash_for_scope(
+    connection: &Connection,
+    kind: at_model::ItemKind,
+    scope: Scope,
+    project_id: Option<&str>,
+    store_hash: &str,
+) -> Result<usize, DbError> {
+    let updated = connection.execute(
+        "UPDATE deployments SET store_hash = ?1 \
+          WHERE scope = ?2 AND COALESCE(project_id, '') = COALESCE(?3, '') \
+            AND item_id IN (SELECT id FROM items WHERE kind = ?4)",
+        params![store_hash, scope.wire_name(), project_id, kind.wire_name()],
+    )?;
+    Ok(updated)
+}
+
+/// Updates store, target, and baseline hashes for one item deployment cell matching
+/// `item_id`, `agent_id`, `scope`, and `project_id`.
+///
+/// If `store_hash` is `Some`, `store_hash` is updated; otherwise existing `store_hash` is kept.
+/// `target_hash` and `baseline_hash` are set to `target_and_baseline_hash`.
+///
+/// Returns the number of rows updated.
+///
+/// # Errors
+/// Returns [`DbError`] when the database update fails.
+pub fn update_item_baseline_hashes(
+    connection: &Connection,
+    item_id: &ItemId,
+    agent_id: &str,
+    scope: Scope,
+    project_id: &str,
+    store_hash: Option<&str>,
+    target_and_baseline_hash: &str,
+) -> Result<usize, DbError> {
+    let updated = connection.execute(
+        "UPDATE deployments SET store_hash = COALESCE(?1, store_hash), \
+                target_hash = ?2, baseline_hash = ?2 \
+          WHERE item_id = ?3 AND agent_id = ?4 AND scope = ?5 \
+            AND COALESCE(project_id, '') = ?6",
+        params![
+            store_hash,
+            target_and_baseline_hash,
+            item_id.to_string(),
+            agent_id,
+            scope.wire_name(),
+            project_id,
+        ],
+    )?;
+    Ok(updated)
+}
+
+/// Updates store, target, and baseline hashes for one item deployment cell matching
+/// `item_id`, `agent_id`, and `scope`.
+///
+/// Sets `store_hash = store_hash`, `target_hash = target_and_baseline_hash`,
+/// and `baseline_hash = target_and_baseline_hash`.
+///
+/// Returns the number of rows updated.
+///
+/// # Errors
+/// Returns [`DbError`] when the database update fails.
+pub fn update_drift_hashes(
+    connection: &Connection,
+    item_id: &ItemId,
+    agent_id: &AgentId,
+    scope: Scope,
+    store_hash: &str,
+    target_and_baseline_hash: &str,
+) -> Result<usize, DbError> {
+    let updated = connection.execute(
+        "UPDATE deployments SET store_hash = ?1, target_hash = ?2, baseline_hash = ?2 \
+         WHERE item_id = ?3 AND agent_id = ?4 AND scope = ?5",
+        params![
+            store_hash,
+            target_and_baseline_hash,
+            item_id.to_string(),
+            agent_id.to_string(),
+            scope.wire_name(),
+        ],
+    )?;
+    Ok(updated)
 }
 
 /// One deployment cell for one `(item, agent, scope, project)` key.
@@ -323,6 +554,29 @@ pub fn operation_item_ids(
     Ok(rows)
 }
 
+/// Project ids of every deployment row one operation wrote, sorted and deduplicated.
+///
+/// A Project-scope operation stamps its project on each deployment row it writes, so a
+/// caller that only knows the operation id (the CLI undo, for example) can recover the
+/// project root it must operate on without being told it again on the command line.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+pub fn operation_project_ids(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT project_id FROM deployments \
+         WHERE operation_id = ?1 AND project_id IS NOT NULL ORDER BY project_id",
+    )?;
+    let rows = statement
+        .query_map([operation_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// Deletes every deployment row one operation wrote and returns how many were removed.
 ///
 /// # Errors
@@ -332,6 +586,83 @@ pub fn delete_for_operation(connection: &Connection, operation_id: &str) -> Resu
     let deleted = connection.execute(
         "DELETE FROM deployments WHERE operation_id = ?1",
         [operation_id],
+    )?;
+    Ok(deleted)
+}
+
+/// Brings the deployment row an undone operation wrote back in line with the filesystem.
+///
+/// `undo_operation` restores files from `operation_files`; the deployment row the undone
+/// operation wrote is metadata the file-level inverse does not touch. Left alone, undoing an
+/// enable leaves the row claiming a link that no longer exists, and undoing a disable leaves a
+/// restored link recorded as off. Either way the next reconcile reports AgenTuna's own undo as
+/// external drift. Only the row owned by `operation_id` for `path` is changed, so a later
+/// command that already took ownership of the cell keeps its state.
+///
+/// Returns the number of rows updated.
+///
+/// # Errors
+///
+/// [`DbError`] when the update fails.
+pub fn align_undone_target(
+    connection: &Connection,
+    operation_id: &str,
+    path: &Path,
+    deployed: bool,
+) -> Result<usize, DbError> {
+    let path_text = path.to_string_lossy();
+    let changed = if deployed {
+        connection.execute(
+            "UPDATE deployments SET state = 'linked', sync_label = 'in_sync', \
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+              WHERE operation_id = ?1 AND target_path = ?2 AND state = 'off'",
+            params![operation_id, path_text.as_ref()],
+        )?
+    } else {
+        // The target is gone. Every row that claimed it is stale, not only the rows of this
+        // operation: a multi-phase delete removes the store row in a later phase, and leaving
+        // another phase's row linked would report that file as newly drifted in between.
+        connection.execute(
+            "UPDATE deployments SET state = 'off', target_hash = NULL, baseline_hash = NULL, \
+                    store_hash = NULL, link_target = NULL, sync_label = NULL, \
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+              WHERE target_path = ?2 AND state != 'off'",
+            params![operation_id, path_text.as_ref()],
+        )?
+    };
+    Ok(changed)
+}
+
+/// Deletes one deployment cell by item and agent.
+///
+/// # Errors
+/// Returns the database failure when the delete fails.
+pub fn delete_cell(
+    connection: &Connection,
+    item_id: &ItemId,
+    agent_id: &AgentId,
+) -> Result<usize, DbError> {
+    Ok(connection.execute(
+        "DELETE FROM deployments WHERE item_id = ?1 AND agent_id = ?2",
+        params![item_id.to_string(), agent_id.to_string()],
+    )?)
+}
+
+/// Deletes every deployment row that belongs to `item_id`.
+///
+/// Used when an item's canonical definition is removed: a row that outlives its manifest entry
+/// describes a server the user can no longer open, and every later list, delete and drift pass
+/// has to filter it out.
+///
+/// Returns the number of rows deleted.
+///
+/// # Errors
+///
+/// [`DbError`] when the delete fails.
+pub fn delete_for_item(connection: &Connection, item_id: &ItemId) -> Result<usize, DbError> {
+    let deleted = connection.execute(
+        "DELETE FROM deployments WHERE item_id = ?1",
+        [item_id.to_string()],
     )?;
     Ok(deleted)
 }
@@ -429,53 +760,6 @@ pub fn list_deployments_for_agent(
     Ok(rows)
 }
 
-/// The effective-config rows for one agent at one scope (and optionally one
-/// project).
-///
-/// One prepared statement joins `deployments` to `items` and `agents`, so the
-/// effective screen never issues a per-row query. `scope` filters the
-/// deployment's scope; `project_id` of `None` selects the global/user rows
-/// (the `COALESCE(project_id, '')` sentinel matches the index).
-///
-/// Rows are ordered by item name so the UI can render them directly.
-///
-/// # Errors
-///
-/// [`DbError`] when the query fails or a stored value is unknown.
-pub fn effective_rows(
-    connection: &Connection,
-    agent_id: &AgentId,
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<Vec<EffectiveDeploymentRow>, DbError> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {}, {}, a.display_name \
-           FROM deployments d \
-           JOIN items i ON i.id = d.item_id \
-           LEFT JOIN agents a ON a.id = d.agent_id \
-          WHERE d.agent_id = ?1 AND d.scope = ?2 \
-            AND COALESCE(d.project_id, '') = COALESCE(?3, '') \
-          ORDER BY i.name COLLATE NOCASE, i.id",
-        DEPLOYMENT_COLUMNS_PREFIXED, ITEM_COLUMNS_PREFIXED
-    ))?;
-    let rows = statement
-        .query_map(
-            params![agent_id.to_string(), scope.wire_name(), project_id],
-            |row| {
-                let cell = crate::shared::deployment_cell_from_row_at(row, 0)?;
-                let item = crate::shared::item_from_row_at(row, ITEM_COLUMN_OFFSET)?;
-                let agent_display_name = row.get(ITEM_COLUMN_OFFSET + ITEM_COLUMN_COUNT)?;
-                Ok(EffectiveDeploymentRow {
-                    cell,
-                    item,
-                    agent_display_name,
-                })
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
 /// Health line for one agent: managed, in-sync and total deployment counts.
 ///
 /// `managed` counts rows whose state is not `native` (AgenTuna owns the
@@ -512,29 +796,195 @@ const DEPLOYMENT_COLUMNS: &str = "id, item_id, agent_id, scope, project_id, stat
      target_path, link_target, store_hash, target_hash, baseline_hash, sync_label, \
      updated_at, last_verified_at, operation_id";
 
-/// `deployments` columns for the effective-rows join (16 columns, index 0..15).
-const DEPLOYMENT_COLUMNS_PREFIXED: &str = "d.id AS id, d.item_id AS item_id, \
-     d.agent_id AS agent_id, d.scope AS scope, d.project_id AS project_id, \
-     d.state AS state, d.mode AS mode, d.target_path AS target_path, \
-     d.link_target AS link_target, d.store_hash AS store_hash, \
-     d.target_hash AS target_hash, d.baseline_hash AS baseline_hash, \
-     d.sync_label AS sync_label, d.updated_at AS updated_at, \
-     d.last_verified_at AS last_verified_at, d.operation_id AS operation_id";
+/// Snapshot of one `deployments` row captured before a delete removed its item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoDeploymentSnapshot {
+    /// Owning item identity.
+    pub item_id: String,
+    /// Agent identity.
+    pub agent_id: String,
+    /// Scope wire name.
+    pub scope: String,
+    /// Owning project id.
+    pub project_id: Option<String>,
+    /// Deployment state.
+    pub state: String,
+    /// Stored mode.
+    pub mode: Option<String>,
+    /// Native target path.
+    pub target_path: Option<String>,
+    /// Link target.
+    pub link_target: Option<String>,
+    /// Canonical store hash.
+    pub store_hash: Option<String>,
+    /// Hash observed at the target.
+    pub target_hash: Option<String>,
+    /// Baseline hash recorded at write time.
+    pub baseline_hash: Option<String>,
+    /// Sync label.
+    pub sync_label: Option<String>,
+    /// Operation that last wrote the row.
+    ///
+    /// Undo re-alignment matches on it: a row restored by a later delete's undo can only be
+    /// flipped back to `linked` by undoing the operation that turned it off.
+    pub operation_id: Option<String>,
+}
 
-/// `items` columns for the effective-rows join (17 columns, index 16..32).
-const ITEM_COLUMNS_PREFIXED: &str = "i.id AS id, i.kind AS kind, i.scope AS scope, \
-     i.project_id AS project_id, i.slug AS slug, i.name AS name, \
-     i.source_path AS source_path, i.link_target AS link_target, \
-     i.content_hash AS content_hash, i.state AS state, i.managed AS managed, \
-     i.source_id AS source_id, i.enabled_default AS enabled_default, \
-     i.tags_json AS tags_json, i.created_at AS created_at, \
-     i.updated_at AS updated_at, i.last_scanned_at AS last_scanned_at";
+/// Reads every deployment row of one item for undo metadata.
+///
+/// # Errors
+/// Returns the database failure when the rows cannot be read.
+pub fn undo_snapshots(
+    connection: &Connection,
+    item_id: &ItemId,
+) -> Result<Vec<UndoDeploymentSnapshot>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT item_id, agent_id, scope, project_id, state, mode, target_path, link_target, \
+         store_hash, target_hash, baseline_hash, sync_label, operation_id \
+         FROM deployments WHERE item_id = ?1 ORDER BY id",
+    )?;
+    let rows = statement.query_map([item_id.to_string()], |row| {
+        Ok(UndoDeploymentSnapshot {
+            item_id: row.get(0)?,
+            agent_id: row.get(1)?,
+            scope: row.get(2)?,
+            project_id: row.get(3)?,
+            state: row.get(4)?,
+            mode: row.get(5)?,
+            target_path: row.get(6)?,
+            link_target: row.get(7)?,
+            store_hash: row.get(8)?,
+            target_hash: row.get(9)?,
+            baseline_hash: row.get(10)?,
+            sync_label: row.get(11)?,
+            operation_id: row.get(12)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
 
-/// Number of `deployments` columns in the effective-rows result.
-const DEPLOYMENT_COLUMN_COUNT: usize = 16;
+/// Restores captured deployment rows for one item, replacing its current cells.
+///
+/// # Errors
+/// Returns the database failure when the rows cannot be written.
+pub fn restore_undo_snapshots(
+    connection: &Connection,
+    item_id: &ItemId,
+    snapshots: &[UndoDeploymentSnapshot],
+) -> Result<(), DbError> {
+    connection.execute(
+        "DELETE FROM deployments WHERE item_id = ?1",
+        [item_id.to_string()],
+    )?;
+    for deployment in snapshots {
+        connection.execute(
+            "INSERT INTO deployments (item_id, agent_id, scope, project_id, state, mode, \
+             target_path, link_target, store_hash, target_hash, baseline_hash, sync_label, \
+             operation_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                deployment.item_id,
+                deployment.agent_id,
+                deployment.scope,
+                deployment.project_id,
+                deployment.state,
+                deployment.mode,
+                deployment.target_path,
+                deployment.link_target,
+                deployment.store_hash,
+                deployment.target_hash,
+                deployment.baseline_hash,
+                deployment.sync_label,
+                deployment.operation_id,
+            ],
+        )?;
+    }
+    Ok(())
+}
 
-/// Offset of the `items` columns inside the effective-rows result.
-const ITEM_COLUMN_OFFSET: usize = DEPLOYMENT_COLUMN_COUNT;
+/// One deployment cell plus the item kind and slug, for a native path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentCellSnapshot {
+    /// Owning item identity.
+    pub item_id: String,
+    /// Agent identity.
+    pub agent_id: String,
+    /// Scope wire name.
+    pub scope: String,
+    /// Owning project id.
+    pub project_id: Option<String>,
+    /// Item kind wire name.
+    pub kind: String,
+    /// Item slug.
+    pub slug: String,
+    /// Recorded mode.
+    pub mode: Option<String>,
+    /// Recorded link target.
+    pub link_target: Option<String>,
+}
 
-/// Number of `items` columns in the effective-rows result.
-const ITEM_COLUMN_COUNT: usize = 17;
+/// Lists the deployment cells that claim one native target path.
+///
+/// # Errors
+/// Returns the database failure when the rows cannot be read.
+pub fn cells_for_target(
+    connection: &Connection,
+    target_path: &str,
+) -> Result<Vec<DeploymentCellSnapshot>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT d.item_id, d.agent_id, d.scope, d.project_id, i.kind, i.slug, d.mode, \
+                d.link_target \
+         FROM deployments d JOIN items i ON i.id = d.item_id \
+         WHERE d.target_path = ?1 AND d.state <> 'off' \
+           AND i.kind IN ('skill', 'mcp_server')",
+    )?;
+    let rows = statement.query_map([target_path], |row| {
+        Ok(DeploymentCellSnapshot {
+            item_id: row.get(0)?,
+            agent_id: row.get(1)?,
+            scope: row.get(2)?,
+            project_id: row.get(3)?,
+            kind: row.get(4)?,
+            slug: row.get(5)?,
+            mode: row.get(6)?,
+            link_target: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Updates the hashes and materialisation of one deployment cell.
+///
+/// # Errors
+/// Returns the database failure when the update fails.
+#[allow(clippy::too_many_arguments)]
+pub fn update_hashes_and_mode(
+    connection: &Connection,
+    item_id: &str,
+    agent_id: &str,
+    scope: Scope,
+    project_id: Option<&str>,
+    store_hash: Option<&str>,
+    target_hash: &str,
+    baseline_hash: Option<&str>,
+    mode: &str,
+    link_target: Option<&str>,
+) -> Result<usize, DbError> {
+    Ok(connection.execute(
+        "UPDATE deployments SET store_hash = ?1, target_hash = ?2, baseline_hash = ?3, \
+                mode = ?4, link_target = ?5 \
+         WHERE item_id = ?6 AND agent_id = ?7 AND scope = ?8 \
+           AND COALESCE(project_id, '') = COALESCE(?9, '')",
+        params![
+            store_hash,
+            target_hash,
+            baseline_hash,
+            mode,
+            link_target,
+            item_id,
+            agent_id,
+            scope.wire_name(),
+            project_id,
+        ],
+    )?)
+}

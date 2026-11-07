@@ -282,6 +282,80 @@ pub fn create_parents_if_target_absent(path: &Path) -> Result<bool, FsError> {
     Ok(true)
 }
 
+/// Creates `path` and any parent directories if they do not exist, returning an IO-typed [`FsError`] on failure.
+///
+/// # Errors
+/// Returns [`FsError`] if an ancestor is not a directory or if creating the directory fails.
+pub fn ensure_dir(path: &Path) -> Result<(), FsError> {
+    ensure_dir_with_mode(path, None)
+}
+
+/// Creates `path` and any parent directories if they do not exist, optionally setting the directory's
+/// permission mode on Unix platforms.
+///
+/// # Errors
+/// Returns [`FsError`] if creating directories or setting permissions fails.
+pub fn ensure_dir_with_mode(path: &Path, mode: Option<u32>) -> Result<(), FsError> {
+    match fs::metadata(path) {
+        Ok(m) if m.is_dir() => {
+            if let Some(m_bits) = mode {
+                set_directory_mode(path, m_bits)?;
+            }
+            Ok(())
+        }
+        Ok(_) => Err(FsError::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "path exists and is not a directory",
+        }),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|err| FsError::from_io(path, err))?;
+            if let Some(m_bits) = mode {
+                set_directory_mode(path, m_bits)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(FsError::from_io(path, e)),
+    }
+}
+
+/// Sets permission mode on `path`, mapping OS errors into [`FsError`].
+///
+/// # Errors
+/// Returns [`FsError`] if setting permissions fails.
+pub fn set_permissions(path: &Path, mode: u32) -> Result<(), FsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777))
+            .map_err(|e| FsError::from_io(path, e))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
+/// Sets permission mode on a directory when supported by the platform (e.g. Unix 0o700 for private store dirs).
+///
+/// # Errors
+/// Returns [`FsError`] if inspecting metadata or setting permissions fails.
+pub fn set_directory_mode(path: &Path, mode: u32) -> Result<(), FsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(path).map_err(|e| FsError::from_io(path, e))?;
+        if metadata.permissions().mode() & 0o777 != mode & 0o777 {
+            set_permissions(path, mode)?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
 /// Where a refused target went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveAsideOutcome {

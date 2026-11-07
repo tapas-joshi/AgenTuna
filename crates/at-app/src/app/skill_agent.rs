@@ -14,7 +14,7 @@ use at_engine::skill_agent::{
 };
 use at_model::{
     AgentId, ChangeSet, ExpectedState, FileOp, ItemId, ItemKind, ItemState, LinkMode,
-    OperationKind, Scope, SyncLabel,
+    OperationKind, Scope,
 };
 use at_store::layout::{Slug, StoreLayout};
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,16 @@ pub(crate) fn take_reviewed_plans(
     Ok(taken)
 }
 
+/// Discards a reviewed skill-agent preview after another item blocks an atomic bulk request.
+#[tauri::command]
+pub fn skill_agent_discard(preview_id: String) -> Result<bool, CommandError> {
+    Ok(plans()
+        .lock()
+        .map_err(|_| CommandError::internal("skill preview cache is unavailable"))?
+        .remove(&preview_id)
+        .is_some())
+}
+
 /// Builds and caches the exact ChangeSet for a per-agent skill toggle.
 #[tauri::command]
 pub fn skill_agent_preview(
@@ -222,11 +232,14 @@ pub(crate) fn skill_agent_preview_impl(
         CommandError::invalid_argument("item_id", "the skill has an invalid stored slug")
     })?;
     let source = layout.skill_dir(&slug);
-    if item
-        .source_path
-        .as_deref()
-        .is_some_and(|stored| Path::new(stored) != source)
-    {
+    if item.source_path.as_deref().is_some_and(|stored| {
+        let p = Path::new(stored);
+        if p.is_absolute() {
+            p != source
+        } else {
+            layout.root().join(p) != source
+        }
+    }) {
         return Err(CommandError::new(
             CommandErrorCode::Conflict,
             "the skill store path changed; refresh the skill list",
@@ -387,6 +400,9 @@ pub(crate) fn skill_agent_preview_impl(
                 remedies: vec!["adopt".to_owned(), "move_aside".to_owned()],
             })),
         },
+        locked @ at_engine::skill_agent::SkillAgentPlanError::Locked { .. } => {
+            CommandError::new(CommandErrorCode::Locked, locked.to_string())
+        }
         other => CommandError::new(CommandErrorCode::Conflict, other.to_string()),
     })?;
     let preview_id = planned
@@ -408,7 +424,7 @@ pub(crate) fn skill_agent_preview_impl(
     let warnings = planned
         .warnings
         .iter()
-        .map(|warning| format!("{warning:?}"))
+        .map(|warning| warning.to_string())
         .collect();
     let mut authorized_roots = vec![env.home.clone()];
     if let Some(project_root) = &project_root
@@ -561,16 +577,21 @@ pub(crate) fn skill_agent_apply_impl(
     } else {
         ItemState::Off
     };
-    let spec = DeploymentSpec::new(&cached.item_id, &cached.agent, cached.scope, state_value)
-        .with_target_path(&target_text)
-        .with_mode(stored_mode.unwrap_or("none"))
-        .with_hashes(
-            Some(&store_hash),
-            target_hash.as_deref(),
-            cached.enabled.then_some(store_hash.as_str()),
-        )
-        .with_sync_label(SyncLabel::InSync)
-        .with_operation(&outcome.operation_id);
+    let hashes = at_db::deployments::DeploymentHashes::new(
+        Some(&store_hash),
+        target_hash.as_deref(),
+        cached.enabled.then_some(store_hash.as_str()),
+    );
+    let spec = DeploymentSpec::applied(
+        &cached.item_id,
+        &cached.agent,
+        cached.scope,
+        state_value,
+        Some(stored_mode.unwrap_or("none")),
+        Some(&target_text),
+        hashes,
+    )
+    .with_operation(&outcome.operation_id);
     let spec = if cached.enabled && cached.mode == Some(LinkMode::Link) {
         spec.with_link_target(&source_text)
     } else {
@@ -582,6 +603,21 @@ pub(crate) fn skill_agent_apply_impl(
     };
     at_db::deployments::upsert_deployment(database.connection(), &spec)
         .map_err(|_| CommandError::internal("the deployment record could not be updated"))?;
+    if cached.enabled {
+        // The native directory now holds the deployed package. Refresh every row that shares
+        // it (a shared skills root couples agents) so drift does not report our own write.
+        at_engine::drift::sync_written_target(
+            database.connection(),
+            Some(cached.scope),
+            &cached.target,
+            Some(&cached.source),
+        )
+        .map_err(|error| {
+            CommandError::internal(format!(
+                "skill deployment baselines could not be refreshed: {error}"
+            ))
+        })?;
+    }
     Ok(SkillAgentApplyView {
         operation_id: Some(outcome.operation_id),
         enabled: cached.enabled,
@@ -602,6 +638,9 @@ mod command_tests {
 
     use super::*;
     use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
+    use crate::app::bulk_skill::{BulkSkillApplyRequest, bulk_skill_apply_inner};
+    use crate::app::drift_testkit::{assert_external_edit_detected_at, assert_no_drift};
+    use crate::app::skill_detail::skill_edit_apply_inner;
     use crate::app::state::AppState;
 
     struct NullSink;
@@ -921,6 +960,147 @@ mod command_tests {
                 .as_deref()
                 .is_some_and(|path| path.contains("demo-skill"))),
             "the copied deployment was backed up before removal: {backups:?}"
+        );
+    }
+
+    #[test]
+    fn enabling_a_skill_refreshes_the_drift_baseline() {
+        let sandbox = Sandbox::new().expect("sandbox");
+        let state = sandbox.state();
+        let target = sandbox.agent_skills_dir().join(sandbox.slug.as_str());
+        let preview = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("enable preview");
+        skill_agent_apply_impl(&state, &preview.preview_id).expect("enable apply");
+        assert_no_drift(&state, "after skill_agent_apply");
+        assert_external_edit_detected_at(
+            &state,
+            &target.join("SKILL.md"),
+            &target,
+            b"---\nname: demo-skill\n---\n\nExternal body.\n",
+        );
+    }
+
+    #[test]
+    fn bulk_enabling_skills_refreshes_the_drift_baseline() {
+        let sandbox = Sandbox::new().expect("sandbox");
+        let state = sandbox.state();
+        let target = sandbox.agent_skills_dir().join(sandbox.slug.as_str());
+        let preview = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("enable preview");
+        let batch = bulk_skill_apply_inner(
+            &state,
+            BulkSkillApplyRequest {
+                preview_ids: vec![preview.preview_id],
+                label: "Enable demo-skill".to_owned(),
+            },
+        )
+        .expect("bulk apply");
+        assert!(batch.applied, "{batch:?}");
+        assert_no_drift(&state, "after bulk_skill_apply");
+        assert_external_edit_detected_at(
+            &state,
+            &target.join("SKILL.md"),
+            &target,
+            b"---\nname: demo-skill\n---\n\nExternal body.\n",
+        );
+    }
+
+    #[test]
+    fn editing_a_linked_skill_refreshes_the_drift_baseline() {
+        let sandbox = Sandbox::new().expect("sandbox");
+        let state = sandbox.state();
+        let target = sandbox.agent_skills_dir().join(sandbox.slug.as_str());
+        let preview = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("enable preview");
+        skill_agent_apply_impl(&state, &preview.preview_id).expect("enable apply");
+        assert_no_drift(&state, "after enabling the linked skill");
+
+        let expected_hash = at_store::manifest::hash_skill_folder(&sandbox.source_dir())
+            .expect("package hash")
+            .to_string();
+        let content = "---\nname: demo-skill\ndescription: demo\n---\n\nEdited body.\n";
+        let preview_id = at_fs::sha256_hex(format!("{expected_hash}\0{content}").as_bytes());
+        skill_edit_apply_inner(
+            &state,
+            &sandbox.item_id.to_string(),
+            content,
+            &expected_hash,
+            &preview_id,
+        )
+        .expect("edit apply");
+        assert_no_drift(&state, "after skill_edit_apply");
+        assert_external_edit_detected_at(
+            &state,
+            &target.join("SKILL.md"),
+            &target,
+            b"---\nname: demo-skill\n---\n\nExternal body.\n",
+        );
+    }
+
+    #[test]
+    fn the_cli_and_app_planners_emit_the_same_change_set_for_one_intent() {
+        // TU-034: the CLI and the app assemble the same intent and hand it to the same engine
+        // planner. Identity fields are random per call, so they are normalized; every other byte
+        // of the serialized ChangeSet must match exactly.
+        let sandbox = Sandbox::new().expect("sandbox");
+        let preview = skill_agent_preview_impl(
+            sandbox.database.connection(),
+            &sandbox.paths,
+            sandbox.request(true),
+        )
+        .expect("app preview");
+        let app_set = {
+            let plans = plans().lock().expect("plan cache");
+            plans
+                .get(&preview.preview_id)
+                .and_then(|cached| cached.set.clone())
+                .expect("the app preview caches its ChangeSet")
+        };
+
+        let store = StoreLayout::for_scope(&sandbox.paths, Scope::User).expect("user layout");
+        let cli_plan = at_engine::skill_cli::plan_toggle(
+            sandbox.database.connection(),
+            &at_engine::skill_cli::ToggleRequest {
+                paths: &sandbox.paths,
+                store: &store,
+                scope: Scope::User,
+                project_id: None,
+                project_root: None,
+                item_id: sandbox.item_id,
+                item_name: "demo-skill".to_owned(),
+                slug: sandbox.slug.clone(),
+                agent: AgentId::ClaudeCode,
+                enabled: true,
+            },
+        )
+        .expect("CLI toggle plan");
+        let cli_set = cli_plan
+            .change_set
+            .expect("the CLI plan carries a ChangeSet");
+
+        let normalized = |set: ChangeSet| {
+            let mut value = serde_json::to_value(set).expect("serialize ChangeSet");
+            value["id"] = serde_json::Value::String("normalized".to_owned());
+            value["preview_id"] = serde_json::Value::String("normalized".to_owned());
+            value["created_at_unix_seconds"] = serde_json::Value::from(0);
+            serde_json::to_vec(&value).expect("canonical bytes")
+        };
+        assert_eq!(
+            normalized(app_set),
+            normalized(cli_set),
+            "CLI --dry-run and the app planner must serialize byte-identical ChangeSets"
         );
     }
 }

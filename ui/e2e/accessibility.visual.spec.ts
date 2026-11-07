@@ -21,12 +21,14 @@ test("picker, palette, Preferences and state-view baselines", async ({ page }) =
   await expect(page.getByRole("dialog", { name: "Switch project" })).toBeVisible();
   await expect(page).toHaveScreenshot("picker-populated.png", { animations: "disabled", caret: "hide" });
   await page.keyboard.press("Escape");
-
+  await expect(page.getByRole("dialog", { name: "Switch project" })).toBeHidden();
   await page.keyboard.press("Meta+k");
-  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette).toBeVisible();
+  await expect(palette.getByRole("combobox", { name: "Search commands" })).toBeFocused();
   await expect(page).toHaveScreenshot("palette-idle.png", { animations: "disabled", caret: "hide" });
   await page.keyboard.press("Escape");
-
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeHidden();
   await page.keyboard.press("Meta+,");
   await expect(page.getByRole("heading", { name: "Preferences" })).toBeVisible();
   await expect(page.getByText("Hide MCP servers banner")).toBeVisible();
@@ -70,14 +72,15 @@ test("keyboard-only project, scope, palette, Add menu and focus behavior", async
 
   const scope = page.getByRole("radiogroup", { name: "Scope" });
   await expect(scope).toBeVisible();
-  const globalScope = scope.getByRole("radio", { name: "Global" });
-  for (let tab = 0; tab < 16 && !(await globalScope.evaluate((element) => element === document.activeElement)); tab += 1) {
+  const userScope = scope.getByRole("radio", { name: "User" });
+  const projectScope = scope.getByRole("radio", { name: "Project" });
+  for (let tab = 0; tab < 16 && !(await userScope.evaluate((element) => element === document.activeElement)); tab += 1) {
     await page.keyboard.press("Tab");
   }
-  await expect(globalScope).toBeFocused();
+  await expect(userScope).toBeFocused();
   await page.keyboard.press("ArrowRight");
-  await expect(scope.getByRole("radio", { name: "User" })).toBeFocused();
-  steps.push({ step: "Switch scope", keystrokes: "Tab; ArrowRight", expectedFocus: "User radio", observed: "User radio focused", result: "pass" });
+  await expect(projectScope).toBeFocused();
+  steps.push({ step: "Switch scope", keystrokes: "Tab; ArrowRight", expectedFocus: "Project radio", observed: "Project radio focused", result: "pass" });
   await page.keyboard.press("Meta+k");
   const palette = page.getByRole("dialog", { name: "Command palette" });
   const commandSearch = palette.getByRole("combobox", { name: "Search commands" });

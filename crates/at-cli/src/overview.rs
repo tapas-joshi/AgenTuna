@@ -36,6 +36,7 @@ impl CommandGroup for OverviewGroup {
                 "choose global, user, project or local",
             )
         })?;
+        crate::runtime::refresh_agent_registry_if_needed(globals)?;
         let paths = resolve_paths(globals)?;
         let _access = CliAccess::read(&paths)?;
         if !paths.db_path().exists() {

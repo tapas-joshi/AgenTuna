@@ -103,6 +103,7 @@ fn plan(fixture: &Fixture, strategy: MigrationStrategy) -> MigrationPlan {
         items: fixture.items.clone(),
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let conflicts = detect_conflicts(&scan);
     let selected = fixture
@@ -219,6 +220,7 @@ fn dry_run_rows_equal_applied_operation_files_for_every_strategy() -> Result<(),
             backup_root: &fixture.backups,
             authorized_roots: &roots,
             database: &mut database,
+            project_id: None,
         };
         let applied = apply_plan(&plan, &mut context)?;
         let actual = operation_paths(&database, &applied.operation_id);
@@ -313,6 +315,7 @@ fn a_second_apply_of_the_same_plan_is_refused_because_the_store_changed()
         backup_root: &fixture.backups,
         authorized_roots: &roots,
         database: &mut database,
+        project_id: None,
     };
     apply_plan(&plan, &mut context)?;
     // The plan hash still matches, but its destinations are now occupied: the reviewed plan
@@ -322,6 +325,7 @@ fn a_second_apply_of_the_same_plan_is_refused_because_the_store_changed()
         backup_root: &fixture.backups,
         authorized_roots: &roots,
         database: &mut database,
+        project_id: None,
     };
     let error = apply_plan(&plan, &mut second).expect_err("second apply refused");
     let text = error.to_string();

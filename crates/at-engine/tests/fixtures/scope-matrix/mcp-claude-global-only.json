@@ -1,0 +1,52 @@
+{
+  "agent": "claude_code",
+  "agents": [
+    {
+      "name": "claude_code"
+    }
+  ],
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-fs"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "filesystem",
+        "path": "<global>/mcp.json",
+        "scope": "global",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "global"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "mcp-claude-global-only",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "fs-global",
+          "id": "srv-fs",
+          "slug": "filesystem"
+        }
+      ],
+      "scope": "global"
+    }
+  ],
+  "title": "Claude Code resolves a Global MCP definition when no nearer copy exists"
+}

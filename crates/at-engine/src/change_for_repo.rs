@@ -556,4 +556,186 @@ mod tests {
         assert_eq!(plan.winner_scope, Some(Scope::Local));
         assert_eq!(plan.shadowed_scope, Some(Scope::Project));
     }
+
+    #[test]
+    fn edit_user_definition_returns_navigation_and_an_empty_change_set() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path();
+        let id = ItemId::new();
+        let project = StoreManifest::new(Scope::Project, StoreId::new());
+        let local = StoreManifest::new(Scope::Local, StoreId::new());
+        let project_scope = StoreLayout::new(Scope::Project, root.join("project-store"));
+        let user_scope = StoreLayout::new(Scope::User, root.join("user"));
+        let user_definition = definition(user_scope.root(), id);
+        let layers = vec![ScopeSnapshot {
+            scope: Scope::User,
+            definitions: vec![user_definition.clone()],
+        }];
+        std::fs::create_dir_all(root.join(".git")).expect("git fixture");
+        let local_scope = LocalScope::detect(
+            root,
+            LocalStorePaths::from_project(&project_scope).expect("local paths"),
+        );
+        let local_layer = LocalLayer::empty(local_scope.clone());
+        let request = ChangeForRepoRequest {
+            item_id: id,
+            kind: ItemKind::Skill,
+            name: "sample".to_owned(),
+            definition_bytes: b"{\"name\":\"sample\"}".to_vec(),
+            project_definition: user_definition,
+            base_layers: &layers,
+            local_layer: &local_layer,
+            inherited_manifests: &[],
+            project_manifest: &project,
+            local_manifest: &local,
+            project_store_path: project_scope.manifest_path(),
+            local_store_path: local_scope.store().store_file(),
+            project_definitions: project_scope.skills_dir(),
+            locks: None,
+            agent: None,
+            project_id: "fixture".to_owned(),
+        };
+        let plan = plan_change_for_repo(ChangeForRepoIntent::EditUserDefinition, &request)
+            .expect("navigation plan");
+        assert!(
+            plan.change_set.is_none(),
+            "navigation emits no file operations: {:?}",
+            plan.change_set
+        );
+        assert!(plan.diffs.is_empty(), "no diff is produced for navigation");
+        assert_eq!(
+            plan.navigate_to,
+            Some((Scope::User, id)),
+            "the intent navigates to the defining scope and item"
+        );
+        assert_eq!(plan.winner_scope, Some(Scope::User));
+        assert!(plan.shadowed_scopes.is_empty());
+        assert!(
+            !project_scope.manifest_path().exists(),
+            "planning navigation writes nothing"
+        );
+    }
+
+    #[test]
+    fn applying_the_reviewed_plan_records_one_operation_with_the_touched_file() {
+        #[derive(Default)]
+        struct Recorder {
+            begun: usize,
+            files: Vec<PathBuf>,
+            finished: usize,
+        }
+
+        impl at_fs::OperationRecorder for Recorder {
+            fn begin(&mut self, _: &ChangeSet) -> Result<String, String> {
+                self.begun += 1;
+                Ok("change-for-repo".to_owned())
+            }
+
+            fn file_completed(
+                &mut self,
+                _: &str,
+                path: &std::path::Path,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&std::path::Path>,
+            ) -> Result<(), String> {
+                self.files.push(path.to_path_buf());
+                Ok(())
+            }
+
+            fn finish(&mut self, _: &str, _: bool, _: bool) -> Result<(), String> {
+                self.finished += 1;
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path();
+        let id = ItemId::new();
+        let project = StoreManifest::new(Scope::Project, StoreId::new());
+        let local = StoreManifest::new(Scope::Local, StoreId::new());
+        let project_scope = StoreLayout::new(Scope::Project, root.join("project-store"));
+        let user_scope = StoreLayout::new(Scope::User, root.join("user"));
+        let user_definition = definition(user_scope.root(), id);
+        let layers = vec![ScopeSnapshot {
+            scope: Scope::User,
+            definitions: vec![user_definition.clone()],
+        }];
+        std::fs::create_dir_all(root.join(".git")).expect("git fixture");
+        std::fs::create_dir_all(project_scope.root()).expect("project store root");
+        std::fs::write(
+            project_scope.manifest_path(),
+            project.to_bytes().expect("seed manifest bytes"),
+        )
+        .expect("seed manifest");
+        let local_scope = LocalScope::detect(
+            root,
+            LocalStorePaths::from_project(&project_scope).expect("local paths"),
+        );
+        let local_layer = LocalLayer::empty(local_scope.clone());
+        let request = ChangeForRepoRequest {
+            item_id: id,
+            kind: ItemKind::Skill,
+            name: "sample".to_owned(),
+            definition_bytes: b"{\"name\":\"sample\"}".to_vec(),
+            project_definition: user_definition,
+            base_layers: &layers,
+            local_layer: &local_layer,
+            inherited_manifests: &[],
+            project_manifest: &project,
+            local_manifest: &local,
+            project_store_path: project_scope.manifest_path(),
+            local_store_path: local_scope.store().store_file(),
+            project_definitions: project_scope.skills_dir(),
+            locks: None,
+            agent: None,
+            project_id: "fixture".to_owned(),
+        };
+        let plan = plan_change_for_repo(
+            ChangeForRepoIntent::DisableInRepo {
+                scope: Scope::Project,
+            },
+            &request,
+        )
+        .expect("disable plan");
+        assert_eq!(plan.diffs.len(), 1, "one op carries one diff");
+        assert!(
+            plan.diffs[0].contains("@@"),
+            "the diff is similar's unified format: {}",
+            plan.diffs[0]
+        );
+
+        let mut recorder = Recorder::default();
+        let backups = root.join("backups");
+        let mut context = at_fs::ApplyContext {
+            store_root: project_scope.root(),
+            backup_folder: &backups,
+            recorder: &mut recorder,
+        };
+        let roots = at_fs::ApplyRoots::new([root.to_path_buf()]).expect("authorized roots");
+        let outcome = apply_change_for_repo(&plan, &mut context, &roots)
+            .expect("apply the reviewed plan")
+            .expect("the plan writes one file");
+        assert_eq!(outcome.completed, 1);
+        assert_eq!(recorder.begun, 1, "exactly one operations row is opened");
+        assert_eq!(recorder.finished, 1, "the operation row is finished");
+        assert_eq!(
+            recorder.files,
+            vec![
+                std::fs::canonicalize(project_scope.manifest_path())
+                    .expect("canonical manifest path")
+            ],
+            "the recorded operation lists every touched file"
+        );
+        let written = StoreManifest::parse(
+            &std::fs::read(project_scope.manifest_path()).expect("written manifest"),
+        )
+        .expect("parse written manifest");
+        assert_eq!(written.disabled().len(), 1);
+        assert_eq!(written.disabled()[0].item_id, id);
+        assert!(
+            !user_scope.manifest_path().exists(),
+            "the User definition is never touched by a disable-in-repo"
+        );
+    }
 }

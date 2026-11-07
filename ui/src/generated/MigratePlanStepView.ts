@@ -13,6 +13,10 @@ seq: number,
  */
 action: string, 
 /**
+ * Store scope that receives this step's item.
+ */
+scope: string, 
+/**
  * Selected canonical item name.
  */
 item_name: string | null, 

@@ -1,4 +1,5 @@
 import type { StateRouteId } from "../components/states";
+import type { ScopeToken } from "../theme";
 /** Stable actions shared by the native menu, keyboard shortcuts and command palette. */
 export const ACTION_IDS = {
   overview: "navigate:overview",
@@ -22,9 +23,26 @@ export const ACTION_IDS = {
   installCli: "install-cli",
   palette: "command-palette",
   save: "save",
+  about: "about",
+  whyTrace: "action:why-trace",
 } as const;
 
-export type AppActionId = (typeof ACTION_IDS)[keyof typeof ACTION_IDS];
+export type AppActionId =
+  | (typeof ACTION_IDS)[keyof typeof ACTION_IDS]
+  | `navigate:${StateRouteId}`
+  | `scope:${ScopeToken}`
+  | "overlay:close";
+
+/** Validates a native menu action before it enters the UI dispatcher. */
+export function isAppActionId(value: string): value is AppActionId {
+  if ((Object.values(ACTION_IDS) as readonly string[]).includes(value)) return true;
+  if (value === "overlay:close") return true;
+  if (value.startsWith("scope:")) {
+    const scope = value.slice("scope:".length);
+    return scope === "global" || scope === "user" || scope === "project" || scope === "local";
+  }
+  return false;
+}
  
 
 /** Shared navigation targets used by native menus, shortcuts and palette actions. */
@@ -44,7 +62,7 @@ export const ACTION_ROUTES: Readonly<Record<string, StateRouteId>> = {
 };
 
 /** Resolve an action id to its shared route target, if it navigates. */
-export function routeForAction(id: string): StateRouteId | null {
+export function routeForAction(id: AppActionId): StateRouteId | null {
   return ACTION_ROUTES[id] ?? null;
 }
 

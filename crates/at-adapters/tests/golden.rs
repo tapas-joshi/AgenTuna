@@ -22,7 +22,7 @@ use at_adapters::codex_mcp::{CodexConfigFile, CodexServerEntry};
 use at_adapters::omp_mcp::{OmpMcpAdapter, OmpMcpConfig, OmpServer};
 use at_fs::BackupPolicy;
 use at_fs::testkit::TestHome;
-use at_model::mcp::{EnvValue, McpTransport, SecretRef};
+use at_model::mcp::{EnvValue, McpTransport};
 use harness::{Format, GoldenCase, Suite, single_edit_span};
 use url::Url;
 
@@ -151,10 +151,7 @@ fn apply_codex_add_server(path: &Path) -> Result<(), String> {
     let mut env = BTreeMap::new();
     env.insert(
         "GITHUB_PERSONAL_ACCESS_TOKEN".to_owned(),
-        EnvValue::Secret(SecretRef {
-            env_name: "GITHUB_PERSONAL_ACCESS_TOKEN".to_owned(),
-            keychain_account: "agentuna/github".to_owned(),
-        }),
+        EnvValue::Literal("${GITHUB_PERSONAL_ACCESS_TOKEN}".to_owned()),
     );
     let entry = CodexServerEntry {
         command: Some("npx".to_owned()),
@@ -1439,6 +1436,307 @@ fn codex_lists_primary_and_unmanaged_alternative_skill_roots() {
     assert!(alternative_row.unmanaged_alternative);
 }
 
+/// Records MCP adapter delegation calls and replays the native config bytes.
+#[derive(Default)]
+struct RecordingMcpDelegate {
+    reads: std::sync::atomic::AtomicUsize,
+    writes: std::sync::atomic::AtomicUsize,
+    last_write: std::sync::Mutex<Vec<u8>>,
+}
+
+impl at_adapters::adapter::McpAdapterDelegate for RecordingMcpDelegate {
+    fn read_io(
+        &self,
+        _scope: at_model::Scope,
+        env: &at_adapters::adapter::AgentEnvironment,
+    ) -> Result<at_adapters::adapter::AgentIoDocument, at_adapters::adapter::AgentError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = at_adapters::codex_mcp::config_path(&env.home);
+        let content = fs::read(&path).unwrap_or_default();
+        Ok(at_adapters::adapter::AgentIoDocument { path, content })
+    }
+
+    fn render_io(
+        &self,
+        deployment: &at_adapters::adapter::AgentDeployment,
+    ) -> Result<Vec<u8>, at_adapters::adapter::AgentError> {
+        Ok(deployment.content.clone())
+    }
+
+    fn write_io(
+        &self,
+        deployment: &at_adapters::adapter::AgentDeployment,
+    ) -> Result<at_adapters::adapter::AgentIoDocument, at_adapters::adapter::AgentError> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut last) = self.last_write.lock() {
+            *last = deployment.content.clone();
+        }
+        Ok(at_adapters::adapter::AgentIoDocument {
+            path: deployment.path.clone(),
+            content: deployment.content.clone(),
+        })
+    }
+}
+
+#[test]
+fn codex_agents_md_create_writes_one_trailing_newline_and_preserves_outside_bytes() {
+    use at_adapters::adapter::{AgentAdapter, AgentDeployment};
+    use at_adapters::codex_adapter::CodexAdapter;
+    use at_model::{ItemKind, Scope};
+
+    let temp = tempfile::tempdir().expect("rule sandbox");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let path = project.join("AGENTS.md");
+    let deployment = |content: &[u8]| AgentDeployment {
+        kind: ItemKind::Rule,
+        scope: Scope::Project,
+        path: path.clone(),
+        content: content.to_vec(),
+    };
+
+    let created = CodexAdapter
+        .render_io(&deployment(b"# Shared rules\nBody line"))
+        .expect("render a new AGENTS.md");
+    assert_eq!(
+        created,
+        b"<!-- agentuna:begin -->\n# Shared rules\nBody line\n<!-- agentuna:end -->\n".to_vec()
+    );
+    assert!(
+        created.ends_with(b"\n") && !created.ends_with(b"\n\n"),
+        "creation writes exactly one trailing newline"
+    );
+
+    let existing = [
+        b"User header kept verbatim.\n".as_slice(),
+        created.as_slice(),
+        b"User footer kept verbatim.\n".as_slice(),
+    ]
+    .concat();
+    fs::write(&path, &existing).expect("seed existing AGENTS.md");
+    let edited = CodexAdapter
+        .render_io(&deployment(b"# New rules\n"))
+        .expect("render an existing AGENTS.md");
+    assert_eq!(
+        edited,
+        [
+            b"User header kept verbatim.\n".as_slice(),
+            b"<!-- agentuna:begin -->\n# New rules\n<!-- agentuna:end -->\n".as_slice(),
+            b"User footer kept verbatim.\n".as_slice(),
+        ]
+        .concat(),
+        "only the managed block body changes"
+    );
+    assert_eq!(
+        fs::read(&path).expect("target stays untouched"),
+        existing,
+        "render_io never writes the file itself"
+    );
+}
+
+#[test]
+fn codex_config_with_ten_projects_and_five_servers_delegates_and_survives_a_skill_deploy() {
+    use at_adapters::adapter::{AgentAdapter, AgentAdapterRegistry, AgentEnvironment};
+    use at_adapters::codex_adapter::CodexAdapter;
+    use at_model::{AgentId, ItemKind, LinkMode, Scope};
+    use std::path::PathBuf;
+
+    let temp = tempfile::tempdir().expect("codex config sandbox");
+    let home = temp.path().join("home");
+    fs::create_dir_all(home.join(".codex")).expect("codex config root");
+    let config_path = home.join(".codex/config.toml");
+    let mut source = String::from("model = \"gpt-5\"\n\n");
+    for index in 0..10 {
+        source.push_str(&format!(
+            "[projects.\"/work/project-{index:02}\"]\ntrust_level = \"trusted\"\n\n"
+        ));
+    }
+    for index in 0..5 {
+        source.push_str(&format!(
+            "[mcp_servers.server-{index}]\ncommand = \"server-{index}\"\nargs = [\"--serve\"]\n\n"
+        ));
+    }
+    fs::write(&config_path, &source).expect("seed config");
+    let before = at_fs::sha256_hex(&fs::read(&config_path).expect("config bytes"));
+
+    let projects = CodexAdapter
+        .list_project_trust(&config_path, &source)
+        .expect("read project trust");
+    assert_eq!(projects.len(), 10, "every [projects.*] table is returned");
+    assert_eq!(projects[0].project_path, PathBuf::from("/work/project-00"));
+    assert_eq!(projects[9].project_path, PathBuf::from("/work/project-09"));
+
+    let registry = AgentAdapterRegistry::register();
+    let delegate = std::sync::Arc::new(RecordingMcpDelegate::default());
+    registry
+        .register_mcp_delegate(AgentId::Codex, delegate.clone())
+        .expect("register TM-006 mock");
+    let env = AgentEnvironment {
+        home: home.clone(),
+        project: None,
+        variables: BTreeMap::new(),
+    };
+    let document = registry
+        .read_io(&AgentId::Codex, ItemKind::McpServer, Scope::User, &env)
+        .expect("delegated MCP read");
+    assert_eq!(
+        delegate.reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the server list comes from one delegation call"
+    );
+    let delegated = String::from_utf8(document.content).expect("UTF-8 config");
+    let parsed = CodexConfigFile::parse(&delegated).expect("parse delegated document");
+    assert_eq!(
+        parsed.server_ids().expect("server ids"),
+        vec![
+            "server-0".to_owned(),
+            "server-1".to_owned(),
+            "server-2".to_owned(),
+            "server-3".to_owned(),
+            "server-4".to_owned(),
+        ]
+    );
+
+    // A skills-only operation in the same agent folder must not touch the MCP document.
+    let store_skill = temp.path().join("store/skills/alpha");
+    fs::create_dir_all(&store_skill).expect("store skill");
+    fs::write(
+        store_skill.join("SKILL.md"),
+        b"---\nname: alpha\ndescription: fixture\n---\n",
+    )
+    .expect("skill document");
+    let target = home.join(".codex/skills/alpha");
+    fs::create_dir_all(target.parent().expect("skills root")).expect("skills root");
+    let outcome = CodexAdapter
+        .deploy_skill(
+            &store_skill,
+            &target,
+            at_fs::SkillStrategy {
+                mode: LinkMode::Link,
+                copy_fallback: false,
+            },
+        )
+        .expect("skills-only deploy");
+    assert_eq!(outcome.mode, LinkMode::Link);
+    assert_eq!(
+        at_fs::sha256_hex(&fs::read(&config_path).expect("config bytes")),
+        before,
+        "a skills-only operation leaves the MCP document hash unchanged"
+    );
+    assert_eq!(
+        CodexAdapter
+            .list_project_trust(&config_path, &source)
+            .expect("projects still parse")
+            .len(),
+        10
+    );
+}
+
+#[test]
+fn codex_invalid_utf8_agents_md_is_a_parse_error_and_is_not_rewritten() {
+    use at_adapters::adapter::{AgentAdapter, AgentDeployment, AgentError};
+    use at_adapters::codex_adapter::CodexAdapter;
+    use at_model::{ItemKind, Scope};
+
+    let temp = tempfile::tempdir().expect("invalid UTF-8 rule sandbox");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let path = project.join("AGENTS.md");
+    let invalid = b"# rules\n\xff\xfe not utf-8\n";
+    fs::write(&path, invalid).expect("seed malformed rules");
+
+    let error = CodexAdapter
+        .render_io(&AgentDeployment {
+            kind: ItemKind::Rule,
+            scope: Scope::Project,
+            path: path.clone(),
+            content: b"replacement".to_vec(),
+        })
+        .expect_err("invalid UTF-8 must be refused, not lossily decoded");
+    assert!(matches!(
+        error,
+        AgentError::Parse { path: parsed, line: 2, col: 1 } if parsed == path
+    ));
+    assert_eq!(
+        fs::read(&path).expect("malformed file remains"),
+        invalid,
+        "the malformed file is never rewritten"
+    );
+    assert_eq!(
+        fs::read_dir(&project).expect("project listing").count(),
+        1,
+        "no temp sibling or backup is created"
+    );
+}
+
+#[test]
+fn codex_mcp_disable_delegates_once_with_enabled_false_and_writes_no_toml() {
+    use at_adapters::adapter::{AgentAdapterRegistry, AgentDeployment};
+    use at_model::{AgentId, ItemKind, Scope};
+
+    let temp = tempfile::tempdir().expect("MCP toggle sandbox");
+    let home = temp.path().join("home");
+    fs::create_dir_all(home.join(".codex")).expect("codex config root");
+    let config_path = home.join(".codex/config.toml");
+    let source = "[mcp_servers.alpha]\ncommand = \"alpha\"\nargs = [\"serve\"]\n";
+    fs::write(&config_path, source).expect("seed config");
+    let before = at_fs::sha256_hex(&fs::read(&config_path).expect("config bytes"));
+
+    let registry = AgentAdapterRegistry::register();
+    let delegate = std::sync::Arc::new(RecordingMcpDelegate::default());
+    registry
+        .register_mcp_delegate(AgentId::Codex, delegate.clone())
+        .expect("register TM-006 mock");
+
+    let mut config = CodexConfigFile::parse(source).expect("parse fixture");
+    let mut entry = config
+        .server("alpha")
+        .expect("read server")
+        .expect("server exists")
+        .entry;
+    entry.enabled = Some(false);
+    config.set_server("alpha", &entry).expect("disable server");
+    let toggled = config.text();
+    assert!(toggled.contains("enabled = false"));
+
+    let document = registry
+        .write_io(
+            &AgentId::Codex,
+            &AgentDeployment {
+                kind: ItemKind::McpServer,
+                scope: Scope::User,
+                path: config_path.clone(),
+                content: toggled.into_bytes(),
+            },
+        )
+        .expect("delegate the disable operation");
+    assert_eq!(document.path, config_path);
+    assert_eq!(
+        delegate.writes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "enable/disable is a single delegation call"
+    );
+    let recorded = delegate.last_write.lock().expect("delegate record").clone();
+    let recorded =
+        CodexConfigFile::parse(std::str::from_utf8(&recorded).expect("recorded document"))
+            .expect("parse recorded document");
+    assert_eq!(
+        recorded
+            .server("alpha")
+            .expect("server")
+            .expect("present")
+            .entry
+            .enabled,
+        Some(false)
+    );
+    assert_eq!(
+        at_fs::sha256_hex(&fs::read(&config_path).expect("config bytes")),
+        before,
+        "the adapter delegation performs no local TOML write"
+    );
+}
+
 #[test]
 fn mcp_format_parsers_preserve_tab_indentation_and_unrelated_text() {
     let claude_source = concat!(
@@ -1529,16 +1827,106 @@ fn omp_mcp_unwritable_config_directory_preserves_original_bytes() {
 
 #[cfg(unix)]
 #[test]
-fn skill_symlink_loop_is_reported_as_a_typed_discovery_error() {
+fn read_only_rule_target_is_refused_without_changing_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use at_adapters::adapter::{AgentAdapter, AgentDeployment, AgentError};
+    use at_adapters::claude_adapter::ClaudeAdapter;
+    use at_model::{ItemKind, Scope};
+
+    let temp = tempfile::tempdir().expect("read-only rule sandbox");
+    let root = temp.path().canonicalize().expect("canonical sandbox root");
+    let path = root.join("CLAUDE.md");
+    let original = b"# Existing native rules\n";
+    fs::write(&path, original).expect("seed rule target");
+    let before_hash = at_fs::sha256_hex(original);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).expect("make rule read-only");
+
+    let error = ClaudeAdapter
+        .render_io(&AgentDeployment {
+            kind: ItemKind::Rule,
+            scope: Scope::Project,
+            path: path.clone(),
+            content: b"New managed instructions".to_vec(),
+        })
+        .expect_err("read-only rules must be refused before an apply plan is produced");
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+        .expect("restore fixture permissions");
+    assert!(matches!(
+        error,
+        AgentError::Permission { path: denied } if denied == path
+    ));
+    assert_eq!(
+        at_fs::sha256_hex(&fs::read(&path).expect("original rule remains")),
+        before_hash,
+        "the read-only target remains byte-identical"
+    );
+}
+
+#[test]
+fn invalid_utf8_markdown_is_reported_as_invalid_and_other_skills_still_load() {
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment};
+    use at_adapters::claude_adapter::ClaudeAdapter;
+    use at_adapters::native_skills::NativeSkillState;
+
+    let temp = tempfile::tempdir().expect("UTF-8 skill sandbox");
+    let root = temp.path().canonicalize().expect("canonical sandbox root");
+    let home = root.join("home");
+    let skills = home.join(".claude/skills");
+    fs::create_dir_all(skills.join("invalid")).expect("invalid skill folder");
+    fs::create_dir_all(skills.join("valid")).expect("valid skill folder");
+    fs::write(skills.join("invalid/SKILL.md"), [0xff]).expect("write invalid UTF-8 fixture");
+    fs::write(
+        skills.join("valid/SKILL.md"),
+        b"---\nname: valid\ndescription: valid fixture\n---\n",
+    )
+    .expect("write valid skill fixture");
+    let env = AgentEnvironment {
+        home,
+        project: None,
+        variables: BTreeMap::new(),
+    };
+
+    let rows = ClaudeAdapter
+        .list_native_skills(&env, &[])
+        .expect("invalid markdown is an item diagnostic, not a failed scan");
+    let invalid = rows
+        .iter()
+        .find(|row| row.name == "invalid")
+        .expect("invalid skill remains visible");
+    assert_eq!(invalid.state, NativeSkillState::Invalid);
+    assert_eq!(
+        invalid.error.as_deref(),
+        Some("SKILL.md is not valid UTF-8"),
+        "invalid bytes are rejected rather than lossily decoded"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.name == "valid" && row.state == NativeSkillState::Valid),
+        "the scan continues to valid skills"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_symlink_loop_is_a_specific_diagnostic_and_scan_continues() {
     use std::os::unix::fs::symlink;
 
-    use at_adapters::adapter::{AgentAdapter, AgentEnvironment, AgentError};
+    use at_adapters::adapter::{AgentAdapter, AgentEnvironment};
     use at_adapters::claude_adapter::ClaudeAdapter;
+    use at_adapters::native_skills::NativeSkillState;
 
     let temp = tempfile::tempdir().expect("skill symlink sandbox");
-    let home = temp.path().join("home");
+    let root = temp.path().canonicalize().expect("canonical sandbox root");
+    let home = root.join("home");
     let skills = home.join(".claude/skills");
-    fs::create_dir_all(&skills).expect("skills root");
+    fs::create_dir_all(skills.join("valid")).expect("valid skill folder");
+    fs::write(
+        skills.join("valid/SKILL.md"),
+        b"---\nname: valid\ndescription: valid fixture\n---\n",
+    )
+    .expect("write valid skill");
     let loop_link = skills.join("loop");
     symlink(&loop_link, &loop_link).expect("symlink loop");
     let env = AgentEnvironment {
@@ -1546,10 +1934,22 @@ fn skill_symlink_loop_is_reported_as_a_typed_discovery_error() {
         project: None,
         variables: BTreeMap::new(),
     };
-    let error = ClaudeAdapter
+    let rows = ClaudeAdapter
         .list_native_skills(&env, &[])
-        .expect_err("a cyclic link cannot be resolved as a skill");
-    assert!(matches!(error, AgentError::Io { .. }));
+        .expect("a cyclic link is diagnosed without aborting the scan");
+
+    let loop_row = rows
+        .iter()
+        .find(|row| row.name == "loop")
+        .expect("loop diagnostic");
+    assert_eq!(loop_row.state, NativeSkillState::Broken);
+    assert_eq!(loop_row.error.as_deref(), Some("symbolic link loop"));
+    assert_eq!(loop_row.target.as_deref(), Some(loop_link.as_path()));
+    assert!(
+        rows.iter()
+            .any(|row| row.name == "valid" && row.state == NativeSkillState::Valid),
+        "the scan continues to valid skills"
+    );
     assert!(
         fs::symlink_metadata(&loop_link)
             .expect("loop metadata")

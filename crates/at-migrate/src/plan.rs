@@ -39,6 +39,8 @@ pub enum ConflictResolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MigrationAction {
+    /// Create the canonical store skeleton before the item steps.
+    CreateStore,
     /// Save the native original to the operation backup directory.
     BackupOriginal,
     /// Copy a native item into the central store.
@@ -109,6 +111,9 @@ pub struct MigrationPlan {
     /// Stable ID used as the plan filename.
     pub id: String,
     /// Store scope receiving the selected items.
+    ///
+    /// One plan never spans scopes: a selection that mixes native scopes becomes one plan per
+    /// receiving scope, so this is the scope of every item in `steps`.
     pub scope: Scope,
     /// Selected strategy.
     pub strategy: MigrationStrategy,
@@ -118,6 +123,54 @@ pub struct MigrationPlan {
     pub counts: PlanCounts,
     /// SHA-256 over the serialized steps and strategy.
     pub plan_hash: String,
+}
+
+/// Store roots a migration writes into, keyed by receiving scope.
+///
+/// One reviewed selection can span native scopes: a user-level skill and a project-level rule
+/// belong in two different stores. This type carries the root the caller resolved for each
+/// scope, so planning never guesses a directory from a scope name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScopeStores {
+    roots: BTreeMap<Scope, PathBuf>,
+}
+
+impl ScopeStores {
+    /// An empty set; every lookup misses.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A set holding one scope's store root.
+    #[must_use]
+    pub fn single(scope: Scope, root: impl Into<PathBuf>) -> Self {
+        let mut stores = Self::new();
+        stores.insert(scope, root);
+        stores
+    }
+
+    /// Registers the store root of `scope`, replacing any earlier root.
+    pub fn insert(&mut self, scope: Scope, root: impl Into<PathBuf>) {
+        self.roots.insert(scope, root.into());
+    }
+
+    /// Store root of `scope`, when this set has one.
+    #[must_use]
+    pub fn root(&self, scope: Scope) -> Option<&std::path::Path> {
+        self.roots.get(&scope).map(PathBuf::as_path)
+    }
+
+    /// Registered scopes, in precedence order.
+    pub fn scopes(&self) -> impl Iterator<Item = Scope> + '_ {
+        self.roots.keys().copied()
+    }
+
+    /// Whether no scope has a root.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
 }
 
 /// Exact, ordered dry-run row for display.
@@ -174,6 +227,18 @@ pub enum PlanError {
     /// Plan serialization or hash computation failed.
     #[error("could not serialize migration plan: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// No store root was supplied for a scope that receives items.
+    #[error("no {scope} store is available for this migration")]
+    MissingStore {
+        /// Receiving scope whose store root was not supplied.
+        scope: Scope,
+    },
+    /// A Project or Local item needs a selected project.
+    #[error("{scope}-scope items need an active project; select one and rebuild the plan")]
+    MissingProject {
+        /// Scope that needs the project.
+        scope: Scope,
+    },
     /// Two selected items would land on one store name on a case-insensitive filesystem.
     #[error(
         "items `{first}` and `{second}` differ only by case; \
@@ -184,6 +249,16 @@ pub enum PlanError {
         first: String,
         /// Second selected name, as reviewed.
         second: String,
+    },
+    /// A reviewed name cannot be a valid store name.
+    #[error("`{name}` cannot be stored as a {kind} name: {reason}")]
+    InvalidName {
+        /// Name shown in the review.
+        name: String,
+        /// Item kind whose store name is invalid.
+        kind: &'static str,
+        /// The slug parser's reason.
+        reason: String,
     },
     /// A planned path exceeds the platform's maximum path length.
     #[error("path `{path}` is {length} bytes, over the {limit}-byte platform limit")]
@@ -279,6 +354,16 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
         let names = choose_names(item, conflict, resolution)?;
         for selected_name in names {
             check_selected_name(&mut selected_names, item.kind, &selected_name)?;
+            let stored_name = normalize(&selected_name);
+            if item.kind == ItemKind::Skill
+                && let Err(error) = at_store::layout::Slug::parse(&stored_name)
+            {
+                return Err(PlanError::InvalidName {
+                    name: selected_name,
+                    kind: "skill",
+                    reason: error.to_string(),
+                });
+            }
             let (digest, bytes) = hash_source(item)?;
             let store_path = item_destination(&request.store_root, item, &selected_name);
             ensure_path_length(&store_path)?;
@@ -323,8 +408,14 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
                 agents: item.agents.clone(),
                 scope: item.scope,
             });
-            if item.kind == ItemKind::Skill {
-                let action = if request.strategy == MigrationStrategy::LeaveAndWatch {
+            // Skills are deployed at their own path; MCP and rule items live inside a shared
+            // agent config, so they are only recorded as watched and never linked.
+            let replaced = item.kind == ItemKind::Skill
+                && request.strategy == MigrationStrategy::ReplaceWithLinks;
+            let watched = item.kind == ItemKind::Skill
+                || request.strategy == MigrationStrategy::LeaveAndWatch;
+            if replaced || watched {
+                let action = if !replaced {
                     MigrationAction::RecordWatched
                 } else if !item.agents.is_empty()
                     && item
@@ -369,7 +460,16 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
         )
     }) {
         let manifest_path = request.store_root.join(at_store::layout::MANIFEST_FILE);
-        let manifest_hash = hash_path(&manifest_path)?;
+        let manifest_hash = match fs::symlink_metadata(&manifest_path) {
+            Ok(_) => Some(hash_path(&manifest_path)?),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(PlanError::SourceRead {
+                    path: manifest_path.clone(),
+                    source,
+                });
+            }
+        };
         steps.push(PlanStep {
             seq: 0,
             action: MigrationAction::UpdateManifest,
@@ -378,7 +478,27 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
             source: None,
             destination: Some(manifest_path),
             expected_source_hash: None,
-            expected_destination_hash: Some(manifest_hash),
+            expected_destination_hash: manifest_hash,
+            backup_path: None,
+            bytes: 0,
+            agent: None,
+            agents: BTreeSet::new(),
+            scope: request.scope,
+        });
+    }
+    // A first migration into a scope with no store yet starts with its skeleton, so the
+    // reviewed plan and its dry run show the store creation before any item step. Apply merges
+    // the same layout operations into the ChangeSet that carries the items.
+    if !at_store::layout::StoreLayout::new(request.scope, &request.store_root).is_ready() {
+        steps.push(PlanStep {
+            seq: 0,
+            action: MigrationAction::CreateStore,
+            item_name: None,
+            source_item_name: None,
+            source: None,
+            destination: Some(request.store_root.clone()),
+            expected_source_hash: None,
+            expected_destination_hash: None,
             backup_path: None,
             bytes: 0,
             agent: None,
@@ -387,14 +507,15 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
         });
     }
     steps.sort_by_key(|step| match step.action {
-        MigrationAction::BackupOriginal => 0,
+        MigrationAction::CreateStore => 0,
+        MigrationAction::BackupOriginal => 1,
         MigrationAction::CreateStoreItem
         | MigrationAction::RenderMcp
-        | MigrationAction::RenderRule => 1,
-        MigrationAction::UpdateManifest => 2,
+        | MigrationAction::RenderRule => 2,
+        MigrationAction::UpdateManifest => 3,
         MigrationAction::WriteLink
         | MigrationAction::WriteCopy
-        | MigrationAction::RecordWatched => 3,
+        | MigrationAction::RecordWatched => 4,
     });
     for (index, step) in steps.iter_mut().enumerate() {
         step.seq = index + 1;
@@ -445,6 +566,112 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
         counts,
         plan_hash,
     })
+}
+
+/// Parameters for [`build_scope_plans`].
+#[derive(Debug, Clone)]
+pub struct ScopePlansRequest<'a> {
+    /// Scan result covering the whole selection.
+    pub scan: &'a ScanReport,
+    /// Explicit decisions keyed by normalized item name, applied in every scope they occur.
+    pub resolutions: &'a BTreeMap<String, ConflictResolution>,
+    /// Selected native paths. Every path must occur in the scan result.
+    pub selected_paths: &'a BTreeSet<PathBuf>,
+    /// Store root per receiving scope.
+    pub stores: &'a ScopeStores,
+    /// Explicit target scope for every item; `None` keeps each item's discovered scope.
+    pub target_scope: Option<Scope>,
+    /// Registered project id; every Project or Local plan requires one.
+    pub project_id: Option<&'a str>,
+    /// Deployment mode per agent.
+    pub copy_agents: &'a BTreeSet<AgentId>,
+    /// Original-preservation strategy.
+    pub strategy: MigrationStrategy,
+    /// Operation backup root.
+    pub backup_root: PathBuf,
+}
+
+/// Builds one reviewed plan per receiving scope from one selection.
+///
+/// Each item is migrated into the store of the scope it was discovered in — a user-level
+/// native skill into the User store, a project-level rule into the Project store — unless
+/// `target_scope` overrides every item explicitly. Conflicts are detected inside each scope,
+/// because two same-named copies in different scopes land in different stores and never
+/// contend for one name.
+///
+/// The plans come back in precedence order (Global, User, Project, Local); the first one is the
+/// operation root the apply uses for its journal and lock.
+///
+/// # Errors
+/// Returns [`PlanError::EmptySelection`], [`PlanError::MissingProject`] when a Project or Local
+/// item is planned without a selected project, [`PlanError::MissingStore`] for a receiving scope
+/// the caller supplied no root for, an unresolved conflict, or an IO/serialization error.
+pub fn build_scope_plans(request: ScopePlansRequest<'_>) -> Result<Vec<MigrationPlan>, PlanError> {
+    let mut selected_by_scope: BTreeMap<Scope, BTreeSet<PathBuf>> = BTreeMap::new();
+    for item in &request.scan.items {
+        if !request.selected_paths.contains(&item.path) {
+            continue;
+        }
+        let target = request.target_scope.unwrap_or(item.scope);
+        selected_by_scope
+            .entry(target)
+            .or_default()
+            .insert(item.path.clone());
+    }
+    if selected_by_scope.is_empty() {
+        return Err(PlanError::EmptySelection);
+    }
+    let mut plans = Vec::with_capacity(selected_by_scope.len());
+    for (target, selected_paths) in selected_by_scope {
+        if matches!(target, Scope::Project | Scope::Local) && request.project_id.is_none() {
+            return Err(PlanError::MissingProject { scope: target });
+        }
+        let Some(store_root) = request.stores.root(target) else {
+            return Err(PlanError::MissingStore { scope: target });
+        };
+        let subset = ScanReport {
+            items: request
+                .scan
+                .items
+                .iter()
+                .filter(|item| selected_paths.contains(&item.path))
+                .cloned()
+                .collect(),
+            partial: false,
+            skipped_roots: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let conflicts = crate::conflicts::detect_conflicts(&subset);
+        let plan = build_plan(BuildPlanRequest {
+            scan: &subset,
+            conflicts: &conflicts,
+            resolutions: request.resolutions,
+            selected_paths: &selected_paths,
+            store_root: store_root.to_path_buf(),
+            copy_agents: request.copy_agents,
+            strategy: request.strategy,
+            scope: target,
+            backup_root: request.backup_root.clone(),
+        })?;
+        validate_plan(&plan)?;
+        plans.push(plan);
+    }
+    Ok(plans)
+}
+
+/// Stable hash of one reviewed selection across every receiving scope.
+///
+/// Apply rebuilds the plans from disk and compares this hash against the reviewed one, so it
+/// binds every scope, step and the strategy without depending on the random plan ids.
+///
+/// # Errors
+/// Returns [`PlanError::Serialize`] when the plans cannot be serialized.
+pub fn plans_hash(plans: &[MigrationPlan]) -> Result<String, PlanError> {
+    let payload = plans
+        .iter()
+        .map(|plan| (plan.scope, plan.strategy, &plan.steps))
+        .collect::<Vec<_>>();
+    Ok(at_fs::sha256_hex(&serde_json::to_vec(&payload)?))
 }
 
 /// Projects a plan into ordered display rows without reading or writing any files.
@@ -548,21 +775,59 @@ pub fn validate_plan(plan: &MigrationPlan) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// Persists a reviewed plan beneath `<store>/.state/plans/` through at-fs.
+/// One persisted reviewed selection: every plan and the hash binding them.
+///
+/// A selection that spans scopes is persisted as one document keyed by [`Self::id`], so the
+/// reviewed apply can be loaded and confirmed as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedPlans {
+    /// Stable id used as the plan file name.
+    pub id: String,
+    /// SHA-256 over every plan, as reviewed.
+    pub plan_hash: String,
+    /// One plan per receiving scope, in precedence order.
+    pub plans: Vec<MigrationPlan>,
+}
+
+impl PersistedPlans {
+    /// File that holds this selection inside `store_root`.
+    #[must_use]
+    pub fn path_in(&self, store_root: &std::path::Path) -> PathBuf {
+        store_root
+            .join(".state")
+            .join("plans")
+            .join(format!("{}.json", self.id))
+    }
+}
+
+/// Builds the persisted document for one reviewed selection without writing it.
 ///
 /// # Errors
-/// Returns an IO or safe-write error without replacing an existing plan.
-pub fn persist_plan(
+/// Returns [`PlanError::EmptySelection`] for an empty selection or [`PlanError::Serialize`] when
+/// the plans cannot be hashed.
+pub fn plans_document(plans: &[MigrationPlan]) -> Result<PersistedPlans, PlanError> {
+    if plans.is_empty() {
+        return Err(PlanError::EmptySelection);
+    }
+    Ok(PersistedPlans {
+        id: at_model::ItemId::new().to_string(),
+        plan_hash: plans_hash(plans)?,
+        plans: plans.to_vec(),
+    })
+}
+
+/// Persists one reviewed selection beneath `<store_root>/.state/plans/` through at-fs.
+///
+/// # Errors
+/// Returns an IO or safe-write error without replacing an existing plan file.
+pub fn persist_plans(
     store_root: &std::path::Path,
-    plan: &MigrationPlan,
+    document: &PersistedPlans,
 ) -> Result<PathBuf, PlanError> {
-    let path = store_root
-        .join(".state")
-        .join("plans")
-        .join(format!("{}.json", plan.id));
+    let path = document.path_in(store_root);
     at_fs::guard::create_parents_if_target_absent(&path)
         .map_err(|error| PlanError::Persistence(error.to_string()))?;
-    let bytes = serde_json::to_vec_pretty(plan)?;
+    let bytes = serde_json::to_vec_pretty(document)?;
     at_fs::apply(&at_fs::WriteRequest::create(&path, bytes))
         .map_err(|error| PlanError::Persistence(error.to_string()))?;
     Ok(path)
@@ -592,10 +857,8 @@ fn hash_path(path: &std::path::Path) -> Result<String, PlanError> {
 fn item_destination(root: &std::path::Path, item: &ScanItem, name: &str) -> PathBuf {
     match item.kind {
         // Store skill folders are slugs: `skills/<slug>/`, so the reviewed name is lowercased.
-        ItemKind::Skill => root.join("skills").join(name.to_ascii_lowercase()),
-        ItemKind::Rule => root
-            .join("rules")
-            .join(format!("{}.md", name.to_ascii_lowercase())),
+        ItemKind::Skill => root.join("skills").join(normalize(name)),
+        ItemKind::Rule => root.join("rules").join(format!("{}.md", normalize(name))),
         ItemKind::McpServer => root.join("mcp.json"),
     }
 }
@@ -623,7 +886,14 @@ fn hash_source(item: &ScanItem) -> Result<(String, u64), PlanError> {
 }
 
 fn normalize(name: &str) -> String {
-    name.trim().to_lowercase().replace('_', "-")
+    // Whitespace and underscores are separators in a skill name but not in a store slug; a
+    // native skill called `Native Migrate` is stored as `native-migrate`.
+    name.trim()
+        .to_lowercase()
+        .replace('_', "-")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Rejects two selected names that differ only by case.
@@ -636,7 +906,7 @@ fn check_selected_name(
     kind: ItemKind,
     name: &str,
 ) -> Result<(), PlanError> {
-    let key = (kind, name.to_ascii_lowercase());
+    let key = (kind, normalize(name));
     match names.get(&key) {
         Some(existing) if existing != name => Err(PlanError::CaseInsensitiveCollision {
             first: existing.clone(),

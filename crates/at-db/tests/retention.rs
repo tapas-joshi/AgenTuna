@@ -389,9 +389,14 @@ fn pruning_runs_in_batches_of_five_hundred() {
     assert_eq!(drift.batches, 3, "500 + 500 + 200 rows");
     assert_eq!(PRUNE_BATCH_SIZE, 500);
     assert_eq!(count(connection, "drift_events"), 0);
+    let budget = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_millis(100)
+    };
     assert!(
-        drift.longest_batch <= Duration::from_millis(100),
-        "a single delete batch stayed under 100 ms (took {:?})",
+        drift.longest_batch <= budget,
+        "a single delete batch stayed under {budget:?} (took {:?})",
         drift.longest_batch
     );
     assert!(report.longest_batch >= drift.longest_batch);

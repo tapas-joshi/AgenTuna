@@ -264,6 +264,7 @@ dependencies = [
  "at-model",
  "at-secrets",
  "jsonc-parser",
+ "libc",
  "saphyr",
  "serde_json",
  "similar",
@@ -279,6 +280,7 @@ name = "at-app"
 version = "0.1.0"
 dependencies = [
  "at-adapters",
+ "at-app",
  "at-db",
  "at-engine",
  "at-fs",
@@ -289,6 +291,7 @@ dependencies = [
  "at-secrets",
  "at-store",
  "ed25519-dalek",
+ "notify",
  "reqwest",
  "rusqlite",
  "rustix",
@@ -320,8 +323,10 @@ dependencies = [
  "at-db",
  "at-engine",
  "at-fs",
+ "at-git",
  "at-migrate",
  "at-model",
+ "at-secrets",
  "at-store",
  "clap",
  "clap_complete",
@@ -401,6 +406,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tracing",
 ]
 
 [[package]]
@@ -459,6 +465,7 @@ dependencies = [
  "at-migrate",
  "at-model",
  "at-store",
+ "jsonc-parser",
  "rusqlite",
  "rustix",
  "serde",

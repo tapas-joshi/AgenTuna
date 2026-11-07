@@ -43,10 +43,18 @@ impl ExpectedState {
                     mtime: want_mtime,
                 },
                 Observed::File { hash, mtime, .. },
-            ) => want == hash && want_mtime == mtime,
+            ) => want == hash && unix_seconds(*want_mtime) == unix_seconds(*mtime),
             _ => false,
         }
     }
+}
+
+/// Whole seconds since the Unix epoch, the precision `at_model::ExpectedState::HashAndMtime`
+/// records. Filesystem timestamps carry nanoseconds; comparing them exactly would reject the
+/// very file the caller just read.
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// What was actually found at the destination.

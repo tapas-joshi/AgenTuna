@@ -58,6 +58,8 @@ export interface ShellProps {
   readonly account?: ShellAccount;
   /** Action from the account block, handled by the shared application dispatcher. */
   readonly onAccountAction?: (action: AccountMenuAction) => void;
+  /** Unavailable account menu actions with reasons. */
+  readonly accountDisabledReasons?: Partial<Record<AccountMenuAction, string>>;
   readonly versionLabel?: string;
   /** Theme mode for scope dots. */
   readonly themeMode?: ThemeMode;
@@ -102,6 +104,7 @@ export function Shell({
   agents = [],
   account,
   onAccountAction,
+  accountDisabledReasons,
   versionLabel,
   themeMode = "dark",
   paletteModifier = "meta",
@@ -130,10 +133,12 @@ export function Shell({
 
       <Sidebar
         activeSection={activeSection}
+        currentRoute={route}
         onNavigate={onNavigate}
         agents={agents}
         account={account}
         onAccountAction={onAccountAction}
+        accountDisabledReasons={accountDisabledReasons}
         versionLabel={versionLabel}
         themeMode={themeMode}
       />
@@ -157,13 +162,13 @@ export function Shell({
          * frame while the chrome stays put; `min-w-0` lets wide tables scroll
          * horizontally instead of overflowing the window.
          */}
-        <main
+        <div
           id="shell-main"
           data-slot="shell-main"
           className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden"
         >
           {children}
-        </main>
+        </div>
       </div>
 
       {overlays}

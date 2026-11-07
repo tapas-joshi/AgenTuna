@@ -7,6 +7,7 @@ use ts_rs::TS;
 
 /// State of an item at one scope for the requested agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 #[non_exhaustive]
 pub enum StepStatus {
     /// No definition or tombstone exists at this scope.
@@ -37,6 +38,7 @@ pub enum StepStatus {
 
 /// Parsed-document location supplied by an adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct DocumentLocation {
     /// File containing the entry.
     #[ts(type = "string")]
@@ -53,6 +55,7 @@ pub struct DocumentLocation {
 
 /// One ordered scope explanation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct TraceStep {
     /// Scope represented.
     #[ts(type = "string")]
@@ -67,6 +70,7 @@ pub struct TraceStep {
 
 /// Final effective on/off state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct Verdict {
     /// Whether the item is enabled for the selected agent.
     pub on: bool,
@@ -76,6 +80,7 @@ pub struct Verdict {
 
 /// Complete trace in Global, User, Project, Local order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct WhyTrace {
     /// Traced item.
     #[ts(type = "string")]
@@ -111,6 +116,41 @@ pub struct TraceEvidence {
     pub location: Option<DocumentLocation>,
 }
 
+/// Derives the source position of a store definition from the file that owns it.
+///
+/// Store skills point at `SKILL.md`, so the reported line is the frontmatter `name` entry and
+/// the byte span covers that entry exactly. Rules are whole files, so they report line 1. MCP
+/// servers live inside one shared `mcp.json` document whose entry spans are not tracked while
+/// loading; they report the file without a line rather than a guessed one. Read failures leave
+/// the position unset instead of failing the read-only trace.
+#[must_use]
+pub fn store_location(
+    definition: &at_model::Definition,
+    rendering_path: Option<PathBuf>,
+) -> DocumentLocation {
+    let mut location = DocumentLocation {
+        path: definition.path.clone(),
+        byte_span: None,
+        line: None,
+        rendering_path,
+    };
+    match definition.kind {
+        at_model::ItemKind::Skill => {
+            if let Ok(doc) = at_store::skill::read_skill_doc(&definition.path) {
+                let start = doc.name_span.start();
+                let end = doc.name_span.end();
+                location.line = Some(doc.raw.get(..start).map_or(1, |head| {
+                    head.bytes().filter(|byte| *byte == b'\n').count() + 1
+                }));
+                location.byte_span = Some(start..end);
+            }
+        }
+        at_model::ItemKind::Rule => location.line = Some(1),
+        _ => {}
+    }
+    location
+}
+
 /// Builds a read-only trace from resolver and adapter facts.
 ///
 /// The adapter is responsible for supplying parsed byte spans and line numbers; this function
@@ -130,6 +170,11 @@ pub fn trace(
             && evidence.iter().any(|(source_scope, source)| {
                 source.winning && source_scope.precedence() < active_scope.precedence()
             });
+        // A tombstone at the active scope turns off every closer definition, so an older
+        // definition is present but not effective: it stays `Defined` rather than `Inherited`.
+        let tombstone_here = evidence
+            .iter()
+            .any(|(source_scope, source)| *source_scope == active_scope && source.disabled);
         let status = match fact {
             None if inherited_here => StepStatus::Inherited,
             None => StepStatus::Absent,
@@ -143,7 +188,11 @@ pub fn trace(
             Some(e) if e.winning => StepStatus::Winning,
             Some(e) if e.shadowed => StepStatus::Shadowed,
             Some(e) if e.defined && active_scope.precedence() > scope.precedence() => {
-                StepStatus::Inherited
+                if tombstone_here {
+                    StepStatus::Defined
+                } else {
+                    StepStatus::Inherited
+                }
             }
             Some(e) if e.defined => StepStatus::Defined,
             Some(_) if inherited_here => StepStatus::Inherited,
@@ -187,6 +236,7 @@ pub fn trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn evidence(
         scope: Scope,
@@ -291,6 +341,13 @@ mod tests {
 
     #[test]
     fn project_tombstone_is_decisive_and_global_lock_has_reason() {
+        let mut tombstone = evidence(Scope::Project, false, false, true);
+        tombstone.1.location = Some(DocumentLocation {
+            path: PathBuf::from("/fixture/tombstones/codex-server.json"),
+            byte_span: None,
+            line: None,
+            rendering_path: None,
+        });
         let disabled = trace(
             ItemId::new(),
             Scope::Project,
@@ -298,12 +355,26 @@ mod tests {
             [
                 evidence(Scope::Global, false, false, false),
                 evidence(Scope::User, true, false, false),
-                evidence(Scope::Project, false, false, true),
+                tombstone,
                 evidence(Scope::Local, false, false, false),
             ],
         );
         assert!(!disabled.verdict.on);
+        assert_eq!(disabled.verdict.decisive_step, Some(2));
         assert_eq!(disabled.steps[2].status, StepStatus::Disabled);
+        assert_eq!(
+            disabled.steps[2]
+                .location
+                .as_ref()
+                .map(|location| location.path.as_path()),
+            Some(Path::new("/fixture/tombstones/codex-server.json")),
+            "the decisive Disabled step names the tombstone file"
+        );
+        assert_eq!(
+            disabled.steps[1].status,
+            StepStatus::Defined,
+            "the User definition stays Defined below the tombstone"
+        );
         let mut global = evidence(Scope::Global, true, false, false);
         global.1.lock_reason = Some("organization policy".to_owned());
         let locked = trace(
@@ -324,5 +395,6 @@ mod tests {
             }
         );
         assert!(!locked.verdict.on);
+        assert_eq!(locked.verdict.decisive_step, Some(0));
     }
 }

@@ -248,3 +248,43 @@ fn keychain_identity_comes_from_the_stored_row() {
         ))
     ));
 }
+
+/// TM-010 AC1: the module issues no DDL — the tables come from TF-018's shipped migrations.
+///
+/// Every other test in this file runs its query against a freshly migrated database, so the
+/// "queries the TF-018 schema" half is exercised by them; this test pins the tables and the
+/// absence of schema statements in the module itself.
+#[test]
+fn module_issues_no_ddl_and_queries_the_tf018_schema() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("secret_refs.rs"),
+    )
+    .expect("secret_refs source is readable");
+    for keyword in ["CREATE", "ALTER", "DROP"] {
+        assert!(
+            !source.contains(keyword),
+            "secret_refs.rs must not issue {keyword}; TF-018 owns the DDL"
+        );
+    }
+
+    let database = database();
+    let mut tables = std::collections::BTreeSet::new();
+    let mut statement = database
+        .connection()
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .expect("schema read");
+    for row in statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("table list")
+    {
+        tables.insert(row.expect("table name"));
+    }
+    for table in ["secret_refs", "secret_ref_uses"] {
+        assert!(
+            tables.contains(table),
+            "TF-018 ships {table}; found {tables:?}"
+        );
+    }
+}

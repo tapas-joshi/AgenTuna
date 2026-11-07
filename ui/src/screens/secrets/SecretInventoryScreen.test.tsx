@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { SecretInventoryScreen } from "./SecretInventoryScreen";
 
@@ -24,5 +24,20 @@ describe("SecretInventoryScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save in Keychain" }));
     expect(await screen.findByText("No secrets yet")).toBeTruthy();
     expect(ipc.calls.find(({ command }) => command === "secrets_create")?.args).toEqual({ name: "api-token", value: "private-sentinel" });
+  });
+
+  test("lists no value column and removes an orphan only after a named confirmation", async () => {
+    const orphan = { name: "old-token", account: "old-token", used_by_count: 0, used_by: [], created_at: null, rotated_at: null, last_read_ok_at: null, orphaned: true, available: true };
+    ipc.reply = (command) => Promise.resolve(command === "secrets_list" ? [orphan] : undefined);
+    render(<SecretInventoryScreen />);
+    expect(await screen.findAllByText("old-token")).toHaveLength(2);
+    expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent)).not.toContain("Value");
+    expect(screen.getByText("Orphaned")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("Remove “old-token”?");
+    expect(ipc.calls.some(({ command }) => command === "secrets_delete")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Remove secret" }));
+    await waitFor(() => expect(ipc.calls.find(({ command }) => command === "secrets_delete")?.args).toEqual({ name: "old-token", confirm: true }));
   });
 });

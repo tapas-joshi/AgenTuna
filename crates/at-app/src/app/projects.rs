@@ -166,10 +166,7 @@ pub fn projects_scan(state: State<'_, AppState>) -> Result<JobId, CommandError> 
             let mut database = database.lock().map_err(|_| JobError::Failed {
                 message: "project database lock is unavailable".to_owned(),
             })?;
-            let mut registry = DbProjectRegistry {
-                database: &mut database,
-            };
-            at_store::project_scan::apply_diff(&diff, &mut registry).map_err(|_| {
+            at_store::project_scan::apply_diff(&diff, &mut *database).map_err(|_| {
                 JobError::Failed {
                     message: "project registry could not be updated".to_owned(),
                 }
@@ -225,45 +222,5 @@ struct CancelOnDrop(at_store::project_scan::CancelFlag);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
-    }
-}
-
-struct DbProjectRegistry<'a> {
-    database: &'a mut at_db::Database,
-}
-
-impl at_store::project_scan::ProjectRegistry for DbProjectRegistry<'_> {
-    fn insert_discovered(
-        &mut self,
-        project: &at_store::project_scan::DiscoveredProject,
-    ) -> Result<(), at_store::project_scan::ScanApplyError> {
-        at_db::projects::add_project(
-            self.database.connection(),
-            &project.path,
-            Some(&project.name),
-            Some(&project.source_root),
-        )
-        .map(|_| ())
-        .map_err(|error| at_store::project_scan::ScanApplyError {
-            path: project.path.clone(),
-            message: error.to_string(),
-        })
-    }
-
-    fn mark_missing(&mut self, path: &Path) -> Result<(), at_store::project_scan::ScanApplyError> {
-        let project = at_db::projects::find_project_by_path(self.database.connection(), path)
-            .map_err(|error| at_store::project_scan::ScanApplyError {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            })?;
-        if let Some(project) = project {
-            at_db::projects::hide_project(self.database.connection(), &project.id).map_err(
-                |error| at_store::project_scan::ScanApplyError {
-                    path: path.to_path_buf(),
-                    message: error.to_string(),
-                },
-            )?;
-        }
-        Ok(())
     }
 }

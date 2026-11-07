@@ -1,13 +1,15 @@
 //! Per-agent health-line computation for the Agents screen.
 //!
-//! Counts and path verification come from the `at-db` repositories. The fallback marker is
-//! supplied by the deployment caller because the shipped deployments schema does not persist
-//! whether a `copy` row followed a failed symlink attempt.
+//! Counts and path verification come from the `at-db` repositories. The copy-fallback marker is
+//! derived from the recorded deployments: a `copy` row for an agent whose configured link mode is
+//! `link` is exactly a state that began as a requested symlink and fell back. An agent configured
+//! for copies from the start (`link_mode.<agent> = copy`, e.g. a custom agent without symlink
+//! support) records `copy` rows too, so it never reports a fallback.
 
 use std::path::Path;
 
 use at_db::{Database, DbError};
-use at_model::AgentId;
+use at_model::{AgentId, LinkMode};
 
 /// Health-line diagnostic requiring a user action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,8 @@ pub struct HealthLine {
     pub text: String,
     /// Diagnostic associated with an unverified primary path.
     pub diagnostic: Option<HealthDiagnostic>,
+    /// Whether a recorded `copy` deployment stands in for a requested link.
+    pub copy_fallback: bool,
 }
 
 /// Why the health line could not be computed.
@@ -33,24 +37,46 @@ pub enum HealthError {
     /// A database repository query failed.
     #[error(transparent)]
     Database(#[from] DbError),
+    /// The settings row could not be read.
+    #[error(transparent)]
+    Settings(#[from] at_db::settings::SettingsError),
 }
 
 /// Computes the summary for `agent_id` using the current database contents.
 ///
 /// `home` is injected so tests and callers can shorten paths without consulting the process
-/// environment. `copy_fallback` must be true only when deployment recorded that a symlink
-/// attempt failed and the deployment fell back to copy mode; a healthy copy-only agent passes
-/// false.
+/// environment.
 ///
 /// # Errors
-/// Returns [`HealthError::Database`] if an agent, path or deployment query fails.
+/// Returns [`HealthError::Database`] if an agent, path, deployment or settings query fails.
 pub fn line(
     database: &Database,
     agent_id: &AgentId,
     home: &Path,
-    copy_fallback: bool,
 ) -> Result<HealthLine, HealthError> {
-    line_with_connection(database.connection(), agent_id, home, copy_fallback)
+    line_with_connection(database.connection(), agent_id, home)
+}
+
+/// Whether a recorded `copy` deployment stands in for a requested link.
+///
+/// True when the agent is configured to link and at least one deployment of it is stored with
+/// mode `copy`. A copy-only agent (`link_mode.<agent> = copy`) is never a fallback.
+///
+/// # Errors
+/// Returns [`HealthError::Database`] when the settings or deployment read fails.
+pub fn copy_fallback(
+    connection: &rusqlite::Connection,
+    agent_id: &AgentId,
+) -> Result<bool, HealthError> {
+    let settings = at_db::settings::load(connection)?;
+    if settings.link_mode(agent_id) != LinkMode::Link {
+        return Ok(false);
+    }
+    Ok(
+        at_db::deployments::list_deployments_for_agent(connection, agent_id)?
+            .iter()
+            .any(|cell| cell.mode.as_deref() == Some("copy")),
+    )
 }
 
 /// Computes an agent health summary over a caller-owned read connection.
@@ -59,13 +85,13 @@ pub fn line(
 /// migration-capable [`Database`] handle.
 ///
 /// # Errors
-/// Returns [`HealthError::Database`] if an agent, path or deployment query fails.
+/// Returns [`HealthError::Database`] if an agent, path, deployment or settings query fails.
 pub fn line_with_connection(
     connection: &rusqlite::Connection,
     agent_id: &AgentId,
     home: &Path,
-    copy_fallback: bool,
 ) -> Result<HealthLine, HealthError> {
+    let copy_fallback = copy_fallback(connection, agent_id)?;
     let agents = at_db::agents::list_agents_on_mac(connection)?;
     let agent = agents.iter().find(|agent| &agent.id == agent_id);
     let paths = at_db::agents::list_agent_paths(connection, agent_id)?;
@@ -95,6 +121,7 @@ pub fn line_with_connection(
     Ok(HealthLine {
         text,
         diagnostic: (!verified).then_some(HealthDiagnostic::NeedsPath),
+        copy_fallback,
     })
 }
 
@@ -253,6 +280,7 @@ fn display_path(path: &Path, home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use at_model::{ItemState, Scope, SyncLabel};
     use std::path::Path;
 
     #[test]
@@ -269,24 +297,198 @@ mod tests {
             "/opt/tool/skills"
         );
     }
-    #[test]
-    fn unverified_path_and_copy_fallback_have_exact_health_line() {
-        let db = Database::open_in_memory().expect("database");
-        let agent_id = AgentId::Codex;
-        db.connection()
+    const CLAUDE_SKILLS: &str = "/Users/example/.claude/skills";
+
+    fn home() -> &'static Path {
+        Path::new("/Users/example")
+    }
+
+    fn seed_agent(connection: &rusqlite::Connection, agent: AgentId, path: &str, verified: bool) {
+        connection
             .execute(
-                "INSERT INTO agents (id, display_name, installed, managed) \
-                 VALUES ('codex', 'Codex', 1, 1)",
-                [],
+                "INSERT INTO agents (id, display_name, installed, managed) VALUES (?1, ?1, 1, 1)",
+                [agent.to_string()],
             )
             .expect("seed agent");
-        let result = line(&db, &agent_id, Path::new("/tmp/agentuna-health-test"), true)
-            .expect("health line");
+        connection
+            .execute(
+                "INSERT INTO agent_paths (agent_id, scope, kind, path, is_primary, \"exists\", verified) \
+                 VALUES (?1, 'user', 'skills_dir', ?2, 1, 1, ?3)",
+                rusqlite::params![agent.to_string(), path, verified],
+            )
+            .expect("seed agent path");
+    }
+
+    fn deploy(
+        connection: &rusqlite::Connection,
+        agent: AgentId,
+        slug: &str,
+        mode: &str,
+        state: ItemState,
+        sync_label: Option<SyncLabel>,
+    ) -> at_model::ItemId {
+        let item_id = at_model::ItemId::new();
+        connection
+            .execute(
+                "INSERT INTO items (id, kind, scope, slug, name, managed) \
+                 VALUES (?1, 'skill', 'user', ?2, ?2, 1)",
+                rusqlite::params![item_id.to_string(), slug],
+            )
+            .expect("seed item");
+        let target = format!("{CLAUDE_SKILLS}/{slug}");
+        let mut spec = at_db::deployments::DeploymentSpec::applied(
+            &item_id,
+            &agent,
+            Scope::User,
+            state,
+            Some(mode),
+            Some(&target),
+            at_db::deployments::DeploymentHashes::none(),
+        );
+        if let Some(label) = sync_label {
+            spec = spec.with_sync_label(label);
+        }
+        at_db::deployments::upsert_deployment(connection, &spec).expect("deployment");
+        item_id
+    }
+
+    fn undeploy(connection: &rusqlite::Connection, item: &at_model::ItemId, agent: AgentId) {
+        connection
+            .execute(
+                "DELETE FROM deployments WHERE item_id = ?1 AND agent_id = ?2",
+                rusqlite::params![item.to_string(), agent.to_string()],
+            )
+            .expect("undeploy");
+    }
+
+    #[test]
+    fn healthy_agent_without_deployments_shows_zero_counts_and_no_diagnostics() {
+        let db = Database::open_in_memory().expect("database");
+        seed_agent(db.connection(), AgentId::ClaudeCode, CLAUDE_SKILLS, true);
+        let result = line(&db, &AgentId::ClaudeCode, home()).expect("health line");
+        assert_eq!(result.text, "~/.claude/skills · 0 / 0 managed · 0 in sync");
+        assert_eq!(result.diagnostic, None);
+        assert!(!result.copy_fallback);
+    }
+
+    #[test]
+    fn unverified_primary_path_keeps_the_last_known_path_and_needs_path() {
+        let db = Database::open_in_memory().expect("database");
+        seed_agent(db.connection(), AgentId::Codex, CLAUDE_SKILLS, false);
+        let result = line(&db, &AgentId::Codex, home()).expect("health line");
+        assert_eq!(result.text, "!~/.claude/skills · 0 / 0 managed · 0 in sync");
+        assert_eq!(result.diagnostic, Some(HealthDiagnostic::NeedsPath));
+        assert!(!result.copy_fallback);
+    }
+
+    #[test]
+    fn missing_agent_reports_the_placeholder_path() {
+        let db = Database::open_in_memory().expect("database");
+        let result = line(&db, &AgentId::Codex, home()).expect("health line");
+        assert_eq!(result.text, "!<path> · 0 / 0 managed · 0 in sync");
+        assert_eq!(result.diagnostic, Some(HealthDiagnostic::NeedsPath));
+    }
+
+    #[test]
+    fn copy_deployment_under_link_mode_reports_the_fallback_suffix() {
+        let db = Database::open_in_memory().expect("database");
+        let connection = db.connection();
+        seed_agent(connection, AgentId::ClaudeCode, CLAUDE_SKILLS, true);
+        deploy(
+            connection,
+            AgentId::ClaudeCode,
+            "review",
+            "copy",
+            ItemState::Linked,
+            Some(SyncLabel::InSync),
+        );
+        let result = line(&db, &AgentId::ClaudeCode, home()).expect("health line");
         assert_eq!(
             result.text,
-            "!<path> · 0 / 0 managed · 0 in sync · copy fallback"
+            "~/.claude/skills · 1 / 1 managed · 1 in sync · copy fallback"
         );
-        assert_eq!(result.diagnostic, Some(HealthDiagnostic::NeedsPath));
+        assert!(result.copy_fallback);
+    }
+
+    #[test]
+    fn copy_only_agent_never_reports_a_fallback() {
+        let mut db = Database::open_in_memory().expect("database");
+        seed_agent(db.connection(), AgentId::ClaudeCode, CLAUDE_SKILLS, true);
+        at_db::settings::set_link_mode(
+            db.connection_mut(),
+            &AgentId::ClaudeCode,
+            LinkMode::Copy,
+            at_db::ops::OperationActor::Ui,
+        )
+        .expect("copy-only agent");
+        deploy(
+            db.connection(),
+            AgentId::ClaudeCode,
+            "review",
+            "copy",
+            ItemState::Linked,
+            Some(SyncLabel::InSync),
+        );
+        let result = line(&db, &AgentId::ClaudeCode, home()).expect("health line");
+        assert_eq!(result.text, "~/.claude/skills · 1 / 1 managed · 1 in sync");
+        assert!(!result.copy_fallback);
+    }
+
+    #[test]
+    fn counts_change_after_deploy_and_undeploy_and_are_stable_between_calls() {
+        let db = Database::open_in_memory().expect("database");
+        let connection = db.connection();
+        seed_agent(connection, AgentId::ClaudeCode, CLAUDE_SKILLS, true);
+        deploy(
+            connection,
+            AgentId::ClaudeCode,
+            "review",
+            "symlink",
+            ItemState::Linked,
+            Some(SyncLabel::InSync),
+        );
+        let first = line(&db, &AgentId::ClaudeCode, home()).expect("first");
+        let second = line(&db, &AgentId::ClaudeCode, home()).expect("second");
+        assert_eq!(first, second);
+        assert_eq!(first.text, "~/.claude/skills · 1 / 1 managed · 1 in sync");
+
+        let extra = deploy(
+            connection,
+            AgentId::ClaudeCode,
+            "extra",
+            "symlink",
+            ItemState::Off,
+            Some(SyncLabel::ProjectOnly),
+        );
+        let after_deploy = line(&db, &AgentId::ClaudeCode, home()).expect("after deploy");
+        assert_eq!(
+            after_deploy.text,
+            "~/.claude/skills · 2 / 2 managed · 1 in sync"
+        );
+
+        undeploy(connection, &extra, AgentId::ClaudeCode);
+        let after_undeploy = line(&db, &AgentId::ClaudeCode, home()).expect("after undeploy");
+        assert_eq!(
+            after_undeploy.text,
+            "~/.claude/skills · 1 / 1 managed · 1 in sync"
+        );
+    }
+
+    #[test]
+    fn native_only_deployment_is_total_but_not_managed() {
+        let db = Database::open_in_memory().expect("database");
+        let connection = db.connection();
+        seed_agent(connection, AgentId::ClaudeCode, CLAUDE_SKILLS, true);
+        deploy(
+            connection,
+            AgentId::ClaudeCode,
+            "native",
+            "native",
+            ItemState::Native,
+            None,
+        );
+        let result = line(&db, &AgentId::ClaudeCode, home()).expect("health line");
+        assert_eq!(result.text, "~/.claude/skills · 0 / 1 managed · 0 in sync");
     }
     #[test]
     fn latest_health_maps_success_failure_and_never_tested() {

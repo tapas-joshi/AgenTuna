@@ -259,7 +259,7 @@ impl CliInstaller {
         let link = directory.join(CLI_NAME);
 
         if !directory.exists() {
-            std::fs::create_dir_all(&directory).map_err(|error| CliInstallError::Io {
+            at_fs::ensure_dir(&directory).map_err(|error| CliInstallError::Io {
                 path: directory.clone(),
                 message: error.to_string(),
             })?;

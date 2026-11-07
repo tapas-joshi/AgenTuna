@@ -65,6 +65,11 @@ impl CommandGroup for RulesGroup {
         globals: &GlobalArgs,
         matches: &ArgMatches,
     ) -> Result<CommandOutput, CliError> {
+        if globals.read_only && matches!(matches.subcommand(), Some(("save" | "new", _))) {
+            let access = CliAccess::for_command(globals, true)?;
+            access.ensure_writable()?;
+        }
+
         match matches.subcommand() {
             Some(("save", args)) => save_rule(globals, args),
             Some(("new", args)) => new_rule(globals, args),
@@ -261,7 +266,11 @@ fn apply_rule_buffer(
         )
     })?;
     let item_id = index_rule(&database, source)?;
-    let mut recorder = at_fs::DbOperationRecorder::new(database.connection(), 30);
+    let mut recorder = at_fs::DbOperationRecorder::new_with_actor(
+        database.connection(),
+        30,
+        at_db::ops::OperationActor::Cli,
+    );
     let mut context = at_fs::ApplyContext {
         store_root: support,
         backup_folder: backup,
@@ -449,7 +458,11 @@ fn new_rule(globals: &GlobalArgs, args: &ArgMatches) -> Result<CommandOutput, Cl
             link_target: None,
         },
     )?;
-    let mut recorder = at_fs::DbOperationRecorder::new(database.connection(), 30);
+    let mut recorder = at_fs::DbOperationRecorder::new_with_actor(
+        database.connection(),
+        30,
+        at_db::ops::OperationActor::Cli,
+    );
     let mut context = at_fs::ApplyContext {
         store_root: support,
         backup_folder: backup,

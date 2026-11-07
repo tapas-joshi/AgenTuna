@@ -1,0 +1,10 @@
+--- fixture
++++ output
+@@ -9,3 +9,7 @@
+ 
+ [mcp_servers.shuttle]
+ url = "https://mcp.example.com/mcp"
++
++[mcp_servers.node_repl]
++command = "npx"
++args = ["-y", "node-repl-mcp"]

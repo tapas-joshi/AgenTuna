@@ -103,3 +103,25 @@ pub fn read_nofollow(path: &Path) -> Result<Vec<u8>, FsError> {
     }
     read_bounded(path, &mut file, &metadata)
 }
+
+/// Reads a regular file, following a final symbolic link to its resolved target.
+///
+/// For agent configuration documents a dotfile manager commonly symlinks. The caller decides
+/// whether following is allowed ([`at_model`]'s `follow_symlink` and the adapter's decision); the
+/// read is bounded exactly like [`read_nofollow`].
+///
+/// # Errors
+/// Returns [`FsError::DanglingSymlink`] for a link whose target is missing and the usual IO,
+/// size or non-regular-file error for other invalid targets.
+pub fn read_following(path: &Path) -> Result<Vec<u8>, FsError> {
+    let (destination, _) = resolve(path, true)?;
+    let mut file =
+        File::open(&destination).map_err(|error| FsError::from_io(&destination, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| FsError::from_io(&destination, error))?;
+    if !metadata.is_file() {
+        return Err(FsError::NotRegularFile { path: destination });
+    }
+    read_bounded(&destination, &mut file, &metadata)
+}

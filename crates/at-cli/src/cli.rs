@@ -17,7 +17,9 @@ use crate::globals::GlobalArgs;
     version,
     about = "Manage AI coding agent configuration across scopes",
     long_about = "Manage skills, MCP servers and rule files for coding agents across the Global, \
-                  User, Project and Local scopes. JSON output is stable; diagnostics go to stderr.",
+                  User, Project and Local scopes. Without --project, commands use the nearest Git \
+                  work tree or registered project above the working directory. JSON output is \
+                  stable; diagnostics go to stderr.",
     arg_required_else_help = true,
     max_term_width = 100
 )]

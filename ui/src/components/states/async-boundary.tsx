@@ -16,6 +16,8 @@ export interface AsyncBoundaryEmptyProps {
   readonly icon?: ReactNode;
   /** The action that resolves the emptiness. */
   readonly action?: StateAction;
+  /** Optional second action, for states that offer an alternative route. */
+  readonly secondaryAction?: StateAction;
 }
 
 /** Props accepted by {@link AsyncBoundary}. */
@@ -134,6 +136,7 @@ export function AsyncBoundary<T>({
         hint={empty?.body}
         icon={empty?.icon}
         action={empty?.action}
+        secondaryAction={empty?.secondaryAction}
         minHeight={minHeight}
       />
     );

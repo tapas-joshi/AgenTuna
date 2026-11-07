@@ -71,7 +71,8 @@ interface Entry {
  */
 export function createToastStore(options: ToastStoreOptions = {}): ToastStore {
   const clock = options.clock ?? createSystemClock();
-  const autoDismissMs = options.autoDismissMs ?? AUTO_DISMISS_MS;
+  const testDismissMs = typeof window !== "undefined" && "__AT_TOAST_DISMISS_MS__" in window && typeof window.__AT_TOAST_DISMISS_MS__ === "number" ? window.__AT_TOAST_DISMISS_MS__ : undefined;
+  const autoDismissMs = options.autoDismissMs ?? testDismissMs ?? AUTO_DISMISS_MS;
   const collapseWithinMs = options.collapseWithinMs ?? COLLAPSE_WITHIN_MS;
   const maxVisible = Math.max(1, options.maxVisible ?? MAX_VISIBLE_TOASTS);
   let idSequence = 0;

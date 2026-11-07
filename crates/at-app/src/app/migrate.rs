@@ -35,6 +35,8 @@ pub struct MigrateScanItemView {
     pub parse_error: Option<String>,
     /// Whether the native entry points into an AgenTuna store.
     pub store_link: bool,
+    /// Authoritative ownership label: `in_agentuna`, `conflict` or `not_in_agentuna`.
+    pub state: String,
     /// Managed, conflict, not-in-agentuna or unknown ownership state.
     pub ownership: String,
 }
@@ -53,6 +55,22 @@ pub struct MigrateScanRootView {
     pub in_sync: i64,
 }
 
+/// One scanned folder or document that could not be read, with the path that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigrateScanWarningView {
+    /// Path of the root or configuration file that could not be read.
+    pub path: String,
+    /// Item kind being discovered.
+    pub kind: String,
+    /// Agent whose root failed.
+    pub agent: String,
+    /// Scope of the failing path.
+    pub scope: String,
+    /// OS or parse error text.
+    pub message: String,
+}
+
 /// Complete migration scan result, including partial-scan status and skipped roots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -63,8 +81,22 @@ pub struct MigrateScanView {
     pub partial: bool,
     /// Missing candidate roots skipped during discovery.
     pub skipped_roots: Vec<String>,
+    /// Roots and configuration files that could not be read, named by path.
+    pub warnings: Vec<MigrateScanWarningView>,
     /// Scanned folders and documents with their item counts.
     pub roots: Vec<MigrateScanRootView>,
+}
+
+/// The authoritative ownership label shown in the migrate table.
+///
+/// `In AgenTuna` means the normalized content matches the store item, `Conflict` means the item
+/// exists in AgenTuna with different content, and `Not in AgenTuna` means no store item matches.
+const fn ownership_state(ownership: Ownership) -> &'static str {
+    match ownership {
+        Ownership::Managed => "in_agentuna",
+        Ownership::Conflict => "conflict",
+        _ => "not_in_agentuna",
+    }
 }
 
 fn item_view(item: ScanItem) -> MigrateScanItemView {
@@ -85,6 +117,7 @@ fn item_view(item: ScanItem) -> MigrateScanItemView {
             _ => Some("unrecognized scan status".to_owned()),
         },
         store_link: item.store_link,
+        state: ownership_state(item.ownership).to_owned(),
         ownership: match item.ownership {
             Ownership::Managed => "managed",
             Ownership::NotInAgenTuna => "not_in_agentuna",
@@ -120,6 +153,8 @@ fn store_inventory(
                     kind: item.kind,
                     name: item.name.clone().unwrap_or_else(|| item.slug.to_string()),
                     content_hash: item.hash.to_string(),
+                    scope,
+                    path: layout.root().join(item.path.to_string()),
                 }
             })),
             Err(error) if error.is_missing() => {}
@@ -191,8 +226,13 @@ pub async fn migrate_scan_inner(
     .await
     .map_err(|_| CommandError::internal("native scan worker stopped unexpectedly"))?
     .map_err(|_| CommandError::internal("native scan failed"))?;
+    Ok(scan_view(report))
+}
+
+/// Projects a scan report into the webview view with authoritative ownership labels.
+fn scan_view(report: ScanReport) -> MigrateScanView {
     let roots = scan_roots(&report);
-    Ok(MigrateScanView {
+    MigrateScanView {
         items: report.items.into_iter().map(item_view).collect(),
         partial: report.partial,
         skipped_roots: report
@@ -200,8 +240,184 @@ pub async fn migrate_scan_inner(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
+        warnings: report
+            .warnings
+            .into_iter()
+            .map(|warning| MigrateScanWarningView {
+                path: warning.path.display().to_string(),
+                kind: warning.kind.to_string(),
+                agent: warning.agent.to_string(),
+                scope: warning.scope.to_string(),
+                message: warning.message,
+            })
+            .collect(),
         roots,
-    })
+    }
+}
+
+/// Completed scan views keyed by bridge job id, bounded to the newest eight.
+static SCAN_RESULTS: LazyLock<Mutex<BTreeMap<String, MigrateScanView>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+fn record_scan_result(job_id: String, view: MigrateScanView) {
+    let mut results = SCAN_RESULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    results.insert(job_id, view);
+    while results.len() > 8 {
+        let oldest = results.keys().next().cloned();
+        if let Some(oldest) = oldest {
+            results.remove(&oldest);
+        }
+    }
+}
+
+/// Forwards discovery steps to the bridge and stops a cancelled scan.
+struct ScanJobObserver {
+    progress: super::bridge::ProgressSender,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl at_migrate::scan::ScanObserver for ScanJobObserver {
+    fn step(&mut self, step: &at_migrate::scan::ScanProgress) -> bool {
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        let done = step.completed + 1;
+        let fraction = if step.total == 0 {
+            0.0
+        } else {
+            done as f64 / step.total as f64
+        };
+        self.progress.fraction(
+            fraction,
+            format!(
+                "Reading {} {} {} ({done}/{})",
+                step.agent, step.scope, step.kind, step.total
+            ),
+        );
+        true
+    }
+}
+
+/// Starts the native scan as a cancellable bridge job and returns its id.
+///
+/// Results stream as bridge progress events, and the finished view is fetched with
+/// [`migrate_scan_result`]. Cancelling the job stops the scan at the next discovery step.
+///
+/// # Errors
+/// [`CommandError`] for unknown projects or an unavailable bridge.
+#[tauri::command]
+pub async fn migrate_scan_start(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<super::bridge::JobId, CommandError> {
+    migrate_scan_start_inner(&state, project_id).await
+}
+
+/// Bridge-facing body of [`migrate_scan_start`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`migrate_scan_start`].
+pub async fn migrate_scan_start_inner(
+    app: &AppState,
+    project_id: Option<String>,
+) -> Result<super::bridge::JobId, CommandError> {
+    let inputs = migration_inputs(app, project_id.as_deref())?;
+    let job = JobSpec::new_cancellable("Migration scan", move |progress, cancel| async move {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let worker_progress = progress.clone();
+        let cancelled = cancel.cancellation_flag();
+        let worker = tokio::task::spawn_blocking(move || {
+            let environment = AgentEnvironment {
+                home: inputs.home.clone(),
+                project: inputs.project.clone(),
+                variables: BTreeMap::new(),
+            };
+            let registry = AgentAdapterRegistry::register();
+            let mut observer = ScanJobObserver {
+                progress: worker_progress,
+                cancelled,
+            };
+            match at_migrate::scan::scan_with(
+                ScanRequest {
+                    environment: &environment,
+                    adapters: &registry,
+                    store_roots: &inputs.roots,
+                    store_items: &inputs.store_items,
+                },
+                &mut observer,
+            ) {
+                Ok(report) => Ok(Some(scan_view(report))),
+                Err(at_migrate::scan::ScanError::Cancelled) => Ok(None),
+                Err(_) => Err(JobError::Failed {
+                    message: "the agent folders could not be scanned".to_owned(),
+                }),
+            }
+        })
+        .await
+        .map_err(|join| JobError::Failed {
+            message: format!("the scan worker stopped: {join}"),
+        })?;
+        let view = match worker {
+            Ok(Some(view)) => view,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        record_scan_result(progress.id().as_str().to_owned(), view);
+        progress.fraction(1.0, "Scan complete");
+        Ok(())
+    });
+    let handle = app.bridge().spawn_job(job).map_err(CommandError::from)?;
+    Ok(handle.id().clone())
+}
+
+/// Returns the recorded result of one scan job, or `None` while it is still running.
+///
+/// # Errors
+/// [`CommandErrorCode::NotFound`] when the job finished without recording a result, for example
+/// after cancellation.
+#[tauri::command]
+pub fn migrate_scan_result(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<Option<MigrateScanView>, CommandError> {
+    migrate_scan_result_inner(&state, &job_id)
+}
+
+/// Bridge-facing body of [`migrate_scan_result`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`migrate_scan_result`].
+pub fn migrate_scan_result_inner(
+    app: &AppState,
+    job_id: &str,
+) -> Result<Option<MigrateScanView>, CommandError> {
+    {
+        let results = SCAN_RESULTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(found) = results.get(job_id) {
+            return Ok(Some(found.clone()));
+        }
+    }
+    if app
+        .bridge()
+        .jobs()
+        .iter()
+        .any(|snapshot| snapshot.id.as_str() == job_id)
+    {
+        return Ok(None);
+    }
+    Err(CommandError::new(
+        CommandErrorCode::NotFound,
+        "No completed scan was recorded for this job.",
+    ))
 }
 
 /// Groups scan rows by the native folder or document that produced them.
@@ -236,13 +452,15 @@ fn scan_roots(report: &ScanReport) -> Vec<MigrateScanRootView> {
         })
         .collect()
 }
-/// One comparable native copy in a migration conflict.
+/// One comparable copy in a migration conflict.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct MigrateConflictCopyView {
-    /// Agent identifier.
+    /// Agent identifier, or `store` for the canonical store copy.
     pub agent: String,
-    /// Native path.
+    /// `native` for an agent copy, `store` for the canonical store copy.
+    pub origin: String,
+    /// Native path, or the canonical store path for a store copy.
     pub path: String,
     /// Discovered scope.
     pub scope: String,
@@ -354,7 +572,16 @@ pub async fn migrate_conflicts_inner(
                     .copies
                     .into_iter()
                     .map(|copy| MigrateConflictCopyView {
-                        agent: copy.agent.to_string(),
+                        agent: copy
+                            .agent
+                            .as_ref()
+                            .map_or_else(|| "store".to_owned(), ToString::to_string),
+                        origin: match copy.origin {
+                            at_migrate::conflicts::CopyOrigin::Native => "native",
+                            at_migrate::conflicts::CopyOrigin::Store => "store",
+                            _ => "unknown",
+                        }
+                        .to_owned(),
                         path: copy.path.display().to_string(),
                         scope: copy.scope.to_string(),
                         raw_hash: copy.raw_hash,
@@ -403,6 +630,8 @@ pub struct MigratePlanStepView {
     pub seq: usize,
     /// Action name.
     pub action: String,
+    /// Store scope that receives this step's item.
+    pub scope: String,
     /// Selected canonical item name.
     pub item_name: Option<String>,
     /// Source path.
@@ -433,51 +662,117 @@ pub struct MigratePlanCountsView {
     pub files_left_in_place: i32,
 }
 
+/// One receiving scope of a reviewed migration plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigratePlanScopeView {
+    /// Store scope receiving these items (`user`, `project` or `local`).
+    pub scope: String,
+    /// Resolved store root these items are copied into.
+    pub store_path: String,
+    /// What happens in this store.
+    pub counts: MigratePlanCountsView,
+    /// Ordered steps written into this store.
+    pub steps: Vec<MigratePlanStepView>,
+}
+
 /// A plan built from the scan and the user's conflict choices, plus its dry run.
+///
+/// A selection that spans native scopes produces one plan per receiving scope; `scopes` lists
+/// them in precedence order with the store root each one writes into, and `plan_hash` binds all
+/// of them to one reviewed apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct MigratePlanView {
-    /// Stable plan id.
-    pub plan_id: String,
-    /// SHA-256 binding the reviewed steps and strategy.
+    /// SHA-256 binding every reviewed scope, step and the strategy.
     pub plan_hash: String,
-    /// Store scope receiving the items.
-    pub scope: String,
+    /// Resolved directory that receives the originals' backups.
+    pub backup_dir: String,
     /// Selected strategy.
     pub strategy: String,
-    /// Summary counts.
+    /// Summary counts across every receiving scope.
     pub counts: MigratePlanCountsView,
-    /// Ordered steps.
-    pub steps: Vec<MigratePlanStepView>,
+    /// One entry per receiving scope, each carrying its store path.
+    pub scopes: Vec<MigratePlanScopeView>,
     /// Files rechecked for the dry run.
     pub files_checked: i32,
 }
 
-/// Builds one reviewed plan from a scan and the user's conflict choices.
+/// Serializes one reviewed step for the webview.
+fn step_view(step: at_migrate::plan::PlanStep) -> MigratePlanStepView {
+    MigratePlanStepView {
+        seq: step.seq,
+        action: format!("{:?}", step.action).to_lowercase(),
+        scope: step.scope.to_string(),
+        item_name: step.item_name,
+        source: step.source.map(|path| path.display().to_string()),
+        destination: step.destination.map(|path| path.display().to_string()),
+        backup_path: step.backup_path.map(|path| path.display().to_string()),
+        bytes: step.bytes,
+        agents: step
+            .agents
+            .into_iter()
+            .map(|agent| agent.to_string())
+            .collect(),
+    }
+}
+
+/// Serializes one plan's counts for the webview.
+fn counts_view(counts: at_migrate::plan::PlanCounts) -> MigratePlanCountsView {
+    MigratePlanCountsView {
+        items: i32::try_from(counts.items).unwrap_or(i32::MAX),
+        files_created: i32::try_from(counts.files_created).unwrap_or(i32::MAX),
+        files_backed_up: i32::try_from(counts.files_backed_up).unwrap_or(i32::MAX),
+        links_written: i32::try_from(counts.links_written).unwrap_or(i32::MAX),
+        files_left_in_place: i32::try_from(counts.files_left_in_place).unwrap_or(i32::MAX),
+    }
+}
+
+/// Adds every scope's counts into the single total the plan footer shows.
+fn summed_counts(plans: &[at_migrate::plan::MigrationPlan]) -> MigratePlanCountsView {
+    let mut total = at_migrate::plan::PlanCounts {
+        items: 0,
+        files_created: 0,
+        files_backed_up: 0,
+        links_written: 0,
+        files_left_in_place: 0,
+    };
+    for plan in plans {
+        total.items += plan.counts.items;
+        total.files_created += plan.counts.files_created;
+        total.files_backed_up += plan.counts.files_backed_up;
+        total.links_written += plan.counts.links_written;
+        total.files_left_in_place += plan.counts.files_left_in_place;
+    }
+    counts_view(total)
+}
+
+/// Wire name of the reviewed strategy.
+const fn strategy_name(strategy: at_migrate::plan::MigrationStrategy) -> &'static str {
+    match strategy {
+        at_migrate::plan::MigrationStrategy::ReplaceWithLinks => "replace_with_links",
+        at_migrate::plan::MigrationStrategy::LeaveAndWatch => "leave_and_watch",
+        _ => "unknown",
+    }
+}
+
+/// Builds one reviewed plan per receiving scope from a scan and the user's conflict choices.
 ///
-/// Retains only selected paths, detects conflicts among them, applies the explicit resolutions and
-/// revalidates the resulting plan so the returned dry run is the exact write list.
-// One argument per independent input of the reviewed plan; the two call sites build them inline.
+/// Each selected item is planned into the store of the scope it was discovered in; conflicts are
+/// detected inside each scope and the explicit resolutions are applied there, so the returned
+/// plans are the exact write list the preview step shows.
+// One argument per independent input of the reviewed selection; both call sites build them inline.
 #[allow(clippy::too_many_arguments)]
-fn plan_from_scan(
-    mut scan: ScanReport,
+fn plans_from_scan(
+    scan: ScanReport,
     selected_paths: &std::collections::BTreeSet<PathBuf>,
     resolutions: &[MigrateResolutionView],
     strategy: at_migrate::plan::MigrationStrategy,
-    scope: at_model::Scope,
-    store_root: PathBuf,
+    stores: &at_migrate::plan::ScopeStores,
+    project_id: Option<&str>,
     backup_root: PathBuf,
     copy_agents: &std::collections::BTreeSet<at_model::AgentId>,
-) -> Result<
-    (
-        at_migrate::plan::MigrationPlan,
-        Vec<at_migrate::plan::DryRunRow>,
-    ),
-    String,
-> {
-    scan.items
-        .retain(|item| selected_paths.contains(&item.path));
-    let conflicts = at_migrate::conflicts::detect_conflicts(&scan);
+) -> Result<Vec<at_migrate::plan::MigrationPlan>, String> {
     let mut choices = BTreeMap::new();
     for resolution in resolutions {
         let choice = match resolution.choice.as_str() {
@@ -490,30 +785,86 @@ fn plan_from_scan(
         };
         choices.insert(resolution.name.clone(), choice);
     }
-    let plan = at_migrate::plan::build_plan(at_migrate::plan::BuildPlanRequest {
+    at_migrate::plan::build_scope_plans(at_migrate::plan::ScopePlansRequest {
         scan: &scan,
-        conflicts: &conflicts,
         resolutions: &choices,
         selected_paths,
-        store_root,
+        stores,
+        target_scope: None,
+        project_id,
         copy_agents,
         strategy,
-        scope,
         backup_root,
     })
-    .map_err(|error| error.to_string())?;
-    at_migrate::plan::validate_plan(&plan).map_err(|error| error.to_string())?;
-    let dry_run = at_migrate::plan::dry_run(&plan);
-    Ok((plan, dry_run))
+    .map_err(|error| plan_error_text(&error))
+}
+
+/// Projects the built plans into the webview view, grouped by receiving scope.
+fn plan_view(
+    plans: Vec<at_migrate::plan::MigrationPlan>,
+    stores: &at_migrate::plan::ScopeStores,
+    backup_dir: String,
+) -> Result<MigratePlanView, String> {
+    let Some(first) = plans.first() else {
+        return Err(plan_error_text(
+            &at_migrate::plan::PlanError::EmptySelection,
+        ));
+    };
+    let strategy = strategy_name(first.strategy);
+    let plan_hash =
+        at_migrate::plan::plans_hash(&plans).map_err(|error| plan_error_text(&error))?;
+    let counts = summed_counts(&plans);
+    let mut scopes = Vec::with_capacity(plans.len());
+    let mut files_checked = 0usize;
+    for plan in &plans {
+        let missing = at_migrate::plan::PlanError::MissingStore { scope: plan.scope };
+        let store_path = stores
+            .root(plan.scope)
+            .ok_or_else(|| plan_error_text(&missing))?
+            .display()
+            .to_string();
+        files_checked += at_migrate::plan::dry_run(plan).len();
+        scopes.push(MigratePlanScopeView {
+            scope: plan.scope.to_string(),
+            store_path,
+            counts: counts_view(plan.counts),
+            steps: plan.steps.iter().cloned().map(step_view).collect(),
+        });
+    }
+    Ok(MigratePlanView {
+        plan_hash,
+        backup_dir,
+        strategy: strategy.to_owned(),
+        counts,
+        scopes,
+        files_checked: i32::try_from(files_checked).unwrap_or(i32::MAX),
+    })
+}
+
+/// Explains a plan refusal in the terms the plan screen shows.
+///
+/// A selection that contains Project or Local native files needs a selected project, because
+/// those items belong in a project store; the message says so instead of naming a missing store.
+fn plan_error_text(error: &at_migrate::plan::PlanError) -> String {
+    match error {
+        at_migrate::plan::PlanError::MissingStore { scope }
+        | at_migrate::plan::PlanError::MissingProject { scope } => format!(
+            "The selected items include {scope}-scope native files, which belong in the {scope} \
+             store. Select a project and rebuild the plan."
+        ),
+        _ => error.to_string(),
+    }
 }
 
 /// Builds the migration plan from a fresh scan and the reviewed conflict choices.
 ///
 /// The scan is repeated so the plan binds to current native bytes; the returned dry run is the
-/// exact ordered write list the preview step shows. Nothing is written.
+/// exact ordered write list the preview step shows. Each item is planned into the store of the
+/// scope it was discovered in. Nothing is written.
 ///
 /// # Errors
-/// Returns a typed command error for unknown projects, an unknown strategy or a refused plan.
+/// Returns a typed command error for unknown projects, an unknown strategy, a selection that
+/// needs a project while none is selected, or a refused plan.
 #[tauri::command]
 pub async fn migrate_plan(
     state: State<'_, AppState>,
@@ -538,7 +889,9 @@ pub async fn migrate_plan_inner(
         .map(PathBuf::from)
         .collect::<std::collections::BTreeSet<_>>();
     let resolutions = request.resolutions;
-    let built = tokio::task::spawn_blocking(move || {
+    let project_id = request.project_id.clone();
+    let backup_dir = inputs.backup_root.display().to_string();
+    let view = tokio::task::spawn_blocking(move || {
         let environment = AgentEnvironment {
             home: inputs.home.clone(),
             project: inputs.project.clone(),
@@ -551,60 +904,29 @@ pub async fn migrate_plan_inner(
             store_roots: &inputs.roots,
             store_items: &inputs.store_items,
         })
-        .map_err(|_| "migration scan failed".to_owned())?;
-        plan_from_scan(
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorCode::Unavailable,
+                "The selected agent folders could not be read.",
+            )
+        })?;
+        let plans = plans_from_scan(
             scan,
             &selected_paths,
             &resolutions,
             strategy,
-            inputs.scope,
-            inputs.store_root,
-            inputs.backup_root,
+            &inputs.stores,
+            project_id.as_deref(),
+            inputs.backup_root.clone(),
             &inputs.copy_agents,
         )
+        .map_err(|error| CommandError::new(CommandErrorCode::InvalidArgument, error))?;
+        plan_view(plans, &inputs.stores, backup_dir)
+            .map_err(|error| CommandError::new(CommandErrorCode::InvalidArgument, error))
     })
     .await
-    .map_err(|_| CommandError::internal("migration plan worker stopped unexpectedly"))?
-    .map_err(|error| CommandError::invalid_argument("selected_paths", &error))?;
-    let (plan, dry_run) = built;
-    Ok(MigratePlanView {
-        plan_id: plan.id,
-        plan_hash: plan.plan_hash,
-        scope: plan.scope.to_string(),
-        strategy: match plan.strategy {
-            at_migrate::plan::MigrationStrategy::ReplaceWithLinks => {
-                String::from("replace_with_links")
-            }
-            at_migrate::plan::MigrationStrategy::LeaveAndWatch => String::from("leave_and_watch"),
-            _ => String::from("unknown"),
-        },
-        counts: MigratePlanCountsView {
-            items: i32::try_from(plan.counts.items).unwrap_or(i32::MAX),
-            files_created: i32::try_from(plan.counts.files_created).unwrap_or(i32::MAX),
-            files_backed_up: i32::try_from(plan.counts.files_backed_up).unwrap_or(i32::MAX),
-            links_written: i32::try_from(plan.counts.links_written).unwrap_or(i32::MAX),
-            files_left_in_place: i32::try_from(plan.counts.files_left_in_place).unwrap_or(i32::MAX),
-        },
-        files_checked: i32::try_from(dry_run.len()).unwrap_or(i32::MAX),
-        steps: plan
-            .steps
-            .into_iter()
-            .map(|step| MigratePlanStepView {
-                seq: step.seq,
-                action: format!("{:?}", step.action).to_lowercase(),
-                item_name: step.item_name,
-                source: step.source.map(|path| path.display().to_string()),
-                destination: step.destination.map(|path| path.display().to_string()),
-                backup_path: step.backup_path.map(|path| path.display().to_string()),
-                bytes: step.bytes,
-                agents: step
-                    .agents
-                    .into_iter()
-                    .map(|agent| agent.to_string())
-                    .collect(),
-            })
-            .collect(),
-    })
+    .map_err(|_| CommandError::internal("migration plan worker stopped unexpectedly"))??;
+    Ok(view)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +1053,12 @@ fn apply_failure(error: at_migrate::apply::ApplyPlanError) -> MigrationApplyFail
             None,
             "Nothing is left half-written; check the backups list, then retry the apply.",
         ),
+        ApplyPlanError::MissingProjectId(slug) => MigrationApplyFailure::new(
+            MigrationApplyFailureCode::PlanInvalid,
+            format!("the project-scope item `{slug}` requires an active project"),
+            None,
+            "Select a project before migrating project-scope items.",
+        ),
         ApplyPlanError::Metadata(_) | ApplyPlanError::OperationKind(_) => {
             MigrationApplyFailure::internal("the migration metadata could not be recorded")
         }
@@ -769,8 +1097,20 @@ pub struct MigrateApplyRequest {
     pub plan_hash: String,
 }
 
+/// What one receiving scope holds after a completed apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct MigrateApplyScopeView {
+    /// Store scope that received these items.
+    pub scope: String,
+    /// Resolved store root that received them.
+    pub store_path: String,
+    /// What landed in this store.
+    pub counts: MigratePlanCountsView,
+}
+
 /// Result of a completed migration apply job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct MigrateApplyResultView {
     /// Bridge job that produced this result.
@@ -785,8 +1125,8 @@ pub struct MigrateApplyResultView {
     pub warnings: Vec<MigrationApplyWarningView>,
     /// Where the operation backups were written.
     pub backup_dir: String,
-    /// Store scope that received the items.
-    pub scope: String,
+    /// One entry per receiving scope, each with its store path and what landed there.
+    pub scopes: Vec<MigrateApplyScopeView>,
     /// Strategy that was applied.
     pub strategy: String,
     /// Plan content hash that was confirmed before writing.
@@ -812,8 +1152,8 @@ fn record_apply_result(result: MigrateApplyResultView) {
 struct MigrationInputs {
     project: Option<PathBuf>,
     home: PathBuf,
-    scope: at_model::Scope,
-    store_root: PathBuf,
+    /// Store root per scope native discovery can report.
+    stores: at_migrate::plan::ScopeStores,
     backup_root: PathBuf,
     roots: Vec<PathBuf>,
     store_items: Vec<at_migrate::scan::StoreItem>,
@@ -855,20 +1195,13 @@ fn migration_inputs(
             .map_err(|_| CommandError::internal("could not read detected agents"))?;
         (project, settings, agents)
     };
-    let scope = if project.is_some() {
-        at_model::Scope::Project
-    } else {
-        at_model::Scope::User
-    };
     let paths = super::paths::resolve_command_paths(app, project.as_deref())
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let home = paths
         .home_dir()
         .ok_or_else(|| CommandError::unavailable("home directory is unavailable"))?
         .to_path_buf();
-    let layout = at_store::layout::StoreLayout::for_scope(&paths, scope)
-        .map_err(|_| CommandError::unavailable("the migration store is unavailable"))?;
-    let store_root = layout.root().to_path_buf();
+    let stores = migration_stores(&paths)?;
     let backup_root = paths.backup_dir().join("migration");
     let (roots, store_items) = store_inventory(&paths)?;
     let copy_agents = agents
@@ -879,13 +1212,39 @@ fn migration_inputs(
     Ok(MigrationInputs {
         project,
         home,
-        scope,
-        store_root,
+        stores,
         backup_root,
         roots,
         store_items,
         copy_agents,
     })
+}
+
+/// Store root per scope that native discovery can report.
+///
+/// The User store always resolves. Project and Local need a selected project, so without one they
+/// stay out of the map: planning an item discovered there then refuses with a message naming the
+/// missing project instead of writing it into the wrong store.
+fn migration_stores(
+    paths: &at_store::paths::AppPaths,
+) -> Result<at_migrate::plan::ScopeStores, CommandError> {
+    let mut stores = at_migrate::plan::ScopeStores::new();
+    for scope in [
+        at_model::Scope::User,
+        at_model::Scope::Project,
+        at_model::Scope::Local,
+    ] {
+        match at_store::layout::StoreLayout::for_scope(paths, scope) {
+            Ok(layout) => stores.insert(scope, layout.root().to_path_buf()),
+            Err(_) if matches!(scope, at_model::Scope::Project | at_model::Scope::Local) => {}
+            Err(_) => {
+                return Err(CommandError::unavailable(
+                    "the migration store is unavailable",
+                ));
+            }
+        }
+    }
+    Ok(stores)
 }
 
 /// Authorized roots for the native paths a migration may replace.
@@ -935,6 +1294,7 @@ pub async fn migrate_apply_inner(
     let reviewed_hash = request.plan_hash;
     let strategy_text = request.strategy.clone();
     let database = app.database_handle().map_err(CommandError::unavailable)?;
+    let refresh_paths = app.paths().cloned();
     let job = JobSpec::new_cancellable("Migration apply", move |progress, cancel| async move {
         if cancel.is_cancelled() {
             return Ok(());
@@ -965,13 +1325,13 @@ pub async fn migrate_apply_inner(
                 )
             })
             .and_then(|scan| {
-                plan_from_scan(
+                plans_from_scan(
                     scan,
                     &selected_paths,
                     &resolutions,
                     strategy,
-                    inputs.scope,
-                    inputs.store_root.clone(),
+                    &inputs.stores,
+                    request.project_id.as_deref(),
                     inputs.backup_root.clone(),
                     &inputs.copy_agents,
                 )
@@ -984,11 +1344,19 @@ pub async fn migrate_apply_inner(
                     )
                 })
             });
-            let (plan, _dry_run) = match built {
+            let plans = match built {
                 Ok(built) => built,
                 Err(failure) => return Err(failure),
             };
-            if plan.plan_hash != reviewed_hash {
+            let rebuilt_hash = at_migrate::plan::plans_hash(&plans).map_err(|error| {
+                MigrationApplyFailure::new(
+                    MigrationApplyFailureCode::PlanInvalid,
+                    format!("the reviewed plan could not be rebuilt: {error}"),
+                    None::<&std::path::Path>,
+                    "Go back to the scan, rebuild the plan and review it again.",
+                )
+            })?;
+            if rebuilt_hash != reviewed_hash {
                 return Err(MigrationApplyFailure::new(
                     MigrationApplyFailureCode::StalePlan,
                     "the files changed since the plan was reviewed",
@@ -999,23 +1367,47 @@ pub async fn migrate_apply_inner(
             if cancellation.load(std::sync::atomic::Ordering::Acquire) {
                 return Ok(None);
             }
+            let mut scopes = Vec::with_capacity(plans.len());
+            for plan in &plans {
+                let Some(store_root) = inputs.stores.root(plan.scope) else {
+                    return Err(MigrationApplyFailure::new(
+                        MigrationApplyFailureCode::PlanInvalid,
+                        format!("the {} store is unavailable for these items", plan.scope),
+                        None::<&std::path::Path>,
+                        "Select the project these items belong to, then review the plan again.",
+                    ));
+                };
+                scopes.push(MigrateApplyScopeView {
+                    scope: plan.scope.to_string(),
+                    store_path: store_root.display().to_string(),
+                    counts: counts_view(plan.counts),
+                });
+            }
             worker_progress.fraction(0.6, "Backing up originals and writing reviewed changes");
             let apply = {
                 let mut database = database.lock().map_err(|_| {
                     MigrationApplyFailure::internal("the index database is unavailable")
                 })?;
-                let mut context = at_migrate::apply::ApplyPlanContext {
-                    store_root: &inputs.store_root,
+                let mut context = at_migrate::apply::ApplyPlansContext {
+                    stores: &inputs.stores,
                     backup_root: &inputs.backup_root,
                     authorized_roots: &authorized,
                     database: &mut database,
+                    project_id: request.project_id.as_deref(),
                 };
-                at_migrate::apply::apply_plan(&plan, &mut context).map_err(apply_failure)
+                at_migrate::apply::apply_plans(&plans, &mut context).map_err(apply_failure)
             };
             let outcome = match apply {
                 Ok(outcome) => outcome,
                 Err(failure) => return Err(failure),
             };
+            // The plan replaced agent files, so the findings derived from them are stale before
+            // the result is even shown: rebuild them from the disk the apply just wrote.
+            if let Some(refresh_paths) = refresh_paths.as_ref()
+                && let Ok(database) = database.lock()
+            {
+                super::native_scan::refresh_native_findings(refresh_paths, database.connection());
+            }
             worker_progress.fraction(0.95, "Recording the migration");
             let view = MigrateApplyResultView {
                 job_id: worker_progress.id().as_str().to_owned(),
@@ -1046,36 +1438,14 @@ pub async fn migrate_apply_inner(
                     })
                     .collect(),
                 backup_dir: inputs.backup_root.display().to_string(),
-                scope: plan.scope.to_string(),
+                scopes,
                 strategy: strategy_text.clone(),
-                plan_hash: plan.plan_hash,
-                counts: MigratePlanCountsView {
-                    items: i32::try_from(plan.counts.items).unwrap_or(i32::MAX),
-                    files_created: i32::try_from(plan.counts.files_created).unwrap_or(i32::MAX),
-                    files_backed_up: i32::try_from(plan.counts.files_backed_up).unwrap_or(i32::MAX),
-                    links_written: i32::try_from(plan.counts.links_written).unwrap_or(i32::MAX),
-                    files_left_in_place: i32::try_from(plan.counts.files_left_in_place)
-                        .unwrap_or(i32::MAX),
-                },
-                steps: plan
-                    .steps
+                plan_hash: rebuilt_hash,
+                counts: summed_counts(&plans),
+                steps: plans
                     .iter()
-                    .map(|step| MigratePlanStepView {
-                        seq: step.seq,
-                        action: format!("{:?}", step.action).to_lowercase(),
-                        item_name: step.item_name.clone(),
-                        source: step.source.as_ref().map(|path| path.display().to_string()),
-                        destination: step
-                            .destination
-                            .as_ref()
-                            .map(|path| path.display().to_string()),
-                        backup_path: step
-                            .backup_path
-                            .as_ref()
-                            .map(|path| path.display().to_string()),
-                        bytes: step.bytes,
-                        agents: step.agents.iter().map(|agent| agent.to_string()).collect(),
-                    })
+                    .flat_map(|plan| plan.steps.iter().cloned())
+                    .map(step_view)
                     .collect(),
             };
             Ok(Some(view))
@@ -1214,7 +1584,45 @@ mod plan_tests {
     use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
     use at_model::{AgentId, ItemKind, Scope};
 
-    use super::{MigrateResolutionView, plan_from_scan};
+    use super::MigrateResolutionView;
+
+    /// Builds the single reviewed User-scope plan the unit tests inspect.
+    ///
+    /// The command path splits a selection by receiving scope; these tests exercise one scope, so
+    /// they assert on the one plan it produces.
+    fn plan_from_scan(
+        scan: ScanReport,
+        selected: &BTreeSet<PathBuf>,
+        resolutions: &[MigrateResolutionView],
+        strategy: at_migrate::plan::MigrationStrategy,
+        store_root: PathBuf,
+        backup_root: PathBuf,
+        copy_agents: &BTreeSet<AgentId>,
+    ) -> Result<
+        (
+            at_migrate::plan::MigrationPlan,
+            Vec<at_migrate::plan::DryRunRow>,
+        ),
+        String,
+    > {
+        let stores = at_migrate::plan::ScopeStores::single(Scope::User, store_root);
+        let plans = super::plans_from_scan(
+            scan,
+            selected,
+            resolutions,
+            strategy,
+            &stores,
+            None,
+            backup_root,
+            copy_agents,
+        )?;
+        let plan = plans
+            .into_iter()
+            .next()
+            .ok_or_else(|| "the selection produced no plan".to_owned())?;
+        let dry_run = at_migrate::plan::dry_run(&plan);
+        Ok((plan, dry_run))
+    }
 
     fn item(name: &str, path: &str, agent: AgentId, hash: char) -> ScanItem {
         ScanItem {
@@ -1259,6 +1667,7 @@ mod plan_tests {
             ],
             partial: false,
             skipped_roots: Vec::new(),
+            warnings: Vec::new(),
         };
         let selected = BTreeSet::from([first.clone(), second.clone()]);
         let resolutions = vec![MigrateResolutionView {
@@ -1271,7 +1680,6 @@ mod plan_tests {
             &selected,
             &resolutions,
             at_migrate::plan::MigrationStrategy::LeaveAndWatch,
-            Scope::User,
             store.path().join("store"),
             store.path().join("backups"),
             &BTreeSet::new(),
@@ -1309,6 +1717,7 @@ mod plan_tests {
             ],
             partial: false,
             skipped_roots: Vec::new(),
+            warnings: Vec::new(),
         };
         let selected = BTreeSet::from([first, second]);
         let unresolved = plan_from_scan(
@@ -1316,7 +1725,6 @@ mod plan_tests {
             &selected,
             &[],
             at_migrate::plan::MigrationStrategy::LeaveAndWatch,
-            Scope::User,
             store.path().join("store"),
             store.path().join("backups"),
             &BTreeSet::new(),
@@ -1333,7 +1741,6 @@ mod plan_tests {
                 names: vec!["same name".to_owned(), "same name".to_owned()],
             }],
             at_migrate::plan::MigrationStrategy::LeaveAndWatch,
-            Scope::User,
             store.path().join("store"),
             store.path().join("backups"),
             &BTreeSet::new(),
@@ -1357,6 +1764,7 @@ mod plan_tests {
             )],
             partial: false,
             skipped_roots: Vec::new(),
+            warnings: Vec::new(),
         };
         let selected = BTreeSet::from([first]);
         let (plan, _) = plan_from_scan(
@@ -1364,7 +1772,6 @@ mod plan_tests {
             &selected,
             &[],
             at_migrate::plan::MigrationStrategy::ReplaceWithLinks,
-            Scope::User,
             store.path().join("store"),
             store.path().join("backups"),
             &BTreeSet::from([AgentId::ClaudeCode]),
@@ -1377,5 +1784,126 @@ mod plan_tests {
             })
         );
         let _ = BTreeMap::<String, String>::new();
+    }
+
+    #[test]
+    fn project_scope_items_without_a_selected_project_are_refused() {
+        let store = temp_store();
+        let source = store.path().join("skills/a/SKILL.md");
+        std::fs::create_dir_all(source.parent().expect("dir")).expect("mkdir a");
+        std::fs::write(&source, b"alpha").expect("write a");
+        let mut project_item = item(
+            "review",
+            &source.display().to_string(),
+            AgentId::ClaudeCode,
+            'a',
+        );
+        project_item.scope = Scope::Project;
+        let scan = ScanReport {
+            items: vec![project_item],
+            partial: false,
+            skipped_roots: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let selected = BTreeSet::from([source]);
+        let mut stores =
+            at_migrate::plan::ScopeStores::single(Scope::User, store.path().join("store"));
+        stores.insert(Scope::Project, store.path().join("project-store"));
+        let error = super::plans_from_scan(
+            scan,
+            &selected,
+            &[],
+            at_migrate::plan::MigrationStrategy::ReplaceWithLinks,
+            &stores,
+            None,
+            store.path().join("backups"),
+            &BTreeSet::new(),
+        )
+        .expect_err("a project-scope item without a selected project must be refused");
+        assert!(
+            error.contains("Select a project and rebuild the plan"),
+            "the refusal tells the user what to do: {error}"
+        );
+        assert!(
+            !store.path().join("project-store").exists(),
+            "a refused plan writes nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_view_tests {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, ScanWarning};
+    use at_model::{AgentId, ItemKind, Scope};
+
+    use super::{ownership_state, scan_view};
+
+    fn item(name: &str, ownership: Ownership) -> ScanItem {
+        ScanItem {
+            kind: ItemKind::Rule,
+            name: name.to_owned(),
+            agents: BTreeSet::from([AgentId::ClaudeCode]),
+            path: PathBuf::from(format!("/home/{name}.md")),
+            scope: Scope::User,
+            content_hash: Some("a".repeat(64)),
+            normalized_hash: Some("a".repeat(64)),
+            parse_status: ParseStatus::Parsed,
+            store_link: false,
+            ownership,
+        }
+    }
+
+    #[test]
+    fn every_ownership_has_one_authoritative_state_label() {
+        assert_eq!(ownership_state(Ownership::Managed), "in_agentuna");
+        assert_eq!(ownership_state(Ownership::Conflict), "conflict");
+        assert_eq!(ownership_state(Ownership::NotInAgenTuna), "not_in_agentuna");
+
+        let report = ScanReport {
+            items: vec![
+                item("managed", Ownership::Managed),
+                item("conflict", Ownership::Conflict),
+                item("fresh", Ownership::NotInAgenTuna),
+            ],
+            partial: false,
+            skipped_roots: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let view = scan_view(report);
+        let states = view
+            .items
+            .iter()
+            .map(|row| (row.name.as_str(), row.state.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(states.get("managed"), Some(&"in_agentuna"));
+        assert_eq!(states.get("conflict"), Some(&"conflict"));
+        assert_eq!(states.get("fresh"), Some(&"not_in_agentuna"));
+    }
+
+    #[test]
+    fn a_warning_keeps_the_path_that_failed() {
+        let path = PathBuf::from("/home/.claude.json");
+        let report = ScanReport {
+            items: vec![item("kept", Ownership::NotInAgenTuna)],
+            partial: true,
+            skipped_roots: Vec::new(),
+            warnings: vec![ScanWarning {
+                path: path.clone(),
+                kind: ItemKind::McpServer,
+                agent: AgentId::ClaudeCode,
+                scope: Scope::User,
+                message: "permission denied".to_owned(),
+            }],
+        };
+        let view = scan_view(report);
+        assert!(view.partial);
+        assert_eq!(view.items.len(), 1, "found rows stay usable");
+        assert_eq!(view.warnings.len(), 1);
+        assert_eq!(view.warnings[0].path, path.display().to_string());
+        assert_eq!(view.warnings[0].kind, "mcp_server");
+        assert_eq!(view.warnings[0].agent, "claude_code");
     }
 }

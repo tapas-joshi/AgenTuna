@@ -249,6 +249,11 @@ fn parse_text(text: &str) -> Result<SkillDoc, SkillError> {
     validate_skill_description(description)?;
 
     let entries = scan_entries(text, frontmatter_start, frontmatter_end);
+    let name_entry = entries
+        .iter()
+        .find(|entry| entry.key == "name")
+        .ok_or(SkillError::FrontmatterNotMapping)?;
+    let name_span = name_entry.span();
     let description_entry = entries
         .iter()
         .find(|entry| entry.key == "description")
@@ -275,6 +280,7 @@ fn parse_text(text: &str) -> Result<SkillDoc, SkillError> {
         raw: text.to_owned(),
         frontmatter_span: ByteSpan::new(frontmatter_start, frontmatter_end),
         body_span: ByteSpan::new(body_start, text.len()),
+        name_span,
         description_span: ByteSpan::new(description_entry.colon + 1, description_entry.entry_end),
         unknown_keys,
     })

@@ -18,7 +18,7 @@ use ts_rs::TS;
 
 use super::{
     commands::{CommandError, CommandErrorCode},
-    paths::resolve_process_paths,
+    paths::{resolve_command_paths, resolve_process_paths},
     state::AppState,
 };
 
@@ -281,12 +281,15 @@ struct CachedAction {
     preview_id: String,
     apply_roots: Vec<PathBuf>,
     store_root: PathBuf,
+    store_file: PathBuf,
     backup_folder: PathBuf,
     scope: Scope,
     in_repo: bool,
     item_id: ItemId,
     agents: Vec<AgentId>,
     enabled: bool,
+    /// The reviewed plan removes the definition, so its derived rows go too.
+    delete: bool,
 }
 
 static ACTION_CACHE: LazyLock<Mutex<HashMap<String, CachedAction>>> =
@@ -298,6 +301,20 @@ pub fn mcp_server_list(
     state: State<'_, AppState>,
     request: McpServerListRequest,
 ) -> Result<McpServerListView, CommandError> {
+    mcp_server_list_impl(&state, request)
+}
+
+/// Lists MCP servers through the injected path set and index.
+///
+/// The body is separated from the Tauri command so app-level tests exercise the same query the
+/// webview sees without resolving the developer's real home directory.
+///
+/// # Errors
+/// Returns a typed command error for invalid arguments or an unreadable index.
+pub fn mcp_server_list_impl(
+    state: &AppState,
+    request: McpServerListRequest,
+) -> Result<McpServerListView, CommandError> {
     let scope_filter =
         match request.scope.as_str() {
             "" | "all" => None,
@@ -307,8 +324,10 @@ pub fn mcp_server_list(
         };
     let database = state.database().map_err(CommandError::unavailable)?;
     let project = project_of(&database, request.project_id.as_deref())?;
-    let paths = resolve_process_paths(project.as_ref().map(|project| Path::new(&project.path)))
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let paths = resolve_command_paths(
+        state,
+        project.as_ref().map(|project| Path::new(&project.path)),
+    )?;
     let rows = at_db::mcp_index::mcp_list_rows(
         database.connection(),
         scope_filter,
@@ -746,14 +765,14 @@ pub enum McpServerActionOutcome {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ActionKind {
+pub(crate) enum ActionKind {
     Disable,
     Enable,
     Delete,
 }
 
-fn run_action(
-    state: &State<'_, AppState>,
+pub(crate) fn run_action(
+    state: &AppState,
     request: McpServerActionRequest,
     kind: ActionKind,
 ) -> Result<McpServerActionOutcome, CommandError> {
@@ -765,10 +784,12 @@ fn run_action(
             "native-only servers must be adopted before they can be changed",
         )
     })?;
-    let database = state.database().map_err(CommandError::unavailable)?;
+    // Applying re-reads the database; take it only after this branch so one command never
+    // holds the shared index lock twice.
     if request.apply {
         return apply_cached(state, &request);
     }
+    let database = state.database().map_err(CommandError::unavailable)?;
     let project = project_of(&database, request.project_id.as_deref())?;
     if matches!(scope, Scope::Project | Scope::Local) && project.is_none() {
         return Err(CommandError::invalid_argument(
@@ -776,8 +797,10 @@ fn run_action(
             "this scope requires an active project",
         ));
     }
-    let paths = resolve_process_paths(project.as_ref().map(|project| Path::new(&project.path)))
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let paths = resolve_command_paths(
+        state,
+        project.as_ref().map(|project| Path::new(&project.path)),
+    )?;
     if let Some(lock) = at_db::locks::locks_for_item(database.connection(), &item_id)
         .map_err(|error| CommandError::internal(format!("cannot read locks: {error}")))?
         .into_iter()
@@ -849,7 +872,9 @@ fn run_action(
     let planned = at_engine::mcp_plan::plan_item(at_engine::mcp_plan::McpItemPlanRequest {
         paths: &paths,
         scope,
-        project_id: request.project_id.clone(),
+        // The reviewed plan's ChangeSet carries this into the deployment writer below; a
+        // user-scope action must never record the active project.
+        project_id: scoped_project_id(scope, request.project_id.as_deref()).map(str::to_owned),
         item_id,
         action,
         installed: &installed,
@@ -868,13 +893,23 @@ fn run_action(
         .clone()
         .or_else(|| planned.plan.native.clone())
         .ok_or_else(|| CommandError::invalid_argument("server", "the plan changes no files"))?;
-    if let Some(native) = &planned.plan.native {
+    // `combined` falls back to the native set, so merging it again would collide on every
+    // destination; only grow the store set.
+    if planned.plan.store.is_some()
+        && let Some(native) = &planned.plan.native
+    {
         combined.ops.extend(native.ops.clone());
     }
     let (preview_set, preview_root) = at_engine::preview::relative_to_common_root(&combined)
-        .map_err(|_| CommandError::invalid_argument("server", "the plan cannot be previewed"))?;
-    let preview = at_engine::preview::preview(&preview_set, &preview_root)
-        .map_err(|_| CommandError::invalid_argument("server", "the plan cannot be previewed"))?;
+        .map_err(|error| {
+            CommandError::invalid_argument(
+                "server",
+                &format!("the plan cannot be previewed: {error}"),
+            )
+        })?;
+    let preview = at_engine::preview::preview(&preview_set, &preview_root).map_err(|error| {
+        CommandError::invalid_argument("server", &format!("the plan cannot be previewed: {error}"))
+    })?;
     let preview_id = preview.id.clone();
     let agents = planned.agents.clone();
     let store_ops = planned.plan.store.as_ref().map_or(0, |set| set.ops.len());
@@ -922,12 +957,16 @@ fn run_action(
         preview_id: preview_id.clone(),
         apply_roots: authorized_roots(&paths, project.as_ref().map(|p| Path::new(&p.path))),
         store_root: paths.support_dir().to_path_buf(),
+        store_file: at_store::layout::StoreLayout::for_scope(&paths, scope)
+            .map_err(|_| CommandError::invalid_argument("scope", "canonical store is unavailable"))?
+            .mcp_file(),
         backup_folder: paths.support_dir().join(at_store::layout::BACKUPS_DIR),
         scope,
         in_repo: request.in_repo && kind == ActionKind::Disable,
         item_id,
         agents,
         enabled: kind == ActionKind::Enable,
+        delete: kind == ActionKind::Delete,
     };
     ACTION_CACHE
         .lock()
@@ -949,7 +988,7 @@ fn run_action(
 }
 
 fn apply_cached(
-    state: &State<'_, AppState>,
+    state: &AppState,
     request: &McpServerActionRequest,
 ) -> Result<McpServerActionOutcome, CommandError> {
     let preview_id = request.preview_id.as_deref().ok_or_else(|| {
@@ -970,7 +1009,33 @@ fn apply_cached(
             "the reviewed files changed; review the plan again",
         ));
     }
+    let native_paths = cached
+        .plan
+        .plan
+        .native
+        .as_ref()
+        .map(|set| {
+            set.ops
+                .iter()
+                .filter_map(|operation| operation.destination().map(Path::to_path_buf))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let database = state.database().map_err(CommandError::unavailable)?;
+    // Capture the index rows a delete removes; undo restores them exactly.
+    let undo_metadata = if cached.delete {
+        let metadata = at_migrate::undo_meta::capture(database.connection(), &cached.item_id)
+            .map_err(|error| {
+                CommandError::internal(format!("could not snapshot the server index rows: {error}"))
+            })?;
+        let before = at_migrate::undo_meta::operation_rowid_high_water(database.connection())
+            .map_err(|error| {
+                CommandError::internal(format!("could not read the operation history: {error}"))
+            })?;
+        Some((metadata, before))
+    } else {
+        None
+    };
     let roots = at_fs::ApplyRoots::new(cached.apply_roots.clone())
         .map_err(|_| CommandError::unavailable("authorized configuration roots are unavailable"))?;
     let outcome = {
@@ -986,26 +1051,120 @@ fn apply_cached(
     for set in cached.plan.plan.apply_order() {
         state.record_writes(set, &cached.store_root);
     }
-    if !cached.in_repo {
+    // The index stores a project id only for Project and Local scopes. The plan ChangeSet may
+    // carry the active project the screen passed in even for a user-scope row; filtering here
+    // keeps `items`/`deployments` valid and the list query matching the row.
+    let deployment_project =
+        scoped_project_id(cached.scope, cached.preview_set.project_id.as_deref());
+    if cached.delete {
+        // The definition is gone, so the index rows that describe it must go with it: an item
+        // row without a manifest entry, or a deployment row without a native projection, is a
+        // stale row every later screen and drift pass has to defend against.
+        at_db::deployments::delete_for_item(database.connection(), &cached.item_id).map_err(
+            |error| {
+                CommandError::internal(format!(
+                    "the deleted server's deployment rows could not be removed: {error}"
+                ))
+            },
+        )?;
+        at_db::items::delete_item(database.connection(), &cached.item_id).map_err(|error| {
+            CommandError::internal(format!(
+                "the deleted server's row could not be removed: {error}"
+            ))
+        })?;
+        at_db::presets::remove_members_for_item(database.connection(), &cached.item_id).map_err(
+            |error| {
+                CommandError::internal(format!(
+                    "the deleted server's preset memberships could not be removed: {error}"
+                ))
+            },
+        )?;
+        if let Some((metadata, before)) = &undo_metadata
+            && let Err(error) = at_migrate::undo_meta::write_for_new_operations(
+                database.connection(),
+                &cached.backup_folder,
+                *before,
+                metadata,
+            )
+        {
+            tracing::warn!(%error, "mcp delete undo metadata could not be written");
+        }
+        // The deleted entry is gone from the shared document: the remaining rows describe the
+        // new file, not the one current at their own creation.
+        if let Ok(bytes) = std::fs::read(&cached.store_file) {
+            at_db::deployments::update_store_hash_for_scope(
+                database.connection(),
+                at_model::ItemKind::McpServer,
+                cached.scope,
+                deployment_project,
+                &at_fs::sha256_hex(&bytes),
+            )
+            .map_err(|error| {
+                CommandError::internal(format!(
+                    "the remaining store hashes could not be refreshed: {error}"
+                ))
+            })?;
+        }
+    } else if !cached.in_repo {
         let state_value = if cached.enabled {
             ItemState::Linked
         } else {
             ItemState::Off
         };
-        let mode = if cached.enabled { "symlink" } else { "none" };
-        for agent in &cached.agents {
-            let spec = at_db::deployments::DeploymentSpec::new(
+        // MCP entries live inside the agent's native document; they are not links.
+        let mode = if cached.enabled { "native" } else { "none" };
+        let store_hash = std::fs::read(&cached.store_file)
+            .ok()
+            .map(|bytes| at_fs::sha256_hex(&bytes));
+        for (index, agent) in cached.agents.iter().enumerate() {
+            let target_path = native_paths.get(index);
+            let target_text = target_path.map(|target| target.to_string_lossy().into_owned());
+            let target_hash = target_path
+                .and_then(|path| std::fs::read(path).ok())
+                .map(|bytes| at_fs::sha256_hex(&bytes));
+            let baseline_hash = target_hash.clone();
+            let hashes = at_db::deployments::DeploymentHashes::new(
+                store_hash.as_deref(),
+                target_hash.as_deref(),
+                baseline_hash.as_deref(),
+            );
+            let mut spec = at_db::deployments::DeploymentSpec::applied(
                 &cached.item_id,
                 agent,
                 cached.scope,
                 state_value,
+                Some(mode),
+                target_text.as_deref(),
+                hashes,
             )
-            .with_mode(mode)
             .with_operation(&outcome.operation_id);
+            if let Some(project_id) = deployment_project {
+                spec = spec.with_project(project_id);
+            }
             at_db::deployments::upsert_deployment(database.connection(), &spec).map_err(
                 |error| CommandError::internal(format!("cannot record the deployment: {error}")),
             )?;
         }
+    }
+    // The native documents now hold what the plan rendered. Refresh every deployment row that
+    // targets them, or the next drift scan reports AgenTuna's own write as an external edit.
+    for path in &native_paths {
+        at_engine::drift::sync_written_target(
+            database.connection(),
+            None,
+            path,
+            Some(&cached.store_file),
+        )
+        .map_err(|error| {
+            CommandError::internal(format!(
+                "MCP deployment baselines could not be refreshed: {error}"
+            ))
+        })?;
+    }
+    // Disable, enable and delete rewrote the native documents the findings are derived from, and
+    // delete removed the canonical row: re-derive the rows so the list reflects the new state.
+    if let Some(paths) = state.paths() {
+        super::native_scan::refresh_native_findings(paths, database.connection());
     }
     Ok(McpServerActionOutcome::Applied {
         applied: McpActionApplyView {
@@ -1013,6 +1172,19 @@ fn apply_cached(
             files_changed: outcome.completed,
         },
     })
+}
+
+/// Project identity an item or deployment row may carry for `scope`.
+///
+/// The index requires a project id exactly for Project and Local scopes. A User or Global save
+/// issued while a project is active must still store `NULL`; passing the active project through
+/// makes `validate_scope_project` reject the row, so the saved item never reaches the list.
+pub(crate) fn scoped_project_id(scope: Scope, project_id: Option<&str>) -> Option<&str> {
+    if matches!(scope, Scope::Project | Scope::Local) {
+        project_id
+    } else {
+        None
+    }
 }
 
 pub(crate) fn project_of(

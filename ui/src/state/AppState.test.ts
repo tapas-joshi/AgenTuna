@@ -95,6 +95,14 @@ describe("AppState", () => {
     expect(state.getSnapshot().route).toBe("mcp-detail");
     expect(state.getSnapshot().screenState["detail:itemId"]).toBe("itm_mcp");
   });
+  test("visited items are deduplicated, newest-first and bounded to eight", () => {
+    const state = createAppState();
+    for (let index = 0; index < 10; index += 1) state.recordVisitedItem(`skill:${index}`);
+    state.recordVisitedItem("skill:5");
+    expect(state.getSnapshot().recentItemIds).toEqual([
+      "skill:5", "skill:9", "skill:8", "skill:7", "skill:6", "skill:4", "skill:3", "skill:2",
+    ]);
+  });
 
   test("a burst of external changes produces one trailing-edge reload", () => {
     vi.useFakeTimers();
@@ -103,6 +111,7 @@ describe("AppState", () => {
     for (let index = 0; index < 200; index += 1) state.requestExternalReload();
     vi.advanceTimersByTime(100);
     expect(reloadEffects(effects)).toEqual([{ type: "reload-route", route: "overview", reason: "external" }]);
+    expect(state.getSnapshot().externalRefreshVersion).toBe(1);
   });
 
   test("external changes protect dirty editors until explicitly resolved", () => {

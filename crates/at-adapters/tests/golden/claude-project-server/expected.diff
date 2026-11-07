@@ -1,0 +1,15 @@
+--- fixture
++++ output
+@@ -5,7 +5,11 @@
+     "/workspace/demo": {
+       "hasTrustDialogAccepted": true,
+       "mcpServers": {
+-        "native-server": { "command": "native", "args": [] }
++        "native-server": { "command": "native", "args": [] },
++        "project-server": {
++          "type": "stdio",
++          "command": "python"
++        }
+       }
+     }
+   },

@@ -3,6 +3,7 @@ import { createToastStore } from "../overlays/toasts/store";
 import type { ScopeToken } from "../theme";
 import type { StateRouteId } from "../components/states";
 import { routeRequiresProject } from "../shell/routes";
+import type { ShellAgentStatus } from "../shell/routes";
 
 /** One dirty editor buffer owned by the app state rather than by a screen. */
 export interface EditorBuffer {
@@ -25,6 +26,11 @@ export interface AppSnapshot {
   readonly externalChanges: Readonly<Record<string, { readonly contentHash: string; readonly kept: boolean }>>;
   readonly overlay: string | null;
   readonly backgroundJobs: readonly string[];
+  readonly recentItemIds: readonly string[];
+  /** Detection result the sidebar renders; filled by `receiveAgents`. */
+  readonly agents: readonly ShellAgentStatus[];
+  /** Monotonic token for subscribers to reload external snapshots after coalescing. */
+  readonly externalRefreshVersion: number;
   readonly revision: number;
 }
 
@@ -33,7 +39,7 @@ export type AppEffect =
   | { readonly type: "reload-route"; readonly route: StateRouteId; readonly reason: "project" | "scope" | "external" }
   | { readonly type: "persist-last-project"; readonly projectId: string }
   | { readonly type: "dirty-navigation"; readonly from: StateRouteId; readonly to: StateRouteId }
-  | { readonly type: "project-picker-required"; readonly route: StateRouteId }
+  | { readonly type: "project-picker-required"; readonly route: StateRouteId; readonly itemId?: string }
   | { readonly type: "persist-last-scope"; readonly projectId: string; readonly scope: ScopeToken }
   | { readonly type: "restore-project-scope"; readonly projectId: string };
 
@@ -74,6 +80,10 @@ export interface AppState {
   setEditorBuffer(route: StateRouteId, buffer: EditorBuffer): void;
   setSelection(key: string, ids: readonly string[]): void;
   setScreenState(key: string, value: unknown): void;
+  /** Publishes a fresh detection result for the sidebar. */
+  receiveAgents(agents: readonly ShellAgentStatus[]): void;
+  /** Moves a visited palette item to the front of the bounded recent list. */
+  recordVisitedItem(itemId: string): void;
   setOverlay(overlay: string | null): void;
   setJob(jobId: string, active: boolean): void;
 }
@@ -94,6 +104,9 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
     externalChanges: {},
     backgroundJobs: [],
     overlay: null,
+    recentItemIds: [],
+    agents: [],
+    externalRefreshVersion: 0,
     revision: 0,
   };
   let externalReloadTimer: number | undefined;
@@ -212,6 +225,10 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
       update({ route: target, routeStack: snapshot.routeStack.slice(0, -1), editors, overlay: null });
       return true;
     },
+    recordVisitedItem(itemId) {
+      if (snapshot.recentItemIds[0] === itemId) return;
+      update({ recentItemIds: [itemId, ...snapshot.recentItemIds.filter((id) => id !== itemId)].slice(0, 8) });
+    },
     openItem(itemId, item) {
       if (item === null) {
         toasts.show({ kind: "warning", title: "Item not found", message: "Item not found" });
@@ -219,12 +236,14 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
       }
       const target: StateRouteId = item.kind === "mcp_server" ? "mcp-detail" : item.kind === "rule" ? "instructions" : "skill-detail";
       if ((item.scope === "project" || item.scope === "local") && item.project_id === null) {
-        effects({ type: "project-picker-required", route: target });
+        effects({ type: "project-picker-required", route: target, itemId });
         return;
       }
       const projectId = item.project_id ?? snapshot.activeProject;
       const scope = item.scope === "global" || item.scope === "user" || item.scope === "project" || item.scope === "local"
         ? item.scope : snapshot.scope;
+      const paletteKind = item.kind === "mcp_server" ? "server" : item.kind === "rule" ? "rule" : "skill";
+      const visitedId = `${paletteKind}:${itemId}`;
       if (projectId !== null) effects({ type: "persist-last-scope", projectId, scope });
       update({
         activeProject: projectId,
@@ -232,6 +251,7 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
         route: target,
         routeStack: [...snapshot.routeStack, target].slice(-50),
         screenState: { ...snapshot.screenState, "detail:itemId": itemId },
+        recentItemIds: [visitedId, ...snapshot.recentItemIds.filter((id) => id !== visitedId)].slice(0, 8),
       });
       effects({ type: "reload-route", route: target, reason: "project" });
     },
@@ -239,6 +259,7 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
       window.clearTimeout(externalReloadTimer);
       externalReloadTimer = window.setTimeout(() => {
         externalReloadTimer = undefined;
+        update({ externalRefreshVersion: snapshot.externalRefreshVersion + 1 });
         reload("external");
       }, 100);
     },
@@ -275,6 +296,9 @@ export function createAppState(ports: AppStatePorts = {}): AppState {
     },
     setScreenState(key, value) {
       update({ screenState: { ...snapshot.screenState, [key]: value } });
+    },
+    receiveAgents(agents) {
+      update({ agents: [...agents] });
     },
     setOverlay(overlay) {
       update({ overlay });

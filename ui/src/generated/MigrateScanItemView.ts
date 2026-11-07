@@ -37,6 +37,10 @@ parse_error: string | null,
  */
 store_link: boolean, 
 /**
+ * Authoritative ownership label: `in_agentuna`, `conflict` or `not_in_agentuna`.
+ */
+state: string, 
+/**
  * Managed, conflict, not-in-agentuna or unknown ownership state.
  */
 ownership: string, };

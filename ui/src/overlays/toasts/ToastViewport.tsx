@@ -58,7 +58,7 @@ export function ToastViewport({ store, clipboard }: ToastViewportProps) {
   const assertive = snapshot.visible.filter((toast) => toast.kind === "error");
 
   return (
-    <div className="at-toasts" data-testid="toast-viewport">
+    <section role="region" aria-label="Notifications" className="at-toasts" data-testid="toast-viewport">
       <div
         className="at-toasts__live"
         role="status"
@@ -142,6 +142,6 @@ export function ToastViewport({ store, clipboard }: ToastViewportProps) {
           );
         })}
       </ol>
-    </div>
+    </section>
   );
 }

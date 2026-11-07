@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 
 use at_fs::ApplyRoots;
 use at_model::{AgentId, ItemKind, Scope};
-use at_store::layout::{Slug, StoreLayout, init_store};
+use at_store::layout::{Slug, StoreLayout};
 use at_store::manifest::StoreManifest;
 
-use crate::apply::{ApplyPlanContext, ApplyPlanError, apply_plan};
-use crate::conflicts::{Conflict, ConflictCopy, ConflictSet, ProposedResolution};
+use crate::apply::{ApplyPlanContext, ApplyPlanError, apply_plan_with_actor};
+use crate::conflicts::{Conflict, ConflictCopy, ConflictSet, CopyOrigin, ProposedResolution};
 use crate::plan::{
     BuildPlanRequest, ConflictResolution, MigrationPlan, MigrationStrategy, PlanError, build_plan,
     dry_run,
@@ -72,12 +72,17 @@ pub enum PathState {
     Missing,
 }
 
-/// Inputs for previewing or performing one adoption.
+/// Inputs for applying one adoption.
 pub struct AdoptRequest<'a> {
     /// Scan record the caller reviewed.
     pub scan: &'a ScanReport,
     /// Native path selected from that record.
     pub path: &'a Path,
+    /// Restricts the match to this entry name when one document holds several entries.
+    ///
+    /// An MCP configuration stores every server in one file, so a caller adopting one server
+    /// names it here; `None` selects the first record at `path`.
+    pub name: Option<&'a str>,
     /// Canonical store root receiving the item.
     pub store_root: &'a Path,
     /// Operation backup root.
@@ -86,6 +91,31 @@ pub struct AdoptRequest<'a> {
     pub authorized_roots: &'a ApplyRoots,
     /// Database for the operation journal and ownership rows.
     pub database: &'a mut at_db::Database,
+    /// Store scope receiving the item.
+    pub scope: Scope,
+    /// What to do with the native original.
+    pub handling: AdoptHandling,
+    /// Active project id when adopting at Project or Local scope.
+    pub project_id: Option<&'a str>,
+}
+
+/// Inputs for a write-free adoption preview.
+pub struct AdoptPreviewRequest<'a> {
+    /// Scan record the caller reviewed.
+    pub scan: &'a ScanReport,
+    /// Native path selected from that record.
+    pub path: &'a Path,
+    /// Restricts the match to this entry name when one document holds several entries.
+    ///
+    /// An MCP configuration stores every server in one file, so a caller previewing one server
+    /// names it here; `None` selects the first record at `path`.
+    pub name: Option<&'a str>,
+    /// Canonical store root receiving the item.
+    pub store_root: &'a Path,
+    /// Operation backup root.
+    pub backup_root: &'a Path,
+    /// Existing roots authorized for absolute native paths.
+    pub authorized_roots: &'a ApplyRoots,
     /// Store scope receiving the item.
     pub scope: Scope,
     /// What to do with the native original.
@@ -176,39 +206,17 @@ pub enum AdoptError {
     Apply(#[from] ApplyPlanError),
 }
 
-/// Creates the canonical store skeleton when `store_root` does not hold a manifest yet.
-///
-/// No user content is written: the store's `store.json`/`mcp.json` bootstrap is what any later
-/// adopt needs, and the plan builder hashes the manifest before it can project anything.
-///
-/// # Errors
-/// [`AdoptError::Store`] when the store cannot be created.
-pub fn ensure_store(scope: Scope, store_root: &Path) -> Result<(), AdoptError> {
-    match StoreManifest::load(&StoreLayout::new(scope, store_root)) {
-        Ok(_) => Ok(()),
-        Err(error) if error.is_missing() => init_store(scope, store_root)
-            .map(|_| ())
-            .map_err(|error| AdoptError::Store(error.to_string())),
-        Err(error) => Err(AdoptError::Store(error.to_string())),
-    }
-}
-
-/// Projects one adoption without writing item content.
+/// Projects one adoption without writing.
 ///
 /// Verifies the source still matches the scan record, picks a collision-free slug and returns
-/// the exact plan rows the adoption would apply. The store skeleton is created when missing
-/// (see [`ensure_store`]); nothing else is written.
+/// the exact plan rows the adoption would apply. A missing store is treated as empty; preview
+/// never creates its directory or manifest.
 ///
 /// # Errors
 /// [`AdoptError::StaleScanRecord`] when the source changed or vanished, [`AdoptError::Plan`] for
 /// an unusable name, or [`AdoptError::Store`] when the store cannot be read.
-pub fn preview_adopt(request: &AdoptRequest<'_>) -> Result<AdoptPreview, AdoptError> {
-    ensure_store(request.scope, request.store_root)?;
-    let item = request
-        .scan
-        .items
-        .iter()
-        .find(|item| item.path == request.path)
+pub fn preview_adopt(request: &AdoptPreviewRequest<'_>) -> Result<AdoptPreview, AdoptError> {
+    let item = selected_item(request.scan, request.path, request.name)
         .ok_or_else(|| AdoptError::ItemNotFound(request.path.to_path_buf()))?;
     if !matches!(item.parse_status, ParseStatus::Parsed) {
         return Err(AdoptError::Unparsed(item.path.clone()));
@@ -251,30 +259,50 @@ pub fn preview_adopt(request: &AdoptRequest<'_>) -> Result<AdoptPreview, AdoptEr
     })
 }
 
-/// Adopts one scanned native item as a reviewed, undoable operation.
+/// Adopts one scanned native item as a reviewed, undoable UI operation.
 ///
-/// The store is initialised when it does not exist yet. The plan is built from the scan record
-/// after re-verifying the source digest, so an item that changed (or vanished) since the scan is
-/// refused with [`AdoptError::StaleScanRecord`] and nothing is written.
+/// A scope with no store yet gets its skeleton inside the same reviewed `ChangeSet` the adoption
+/// applies, so the store creation and the item are one operation and one undo. The plan is built
+/// from the scan record after re-verifying the source digest, so an item that changed (or
+/// vanished) since the scan is refused with [`AdoptError::StaleScanRecord`] and nothing is
+/// written.
 ///
 /// # Errors
 /// Returns [`AdoptError`] for a stale record, an unusable name, or any plan/apply failure.
 pub fn adopt_item(request: AdoptRequest<'_>) -> Result<AdoptOutcome, AdoptError> {
-    let preview = preview_adopt(&request)?;
-    let item = request
-        .scan
-        .items
-        .iter()
-        .find(|item| item.path == request.path)
+    adopt_item_with_actor(request, at_db::ops::OperationActor::Ui)
+}
+
+/// Adopts one scanned item and records the supplied operation actor.
+///
+/// # Errors
+/// Returns the same failures as [`adopt_item`].
+pub fn adopt_item_with_actor(
+    request: AdoptRequest<'_>,
+    actor: at_db::ops::OperationActor,
+) -> Result<AdoptOutcome, AdoptError> {
+    let preview_request = AdoptPreviewRequest {
+        scan: request.scan,
+        path: request.path,
+        name: request.name,
+        store_root: request.store_root,
+        backup_root: request.backup_root,
+        authorized_roots: request.authorized_roots,
+        scope: request.scope,
+        handling: request.handling,
+    };
+    let preview = preview_adopt(&preview_request)?;
+    let item = selected_item(request.scan, request.path, request.name)
         .ok_or_else(|| AdoptError::ItemNotFound(request.path.to_path_buf()))?;
-    let plan = build_adopt_plan(&request, item, &preview.slug)?;
+    let plan = build_adopt_plan(&preview_request, item, &preview.slug)?;
     let mut context = ApplyPlanContext {
         store_root: request.store_root,
         backup_root: request.backup_root,
         authorized_roots: request.authorized_roots,
         database: request.database,
+        project_id: request.project_id,
     };
-    let applied = apply_plan(&plan, &mut context)?;
+    let applied = apply_plan_with_actor(&plan, &mut context, actor)?;
     Ok(AdoptOutcome {
         plan,
         operation_id: applied.operation_id,
@@ -293,7 +321,7 @@ pub fn adopt_item(request: AdoptRequest<'_>) -> Result<AdoptOutcome, AdoptError>
 /// conflict resolution instead of a renamed scan row: the plan keeps the original native name
 /// and writes the chosen store name.
 fn build_adopt_plan(
-    request: &AdoptRequest<'_>,
+    request: &AdoptPreviewRequest<'_>,
     item: &ScanItem,
     slug: &str,
 ) -> Result<MigrationPlan, AdoptError> {
@@ -301,6 +329,7 @@ fn build_adopt_plan(
         items: vec![item.clone()],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let selected_paths = BTreeSet::from([item.path.clone()]);
     let mut resolutions = BTreeMap::new();
@@ -309,7 +338,8 @@ fn build_adopt_plan(
     } else {
         let name = normalize(&item.name);
         let placeholder = ConflictCopy {
-            agent: other_agent(item),
+            agent: Some(other_agent(item)),
+            origin: CopyOrigin::Native,
             path: request.store_root.join(".adopt-name-placeholder"),
             scope: item.scope,
             raw_hash: String::new(),
@@ -327,12 +357,14 @@ fn build_adopt_plan(
                 name,
                 copies: vec![
                     ConflictCopy {
-                        agent: item
-                            .agents
-                            .iter()
-                            .next()
-                            .cloned()
-                            .unwrap_or(AgentId::ClaudeCode),
+                        agent: Some(
+                            item.agents
+                                .iter()
+                                .next()
+                                .cloned()
+                                .unwrap_or(AgentId::ClaudeCode),
+                        ),
+                        origin: CopyOrigin::Native,
                         path: item.path.clone(),
                         scope: item.scope,
                         raw_hash: item.content_hash.clone().unwrap_or_default(),
@@ -344,6 +376,7 @@ fn build_adopt_plan(
                 unified_diff: String::new(),
                 proposed_resolution: ProposedResolution::NeedsChoice,
             }],
+            ..ConflictSet::default()
         }
     };
     let copy_agents = if request.handling == AdoptHandling::Copy {
@@ -400,6 +433,21 @@ fn taken_slugs(
         }
     }
     Ok(taken)
+}
+
+/// Finds the scan record a caller selected.
+///
+/// `name` narrows the match to one entry inside a shared native document — an MCP server key
+/// — because every server in one configuration file scans to the same `path`. Without it the
+/// first record at `path` is chosen, which is what a skill or rule adoption needs.
+fn selected_item<'r>(
+    scan: &'r ScanReport,
+    path: &Path,
+    name: Option<&str>,
+) -> Option<&'r ScanItem> {
+    scan.items
+        .iter()
+        .find(|item| item.path == path && name.is_none_or(|wanted| item.name == wanted))
 }
 
 /// The digest the scanner recorded for this row.

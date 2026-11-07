@@ -5,6 +5,7 @@
 //! are unchanged, combines them into one ChangeSet and applies it atomically. Every item reports
 //! progress, and the whole batch produces exactly one Tauri event.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use at_engine::bulk_skill::{
@@ -73,6 +74,21 @@ pub async fn bulk_skill_apply(
     state: State<'_, AppState>,
     request: BulkSkillApplyRequest,
 ) -> Result<BulkSkillBatchView, CommandError> {
+    let batch = bulk_skill_apply_inner(&state, request)?;
+    let _ = app.emit(EVENT_BULK_PROGRESS, &batch);
+    Ok(batch)
+}
+
+/// Applies a reviewed bulk selection without a Tauri app, emitting nothing.
+///
+/// The command wrapper emits the single batch event; tests call this directly.
+///
+/// # Errors
+/// See [`bulk_skill_apply`].
+pub(crate) fn bulk_skill_apply_inner(
+    state: &AppState,
+    request: BulkSkillApplyRequest,
+) -> Result<BulkSkillBatchView, CommandError> {
     if request.preview_ids.is_empty() {
         return Err(CommandError::invalid_argument(
             "preview_ids",
@@ -80,7 +96,11 @@ pub async fn bulk_skill_apply(
         ));
     }
     let plans = take_reviewed_plans(&request.preview_ids)?;
+    let mut verified_items = BTreeSet::new();
     for plan in &plans {
+        if !verified_items.insert(plan.item_id) {
+            continue;
+        }
         let current = at_store::manifest::hash_skill_folder(&plan.source)
             .map_err(|_| CommandError::unavailable("the canonical skill package is unavailable"))?
             .to_string();
@@ -98,31 +118,41 @@ pub async fn bulk_skill_apply(
         .first()
         .map(|plan| plan.scope)
         .ok_or_else(|| CommandError::invalid_argument("preview_ids", "no skill plans"))?;
-    if plans.iter().any(|plan| plan.scope != scope) {
+    let project_ids = plans
+        .iter()
+        .filter_map(|plan| plan.project_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    if project_ids.len() > 1 {
         return Err(CommandError::invalid_argument(
             "preview_ids",
-            "a batch must stay in one scope",
+            "a batch must stay in one project",
         ));
     }
     let mut targets = Vec::<AgentId>::new();
+    let mut items = Vec::new();
+    let mut item_plans = Vec::<BulkItemPlan>::new();
     for plan in &plans {
         if !targets.contains(&plan.agent) {
             targets.push(plan.agent.clone());
         }
+        let ops = plan
+            .set
+            .as_ref()
+            .map_or_else(Vec::new, |set| set.ops.clone());
+        if let Some(item_plan) = item_plans
+            .iter_mut()
+            .find(|item| item.item_id == plan.item_id)
+        {
+            item_plan.ops.extend(ops);
+        } else {
+            items.push(plan.item_id);
+            item_plans.push(BulkItemPlan {
+                item_id: plan.item_id,
+                ops,
+                refusal: None,
+            });
+        }
     }
-    let items = plans.iter().map(|plan| plan.item_id).collect::<Vec<_>>();
-    let item_plans = plans
-        .iter()
-        .map(|plan| BulkItemPlan {
-            item_id: plan.item_id,
-            ops: plan
-                .set
-                .as_ref()
-                .map(|set| set.ops.clone())
-                .unwrap_or_default(),
-            refusal: None,
-        })
-        .collect::<Vec<_>>();
     let kind = if plans.iter().all(|plan| plan.enabled) {
         BulkKind::Enable
     } else if plans.iter().all(|plan| !plan.enabled) {
@@ -138,7 +168,10 @@ pub async fn bulk_skill_apply(
         items: items.clone(),
         targets,
         scope,
-        project_id: plans.first().and_then(|plan| plan.project_id.clone()),
+        project_id: project_ids
+            .iter()
+            .next()
+            .map(|project_id| (*project_id).to_owned()),
     };
     let plan = match plan_bulk(&intent, item_plans) {
         Ok(plan) => plan,
@@ -157,7 +190,6 @@ pub async fn bulk_skill_apply(
                 applied: false,
                 refusal: Some(String::from("nothing to do")),
             };
-            let _ = app.emit(EVENT_BULK_PROGRESS, &batch);
             return Ok(batch);
         }
         Err(error) => {
@@ -198,6 +230,7 @@ pub async fn bulk_skill_apply(
         Ok(outcome) => {
             state.record_writes(&plan.change_set, &store_root);
             update_deployments(database.connection(), &plans, &outcome.operation_id)?;
+            refresh_baselines(database.connection(), &plans)?;
             BulkSkillBatchView {
                 batch_id,
                 events: collected.into_iter().map(progress_view).collect(),
@@ -216,7 +249,6 @@ pub async fn bulk_skill_apply(
             refusal: Some(error.to_string()),
         },
     };
-    let _ = app.emit(EVENT_BULK_PROGRESS, &batch);
     Ok(batch)
 }
 
@@ -250,17 +282,60 @@ fn update_deployments(
         };
         let mode = if plan.enabled { "symlink" } else { "none" };
         let target = plan.target.to_string_lossy();
-        let spec =
-            at_db::deployments::DeploymentSpec::new(&plan.item_id, &plan.agent, plan.scope, state)
-                .with_mode(mode)
-                .with_target_path(target.as_ref())
-                .with_operation(operation_id);
-        let spec = match plan.project_id.as_deref() {
-            Some(project_id) => spec.with_project(project_id),
-            None => spec,
+        let store_hash = at_store::manifest::hash_skill_folder(&plan.source)
+            .map_err(|_| CommandError::unavailable("the canonical skill package is unavailable"))?
+            .to_string();
+        let target_hash = if plan.enabled {
+            at_fs::hash_node(&plan.target).map_err(|_| {
+                CommandError::unavailable("the deployed skill could not be verified")
+            })?
+        } else {
+            None
         };
+        let hashes = at_db::deployments::DeploymentHashes::new(
+            Some(&store_hash),
+            target_hash.as_deref(),
+            plan.enabled.then_some(store_hash.as_str()),
+        );
+        let mut spec = at_db::deployments::DeploymentSpec::applied(
+            &plan.item_id,
+            &plan.agent,
+            plan.scope,
+            state,
+            Some(mode),
+            Some(target.as_ref()),
+            hashes,
+        )
+        .with_operation(operation_id);
+        if let Some(project_id) = plan.project_id.as_deref() {
+            spec = spec.with_project(project_id);
+        }
         at_db::deployments::upsert_deployment(connection, &spec).map_err(|error| {
             CommandError::internal(format!("cannot record deployments: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Refreshes baselines for every deployment row that shares an enabled batch target.
+///
+/// The batch writes one directory per item; a shared skills root can carry rows from several
+/// agents, so the recorded hashes are refreshed for the path, not only the acting agent.
+fn refresh_baselines(
+    connection: &rusqlite::Connection,
+    plans: &[ReviewedSkillPlan],
+) -> Result<(), CommandError> {
+    for plan in plans.iter().filter(|plan| plan.enabled && !plan.no_op) {
+        at_engine::drift::sync_written_target(
+            connection,
+            Some(plan.scope),
+            &plan.target,
+            Some(&plan.source),
+        )
+        .map_err(|error| {
+            CommandError::internal(format!(
+                "skill deployment baselines could not be refreshed: {error}"
+            ))
         })?;
     }
     Ok(())

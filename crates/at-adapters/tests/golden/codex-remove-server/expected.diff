@@ -1,0 +1,17 @@
+--- fixture
++++ output
+@@ -17,14 +17,6 @@
+ command = "npx"
+ args = ["-y", "@playwright/mcp@0.0.0"]
+ 
+-[mcp_servers.node_repl]
+-command = "npx"
+-args = ["-y", "@modelcontextprotocol/server-everything"]
+-env = { NODE_REPL_MODE = "sandbox" }
+-env_vars = ["NODE_REPL_TOKEN"]
+-enabled = true
+-startup_timeout_sec = 20
+-
+ [mcp_servers.shuttle]
+ url = "https://mcp.example.com/mcp"
+ 

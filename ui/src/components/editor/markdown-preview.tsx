@@ -1,7 +1,9 @@
+import type { SyntheticEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { cn } from "../cn";
+import { isSafeExternalUrl, openExternalLink } from "./external-link";
 
 /** Props accepted by {@link MarkdownPreview}. */
 export interface MarkdownPreviewProps {
@@ -11,10 +13,27 @@ export interface MarkdownPreviewProps {
 }
 
 /**
+ * Routes an activated link through the browser command instead of the webview.
+ *
+ * Runs for the mouse click and for the Enter key on a focused link; cancelling both means the
+ * webview never starts a navigation, so the app-origin guard in `at-app` is the second line of
+ * defence rather than the only one.
+ */
+function activateExternalLink(event: SyntheticEvent, url: string): void {
+  event.preventDefault();
+  void openExternalLink(url).catch((error: unknown) => {
+    console.error("the external link could not be opened", error);
+  });
+}
+
+/**
  * Markdown is never rendered as raw HTML: `skipHtml` drops HTML nodes before
  * React sees them, and `rehype-sanitize` re-runs the GitHub schema over whatever
  * the parser produced. Images are rendered as text so previewing an untrusted
- * skill cannot fetch remote content.
+ * skill cannot fetch remote content. Links never navigate the webview: an
+ * `https` target is intercepted on click and on Enter and handed to the typed
+ * `open_external_link` command, which opens the system browser after validating
+ * the URL again; every other target renders as plain text.
  */
 const COMPONENTS: Components = {
   h1: ({ children }) => <h1 className="mt-16 mb-8 text-18 font-semibold text-text first:mt-0">{children}</h1>,
@@ -36,16 +55,24 @@ const COMPONENTS: Components = {
   blockquote: ({ children }) => (
     <blockquote className="my-12 border-l-2 border-border pl-12 text-text-secondary">{children}</blockquote>
   ),
-  a: ({ children, href }) => (
-    <a
-      href={href}
-      rel="noreferrer noopener"
-      target="_blank"
-      className="text-accent underline underline-offset-2"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ children, href }) =>
+    isSafeExternalUrl(href) ? (
+      <a
+        href={href}
+        title={href}
+        className="text-accent underline underline-offset-2"
+        onClick={(event) => activateExternalLink(event, href)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") activateExternalLink(event, href);
+        }}
+      >
+        {children}
+      </a>
+    ) : (
+      <span className="text-text" title={href ?? undefined}>
+        {children}
+      </span>
+    ),
   hr: () => <hr className="my-16 border-border" />,
   img: ({ alt }) => <span className="text-text-muted">[image: {alt ?? "untitled"}]</span>,
 };

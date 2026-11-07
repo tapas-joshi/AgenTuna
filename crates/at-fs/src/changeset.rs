@@ -35,18 +35,41 @@ pub trait OperationRecorder {
         succeeded: bool,
         manual_review: bool,
     ) -> Result<(), String>;
+    /// Records that a completed reversible apply was rolled back before its later phase ran.
+    ///
+    /// The filesystem is already restored when this runs: the operation must end failed and its
+    /// file rows must stop describing writes that no longer exist. The default finishes the
+    /// operation as failed, which is enough for recorders that do not keep per-file history.
+    fn rolled_back(&mut self, operation_id: &str, _reason: &str) -> Result<(), String> {
+        self.finish(operation_id, false, false)
+    }
 }
 
 /// Concrete operation recorder backed by at-db repositories.
 pub struct DbOperationRecorder<'a> {
     connection: &'a rusqlite::Connection,
     backup_retention_days: u32,
+    actor: at_db::ops::OperationActor,
 }
 
 impl<'a> DbOperationRecorder<'a> {
-    /// Builds a recorder, clamping retention to the contract's 30-day minimum.
+    /// Builds a UI recorder, clamping retention to the contract's 30-day minimum.
     #[must_use]
     pub const fn new(connection: &'a rusqlite::Connection, backup_retention_days: u32) -> Self {
+        Self::new_with_actor(
+            connection,
+            backup_retention_days,
+            at_db::ops::OperationActor::Ui,
+        )
+    }
+
+    /// Builds an actor-specific recorder with contract-compliant retention.
+    #[must_use]
+    pub const fn new_with_actor(
+        connection: &'a rusqlite::Connection,
+        backup_retention_days: u32,
+        actor: at_db::ops::OperationActor,
+    ) -> Self {
         Self {
             connection,
             backup_retention_days: if backup_retention_days < 30 {
@@ -54,17 +77,18 @@ impl<'a> DbOperationRecorder<'a> {
             } else {
                 backup_retention_days
             },
+            actor,
         }
     }
 }
 
 impl OperationRecorder for DbOperationRecorder<'_> {
     fn begin(&mut self, set: &ChangeSet) -> Result<String, String> {
-        use at_db::ops::{NewOperation, OperationActor, OperationKind, begin};
+        use at_db::ops::{NewOperation, OperationKind, begin};
         use std::str::FromStr;
         let kind = OperationKind::from_str(set.operation_kind.as_str())
             .map_err(|error| error.to_string())?;
-        let mut operation = NewOperation::new(kind, OperationActor::Ui).with_summary(&set.summary);
+        let mut operation = NewOperation::new(kind, self.actor).with_summary(&set.summary);
         operation.scope = set.scope;
         begin(self.connection, &operation)
             .map(|id| id.to_string())
@@ -132,6 +156,15 @@ impl OperationRecorder for DbOperationRecorder<'_> {
             Err("operation row was not running".to_owned())
         }
     }
+
+    fn rolled_back(&mut self, id: &str, _reason: &str) -> Result<(), String> {
+        use at_db::ops::{OperationId, record_rollback};
+        use std::str::FromStr;
+        let operation = OperationId::from_str(id).map_err(|error| error.to_string())?;
+        record_rollback(self.connection, &operation)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Parameters for applying a ChangeSet.
@@ -178,6 +211,12 @@ impl ApplyRoots {
         }
         canonical.sort();
         Ok(Self { roots: canonical })
+    }
+
+    /// Returns the canonical authorized roots.
+    #[must_use]
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
     }
 
     fn root_for(&self, path: &Path) -> Result<(&Path, PathBuf), ChangeSetApplyError> {
@@ -253,7 +292,9 @@ impl ApplyRoots {
         }
         let (root, relative, _) = matched
             .ok_or_else(|| ChangeSetApplyError::OutsideAuthorizedRoots(path.to_path_buf()))?;
-        if !ancestor_real.starts_with(root) {
+        // A path that is itself an authorized root (the preview adds each deployment target)
+        // has no parent under that root; accept it instead of treating the root as an escape.
+        if !relative.as_os_str().is_empty() && !ancestor_real.starts_with(root) {
             return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
                 path.to_path_buf(),
             ));
@@ -274,17 +315,18 @@ pub struct ApplyOutcome {
 
 /// In-memory token for reversing a completed ChangeSet in the same process.
 ///
-/// The token retains reviewed pre-state and delete backups. Dropping it commits the applied
-/// operation permanently; it is not a durable undo record.
+/// The token retains reviewed pre-state, delete backups and the still-uncommitted journal. The
+/// journal is marked committed by [`commit_reversible`] and never by the apply, so a crash between
+/// the apply and the commit leaves a journal startup recovery can re-examine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackHandle {
     set: ChangeSet,
     root: PathBuf,
+    operation_id: String,
     journal_path: PathBuf,
+    journal: PendingJournal,
     done: Vec<CompletedOperation>,
     paths: Vec<PathBuf>,
-    entries: Vec<JournalEntry>,
-    created_dirs: Vec<PathBuf>,
 }
 
 /// ChangeSet application failures.
@@ -389,10 +431,23 @@ pub fn apply_with_roots_reversible(
 
 /// Reverses a completed reversible ChangeSet, refusing to overwrite later external edits.
 ///
+/// The operation history is updated through `recorder` only after every file is restored: the
+/// operation ends failed with its file rows describing the restored state, so history and Undo
+/// do not show a phase that never landed.
+///
+/// When restoration itself fails — an external edit landed between the phase and this rollback —
+/// the operation is recorded failed with `manual_review` and its journal stays uncommitted, so the
+/// next startup re-examines the files this call could not restore instead of deleting its only
+/// record. The returned error carries the rollback failure and the manual-review outcome; callers
+/// that are handling a later phase's own error must report both.
+///
 /// # Errors
 /// Returns [`ChangeSetApplyError::Apply`] when the reviewed result has changed or restoration
 /// fails, and a journal error when its lock or journal cannot be maintained.
-pub fn rollback_committed(handle: RollbackHandle) -> Result<(), ChangeSetApplyError> {
+pub fn rollback_committed(
+    handle: RollbackHandle,
+    recorder: &mut dyn OperationRecorder,
+) -> Result<(), ChangeSetApplyError> {
     let lock_dir = handle.root.join(".state/locks");
     fs::create_dir_all(&lock_dir)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
@@ -404,29 +459,46 @@ pub fn rollback_committed(handle: RollbackHandle) -> Result<(), ChangeSetApplyEr
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
     FileExt::try_lock(&lock_file)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
-    rollback(
+    if let Err(failure) = rollback(
         &handle.set,
         &handle.root,
         &handle.done,
         &handle.paths,
-        &handle.entries,
-        &handle.created_dirs,
-    )
-    .map_err(|cause| ChangeSetApplyError::Apply {
-        cause,
-        rollback: "phase rollback failed".to_owned(),
-    })?;
+        &handle.journal.entries,
+        &handle.journal.created_dirs,
+    ) {
+        // History still says the phase succeeded, and the journal still says committed, so a
+        // plain error would leave both lying. Record the failure with manual review and leave
+        // the journal uncommitted: startup recovery needs it to finish the restoration.
+        let _ = recorder.finish(&handle.operation_id, false, true);
+        return Err(ChangeSetApplyError::Apply {
+            cause: failure,
+            rollback: "manual review required; the uncommitted journal is retained".to_owned(),
+        });
+    }
+    recorder
+        .rolled_back(&handle.operation_id, "the later phase failed")
+        .map_err(ChangeSetApplyError::History)?;
     fs::remove_file(&handle.journal_path)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
     Ok(())
 }
-/// Commits a reversible apply by removing its in-process journal and discarding rollback state.
+/// Commits a reversible apply by marking its journal committed and removing it.
 ///
-/// The operation's normal backup files remain available through the operation history.
+/// The operation's normal backup files remain available through the operation history. The commit
+/// marker is written before the removal so a crash in between leaves a journal that startup
+/// recovery cleans up rather than one that rolls back a committed operation.
 ///
 /// # Errors
-/// Returns a journal error if the retained journal cannot be removed.
-pub fn commit_reversible(handle: RollbackHandle) -> Result<(), ChangeSetApplyError> {
+/// Returns a journal error if the journal cannot be marked or removed.
+pub fn commit_reversible(mut handle: RollbackHandle) -> Result<(), ChangeSetApplyError> {
+    handle.journal.committed = true;
+    let journal_dir = handle
+        .journal_path
+        .parent()
+        .ok_or_else(|| ChangeSetApplyError::Journal("journal path has no directory".to_owned()))?;
+    write_journal(journal_dir, &handle.journal)
+        .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
     fs::remove_file(&handle.journal_path)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))
 }
@@ -483,32 +555,32 @@ fn apply_inner(
         }
     }
     let mut created_dirs = Vec::new();
-    if authorized_roots.is_some() {
-        for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
-            if !op.destination().is_some_and(Path::is_absolute) {
-                continue;
+    // Both path spaces record the parents this operation creates: an absolute destination
+    // walks up to its authorized root, a relative one to the operation's store root. A
+    // first-run plan creates the store directories through these parents, and journaling them
+    // lets rollback and recovery remove exactly the directories this operation made when they
+    // are still empty.
+    for ((op, path), root) in set.ops.iter().zip(&paths).zip(&path_roots) {
+        let mut parent = path.parent();
+        while let Some(directory) = parent {
+            if directory == root {
+                break;
             }
-            let mut parent = path.parent();
-            while let Some(directory) = parent {
-                if directory == root {
-                    break;
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.is_dir() => break,
+                Ok(_) => {
+                    return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                        op.destination().map(Path::to_path_buf).unwrap_or_default(),
+                    ));
                 }
-                match fs::symlink_metadata(directory) {
-                    Ok(metadata) if metadata.is_dir() => break,
-                    Ok(_) => {
-                        return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
-                            op.destination().map(Path::to_path_buf).unwrap_or_default(),
-                        ));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        created_dirs.push(directory.to_path_buf());
-                        parent = directory.parent();
-                    }
-                    Err(_) => {
-                        return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
-                            op.destination().map(Path::to_path_buf).unwrap_or_default(),
-                        ));
-                    }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    created_dirs.push(directory.to_path_buf());
+                    parent = directory.parent();
+                }
+                Err(_) => {
+                    return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                        op.destination().map(Path::to_path_buf).unwrap_or_default(),
+                    ));
                 }
             }
         }
@@ -531,7 +603,35 @@ fn apply_inner(
                 matches!(prior, FileOp::Delete { path: deleted, .. }
                     if Some(deleted.as_path()) == op.destination())
             });
-        validate_expected(op, path, root, context.store_root, replaced_by_prior_move)?;
+        // A link may point at content the same restore set recreates later (the undo restores
+        // the package after the deployment link). Accept a target that a prior op creates.
+        let target_ready = if let FileOp::Symlink { target, .. } = op {
+            resolve_path(context.store_root, target).is_ok_and(|target| {
+                set.ops[..index].iter().any(|prior| match prior {
+                    FileOp::CopyTree { dest, .. } | FileOp::Copy { dest, .. } => {
+                        target.starts_with(dest)
+                    }
+                    FileOp::Write { path, .. } => {
+                        target == *path || path.starts_with(target.as_path())
+                    }
+                    FileOp::Mkdir { path, .. } => {
+                        target == *path || path.starts_with(target.as_path())
+                    }
+                    FileOp::Symlink { link_path, .. } => target == *link_path,
+                    _ => false,
+                })
+            })
+        } else {
+            false
+        };
+        validate_expected(
+            op,
+            path,
+            root,
+            context.store_root,
+            replaced_by_prior_move,
+            target_ready,
+        )?;
     }
     if let Some(guard) = ownership_guard {
         for op in &set.ops {
@@ -573,17 +673,38 @@ fn apply_inner(
         .iter()
         .zip(&paths)
         .map(|(op, path)| {
-            let before_hash = node_hash(path).ok().flatten();
-            JournalEntry {
+            let target = operation_target(op, path)?;
+            let before_hash = node_hash(&target).ok().flatten();
+            Ok(JournalEntry {
                 path: path.clone(),
                 before_hash,
                 after_hash: match op {
                     FileOp::Write { bytes, .. } => sha256_hex(bytes),
                     _ => String::new(),
                 },
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ChangeSetApplyError>>()?;
+    let roots_vec: Vec<PathBuf> = match authorized_roots {
+        Some(ar) => {
+            let mut list = ar.roots().to_vec();
+            if let Ok(store_canon) = fs::canonicalize(context.store_root) {
+                if !list.contains(&store_canon) {
+                    list.push(store_canon);
+                }
+            } else if !list.contains(&context.store_root.to_path_buf()) {
+                list.push(context.store_root.to_path_buf());
+            }
+            list
+        }
+        None => {
+            if let Ok(store_canon) = fs::canonicalize(context.store_root) {
+                vec![store_canon]
+            } else {
+                vec![context.store_root.to_path_buf()]
+            }
+        }
+    };
     let mut journal = PendingJournal {
         journal_version: JOURNAL_VERSION,
         operation_id: operation_id.clone(),
@@ -594,6 +715,8 @@ fn apply_inner(
         completed_ops: Vec::new(),
         created_dirs: created_dirs.clone(),
         committed: false,
+        authorized_roots: Some(roots_vec),
+        backup_root: Some(context.backup_folder.to_path_buf()),
     };
     let journal_path = write_journal(&journal_dir, &journal)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
@@ -601,10 +724,32 @@ fn apply_inner(
     for (index, ((op, path), backup_relative)) in
         set.ops.iter().zip(&paths).zip(&backup_relpaths).enumerate()
     {
-        let prior = fs::symlink_metadata(path)
+        let target = match operation_target(op, path) {
+            Ok(target) => target,
+            Err(cause) => {
+                return fail_rollback(
+                    context,
+                    RollbackState {
+                        set,
+                        id: &operation_id,
+                        journal_path: &journal_path,
+                        backup_folder: &backup_folder,
+                        done: &done,
+                        paths: &paths,
+                        entries: &journal.entries,
+                        created_dirs: &created_dirs,
+                    },
+                    format!(
+                        "ChangeSet operation {index} at `{}` failed: {cause}",
+                        path.display()
+                    ),
+                );
+            }
+        };
+        let prior = fs::symlink_metadata(&target)
             .ok()
             .filter(|metadata| metadata.is_file())
-            .and_then(|_| fs::read(path).ok());
+            .and_then(|_| fs::read(&target).ok());
         let backup_path = match execute_op(
             op,
             path,
@@ -612,6 +757,7 @@ fn apply_inner(
             &ExecuteContext {
                 set,
                 operation_id: &operation_id,
+                operation_index: index,
                 store_root: context.store_root,
                 backup_root: &backup_folder,
                 ownership_guard,
@@ -625,6 +771,7 @@ fn apply_inner(
                         set,
                         id: &operation_id,
                         journal_path: &journal_path,
+                        backup_folder: &backup_folder,
                         done: &done,
                         paths: &paths,
                         entries: &journal.entries,
@@ -641,7 +788,7 @@ fn apply_inner(
             .entries
             .get(index)
             .and_then(|entry| entry.before_hash.clone());
-        let after_hash = node_hash(path).ok().flatten();
+        let after_hash = node_hash(&target).ok().flatten();
         if let Some(entry) = journal.entries.get_mut(index) {
             entry.after_hash = after_hash.clone().unwrap_or_default();
         }
@@ -658,6 +805,7 @@ fn apply_inner(
                     set,
                     id: &operation_id,
                     journal_path: &journal_path,
+                    backup_folder: &backup_folder,
                     done: &done,
                     paths: &paths,
                     entries: &journal.entries,
@@ -679,6 +827,7 @@ fn apply_inner(
                     set,
                     id: &operation_id,
                     journal_path: &journal_path,
+                    backup_folder: &backup_folder,
                     done: &done,
                     paths: &paths,
                     entries: &journal.entries,
@@ -688,7 +837,10 @@ fn apply_inner(
             );
         }
     }
-    journal.committed = true;
+    // A reversible apply is not committed until the caller commits it: the journal has to stay
+    // uncommitted so a crash before `commit_reversible` leaves something recovery re-examines
+    // rather than silently discards.
+    journal.committed = !reversible;
     write_journal(&journal_dir, &journal)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
     context
@@ -703,11 +855,11 @@ fn apply_inner(
     let rollback_handle = reversible.then(|| RollbackHandle {
         set: set.clone(),
         root: context.store_root.to_path_buf(),
+        operation_id: operation_id.clone(),
         journal_path,
+        journal: journal.clone(),
         done,
         paths,
-        entries: journal.entries,
-        created_dirs,
     });
     Ok(ApplyOutcome {
         operation_id,
@@ -719,6 +871,7 @@ fn apply_inner(
 struct ExecuteContext<'a> {
     set: &'a ChangeSet,
     operation_id: &'a str,
+    operation_index: usize,
     store_root: &'a Path,
     backup_root: &'a Path,
     ownership_guard: Option<&'a dyn crate::guard::OverwriteGuard>,
@@ -732,6 +885,9 @@ fn execute_op(
 ) -> Result<Option<PathBuf>, String> {
     crate::failpoint::hit(crate::failpoint::FaultPoint::ChangeSetOperation, path)
         .map_err(|failure| failure.into_io().to_string())?;
+    // `path` is already resolved against the operation's store root for a relative destination,
+    // so both path spaces create missing parents here; `created_dirs` above journals them so
+    // rollback removes only what this operation made.
     if path.is_absolute() {
         crate::guard::create_parents_if_target_absent(path).map_err(|error| error.to_string())?;
     }
@@ -776,7 +932,10 @@ fn execute_op(
                 return Err(format!("delete target is absent: {}", path.display()));
             }
             let folder = backup_folder(context.backup_root, context.set.scope, backup_relative)?;
-            let deleted = folder.join(format!("{}.deleted", context.operation_id));
+            let deleted = folder.join(format!(
+                "{}-{}.deleted",
+                context.operation_id, context.operation_index
+            ));
             if !expected_absent(&deleted) {
                 return Err(format!(
                     "delete backup already exists: {}",
@@ -791,6 +950,8 @@ fn execute_op(
                     .map_err(|error| error.to_string())?;
             }
             fs::rename(path, &deleted).map_err(|error| error.to_string())?;
+            crate::failpoint::hit(crate::failpoint::FaultPoint::DeleteBackupRename, path)
+                .map_err(|failure| failure.into_io().to_string())?;
             Ok(Some(deleted))
         }
         FileOp::Symlink { target, mode, .. } => {
@@ -964,12 +1125,36 @@ fn same_expected(wanted: &ExpectedState, actual: &ExpectedState) -> bool {
     }
 }
 
+/// Whether `path` is beneath `root`, tolerating a non-canonical spelling of `root`.
+fn path_within(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok()
+        || fs::canonicalize(root).is_ok_and(|root| path.strip_prefix(&root).is_ok())
+}
+
+/// The filesystem node a [`FileOp`] actually reads and writes.
+///
+/// A write that follows a symbolic link lands on the resolved target; every other operation
+/// acts on the reviewed destination itself. Preflight, journal digests and rollback all use
+/// this resolution so they stay in step with the guarded writer.
+fn operation_target(op: &FileOp, path: &Path) -> Result<PathBuf, ChangeSetApplyError> {
+    match op {
+        FileOp::Write {
+            follow_symlink: true,
+            ..
+        } => crate::symlink::resolve(path, true)
+            .map(|(destination, _)| destination)
+            .map_err(ChangeSetApplyError::Fs),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
 fn validate_expected(
     op: &FileOp,
     path: &Path,
     path_root: &Path,
     store_root: &Path,
     replaced_by_prior_move: bool,
+    target_ready: bool,
 ) -> Result<(), ChangeSetApplyError> {
     let mut parent = path.parent();
     while let Some(current) = parent {
@@ -982,9 +1167,26 @@ fn validate_expected(
         parent = current.parent();
     }
     let valid = match op {
-        FileOp::Write { expected, .. } | FileOp::Delete { expected, .. } => {
-            expected_matches(path, expected)
+        // A write that follows a symbolic link lands on the resolved target, so preflight
+        // must compare the reviewed expectation with the target node, not the link text, and
+        // must keep the target inside the roots the operation was authorized for.
+        FileOp::Write {
+            expected,
+            follow_symlink,
+            ..
+        } => {
+            let (destination, _) = crate::symlink::resolve(path, *follow_symlink)?;
+            if destination != path
+                && !path_within(path_root, &destination)
+                && !path_within(store_root, &destination)
+            {
+                return Err(ChangeSetApplyError::OutsideAuthorizedRoots(
+                    path.to_path_buf(),
+                ));
+            }
+            expected_matches(&destination, expected)
         }
+        FileOp::Delete { expected, .. } => expected_matches(path, expected),
         // A Copy that replaces a just-deleted destination is the undo pipeline re-creating a
         // backed-up tree; the Delete immediately before it removed what was there.
         FileOp::Copy { expected, .. } | FileOp::CopyTree { expected, .. } => {
@@ -994,7 +1196,8 @@ fn validate_expected(
         FileOp::Symlink { target, .. } => {
             (expected_absent(path) || replaced_by_prior_move)
                 && (resolve_path(store_root, target).is_ok_and(|target| target.exists())
-                    || replaced_by_prior_move)
+                    || replaced_by_prior_move
+                    || target_ready)
         }
         FileOp::Mkdir { parents, .. } => {
             expected_absent(path) && (*parents || path.parent().is_some_and(Path::is_dir))
@@ -1136,19 +1339,24 @@ fn rollback(
         let path = paths
             .get(*index)
             .ok_or_else(|| "rollback path missing".to_owned())?;
+        let op = set
+            .ops
+            .get(*index)
+            .ok_or_else(|| "rollback operation missing".to_owned())?;
+        let target = operation_target(op, path).map_err(|error| error.to_string())?;
         let after = entries
             .get(*index)
             .ok_or_else(|| "journal entry missing".to_owned())?
             .after_hash
             .as_str();
-        let current_hash = node_hash(path)?;
+        let current_hash = node_hash(&target)?;
         if current_hash.as_deref() != (!after.is_empty()).then_some(after) {
             return Err(format!(
                 "target changed during rollback: {}",
                 path.display()
             ));
         }
-        if matches!(set.ops.get(*index), Some(FileOp::Delete { .. })) {
+        if matches!(op, FileOp::Delete { .. }) {
             let backup = delete_backup
                 .as_deref()
                 .ok_or_else(|| "delete backup missing during rollback".to_owned())?;
@@ -1161,7 +1369,7 @@ fn rollback(
             fs::rename(backup, path).map_err(|error| error.to_string())?;
             continue;
         }
-        if let Some(FileOp::Move { from, .. }) = set.ops.get(*index) {
+        if let FileOp::Move { from, .. } = op {
             let source = resolve_path(root, from)?;
             if !expected_absent(&source) {
                 return Err(format!(
@@ -1179,12 +1387,12 @@ fn rollback(
                 } else {
                     ExpectedState::Hash(after.to_owned())
                 };
-                apply_write(&WriteRequest::replace(path, bytes.clone(), expected))
+                apply_write(&WriteRequest::replace(&target, bytes.clone(), expected))
                     .map_err(|error| error.to_string())?;
             }
-            None => match fs::symlink_metadata(path) {
+            None => match fs::symlink_metadata(&target) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Ok(_) => remove_node(path)?,
+                Ok(_) => remove_node(&target)?,
                 Err(error) => return Err(error.to_string()),
             },
         }
@@ -1203,6 +1411,7 @@ struct RollbackState<'a> {
     set: &'a ChangeSet,
     id: &'a str,
     journal_path: &'a Path,
+    backup_folder: &'a Path,
     done: &'a [CompletedOperation],
     paths: &'a [PathBuf],
     entries: &'a [JournalEntry],
@@ -1222,11 +1431,16 @@ fn fail_rollback(
         state.entries,
         state.created_dirs,
     );
-    let _ = context
-        .recorder
-        .finish(state.id, false, rolled_back.is_err());
+    let _ = match &rolled_back {
+        Ok(()) => context.recorder.rolled_back(state.id, &cause),
+        Err(_) => context.recorder.finish(state.id, false, true),
+    };
     if rolled_back.is_ok() {
         let _ = fs::remove_file(state.journal_path);
+        // A rolled-back operation restored every file it changed, so its operation
+        // backup folder carries nothing recoverable. Remove it when empty so a failed
+        // batch leaves the store tree byte-for-byte identical to the pre-state.
+        let _ = fs::remove_dir(state.backup_folder);
     }
     Err(ChangeSetApplyError::Apply {
         cause,
@@ -1249,6 +1463,8 @@ mod tests {
         starts: usize,
         completed: usize,
         finish: Vec<(bool, bool)>,
+        rolled_back: Vec<String>,
+        backups: Vec<Option<PathBuf>>,
     }
     impl OperationRecorder for Recorder {
         fn begin(&mut self, _: &ChangeSet) -> Result<String, String> {
@@ -1261,13 +1477,19 @@ mod tests {
             _: &Path,
             _: Option<&str>,
             _: Option<&str>,
-            _: Option<&Path>,
+            backup: Option<&Path>,
         ) -> Result<(), String> {
             self.completed += 1;
+            self.backups.push(backup.map(Path::to_path_buf));
             Ok(())
         }
         fn finish(&mut self, _: &str, ok: bool, review: bool) -> Result<(), String> {
             self.finish.push((ok, review));
+            Ok(())
+        }
+        fn rolled_back(&mut self, id: &str, _reason: &str) -> Result<(), String> {
+            self.rolled_back.push(id.to_owned());
+            self.finish.push((false, false));
             Ok(())
         }
     }
@@ -1289,6 +1511,170 @@ mod tests {
             ops,
             created_at_unix_seconds: 0,
         }
+    }
+    #[test]
+    fn a_reversible_apply_leaves_its_journal_uncommitted_until_commit() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let backup_root = sandbox.path().join("backups");
+        fs::create_dir_all(&root).expect("store");
+        fs::write(root.join("config.json"), b"before").expect("target");
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("config.json"),
+            bytes: b"after".to_vec(),
+            expected: ModelExpected::hash(crate::sha256_hex(b"before")).expect("hash"),
+            follow_symlink: false,
+            backup: true,
+        }]);
+        let roots = ApplyRoots::new([root.clone()]).expect("roots");
+        let mut recorder = Recorder::default();
+        let outcome = {
+            let mut context = ApplyContext {
+                store_root: &root,
+                backup_folder: &backup_root,
+                recorder: &mut recorder,
+            };
+            apply_with_roots_reversible(&set, &mut context, &roots).expect("apply")
+        };
+        let handle = outcome.rollback_handle.expect("rollback token");
+        let journal_dir = root.join(".state/journal");
+        let journal_path = fs::read_dir(&journal_dir)
+            .expect("journal dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("journal entries")
+            .first()
+            .map(|entry| entry.path())
+            .expect("one retained journal");
+        assert!(
+            !crate::recovery::read_journal(&journal_path)
+                .expect("retained journal")
+                .committed,
+            "a reversible phase is not committed until the caller commits it"
+        );
+
+        commit_reversible(handle).expect("commit");
+
+        assert!(!journal_path.exists(), "the commit removes the journal");
+    }
+
+    #[test]
+    fn a_failed_rollback_records_manual_review_and_keeps_the_journal_uncommitted() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let backup_root = sandbox.path().join("backups");
+        fs::create_dir_all(&root).expect("store");
+        fs::write(root.join("config.json"), b"before").expect("target");
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("config.json"),
+            bytes: b"after".to_vec(),
+            expected: ModelExpected::hash(crate::sha256_hex(b"before")).expect("hash"),
+            follow_symlink: false,
+            backup: true,
+        }]);
+        let roots = ApplyRoots::new([root.clone()]).expect("roots");
+        let mut recorder = Recorder::default();
+        let outcome = {
+            let mut context = ApplyContext {
+                store_root: &root,
+                backup_folder: &backup_root,
+                recorder: &mut recorder,
+            };
+            apply_with_roots_reversible(&set, &mut context, &roots).expect("apply")
+        };
+        let handle = outcome.rollback_handle.expect("rollback token");
+        // The later phase failed; by the time the rollback runs, a third party edited the file
+        // the first phase wrote. The rollback cannot restore it and must say so.
+        fs::write(root.join("config.json"), b"external edit").expect("external edit");
+
+        let error = rollback_committed(handle, &mut recorder).expect_err("rollback must fail");
+
+        match &error {
+            ChangeSetApplyError::Apply { cause, rollback } => {
+                assert!(cause.contains("changed during rollback"), "{cause}");
+                assert!(rollback.contains("manual review"), "{rollback}");
+            }
+            other => panic!("expected a rollback failure, got {other:?}"),
+        }
+        assert_eq!(
+            recorder.finish.last(),
+            Some(&(false, true)),
+            "history records a failed operation that needs review"
+        );
+        assert!(
+            recorder.rolled_back.is_empty(),
+            "a rollback that did not finish is not recorded as undone"
+        );
+        let journal_dir = root.join(".state/journal");
+        let journals = fs::read_dir(&journal_dir)
+            .expect("journal dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("journal entries");
+        assert_eq!(
+            journals.len(),
+            1,
+            "the journal is kept for startup recovery"
+        );
+        assert!(
+            !crate::recovery::read_journal(&journals[0].path())
+                .expect("retained journal")
+                .committed,
+            "startup recovery must re-examine the journal instead of deleting it"
+        );
+        assert_eq!(
+            fs::read(root.join("config.json")).expect("read target"),
+            b"external edit",
+            "the newer external edit is never overwritten"
+        );
+    }
+
+    #[test]
+    fn sibling_deletes_use_unique_deterministic_backup_names() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let root = sandbox.path().join("store");
+        let parent = root.join("skills");
+        fs::create_dir_all(&parent).expect("skills root");
+        let names = ["first", "second", "third"];
+        let mut operations = Vec::new();
+        for name in names {
+            let relative = PathBuf::from("skills").join(name);
+            let full = root.join(&relative);
+            fs::create_dir_all(&full).expect("skill tree");
+            fs::write(full.join("SKILL.md"), format!("# {name}\n")).expect("skill document");
+            let before = node_hash(&full).expect("skill hash").expect("skill exists");
+            operations.push(FileOp::Delete {
+                path: relative,
+                expected: ModelExpected::hash(before).expect("expected skill hash"),
+            });
+        }
+        let backup_root = root.join("backups");
+        let set = changeset(operations);
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &backup_root,
+            recorder: &mut recorder,
+        };
+
+        let outcome = apply(&set, &mut context).expect("delete sibling skills");
+
+        assert_eq!(outcome.completed, names.len());
+        for name in names {
+            assert!(!root.join("skills").join(name).exists());
+        }
+        let backups = recorder
+            .backups
+            .iter()
+            .map(|path| {
+                path.as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(OsStr::to_str)
+                    .expect("delete backup filename")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            backups,
+            ["op-1-0.deleted", "op-1-1.deleted", "op-1-2.deleted"]
+        );
     }
     #[test]
     fn third_write_failure_rolls_back_first_two_and_leaves_rest_untouched() {
@@ -1698,11 +2084,161 @@ mod tests {
             apply_with_roots_reversible(&set, &mut context, &roots).expect("reversible apply");
         assert_eq!(fs::read(root.join("item.txt")).expect("after"), b"after");
         let handle = applied.rollback_handle.expect("rollback token");
-        rollback_committed(handle).expect("rollback");
+        rollback_committed(handle, context.recorder).expect("rollback");
         assert_eq!(
             fs::read(root.join("item.txt")).expect("restored"),
             b"before"
         );
+    }
+
+    /// Seeds a store whose `claude.json` is a symbolic link to a Dotfiles target, the layout a
+    /// dotfile manager leaves behind for `~/.claude.json`.
+    fn symlinked_store(sandbox: &TempDir, before: &[u8]) -> (PathBuf, PathBuf, PathBuf) {
+        let root = sandbox.path().join("store");
+        fs::create_dir_all(root.join("dotfiles")).expect("dotfiles dir");
+        let target = root.join("dotfiles/claude.json");
+        fs::write(&target, before).expect("seed target");
+        let link = root.join("claude.json");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        (root, link, target)
+    }
+
+    #[test]
+    fn write_following_a_symlinked_config_updates_the_target_and_keeps_the_link() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let before = br#"{"mcpServers":{}}"#;
+        let after = br#"{"mcpServers":{"srv":{"command":"srv"}}}"#;
+        let (root, link, target) = symlinked_store(&sandbox, before);
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("claude.json"),
+            bytes: after.to_vec(),
+            expected: ModelExpected::hash(sha256_hex(before)).expect("valid hash"),
+            follow_symlink: true,
+            backup: true,
+        }]);
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &root.join("backups"),
+            recorder: &mut recorder,
+        };
+
+        let applied = apply(&set, &mut context).expect("apply through the link");
+
+        assert_eq!(applied.completed, 1);
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "the deployment link must survive the write"
+        );
+        assert_eq!(fs::read(&target).expect("target bytes"), after);
+    }
+
+    #[test]
+    fn write_without_following_a_symlink_is_refused_before_any_history() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let before = br#"{"mcpServers":{}}"#;
+        let (root, link, target) = symlinked_store(&sandbox, before);
+        let set = changeset(vec![FileOp::Write {
+            path: PathBuf::from("claude.json"),
+            bytes: br#"{"mcpServers":{"srv":{}}}"#.to_vec(),
+            expected: ModelExpected::hash(sha256_hex(before)).expect("valid hash"),
+            follow_symlink: false,
+            backup: true,
+        }]);
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &root.join("backups"),
+            recorder: &mut recorder,
+        };
+
+        let error = apply(&set, &mut context).expect_err("a link target is refused");
+
+        assert!(
+            matches!(
+                error,
+                ChangeSetApplyError::Fs(FsError::SymlinkRefused { ref path }) if path == &link
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            recorder.starts, 0,
+            "preflight refuses before any history row"
+        );
+        assert_eq!(fs::read(&target).expect("target bytes"), before);
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    struct FailSecondWrite(AtomicUsize);
+    impl FailInjector for FailSecondWrite {
+        fn fault(&self, point: FaultPoint, _: &Path) -> Option<Fault> {
+            (point == FaultPoint::TempWrite && self.0.fetch_add(1, Ordering::SeqCst) == 1)
+                .then_some(Fault::Fail(libc::EIO))
+        }
+    }
+
+    #[test]
+    fn failed_batch_rolls_a_symlinked_write_back_through_the_link() {
+        let sandbox = TempDir::new().expect("tempdir");
+        let before = br#"{"mcpServers":{}}"#;
+        let (root, link, target) = symlinked_store(&sandbox, before);
+        fs::write(root.join("second.txt"), b"untouched").expect("seed second file");
+        let set = changeset(vec![
+            FileOp::Write {
+                path: PathBuf::from("claude.json"),
+                bytes: br#"{"mcpServers":{"srv":{}}}"#.to_vec(),
+                expected: ModelExpected::hash(sha256_hex(before)).expect("valid hash"),
+                follow_symlink: true,
+                backup: true,
+            },
+            FileOp::Write {
+                path: PathBuf::from("second.txt"),
+                bytes: b"changed".to_vec(),
+                expected: ModelExpected::hash(sha256_hex(b"untouched")).expect("valid hash"),
+                follow_symlink: false,
+                backup: true,
+            },
+        ]);
+        let mut recorder = Recorder::default();
+        let mut context = ApplyContext {
+            store_root: &root,
+            backup_folder: &root.join("backups"),
+            recorder: &mut recorder,
+        };
+
+        let injector = Arc::new(FailSecondWrite(AtomicUsize::new(0)));
+        let error = crate::failpoint::with_injector(injector, || apply(&set, &mut context))
+            .expect_err("the second write fails");
+
+        assert!(
+            matches!(&error, ChangeSetApplyError::Apply { rollback, .. } if rollback == "complete"),
+            "{error:?}"
+        );
+        assert_eq!(
+            fs::read(&target).expect("target bytes"),
+            before,
+            "the first write is restored through the link"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "rollback must not delete the deployment link"
+        );
+        assert_eq!(
+            fs::read(root.join("second.txt")).expect("second"),
+            b"untouched"
+        );
+        assert_eq!(recorder.rolled_back, ["op-1"]);
     }
 
     #[test]

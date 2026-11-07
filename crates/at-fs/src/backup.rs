@@ -6,7 +6,9 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use at_model::Scope;
 use serde::{Deserialize, Serialize};
@@ -127,30 +129,83 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> BackupError + '_ {
     }
 }
 
-/// Writes `bytes` to a fresh file at `dest` (exclusive create), fsynced.
-fn write_new(dest: &Path, bytes: &[u8]) -> Result<(), BackupError> {
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Name of the staged temp file used to install `dest` atomically.
+///
+/// The `.<name>.agentuna-tmp-<pid>-<n>` shape is the one
+/// [`crate::recovery::sweep_stale_temp_files`] recognizes, so a crash cannot leave an
+/// unrecognized blob behind.
+fn temp_path(dest: &Path) -> PathBuf {
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = dest
+        .file_name()
+        .map_or_else(|| "backup".into(), |name| name.to_string_lossy());
+    dest.with_file_name(format!(".{name}.agentuna-tmp-{}-{n}", std::process::id()))
+}
+
+/// Writes `bytes` to `dest` through a same-directory temp file: write, fsync, rename.
+///
+/// The blob only ever appears at its final name after its bytes are on the device, so a
+/// failure or crash in the middle leaves either nothing or a recognizable temp file, never
+/// a truncated backup. The temp file is removed on every error path.
+fn write_staged(dest: &Path, bytes: &[u8]) -> Result<(), BackupError> {
     #[cfg(any(test, feature = "faults", feature = "testkit"))]
     if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::BackupWrite, dest) {
         return Err(io_err(dest)(f.into_io()));
     }
+    let temp = temp_path(dest);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(dest)
+        .mode(0o600)
+        .open(&temp)
         .map_err(io_err(dest))?;
-    file.write_all(bytes).map_err(io_err(dest))?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(io_err(dest)(error));
+    }
     #[cfg(any(test, feature = "faults", feature = "testkit"))]
     if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::BackupSync, dest) {
+        drop(file);
+        let _ = fs::remove_file(&temp);
         return Err(io_err(dest)(f.into_io()));
     }
-    file.sync_all().map_err(io_err(dest))
+    if let Err(error) = crate::durability::sync_all(&file) {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(io_err(dest)(error));
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temp, dest) {
+        let _ = fs::remove_file(&temp);
+        return Err(io_err(dest)(error));
+    }
+    Ok(())
+}
+
+/// Whether `blob`/`sidecar` already hold exactly this copy, so re-running it is a no-op.
+fn is_identical(blob: &Path, sidecar: &Path, original: &Path, hash: &str) -> bool {
+    if !blob.is_file() || !sidecar.is_file() {
+        return false;
+    }
+    let Ok(bytes) = fs::read(sidecar) else {
+        return false;
+    };
+    matches!(
+        serde_json::from_slice::<BackupSidecar>(&bytes),
+        Ok(recorded) if recorded.content_hash == hash && recorded.original_path == original
+    )
 }
 
 /// Copies `bytes` (the content of `original`) into `operation_dir` with a verified sidecar.
 ///
-/// The blob is named after the original's file name; a name collision inside the folder
-/// gets a numeric suffix. Both files are written with exclusive create and fsynced, then
-/// the folder is fsynced.
+/// The blob is named after the original's file name and installed with temp+rename: its
+/// bytes are fsynced under a `.<name>.agentuna-tmp-<pid>-<n>` staging name before the
+/// rename, and only then is the sidecar written the same way. Re-running the same copy
+/// (same original, same bytes) is idempotent and leaves one blob plus one sidecar; a
+/// different copy whose file name collides gets a numeric suffix so both are preserved.
 ///
 /// # Errors
 /// [`BackupError::FolderMissing`] when `operation_dir` is not a directory; IO errors otherwise.
@@ -167,9 +222,10 @@ pub fn copy_into(
     let base = original
         .file_name()
         .map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
+    let hash = sha256_hex(bytes);
     let sidecar_body = BackupSidecar {
         original_path: original.to_path_buf(),
-        content_hash: sha256_hex(bytes),
+        content_hash: hash.clone(),
         size: bytes.len() as u64,
         captured_at,
         scope: meta.scope,
@@ -190,17 +246,22 @@ pub fn copy_into(
         };
         let blob = operation_dir.join(&name);
         let sidecar = operation_dir.join(format!("{name}.json"));
+        if is_identical(&blob, &sidecar, original, &hash) {
+            return Ok(BackupFiles { blob, sidecar });
+        }
         if blob.exists() || sidecar.exists() {
             continue;
         }
-        write_new(&blob, bytes)?;
-        if let Err(e) = write_new(&sidecar, &json) {
+        write_staged(&blob, bytes)?;
+        if let Err(e) = write_staged(&sidecar, &json) {
             let _ = fs::remove_file(&blob);
             return Err(e);
         }
-        File::open(operation_dir)
-            .and_then(|d| d.sync_all())
-            .map_err(io_err(operation_dir))?;
+        if let Err(e) = File::open(operation_dir).and_then(|d| crate::durability::sync_all(&d)) {
+            let _ = fs::remove_file(&blob);
+            let _ = fs::remove_file(&sidecar);
+            return Err(io_err(operation_dir)(e));
+        }
         return Ok(BackupFiles { blob, sidecar });
     }
     Err(BackupError::Corrupt {

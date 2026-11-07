@@ -3,10 +3,22 @@ import type { OverviewView } from "../../generated/OverviewView";
 import type { ProjectSyncApplyView } from "../../generated/ProjectSyncApplyView";
 import type { ProjectSyncItemView } from "../../generated/ProjectSyncItemView";
 import type { ProjectSyncPreviewView } from "../../generated/ProjectSyncPreviewView";
+import type { ScopeSetupApplyView } from "../../generated/ScopeSetupApplyView";
+import type { ScopeSetupPreviewView } from "../../generated/ScopeSetupPreviewView";
 
 /** Loads the database-backed Overview projections for the currently selected scope. */
 export function loadOverview(activeScope: string): Promise<OverviewView> {
   return invoke<OverviewView>("overview_load", { activeScope });
+}
+
+/** Reviews the entries a scope store setup would create without writing anything. */
+export function previewScopeSetup(scope: string, projectId: string | null): Promise<ScopeSetupPreviewView> {
+  return invoke<ScopeSetupPreviewView>("overview_setup_preview", { scope, projectId });
+}
+
+/** Applies the exact reviewed scope store setup and returns its undoable operation id. */
+export function applyScopeSetup(previewId: string): Promise<ScopeSetupApplyView> {
+  return invoke<ScopeSetupApplyView>("overview_setup_apply", { previewId, confirmed: true });
 }
 
 /** Requests one-shot, user-approved preparation of the Global store for writes. */

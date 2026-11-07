@@ -1,0 +1,15 @@
+--- fixture
++++ output
+@@ -10,6 +10,11 @@
+     }
+   },
+   "mcpServers": {
+-    "existing": { "command": "old", "args": [], "env": {"MODE": "dev"} }
++    "existing": { "command": "old", "args": [], "env": {"MODE": "dev"} },
++    "mcp.测试-server": {
++      "type": "stdio",
++      "command": "node",
++      "args": ["server.js"]
++    }
+   }
+ }

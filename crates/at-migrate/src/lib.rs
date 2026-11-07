@@ -16,6 +16,8 @@ pub mod plan;
 /// Generic operation undo orchestration.
 pub mod undo;
 
+pub mod undo_meta;
+
 /// Single-item adoption of an unmanaged native entry.
 pub mod adopt;
 

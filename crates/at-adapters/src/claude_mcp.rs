@@ -3,7 +3,7 @@
 //! Existing documents are edited through the JSONC CST so unrelated bytes are retained.
 //! `${NAME}` interpolation is deliberately unverified and remains a literal on import.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -61,6 +61,18 @@ pub enum ClaudeMcpError {
     /// The selected server map is not an object.
     #[error("Claude MCP server map is not an object")]
     ServersNotObject,
+    /// The same server name appears more than once, so neither entry is authoritative.
+    #[error("Claude MCP server `{name}` is defined more than once")]
+    DuplicateServer {
+        /// Repeated server-map key.
+        name: String,
+    },
+    /// A key the adapter edits appears more than once, so a patch could change the wrong value.
+    #[error("Claude config repeats the key `{key}`")]
+    DuplicateKey {
+        /// Repeated object key.
+        key: String,
+    },
     /// A server entry is not an object.
     #[error("Claude MCP entry `{name}` is not an object")]
     EntryNotObject {
@@ -142,10 +154,14 @@ impl ClaudeMcpConfig {
         let root = parse_root(source)?;
         let map = server_object(&root, &scope)?;
         let mut servers = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         for prop in map.properties() {
             let Some(name) = prop.decoded_name() else {
                 continue;
             };
+            if !seen.insert(name.clone()) {
+                return Err(ClaudeMcpError::DuplicateServer { name });
+            }
             let value = prop
                 .to_serde_value()
                 .ok_or_else(|| ClaudeMcpError::EntryNotObject { name: name.clone() })?;
@@ -456,13 +472,34 @@ fn parse_root(source: &str) -> Result<CstRootNode, ClaudeMcpError> {
     })
 }
 
+/// Rejects a key that occurs more than once, which would make a lookup or patch ambiguous.
+fn ensure_unique_key(object: &CstObject, key: &str) -> Result<(), ClaudeMcpError> {
+    let occurrences = object
+        .properties()
+        .iter()
+        .filter(|property| property.decoded_name().as_deref() == Some(key))
+        .count();
+    if occurrences > 1 {
+        return Err(ClaudeMcpError::DuplicateKey {
+            key: key.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn server_object(
     root: &CstRootNode,
     scope: &ClaudeConfigScope,
 ) -> Result<CstObject, ClaudeMcpError> {
-    let obj = root
-        .object_value()
-        .ok_or(ClaudeMcpError::ServersNotObject)?;
+    // A Claude config that does not exist yet (or is an empty file) is an empty object. A
+    // non-blank document whose root is not an object is user content AgenTuna must not replace.
+    let obj = match root.object_value() {
+        Some(obj) => obj,
+        None if root.to_string().trim().is_empty() => root.object_value_or_set(),
+        None => return Err(ClaudeMcpError::ServersNotObject),
+    };
+    ensure_unique_key(&obj, "mcpServers")?;
+    ensure_unique_key(&obj, "projects")?;
     match scope {
         ClaudeConfigScope::User | ClaudeConfigScope::ProjectFile => match obj.get("mcpServers") {
             Some(prop) => prop.object_value().ok_or(ClaudeMcpError::ServersNotObject),
@@ -485,6 +522,7 @@ fn server_object(
                         .ok_or(ClaudeMcpError::ServersNotObject)?
                 }
             };
+            ensure_unique_key(&projects, project_path)?;
             let project = match projects.get(project_path) {
                 Some(prop) => prop
                     .object_value()
@@ -497,6 +535,7 @@ fn server_object(
                         .ok_or(ClaudeMcpError::ServersNotObject)?
                 }
             };
+            ensure_unique_key(&project, "mcpServers")?;
             match project.get("mcpServers") {
                 Some(prop) => prop.object_value().ok_or(ClaudeMcpError::ServersNotObject),
                 None => {

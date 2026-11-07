@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./support/tauri-mock";
 
 async function openMigration(page: Page) {
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
   await page.keyboard.press("Meta+k");
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await palette.getByRole("combobox", { name: "Search commands" }).fill("Import native items");
@@ -22,6 +23,43 @@ test("Effective config shows populated agent state and why-trace dialog", async 
   const dialog = page.getByRole("dialog", { name: "Why is this on?" });
   await expect(dialog.getByText("This User copy wins for Claude Code.")).toBeVisible();
   await expect(page).toHaveScreenshot("why-trace-dialog.png", { animations: "disabled", caret: "hide" });
+});
+
+test("Effective config explains why a locked item cannot be overridden in this repo", async ({ page }) => {
+  await page.addInitScript(() => {
+    const mocks = (window as typeof window & { __AT_TEST_MOCKS__: { commandOverrides: Record<string, unknown> } }).__AT_TEST_MOCKS__;
+    mocks.commandOverrides.effective_query = {
+      items: [
+        {
+          logical_id: "logical_visual_skill",
+          item_id: "itm_visual_skill",
+          kind: "skill",
+          name: "Code Review",
+          winner_scope: "user",
+          source_path: "/sandbox/user/skills/code-review",
+          agents: [
+            { agent: "claude_code", state: "linked", loads: true },
+            { agent: "codex", state: "linked", loads: true },
+          ],
+          loads_in_agents: 2,
+          lock: { id: "lock_visual", reason: "Global policy approves only 0.1.0." },
+        },
+      ],
+      disabled_here: [],
+      diagnostics: [],
+      load_diagnostics: [],
+    };
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Effective config", exact: true }).click();
+  const main = page.getByRole("main", { name: "Effective config" });
+  const section = main.getByRole("region", { name: "Change it for this repo" });
+  await expect(section).toBeVisible();
+  await expect(section.getByRole("button", { name: "Disable in this repo" })).toBeDisabled();
+  await expect(section.getByRole("button", { name: "Disable in this repo" })).toHaveAttribute("title", "Global policy approves only 0.1.0.");
+  await expect(section.getByRole("button", { name: "Override in Project" })).toBeDisabled();
+  await expect(section.getByText("Locked: Global policy approves only 0.1.0.")).toBeVisible();
+  await expect(page).toHaveScreenshot("effective-config-locked.png", { animations: "disabled", caret: "hide" });
 });
 
 test("Migrate scan renders several discovered items", async ({ page }) => {
@@ -176,4 +214,29 @@ test("Why trace explains all scopes, exposes diagnostics, and restores focus on 
   await page.locator(".at-modal__backdrop").click({ position: { x: 2, y: 2 } });
   await expect(dialog).toBeHidden();
   await expect(opener).toBeFocused();
+});
+test("custom-agent setup previews paths, disables unsupported MCP, and adds the resulting card", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  const main = page.getByRole("main", { name: "Agents" });
+  await main.getByRole("button", { name: "Add custom agent" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add custom agent" });
+  await dialog.getByRole("textbox", { name: "Custom agent name" }).fill("WindSurf");
+  await dialog.getByRole("textbox", { name: "Custom agent root" }).fill("/sandbox/windsurf");
+  await dialog.getByLabel("Rule files").fill("AGENTS.md");
+  await dialog.getByRole("combobox", { name: "MCP format" }).selectOption("none");
+  const resolvedPaths = dialog.getByRole("region", { name: "Resolved path preview" });
+  await expect(resolvedPaths).toContainText("/sandbox/windsurf/skills");
+  await expect(resolvedPaths).toContainText("/sandbox/windsurf/AGENTS.md");
+  await expect(resolvedPaths).toContainText("MCP not supported");
+  await expect(dialog.getByRole("button", { name: "Add agent" })).toBeEnabled();
+  await expect(page).toHaveScreenshot("agents-add-custom-dialog.png", { animations: "disabled", caret: "hide" });
+  await dialog.getByRole("button", { name: "Add agent" }).click();
+  const card = main.getByRole("article", { name: "WindSurf" });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("MCP not supported");
+  await expect(page).toHaveScreenshot("agents-custom-agent-added.png", { animations: "disabled", caret: "hide" });
+  const commands = await page.evaluate(() => (window as typeof window & { __AT_TEST_MOCKS__: { calls: string[] } }).__AT_TEST_MOCKS__.calls);
+  expect(commands).toContain("custom_agent_preview");
+  expect(commands).toContain("custom_agent_create");
 });

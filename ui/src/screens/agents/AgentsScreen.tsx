@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Button, SegmentedControl, Toggle } from "../../components";
 import type { AgentCardView } from "../../generated/AgentCardView";
+import { Button, SegmentedControl, Toggle } from "../../components";
 import { ConnectAgentDialog } from "../../overlays/dialogs/ConnectAgentDialog";
+import { CustomAgentDialog } from "../../overlays/dialogs/CustomAgentDialog";
 import { useToast } from "../../overlays/toasts";
+import { useAppState } from "../../state/context";
+import { shellAgentStatus } from "../../shell/agents";
 
 const INITIALS: Readonly<Record<string, string>> = {
   claude_code: "CL",
@@ -47,34 +50,57 @@ function SkeletonCard() {
 /** Agent inventory with health, management, deployment mode and path repair. */
 export function AgentsScreen() {
   const toast = useToast();
+  const app = useAppState();
   const [agents, setAgents] = useState<readonly AgentCardView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [rescanError, setRescanError] = useState<string | null>(null);
   const [pathAgent, setPathAgent] = useState<AgentCardView | null>(null);
+  const [customAgentOpen, setCustomAgentOpen] = useState(false);
+  const pathRequest = useRef<string | null>(null);
+
+  /** Stores the screen's rows and feeds the same detections to the sidebar. */
+  const publish = useCallback(
+    (cards: readonly AgentCardView[]) => {
+      setAgents(cards);
+      app.receiveAgents(shellAgentStatus(cards));
+    },
+    [app],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setAgents(await invoke<AgentCardView[]>("agents_list"));
+      publish(await invoke<AgentCardView[]>("agents_list"));
     } catch (cause) {
       setError(String(cause));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [publish]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  // "Set path" from Overview selects an agent; open the same path dialog the
+  // card menu opens, once per requested id.
+  useEffect(() => {
+    const requested = app.getSnapshot().selections.agents?.[0];
+    if (requested === undefined || pathRequest.current === requested || agents.length === 0) return;
+    const target = agents.find((agent) => agent.id === requested);
+    if (target === undefined) return;
+    pathRequest.current = requested;
+    setPathAgent(target);
+  }, [agents, app]);
+
   async function rescan(): Promise<void> {
     setBusy("rescan");
     setRescanError(null);
     try {
-      setAgents(await invoke<AgentCardView[]>("agents_rescan"));
+      publish(await invoke<AgentCardView[]>("agents_rescan"));
     } catch (cause) {
       setRescanError(String(cause));
     } finally {
@@ -88,7 +114,7 @@ export function AgentsScreen() {
     try {
       await invoke("agent_manage_set", { agentId: agent.id, managed });
       const next = await invoke<AgentCardView[]>("agents_rescan");
-      setAgents(next);
+      publish(next);
       const refreshed = next.find((row) => row.id === agent.id);
       if (managed) {
         toast.success(
@@ -113,7 +139,7 @@ export function AgentsScreen() {
     try {
       await invoke("agent_link_mode_set", { agentId: agent.id, mode });
       const refreshed = await invoke<AgentCardView[]>("agents_list");
-      setAgents(refreshed);
+      publish(refreshed);
       if (mode === "copy" && agent.linked_deployments > 0) {
         toast.info(
           `${agent.linked_deployments} existing link${agent.linked_deployments === 1 ? "" : "s"} will migrate to copies on the next deploy.`,
@@ -138,9 +164,12 @@ export function AgentsScreen() {
             Coding agents found on this Mac. AgenTuna writes each one's native config format.
           </p>
         </div>
-        <Button variant="secondary" aria-label="Rescan all agents" disabled={busy !== null} onClick={() => void rescan()}>
-          {busy === "rescan" ? "Rescanning…" : "Rescan"}
-        </Button>
+        <div className="flex gap-8">
+          <Button variant="secondary" onClick={() => setCustomAgentOpen(true)}>Add custom agent</Button>
+          <Button variant="secondary" aria-label="Rescan all agents" disabled={busy !== null} onClick={() => void rescan()}>
+            {busy === "rescan" ? "Rescanning…" : "Rescan"}
+          </Button>
+        </div>
       </header>
 
       {rescanError !== null && (
@@ -176,6 +205,8 @@ export function AgentsScreen() {
             const missing = agent.presence === "not_installed";
             return (
               <article
+                id={`agent-card-${agent.id}`}
+                tabIndex={-1}
                 key={agent.id}
                 aria-label={agent.name}
                 className="flex flex-col gap-12 rounded-10 border border-border bg-raised p-16"
@@ -230,9 +261,16 @@ export function AgentsScreen() {
                     )}
                   </div>
                 </dl>
-                <p className="m-0 break-words font-mono text-11 text-text-muted">
-                  {agent.managed ? agent.health : "Not managed by AgenTuna"}
-                </p>
+                {agent.managed && agent.total === 0 ? (
+                  <p className="m-0 flex flex-wrap items-baseline gap-6 text-11 text-text-muted">
+                    <span className="break-words font-mono">{agent.primary_path ?? "<path>"}</span>
+                    <span>· Nothing deployed yet</span>
+                  </p>
+                ) : (
+                  <p className="m-0 break-words font-mono text-11 text-text-muted">
+                    {agent.managed ? agent.health : "Not managed by AgenTuna"}
+                  </p>
+                )}
 
                 <div className="mt-auto border-t border-border pt-12">
                   {missing ? (
@@ -293,8 +331,33 @@ export function AgentsScreen() {
         agent={pathAgent}
         onClose={() => setPathAgent(null)}
         onSaved={(updated) => {
-          setAgents((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+          publish(agents.map((row) => (row.id === updated.id ? updated : row)));
           setPathAgent(null);
+        }}
+      />
+      <CustomAgentDialog
+        open={customAgentOpen}
+        onClose={() => setCustomAgentOpen(false)}
+        onCreated={(created) => {
+          publish(agents.some((row) => row.id === created.id)
+            ? agents.map((row) => (row.id === created.id ? created : row))
+            : [...agents, created]);
+        }}
+        onOpenExisting={(agentId) => {
+          setCustomAgentOpen(false);
+          const openCard = () => {
+            const card = document.getElementById(`agent-card-${agentId}`);
+            card?.scrollIntoView({ behavior: "smooth", block: "center" });
+            card?.focus({ preventScroll: true });
+          };
+          if (agents.some((agent) => agent.id === agentId)) {
+            window.requestAnimationFrame(openCard);
+          } else {
+            void invoke<AgentCardView[]>("agents_list").then((next) => {
+              setAgents(next);
+              window.requestAnimationFrame(openCard);
+            }).catch((cause: unknown) => setError(String(cause)));
+          }
         }}
       />
     </main>

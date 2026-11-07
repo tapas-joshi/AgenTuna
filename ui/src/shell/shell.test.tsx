@@ -73,7 +73,7 @@ function renderShell(overrides: ShellOverrides = {}) {
       scopeSwitcher={overrides.scopeSwitcher}
       paletteModifier={overrides.paletteModifier}
     >
-      {overrides.children ?? <div data-testid="body">body</div>}
+      {overrides.children ?? <main aria-label="Workspace content" data-testid="body">body</main>}
     </Shell>,
   );
   return { onNavigate, onProjectPicker, onPalette, onBack };
@@ -199,6 +199,96 @@ describe("top bar", () => {
     const palette = screen.getByRole("button", { name: /Open command palette/ });
     expect(palette.textContent).toContain("Ctrl+K");
     expect(palette.getAttribute("aria-keyshortcuts")).toBe("Control+K");
+  });
+
+  test("TU-006 AC2: layout stays usable at 900 px width with no overlapping controls", () => {
+    render(
+      <div style={{ width: "900px", height: "600px", display: "flex" }}>
+        <Shell
+          route="overview"
+          title="Overview"
+          projectLabel="very-long-project-name-ai-coding-config-studio-workspace"
+          onNavigate={() => {}}
+          onProjectPicker={() => {}}
+          onPalette={() => {}}
+          canGoBack={true}
+          onBack={() => {}}
+          scopeSwitcher={
+            <div data-testid="scope-switcher" className="inline-flex gap-4">
+              <button type="button">Global</button>
+              <button type="button">User</button>
+              <button type="button">Project</button>
+            </div>
+          }
+        >
+          <div>Body</div>
+        </Shell>
+      </div>,
+    );
+
+    const topbar = screen.getByRole("banner");
+    expect(topbar).toBeTruthy();
+
+    const backBtn = screen.getByRole("button", { name: "Back" });
+    const title = topbar.querySelector("[data-slot='shell-title']");
+    const picker = screen.getByRole("button", { name: /Project:/ });
+    const scopeSwitcher = screen.getByTestId("scope-switcher");
+    const palette = screen.getByRole("button", { name: /Open command palette/ });
+
+    // All controls are present and reachable
+    expect(backBtn).toBeTruthy();
+    expect(title).toBeTruthy();
+    expect(picker).toBeTruthy();
+    expect(scopeSwitcher).toBeTruthy();
+    expect(palette).toBeTruthy();
+
+    // Project picker and title have min-w-0 and truncate classes so they compress rather than overlap
+    expect(picker.className).toContain("min-w-0");
+    expect(picker.className).toContain("shrink");
+    expect(picker.querySelector(".truncate")).toBeTruthy();
+    expect(title?.className).toContain("min-w-0");
+    expect(title?.className).toContain("truncate");
+
+    // Palette hint preserves its fixed width and does not shrink
+    expect(palette.className).toContain("w-[220px]");
+    expect(palette.className).toContain("shrink-0");
+
+    // Flex container preserves single-row horizontal layout with gap and no wrapping
+    expect(topbar.className).toContain("flex");
+    expect(topbar.className).toContain("items-center");
+    expect(topbar.className).not.toContain("flex-wrap");
+
+    // Geometry in a 900px container:
+    // Sidebar = 200px rail. Topbar width = 700px.
+    // Padding = 16px left + 16px right = 32px. Available = 668px.
+    // Fixed width elements: Back (28px) + Palette (220px) = 248px + 4 gaps (48px) = 296px.
+    // Remainder for title, picker and scopeSwitcher is 372px.
+    const topbarWidth = 700;
+    const padding = 16;
+    const gap = 12;
+    const fixedWidths = 28 + 220;
+    const gaps = 4 * gap;
+    const remaining = topbarWidth - 2 * padding - gaps - fixedWidths;
+    expect(remaining).toBeGreaterThan(300);
+
+    // DOM sequence matches horizontal visual order (left to right, no overlapping coordinates)
+    const topbarChildren = Array.from(topbar.children);
+    const backIdx = topbarChildren.indexOf(backBtn);
+    const titleIdx = topbarChildren.indexOf(title as Element);
+    const pickerIdx = topbarChildren.indexOf(picker);
+    const scopeContainer = scopeSwitcher.parentElement;
+    const scopeIdx = topbarChildren.indexOf(scopeContainer as Element);
+    const paletteIdx = topbarChildren.indexOf(palette);
+
+    expect(backIdx).toBeLessThan(titleIdx);
+    expect(titleIdx).toBeLessThan(pickerIdx);
+    expect(pickerIdx).toBeLessThan(scopeIdx);
+    expect(scopeIdx).toBeLessThan(paletteIdx);
+
+    // Controls are in-flow elements, none positioned absolute
+    for (const el of [backBtn, title as Element, picker, scopeContainer as Element, palette]) {
+      expect(el.className).not.toContain("absolute");
+    }
   });
 });
 

@@ -7,6 +7,6 @@ import type { SourceKind } from "./SourceKind";
  */
 export type WizardEvent = { "type": "select_source", "payload": SourceKind } | { "type": "set_name", "payload": string } | { "type": "set_details", "payload": SourceDetails } | { "type": "set_scope", "payload": string } | { "type": "set_agents", "payload": Array<string> } | { "type": "fetch_source" } | { "type": "source_fetched", "payload": { 
 /**
- * Candidate identifier returned by the injected source provider.
+ * Candidate identifiers returned by the injected source provider.
  */
-selection: string | null, } } | { "type": "next" } | { "type": "back" } | { "type": "cancel" } | { "type": "confirm_discard" } | { "type": "import_completed" };
+selections: Array<string>, } } | { "type": "next" } | { "type": "back" } | { "type": "cancel" } | { "type": "confirm_discard" } | { "type": "import_completed" };

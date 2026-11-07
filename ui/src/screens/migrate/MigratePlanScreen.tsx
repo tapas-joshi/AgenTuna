@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import { Badge, Button, Checkbox, RadioCardGroup } from "../../components";
 import type { MigratePlanView } from "../../generated/MigratePlanView";
 import { Modal } from "../../overlays/dialogs/Modal";
+import { describeCause } from "./applyJob";
 
 const ACTION_LABEL: Readonly<Record<string, string>> = {
   backuporiginal: "Back up original",
@@ -13,6 +14,14 @@ const ACTION_LABEL: Readonly<Record<string, string>> = {
   recordwatched: "Leave original and watch it",
   rendermcp: "Rewrite MCP config",
   renderrule: "Rewrite rule document",
+};
+
+/** Human label and badge tone for one receiving scope. */
+const SCOPE_LABEL: Readonly<Record<string, { readonly label: string; readonly tone: "info" | "warning" | "locked" | "neutral" }>> = {
+  global: { label: "Global", tone: "locked" },
+  user: { label: "User", tone: "info" },
+  project: { label: "Project", tone: "warning" },
+  local: { label: "Local", tone: "neutral" },
 };
 
 const STRATEGY_OPTIONS = [
@@ -37,7 +46,6 @@ export function MigratePlanScreen({
   strategy,
   busy,
   error,
-  backupLocation = "~/.config-studio/backups/migration",
   warnings = [],
   onStrategyChange,
   onApply,
@@ -48,7 +56,6 @@ export function MigratePlanScreen({
   readonly strategy: "replace_with_links" | "leave_and_watch";
   readonly busy: boolean;
   readonly error: string | null;
-  readonly backupLocation?: string;
   readonly warnings?: readonly string[];
   readonly onStrategyChange: (strategy: "replace_with_links" | "leave_and_watch") => void;
   readonly onApply: () => Promise<void>;
@@ -61,7 +68,9 @@ export function MigratePlanScreen({
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
 
-  const hasGlobalWarning = plan?.scope === "global";
+  // The backend resolves every store path from the injected sandbox/store overrides, so the
+  // screen never prints a guessed location: a scope is not a directory.
+  const backupLocation = plan?.backup_dir ?? "Resolving the backup directory…";
 
   async function handleConfirmApply() {
     setApplying(true);
@@ -70,14 +79,14 @@ export function MigratePlanScreen({
       await onApply();
       setConfirmOpen(false);
     } catch (err: unknown) {
-      setApplyError(String(err));
+      setApplyError(describeCause(err));
     } finally {
       setApplying(false);
     }
   }
 
   return (
-    <main aria-label="Migration plan" className="flex min-h-0 flex-1 flex-col">
+    <section aria-label="Migration plan" className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-4">
         <p className="m-0 text-12 uppercase tracking-wide text-text-muted">Migrate to AgenTuna</p>
         <h1 className="m-0 text-26 font-semibold text-text">
@@ -98,18 +107,46 @@ export function MigratePlanScreen({
 
       <div className="mt-16 grid min-h-0 flex-1 grid-cols-[1fr_360px] gap-16">
         <div className="flex flex-col gap-16">
-          <section aria-label="AgenTuna store" className="rounded-10 border border-border bg-raised p-16">
-            <h2 className="m-0 text-14 font-semibold text-text">AgenTuna store</h2>
-            <div className="mt-8 flex items-center gap-12">
-              <Badge tone={plan?.scope === "project" ? "warning" : "info"} dot>
-                {plan?.scope === "project" ? "Project" : "User"}
-              </Badge>
-              <span className="font-mono text-13 text-text-secondary">
-                {plan?.scope === "project" ? "./.config-studio/" : "~/.config-studio/"}
-              </span>
-            </div>
+          <section aria-label="AgenTuna stores" className="rounded-10 border border-border bg-raised p-16">
+            <h2 className="m-0 text-14 font-semibold text-text">Where the items land</h2>
+            {plan === null ? (
+              <p role="status" className="m-0 mt-8 text-13 text-text-secondary">
+                Resolving the stores…
+              </p>
+            ) : (
+              <ul className="m-0 mt-8 flex list-none flex-col gap-10 p-0">
+                {plan.scopes.map((entry) => {
+                  const meta = SCOPE_LABEL[entry.scope] ?? { label: entry.scope, tone: "neutral" as const };
+                  return (
+                    <li
+                      key={entry.scope}
+                      aria-label={`${meta.label} store`}
+                      className="flex flex-col gap-4 rounded-6 border border-border p-8"
+                    >
+                      <div className="flex items-center gap-12">
+                        <Badge tone={meta.tone} dot>
+                          {meta.label}
+                        </Badge>
+                        <span
+                          className="truncate font-mono text-13 text-text-secondary"
+                          title={entry.store_path}
+                        >
+                          {entry.store_path}
+                        </span>
+                      </div>
+                      <p className="m-0 text-12 text-text-muted">
+                        {entry.counts.items} item{entry.counts.items === 1 ? "" : "s"} ·{" "}
+                        {entry.counts.links_written} link{entry.counts.links_written === 1 ? "" : "s"} ·{" "}
+                        {entry.counts.files_backed_up} backup{entry.counts.files_backed_up === 1 ? "" : "s"}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
             <p className="m-0 mt-8 text-12 text-text-muted">
-              Selected originals change only as reviewed here; unselected files keep their path.
+              Each item moves into the store of the scope it was found in; unselected files keep their
+              path.
             </p>
           </section>
 
@@ -156,36 +193,52 @@ export function MigratePlanScreen({
                 {showFiles ? "Hide file list" : "Show file list"}
               </Button>
               {showFiles && (
-                <ol className="m-0 flex max-h-[320px] list-none flex-col gap-4 overflow-auto p-0" aria-label="Planned files">
-                  {plan.steps.map((step) => (
-                    <li key={step.seq} className="rounded-6 border border-border p-8">
-                      <div className="flex items-center justify-between gap-6">
-                        <span className="text-12 text-text">
-                          {step.seq}. {ACTION_LABEL[step.action] ?? step.action}
-                        </span>
-                        <span className="font-mono text-11 text-text-muted">{step.bytes} B</span>
+                <div
+                  className="m-0 flex max-h-[320px] flex-col gap-10 overflow-auto"
+                  aria-label="Planned files"
+                >
+                  {plan.scopes.map((entry) => {
+                    const meta = SCOPE_LABEL[entry.scope] ?? { label: entry.scope, tone: "neutral" as const };
+                    return (
+                      <div key={entry.scope} className="flex flex-col gap-4" aria-label={`${meta.label} store files`}>
+                        <p className="m-0 text-11 uppercase tracking-wide text-text-muted">
+                          {meta.label} store · {entry.store_path}
+                        </p>
+                        <ol className="m-0 flex list-none flex-col gap-4 p-0">
+                          {entry.steps.map((step) => (
+                            <li key={`${entry.scope}:${step.seq}`} className="rounded-6 border border-border p-8">
+                              <div className="flex items-center justify-between gap-6">
+                                <span className="text-12 text-text">
+                                  {step.seq}. {ACTION_LABEL[step.action] ?? step.action}
+                                </span>
+                                <span className="font-mono text-11 text-text-muted">{step.bytes} B</span>
+                              </div>
+                              {step.source !== null && (
+                                <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.source}>
+                                  from {step.source}
+                                </p>
+                              )}
+                              {step.destination !== null && (
+                                <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.destination}>
+                                  to {step.destination}
+                                </p>
+                              )}
+                              {step.backup_path !== null && (
+                                <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.backup_path}>
+                                  backup {step.backup_path}
+                                </p>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
                       </div>
-                      {step.source !== null && (
-                        <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.source}>
-                          from {step.source}
-                        </p>
-                      )}
-                      {step.destination !== null && (
-                        <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.destination}>
-                          to {step.destination}
-                        </p>
-                      )}
-                      {step.backup_path !== null && (
-                        <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.backup_path}>
-                          backup {step.backup_path}
-                        </p>
-                      )}
-                    </li>
-                  ))}
-                </ol>
+                    );
+                  })}
+                </div>
               )}
               <p className="m-0 mt-8 text-11 text-text-muted">
-                Plan {plan.plan_id.slice(-8)} · hash {plan.plan_hash.slice(0, 8)}
+                Plan hash {plan.plan_hash.slice(0, 8)} across {plan.scopes.length} store
+                {plan.scopes.length === 1 ? "" : "s"}
               </p>
             </>
           )}
@@ -246,7 +299,12 @@ export function MigratePlanScreen({
             <div className="rounded-8 border border-border bg-raised p-12">
               <h3 className="m-0 text-13 font-semibold text-text">Migration summary</h3>
               <ul className="m-0 mt-8 flex list-disc flex-col gap-4 pl-16 text-12 text-text">
-                <li>{plan.counts.items} item{plan.counts.items === 1 ? "" : "s"} copied to {plan.scope} store</li>
+                {plan.scopes.map((entry) => (
+                  <li key={entry.scope}>
+                    {entry.counts.items} item{entry.counts.items === 1 ? "" : "s"} into the{" "}
+                    {(SCOPE_LABEL[entry.scope] ?? { label: entry.scope }).label} store ({entry.store_path})
+                  </li>
+                ))}
                 <li>{plan.counts.links_written} skill folder links to be written</li>
                 <li>{plan.counts.files_backed_up} files backed up before modification</li>
               </ul>
@@ -262,10 +320,9 @@ export function MigratePlanScreen({
               </p>
             </div>
 
-            {(hasGlobalWarning || warnings.length > 0) && (
+            {warnings.length > 0 && (
               <div role="alert" className="flex flex-col gap-4 rounded-8 border border-warning/40 bg-warning/10 p-12 text-12 text-warning">
                 <span className="font-semibold">Notice:</span>
-                {hasGlobalWarning && <p className="m-0">Global-scope migration affects machine-wide configuration.</p>}
                 {warnings.map((w, idx) => (
                   <p key={idx} className="m-0">{w}</p>
                 ))}
@@ -288,6 +345,6 @@ export function MigratePlanScreen({
           </div>
         </Modal>
       )}
-    </main>
+    </section>
   );
 }

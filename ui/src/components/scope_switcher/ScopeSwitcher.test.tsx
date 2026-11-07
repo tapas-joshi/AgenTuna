@@ -38,6 +38,7 @@ test("shows Local with the specified label and emits exactly one selection", asy
 test("disables project scopes with an accessible reason when no project is selected", () => {
   renderSwitcher({ hasProject: false, localEnabled: true });
   expect(screen.getByRole("radio", { name: "Project" }).getAttribute("aria-disabled")).toBe("true");
+  expect(screen.getByRole("radio", { name: "Local (only you, this repo)" }).getAttribute("aria-disabled")).toBe("true");
   expect(screen.getByRole("radio", { name: "Local (only you, this repo)" }).getAttribute("aria-describedby")).toBe("scope-project-required");
   expect(screen.getByText("Choose a project first").className).toContain("sr-only");
 });
@@ -57,6 +58,37 @@ test("arrow navigation selects one enabled option", async () => {
   await user.keyboard("{ArrowRight}");
   expect(document.activeElement).toBe(screen.getByRole("radio", { name: "Project" }));
   expect(onScopeSelected).toHaveBeenCalledExactlyOnceWith("project");
+});
+
+test("uses one Tab stop and arrow keys skip locked or unavailable scopes", async () => {
+  const user = userEvent.setup();
+  const onScopeSelected = renderSwitcher({ scope: "global", globalLocked: true, hasProject: false, localEnabled: true });
+  const global = screen.getByRole("radio", { name: "Global" });
+  const userScope = screen.getByRole("radio", { name: "User" });
+  const project = screen.getByRole("radio", { name: "Project" });
+  const local = screen.getByRole("radio", { name: "Local (only you, this repo)" });
+  expect(global.getAttribute("tabindex")).toBe("0");
+  expect(userScope.getAttribute("tabindex")).toBe("-1");
+  expect(project.getAttribute("tabindex")).toBe("-1");
+  expect(local.getAttribute("tabindex")).toBe("-1");
+  await user.tab();
+  expect(document.activeElement).toBe(global);
+  await user.keyboard("{ArrowRight}");
+  expect(document.activeElement).toBe(userScope);
+  expect(onScopeSelected).toHaveBeenCalledExactlyOnceWith("user");
+  await user.keyboard("{ArrowLeft}");
+  expect(document.activeElement).toBe(userScope);
+  expect(onScopeSelected).toHaveBeenCalledExactlyOnceWith("user");
+});
+
+test("a locked selected scope remains focusable and cannot be activated", async () => {
+  const user = userEvent.setup();
+  const onScopeSelected = renderSwitcher({ scope: "global", globalLocked: true });
+  const global = screen.getByRole("radio", { name: "Global" });
+  await user.tab();
+  expect(document.activeElement).toBe(global);
+  await user.keyboard("{Enter}");
+  expect(onScopeSelected).not.toHaveBeenCalled();
 });
 
 test("marks dark and light rendering variants", () => {

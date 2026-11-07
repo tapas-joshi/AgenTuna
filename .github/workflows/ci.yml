@@ -74,8 +74,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: Build the release app
-        run: cargo build --release -p at-app
+      - name: Build the release app with the embedded frontend
+        run: cargo build --release -p at-app --features custom-protocol
 
       - name: Generated TypeScript types are committed
         run: git diff --exit-code -- ui/src/generated
@@ -142,6 +142,39 @@ jobs:
           cargo install cargo-deny --locked
           cargo deny check
 
+  portability:
+    name: portability
+    # TF-037/TF-038/TF-039: compile the path modules for the two port targets. The phase is not
+    # enabled yet (at-fs still refuses non-Unix builds, and the Windows deployment primitive has
+    # no Windows runner), so this job reports its result without gating the workflow.
+    continue-on-error: true
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain and both port targets
+        run: |
+          channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal \
+            --target aarch64-unknown-linux-gnu --target x86_64-pc-windows-msvc
+          rustup default "$channel"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-portability
+          cache-on-failure: true
+
+      - name: Check the path modules on Linux
+        run: cargo check -p at-store --target aarch64-unknown-linux-gnu
+
+      - name: Check the path modules on Windows
+        run: cargo check -p at-store --target x86_64-pc-windows-msvc
+
   golden:
     name: golden files
     runs-on: ubuntu-latest
@@ -173,5 +206,77 @@ jobs:
         with:
           name: golden-diffs
           path: target/golden-diff/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  visual:
+    name: visual
+    # TU-025. Informational: the required checks stay `rust`, `frontend` and `supply-chain`.
+    # The goldens were captured with Chromium on macOS and macOS/Linux font rasterisation differs
+    # by more than the 0.1% pixel budget, so this runs on the same macOS image as `rust`.
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Install the Chromium build the project pins
+        run: pnpm --dir ui exec playwright install chromium
+
+      - name: Compare against the goldens
+        # Headless by default, so no window server is involved. The suite is the whole step, and
+        # its wall clock is checked against the story's 180-second budget after it finishes.
+        run: |
+          mkdir -p target/ci-logs
+          started="$(date +%s)"
+          set +e
+          pnpm --dir ui run visual 2>&1 | tee target/ci-logs/visual.log
+          status="${PIPESTATUS[0]}"
+          elapsed="$(( $(date +%s) - started ))"
+          echo "Visual suite wall clock: ${elapsed}s (story budget: 180s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the visual suite failed; compare ui/test-results with the goldens"
+            exit "$status"
+          fi
+          if [ "$elapsed" -gt 180 ]; then
+            echo "::error::the visual suite took ${elapsed}s, over the 180s budget"
+            exit 1
+          fi
+
+      - name: Goldens only change with UPDATE_SNAPSHOTS=1
+        run: |
+          changed="$(git status --porcelain -- ui/e2e/snapshots)"
+          if [ -n "$changed" ]; then
+            echo "::error::a run without UPDATE_SNAPSHOTS=1 must not write ui/e2e/snapshots; regenerate deliberately with UPDATE_SNAPSHOTS=1 cargo test -p at-app --test snapshots"
+            echo "$changed"
+            exit 1
+          fi
+
+      - name: Upload screenshot diffs and the HTML report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: visual-failure-artifacts
+          path: |
+            ui/test-results/
+            ui/playwright-report/
+            target/ci-logs/visual.log
           if-no-files-found: ignore
           retention-days: 7

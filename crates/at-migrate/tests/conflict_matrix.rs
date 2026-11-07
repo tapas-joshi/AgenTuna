@@ -7,9 +7,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use at_migrate::conflicts::{ProposedResolution, detect_conflicts};
+use at_migrate::conflicts::{
+    CopyOrigin, ProposedResolution, detect_conflicts, detect_conflicts_with_store, keep_both_names,
+    occupied_names,
+};
 use at_migrate::normalize;
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, StoreItem};
 use at_model::{AgentId, ItemKind, Scope};
 use tempfile::TempDir;
 
@@ -45,6 +48,7 @@ fn classify(copies: [FixtureCopy; 2]) -> (bool, bool, ProposedResolution) {
         ],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let conflicts = detect_conflicts(&report);
     let conflict = conflicts.conflicts.first().expect("fixture conflict");
@@ -280,13 +284,163 @@ fn identical_copies_and_single_copies_are_not_conflicts() {
         ],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
-    assert!(detect_conflicts(&report).conflicts.is_empty());
+    let set = detect_conflicts(&report);
+    assert!(set.conflicts.is_empty(), "identical copies need no review");
+    assert_eq!(set.equal_groups.len(), 1, "one equal-hash group");
+    assert_eq!(set.equal_groups[0].copies.len(), 2);
+    assert_eq!(
+        set.equal_groups[0]
+            .copies
+            .iter()
+            .filter_map(|copy| copy.agent.as_ref())
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([AgentId::ClaudeCode, AgentId::Codex]),
+        "both agents collapse into the one group"
+    );
 
     let single = ScanReport {
         items: vec![item(one, AgentId::ClaudeCode)],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
-    assert!(detect_conflicts(&single).conflicts.is_empty());
+    let set = detect_conflicts(&single);
+    assert!(set.conflicts.is_empty());
+    assert!(set.equal_groups.is_empty());
+}
+
+#[test]
+fn a_store_env_value_change_is_a_real_conflict_with_a_redacted_diff() {
+    let temp = TempDir::new().expect("fixture root");
+    let secret = "sk-live-3f4a9b1c";
+    let reference = serde_json::json!({
+        "command": "server",
+        "args": ["--x"],
+        "env": {"TOKEN": "${TOKEN}"}
+    });
+    let literal = serde_json::json!({
+        "command": "server",
+        "args": ["--x"],
+        "env": {"TOKEN": secret}
+    });
+    let store_path = temp.path().join("store/mcp.json");
+    let store_items = vec![StoreItem {
+        kind: ItemKind::McpServer,
+        name: "example".to_owned(),
+        content_hash: normalize::mcp_entry(&reference)
+            .expect("canonical store entry")
+            .to_string(),
+        scope: Scope::User,
+        path: store_path.clone(),
+    }];
+
+    // One native copy holding a literal value against a store copy holding the reference is a
+    // real conflict, never a formatting-only difference.
+    let mut native = item(mcp(temp.path(), "native", &literal), AgentId::ClaudeCode);
+    native.ownership = Ownership::Conflict;
+    let report = ScanReport {
+        items: vec![native],
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let set = detect_conflicts_with_store(&report, &store_items);
+    assert_eq!(set.conflicts.len(), 1, "{set:#?}");
+    let conflict = &set.conflicts[0];
+    assert!(!conflict.formatting_only);
+    assert_eq!(
+        conflict.proposed_resolution,
+        ProposedResolution::NeedsChoice
+    );
+    assert_eq!(conflict.copies.len(), 2, "copy A native, copy B store");
+    assert_eq!(conflict.copies[0].origin, CopyOrigin::Native);
+    assert_eq!(conflict.copies[1].origin, CopyOrigin::Store);
+    assert_eq!(conflict.copies[1].agent, None);
+    assert_eq!(conflict.copies[1].path, store_path);
+    assert!(
+        !conflict.unified_diff.contains(secret),
+        "the diff must not render the secret: {}",
+        conflict.unified_diff
+    );
+
+    // A matching `${VAR}` reference in the native copy is formatting-equivalent to the store
+    // copy, so the pair collapses instead of waiting for a decision.
+    let mut equivalent = item(
+        mcp(temp.path(), "equivalent", &reference),
+        AgentId::ClaudeCode,
+    );
+    equivalent.ownership = Ownership::Managed;
+    let report = ScanReport {
+        items: vec![equivalent],
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    assert!(
+        detect_conflicts_with_store(&report, &store_items)
+            .conflicts
+            .is_empty()
+    );
+}
+
+#[test]
+fn keep_both_names_avoid_the_store_and_every_agent_folder() {
+    let temp = TempDir::new().expect("fixture root");
+    let mut items = Vec::new();
+    for (suffix, agent) in [
+        ("rules", AgentId::ClaudeCode),
+        ("rules-claude-code", AgentId::Codex),
+        ("rules-2", AgentId::Omp),
+    ] {
+        let copy = rule(temp.path(), suffix, rule_bytes_for(suffix));
+        let mut row = item(copy, agent);
+        row.name = suffix.to_owned();
+        items.push(row);
+    }
+    let scan = ScanReport {
+        items,
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let store_items = vec![StoreItem {
+        kind: ItemKind::Rule,
+        name: "rules-3".to_owned(),
+        content_hash: String::new(),
+        scope: Scope::User,
+        path: temp.path().join("store/rules/rules-3.md"),
+    }];
+
+    let occupied = occupied_names(&scan, &store_items, ItemKind::Rule);
+    assert_eq!(
+        occupied,
+        BTreeSet::from([
+            "rules".to_owned(),
+            "rules-claude-code".to_owned(),
+            "rules-2".to_owned(),
+            "rules-3".to_owned(),
+        ])
+    );
+    assert_eq!(
+        keep_both_names("rules", &AgentId::ClaudeCode, &occupied),
+        Some(("rules-claude-code-2".to_owned(), "rules-4".to_owned())),
+        "the agent name and both numeric names are already taken"
+    );
+    assert_eq!(
+        keep_both_names("bad/name", &AgentId::ClaudeCode, &BTreeSet::new()),
+        None,
+        "no valid name exists, so the resolution is blocked"
+    );
+}
+
+/// Distinct bytes for a fixture file so each copy has its own hash.
+fn rule_bytes_for(label: &str) -> &'static [u8] {
+    match label {
+        "rules" => b"# Rules\nbase\n",
+        "rules-claude-code" => b"# Rules\nclaude\n",
+        _ => b"# Rules\nother\n",
+    }
 }

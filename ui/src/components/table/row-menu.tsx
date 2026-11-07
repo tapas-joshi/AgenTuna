@@ -72,6 +72,8 @@ export interface RowMenuTriggerProps {
   readonly label: string;
   /** True while this row's menu is open; rendered as `aria-expanded`. */
   readonly open: boolean;
+  /** Whether the row action is temporarily unavailable. */
+  readonly disabled?: boolean;
   /** Id of the menu element this trigger controls, when the menu is rendered. */
   readonly controls?: string;
   /** Reports the click; the table marks the event as row-interactive already. */
@@ -86,21 +88,23 @@ export interface RowMenuTriggerProps {
  * without extra key handling, and it is marked `data-row-interactive` so the
  * click does not also change the row selection.
  */
-export function RowMenuTrigger({ label, open, controls, onToggle, className }: RowMenuTriggerProps) {
+export function RowMenuTrigger({ label, open, disabled = false, controls, onToggle, className }: RowMenuTriggerProps) {
   return (
     <button
       type="button"
       aria-haspopup="menu"
       aria-expanded={open}
+      aria-disabled={disabled || undefined}
       aria-controls={controls}
       aria-label={label}
       data-row-interactive=""
       data-row-menu=""
       data-slot="row-menu-trigger"
-      onClick={onToggle}
+      onClick={disabled ? undefined : onToggle}
       className={cn(
         "inline-flex size-24 items-center justify-center rounded-6 text-text-muted transition-colors",
         "hover:bg-overlay hover:text-text",
+        "aria-disabled:cursor-not-allowed aria-disabled:text-text-secondary",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
         className,
       )}
@@ -113,3 +117,4 @@ export function RowMenuTrigger({ label, open, controls, onToggle, className }: R
     </button>
   );
 }
+

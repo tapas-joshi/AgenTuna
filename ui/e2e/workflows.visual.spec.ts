@@ -2,6 +2,7 @@ import { expect, test } from "./support/tauri-mock";
 import type { Page } from "@playwright/test";
 
 async function openMigration(page: Page) {
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
   await page.keyboard.press("Meta+k");
 
   const palette = page.getByRole("dialog", { name: "Command palette" });

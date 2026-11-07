@@ -1,0 +1,53 @@
+{
+  "agent": "custom:matrix",
+  "agents": [
+    {
+      "custom": true,
+      "name": "matrix"
+    }
+  ],
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Declared": "srv-index"
+        },
+        "kind": "mcp_server",
+        "lock": null,
+        "locked": false,
+        "name": "index",
+        "path": "<project>/.agentuna/mcp.json",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "mcp-custom-project-only",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "index",
+          "id": "srv-index",
+          "slug": "index"
+        }
+      ],
+      "scope": "project"
+    }
+  ],
+  "title": "A custom agent resolves an MCP server defined only in Project"
+}

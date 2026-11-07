@@ -303,12 +303,8 @@ pub(crate) fn instruction_create_impl(
             break;
         }
     }
-    if !paths.support_dir().exists() {
-        let _ = std::fs::create_dir_all(paths.support_dir());
-    }
-    if !paths.backup_dir().exists() {
-        let _ = std::fs::create_dir_all(paths.backup_dir());
-    }
+    let _ = at_fs::ensure_dir(paths.support_dir());
+    let _ = at_fs::ensure_dir(paths.backup_dir());
     let roots =
         at_fs::changeset::ApplyRoots::new(vec![native_root, paths.support_dir().to_path_buf()])
             .map_err(|_| {

@@ -70,7 +70,8 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Project directory to operate on instead of the one above the working directory.
+    /// Project directory to operate on instead of the nearest Git or registered
+    /// project above the working directory.
     #[arg(long, global = true, value_name = "PATH")]
     pub project: Option<PathBuf>,
 

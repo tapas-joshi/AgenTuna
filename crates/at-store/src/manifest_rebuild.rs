@@ -154,6 +154,12 @@ pub fn plan_manifest_rebuild(
         || StoreManifest::new(layout.scope(), StoreId::new()),
         StoreManifest::from_header,
     );
+    // Identity is the slug: it is the store folder name and the `items` unique key, so a
+    // rebuild matches it first. The earlier `(kind, name, hash)` key missed whenever a command
+    // recorded a display name that differs from the skill's own (`duplicate-2` versus
+    // `duplicate`) or a hash that the store later recomputed, and the missed entry received a
+    // brand-new ItemId that every deployment row still disagreed with.
+    let mut old_slugs: BTreeMap<(ItemKind, String), (ItemId, String)> = BTreeMap::new();
     let mut old_ids: BTreeMap<(ItemKind, String, ContentHash), (ItemId, String)> = BTreeMap::new();
     if let Some(old) = &old_manifest {
         for item in old.items() {
@@ -162,6 +168,10 @@ pub fn plan_manifest_rebuild(
                 .as_deref()
                 .unwrap_or(item.slug.as_str())
                 .to_lowercase();
+            old_slugs.insert(
+                (item.kind, item.slug.as_str().to_owned()),
+                (item.id, item.path.as_str().to_owned()),
+            );
             old_ids.insert(
                 (item.kind, name, item.hash.clone()),
                 (item.id, item.path.as_str().to_owned()),
@@ -211,6 +221,7 @@ pub fn plan_manifest_rebuild(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            old_slugs.insert((kind, slug.to_owned()), (id, path.clone()));
             old_ids.insert((kind, name, hash), (id, path));
         }
     }
@@ -337,7 +348,9 @@ pub fn plan_manifest_rebuild(
                 path: layout.root().join(&path_text),
             })?;
         let key = (kind, name.to_lowercase(), hash.clone());
-        let prior = old_ids.remove(&key);
+        let prior = old_slugs
+            .remove(&(kind, slug_text.clone()))
+            .or_else(|| old_ids.remove(&key));
         let (id, matched, renamed) = match prior {
             Some((id, old_path)) => {
                 let renamed = old_path != path_text;

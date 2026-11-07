@@ -265,6 +265,7 @@ export function DiffViewer({
           {label}
         </span>
         <span
+          role="img"
           className="flex shrink-0 items-center gap-4 font-mono text-12"
           aria-label={`${counts.additions} additions, ${counts.deletions} deletions`}
         >

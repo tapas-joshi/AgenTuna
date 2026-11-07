@@ -62,6 +62,22 @@ pub struct McpChangeSetPreviewView {
     pub preview_id: String,
     /// Per-agent files and their exact proposed changes.
     pub files: Vec<McpFileChangeView>,
+    /// Fields the selected agents cannot represent, grouped per agent.
+    pub unsupported_fields: Vec<McpUnsupportedFieldView>,
+    /// Policy warnings raised by the planner, such as a refused secret reference.
+    pub warnings: Vec<String>,
+    /// Store creation the same reviewed plan performs first, when the scope has no store yet.
+    pub store_init: Option<super::store_setup::StoreSetupView>,
+}
+
+/// Fields one agent drops from the draft MCP server definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpUnsupportedFieldView {
+    /// Human-readable target agent name.
+    pub agent: String,
+    /// Stable field names the agent cannot represent.
+    pub fields: Vec<String>,
 }
 
 /// One selected agent target in an MCP ChangeSet preview.
@@ -84,50 +100,6 @@ pub struct McpFileChangeView {
     pub selected: bool,
     /// Reason the selected target cannot be written, if any.
     pub cannot_write_reason: Option<String>,
-}
-
-/// Safe environment input used by an unsaved MCP server connection test.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/generated/")]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum McpTestEnvValue {
-    /// Literal environment value.
-    Literal {
-        /// Value supplied to the local process or HTTP header.
-        value: String,
-    },
-    /// Reference to an existing Keychain value; never contains the secret itself.
-    Secret {
-        /// Environment/header key associated with the reference.
-        env_name: String,
-        /// Keychain account containing the secret.
-        keychain_account: String,
-    },
-}
-
-/// Transport configuration for an unsaved MCP server connection test.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/generated/")]
-pub enum McpTestTransport {
-    /// Spawn an MCP server process for the explicitly requested test.
-    Stdio {
-        /// Executable name or path.
-        command: String,
-        /// Arguments passed without shell interpolation.
-        args: Vec<String>,
-        /// Optional working directory.
-        cwd: Option<String>,
-        /// Environment entries; secrets are Keychain references.
-        env: std::collections::BTreeMap<String, McpTestEnvValue>,
-    },
-    /// Connect to a streamable HTTP endpoint for the explicitly requested test.
-    Http {
-        /// Absolute endpoint URL.
-        url: String,
-        /// Request headers; secrets are Keychain references.
-        headers: std::collections::BTreeMap<String, McpTestEnvValue>,
-    },
 }
 
 /// Redacted, stable presentation of one connection-test attempt.
@@ -165,116 +137,8 @@ pub struct McpTestErrorView {
     /// Suggested recovery action.
     pub suggested_action: String,
 }
-/// Unsaved MCP server configuration submitted by the explicit Test connection action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/generated/")]
-pub struct McpTestRequest {
-    /// Stable identity assigned to this draft.
-    pub id: String,
-    /// User-visible server name.
-    pub display_name: String,
-    /// Selected scope.
-    pub scope: String,
-    /// Current unsaved transport configuration.
-    pub transport: McpTestTransport,
-    /// Explicit approval flag set by the Run test action.
-    pub user_approved: bool,
-}
 
-/// Tests the current draft configuration after requiring explicit user approval.
-///
-/// The command uses the same MCP session implementation as health checks but does not
-/// persist health history or mutate server configuration.
-#[tauri::command]
-pub async fn mcp_test_connection(
-    network: State<'_, super::network::NetworkState>,
-    request: McpTestRequest,
-) -> Result<McpTestResultView, CommandError> {
-    use std::str::FromStr;
-
-    use at_model::{
-        EnvValue, McpServer, McpServerDef, McpServerId, McpTransport, Scope, SecretRef,
-    };
-    use at_secrets::KeychainStore;
-
-    require_test_approval(request.user_approved)?;
-
-    let id = McpServerId::from_str(&request.id)
-        .map_err(|_| CommandError::invalid_argument("id", "expected a valid MCP server id"))?;
-    let scope = Scope::from_str(&request.scope)
-        .map_err(|_| CommandError::invalid_argument("scope", "expected a supported scope"))?;
-    let convert_values = |values: std::collections::BTreeMap<String, McpTestEnvValue>| {
-        values
-            .into_iter()
-            .map(|(name, value)| {
-                let value = match value {
-                    McpTestEnvValue::Literal { value } => EnvValue::Literal(value),
-                    McpTestEnvValue::Secret {
-                        env_name,
-                        keychain_account,
-                    } => EnvValue::Secret(SecretRef {
-                        env_name,
-                        keychain_account,
-                    }),
-                };
-                (name, value)
-            })
-            .collect()
-    };
-    let transport = match request.transport {
-        McpTestTransport::Stdio {
-            command,
-            args,
-            cwd,
-            env,
-        } => McpTransport::Stdio {
-            command,
-            args,
-            cwd: cwd.map(Into::into),
-            env: convert_values(env),
-        },
-        McpTestTransport::Http { url, headers } => McpTransport::Http {
-            url: url.parse().map_err(|_| {
-                CommandError::invalid_argument("transport.url", "expected an absolute URL")
-            })?,
-            headers: convert_values(headers),
-            oauth: None,
-        },
-    };
-    let server = McpServer::from_def(
-        id,
-        scope,
-        McpServerDef {
-            display_name: request.display_name,
-            description: None,
-            transport,
-            extra: Default::default(),
-        },
-    );
-
-    // Calling this Tauri command is the explicit Test connection user action. Only here
-    // is stdio consent minted, and the token is bound to this exact draft launch.
-    let launch = at_mcp::StdioLaunch::from_server(&server).ok();
-    let consent = launch.as_ref().map(at_mcp::LaunchConsent::user_approved);
-    let secrets: std::sync::Arc<dyn at_secrets::SecretStore> =
-        std::sync::Arc::new(KeychainStore::new());
-    let stdio = at_mcp::StdioClient::new(
-        std::sync::Arc::new(at_mcp::PathResolver::new()),
-        std::sync::Arc::clone(&secrets),
-    );
-    let http = at_mcp::HttpClient::new(std::sync::Arc::new(network.policy()), secrets);
-    let result = at_mcp::test_connection(
-        &server,
-        &stdio,
-        &http,
-        consent.as_ref(),
-        &tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    Ok(mcp_test_result_view(result))
-}
-
-fn mcp_test_result_view(result: at_mcp::TestResult) -> McpTestResultView {
+pub(super) fn mcp_test_result_view(result: at_mcp::TestResult) -> McpTestResultView {
     let error = result.error.map(|error| {
         let kind = match error.kind() {
             at_mcp::McpErrorKind::UnresolvedCommand => "unresolved_command",
@@ -313,6 +177,18 @@ fn mcp_test_result_view(result: at_mcp::TestResult) -> McpTestResultView {
     }
 }
 
+/// Runs a filesystem- or database-heavy command body off the IPC thread.
+///
+/// Commands stay `async` and keep their testable `_inner` functions; the blocking part runs on
+/// the runtime's blocking pool so a large apply or hash pass cannot stall other commands.
+pub(super) async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, CommandError> + Send + 'static,
+) -> Result<T, CommandError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| CommandError::internal("the background command task failed"))?
+}
+
 use super::state::AppState;
 // Placeholder
 
@@ -349,6 +225,11 @@ pub enum CommandErrorCode {
     RefusedOverwrite,
     /// A reviewed plan conflicts with newer or divergent state.
     Conflict,
+    /// A file changed outside AgenTuna after the reviewed preview was produced.
+    #[serde(rename = "external_write_conflict")]
+    ExternalWriteConflict,
+    /// The operating system denied access to the path named in the message.
+    PermissionDenied,
     /// A Global lock blocks the requested change.
     Locked,
 }
@@ -431,6 +312,15 @@ impl CommandError {
         )
     }
 
+    /// A reviewed file changed outside AgenTuna after its preview was produced.
+    #[must_use]
+    pub fn external_write_conflict(reason: &str) -> Self {
+        Self::new(
+            CommandErrorCode::ExternalWriteConflict,
+            format!("external write conflict: {reason}"),
+        )
+    }
+
     /// A required service is unavailable.
     #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
@@ -497,6 +387,86 @@ pub fn app_info() -> AppInfo {
         name: "AgenTuna".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
+}
+
+/// How the running binary is signed, used by the About dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+#[non_exhaustive]
+pub enum SigningStatus {
+    /// Signed with a Developer ID Application identity for distribution.
+    DeveloperId,
+    /// Ad-hoc signed by `scripts/sign.sh` without credentials.
+    AdHoc,
+    /// Not signed, or the signature could not be read.
+    Unsigned,
+}
+
+impl SigningStatus {
+    /// Classifies the output of `codesign -dv --verbose=4` (which prints to stderr).
+    #[must_use]
+    pub fn from_codesign_output(output: &str) -> Self {
+        if output.contains("Authority=Developer ID Application") {
+            Self::DeveloperId
+        } else if output.to_ascii_lowercase().contains("adhoc") {
+            Self::AdHoc
+        } else {
+            Self::Unsigned
+        }
+    }
+}
+
+/// Reports how the running binary is signed so About can label a local build.
+///
+/// A release build signed by `scripts/sign.sh` with a Developer ID prints the distribution
+/// identity; an ad-hoc local build or an unsigned development binary is reported as such.
+#[tauri::command]
+pub fn app_signing_status() -> SigningStatus {
+    let Ok(executable) = std::env::current_exe() else {
+        return SigningStatus::Unsigned;
+    };
+    let tool_path = if std::path::Path::new("/usr/bin/codesign").exists() {
+        "/usr/bin/codesign"
+    } else {
+        "codesign"
+    };
+    let mut child = match std::process::Command::new(tool_path)
+        .args(["-dv", "--verbose=4"])
+        .arg(&executable)
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return SigningStatus::Unsigned,
+    };
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return SigningStatus::Unsigned;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return SigningStatus::Unsigned;
+            }
+        }
+    }
+    let Ok(output) = child.wait_with_output() else {
+        return SigningStatus::Unsigned;
+    };
+    let mut details = String::from_utf8_lossy(&output.stderr).into_owned();
+    details.push_str(&String::from_utf8_lossy(&output.stdout));
+    SigningStatus::from_codesign_output(&details)
 }
 
 /// Returns every job currently running in the async bridge.
@@ -804,20 +774,10 @@ pub fn item_lookup(
         .map_err(|error| CommandError::internal(error.to_string()))?;
     Ok(rows.pop())
 }
-fn require_test_approval(approved: bool) -> Result<(), CommandError> {
-    if approved {
-        Ok(())
-    } else {
-        Err(CommandError::invalid_argument(
-            "user_approved",
-            "explicit approval is required to test this server",
-        ))
-    }
-}
 
 #[cfg(test)]
-mod mcp_test_connection_tests {
-    use super::{CommandError, CommandErrorCode, require_test_approval};
+mod command_error_tests {
+    use super::{CommandError, CommandErrorCode};
 
     #[test]
     fn refused_overwrite_serializes_typed_remedies_and_hash() {
@@ -843,10 +803,49 @@ mod mcp_test_connection_tests {
                 .is_none()
         );
     }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::SigningStatus;
 
     #[test]
-    fn connection_test_requires_explicit_approval() {
-        assert!(require_test_approval(false).is_err());
-        assert!(require_test_approval(true).is_ok());
+    fn developer_id_output_is_distribution_signed() {
+        let output = "Executable=/Applications/AgenTuna.app/Contents/MacOS/agentuna-app\n\
+            Identifier=com.agentuna.app\n\
+            Authority=Developer ID Application: Example Corp (TEAM123456)\n\
+            Authority=Developer ID Certification Authority\n\
+            Authority=Apple Root CA\n\
+            Timestamp=Nov  6, 2026 at 10:00:00\n\
+            Runtime Version=14.0.0\n\
+            flags=0x10000(runtime)\n";
+        assert_eq!(
+            SigningStatus::from_codesign_output(output),
+            SigningStatus::DeveloperId
+        );
+    }
+
+    #[test]
+    fn ad_hoc_output_is_a_local_build() {
+        let output = "Executable=target/release/agentuna-app\n\
+            Identifier=agentuna-app\n\
+            Signature=adhoc\n\
+            flags=0x2(adhoc)\n";
+        assert_eq!(
+            SigningStatus::from_codesign_output(output),
+            SigningStatus::AdHoc
+        );
+    }
+
+    #[test]
+    fn unsigned_or_unreadable_output_is_unsigned() {
+        assert_eq!(
+            SigningStatus::from_codesign_output("code object is not signed at all"),
+            SigningStatus::Unsigned
+        );
+        assert_eq!(
+            SigningStatus::from_codesign_output(""),
+            SigningStatus::Unsigned
+        );
     }
 }

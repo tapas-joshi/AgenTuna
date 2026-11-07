@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { Badge } from "../../components/badge";
 import { Button } from "../../components/button";
 import { AsyncBoundary } from "../../components/states";
 import { useAsyncResource } from "../../components/states";
+import { Modal } from "../../overlays/dialogs";
 import { useAppSnapshot, useAppState } from "../../state/context";
+import { ACTION_IDS } from "../../shell/actions";
 import type { OverviewView } from "../../generated/OverviewView";
 import type { OverviewScopeView } from "../../generated/OverviewScopeView";
 import type { ProjectSyncItemView } from "../../generated/ProjectSyncItemView";
 import type { ProjectSyncPreviewView } from "../../generated/ProjectSyncPreviewView";
+import type { ScopeSetupPreviewView } from "../../generated/ScopeSetupPreviewView";
 import type { SkillCompareView } from "../../generated/SkillCompareView";
-import { compareSkillCopies } from "../skill_detail/commands";
-import { enableGlobalWrites, loadOverview, loadProjectSyncStatus, previewProjectSync, applyProjectSync } from "./commands";
+import { compareSkillCopies, loadSkillDetail } from "../skill_detail/commands";
+import { applyScopeSetup, enableGlobalWrites, loadOverview, loadProjectSyncStatus, previewProjectSync, applyProjectSync, previewScopeSetup } from "./commands";
 const SYNC_LABELS: Readonly<Record<string, string>> = { in_sync: "In sync", project_only: "Project only", library_newer: "Library newer", project_newer: "Project newer", library_only: "Library only", conflict: "Conflict", drifted: "Drifted" };
 const SYNC_LABEL_COLORS: Readonly<Record<string, string>> = {
   in_sync: "bg-success/10 text-success",
@@ -24,6 +29,33 @@ const SYNC_LABEL_COLORS: Readonly<Record<string, string>> = {
 const SCOPE_NAMES: Readonly<Record<string, string>> = { global: "Global", user: "User", project: "Project", local: "Local" };
 const SCOPE_COLORS: Readonly<Record<string, string>> = { global: "bg-scope-global", user: "bg-scope-user", project: "bg-scope-project", local: "bg-scope-local" };
 
+/** Visible word for every needs-attention kind; colour is never the only signal. */
+const ATTENTION_STATUS: Readonly<Record<string, { readonly label: string; readonly tone: "danger" | "warning" | "info" | "muted" | "locked" }>> = {
+  failing_health_check: { label: "Failing", tone: "danger" },
+  drift_event: { label: "Drift", tone: "warning" },
+  native_deployment: { label: "Not in AgenTuna", tone: "info" },
+  missing_agent: { label: "Missing", tone: "muted" },
+  shadowed_skill: { label: "Shadowed", tone: "warning" },
+  locked_item_not_found: { label: "Locked", tone: "locked" },
+};
+
+/** Direct action offered on each attention row. */
+const ATTENTION_ACTION: Readonly<Record<string, string>> = {
+  failing_health_check: "Fix token",
+  drift_event: "Review diff",
+  native_deployment: "Review",
+  missing_agent: "Set path",
+  shadowed_skill: "Compare",
+  locked_item_not_found: "Open",
+};
+
+/** One item resolved by `item_lookup`; the same shape `openItem` accepts. */
+interface LookupItem {
+  readonly kind: string;
+  readonly scope: string;
+  readonly project_id: string | null;
+}
+
 function relativeTime(timestamp: string | null): string {
   if (!timestamp) return "Not set up";
   const time = Date.parse(timestamp);
@@ -37,27 +69,28 @@ function relativeTime(timestamp: string | null): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-function ScopeCard({ card, path, selected, onSetUp, onCopy }: { readonly card: OverviewScopeView; readonly path: string; readonly selected: boolean; readonly onSetUp: () => void; readonly onCopy: () => void }) {
+function ScopeCard({ card, path, note, selected, setupBusy, onSetUp, onCopy }: { readonly card: OverviewScopeView; readonly path: string; readonly note?: string; readonly selected: boolean; readonly setupBusy: boolean; readonly onSetUp: () => void; readonly onCopy: () => void }) {
   const skills = Number(card.skills);
   const mcp = Number(card.mcp);
   const rules = Number(card.rules);
   const locks = Number(card.locks);
   const disabled = Number(card.disabled);
-  const empty = skills + mcp + rules + locks + disabled === 0 && card.last_edited === null;
+  const empty = !card.store_ready;
   const scopeColor = card.scope === "global" || card.scope === "user" || card.scope === "project" || card.scope === "local" ? `var(--at-color-scope-${card.scope})` : "var(--at-color-border)";
   return (
     <article className={`flex h-[214px] flex-col gap-8 rounded-10 border p-12 ${selected ? "bg-raised shadow-[0_0_0_1px_var(--at-color-border)]" : "border-border bg-raised"}`} style={selected ? { borderColor: scopeColor, boxShadow: `0 0 0 1px ${scopeColor}` } : undefined} aria-current={selected ? "true" : undefined}>
       <div className="flex items-center justify-between">
-        <span className={`rounded-6 px-8 py-4 text-12 font-semibold ${SCOPE_COLORS[card.scope] ?? "bg-overlay"}`}>{SCOPE_NAMES[card.scope] ?? card.scope}</span>
-        {locks > 0 && <span className="inline-flex items-center gap-4 text-12 text-warning" aria-label={`${locks} locked items`} title="Global locks protect these items"><svg aria-hidden="true" className="h-12 w-12 fill-none stroke-current" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="8" rx="1" /><path d="M5 7V5a3 3 0 0 1 6 0v2" /></svg>{locks} locked</span>}
+        <span className={`rounded-6 px-8 py-4 text-12 font-semibold text-slate-950 ${SCOPE_COLORS[card.scope] ?? "bg-overlay text-text"}`}>{SCOPE_NAMES[card.scope] ?? card.scope}</span>
+        {locks > 0 && <span role="img" className="inline-flex items-center gap-4 text-12 text-warning" aria-label={`${locks} locked items`} title="Global locks protect these items"><svg aria-hidden="true" className="h-12 w-12 fill-none stroke-current" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="8" rx="1" /><path d="M5 7V5a3 3 0 0 1 6 0v2" /></svg>{locks} locked</span>}
       </div>
-      {empty ? <div className="flex flex-1 flex-col justify-center gap-8"><p className="m-0 flex min-w-0 items-center gap-6 font-mono text-12 text-text-muted"><span className="min-w-0 flex-1 truncate" title={path}>{path}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-3 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p><p className="m-0 text-13 text-text-secondary">This scope has no AgenTuna store yet.</p><Button size="sm" className="self-start" onClick={onSetUp}>Set up this scope</Button></div> : <>
+      {empty ? <div className="flex flex-1 flex-col justify-center gap-8"><p className="m-0 flex min-w-0 items-center gap-6 font-mono text-12 text-text-muted"><span className="min-w-0 flex-1 truncate" title={path}>{path}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-3 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p><p className="m-0 text-13 text-text-secondary">This scope has no AgenTuna store yet.</p><Button size="sm" className="self-start" loading={setupBusy} aria-label={`Set up the ${SCOPE_NAMES[card.scope] ?? card.scope} scope`} onClick={onSetUp}>Set up this scope</Button></div> : <>
         <p className="m-0 flex min-w-0 items-center gap-6 font-mono text-12 text-text-muted"><span className="min-w-0 flex-1 truncate" title={path}>{path}</span>{card.scope === "user" && <button type="button" className="shrink-0 rounded-4 px-6 py-3 font-sans text-11 text-text-secondary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={onCopy}>Copy path</button>}</p>
         <div className="grid grid-cols-3 gap-8">
           <Count value={skills} label="skills" />
           <Count value={mcp} label="MCP servers" />
           <Count value={rules} label="instruction files" />
         </div>
+        {note && <p className="m-0 truncate text-11 text-text-muted" title={note}>{note}</p>}
         <div className="mt-auto flex justify-between border-t border-border pt-8 text-11 text-text-muted"><span>{disabled > 0 ? `${disabled} disabled` : "No disabled items"}</span><span>{relativeTime(card.last_edited)}</span></div>
       </>}
     </article>
@@ -68,9 +101,9 @@ function Count({ value, label }: { readonly value: number; readonly label: strin
   return <div><strong className="block font-mono text-20 text-text">{value}</strong><span className="text-11 text-text-muted">{label}</span></div>;
 }
 
-function AttentionMarker({ row }: { readonly row: OverviewView["attention"][number] }) {
-  if (row.kind.includes("locked")) return <span aria-label="Locked item" title={row.subtitle ?? "Global lock"} className="mt-2 inline-flex h-12 w-12 shrink-0 items-center justify-center text-warning"><svg aria-hidden="true" className="h-12 w-12 fill-none stroke-current" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="8" rx="1" /><path d="M5 7V5a3 3 0 0 1 6 0v2" /></svg></span>;
-  return <span aria-hidden="true" className={`mt-4 h-8 w-8 shrink-0 rounded-full ${row.kind.includes("health") ? "bg-danger" : row.kind.includes("drift") ? "bg-warning" : "bg-scope-user"}`} />;
+function AttentionStatusBadge({ row }: { readonly row: OverviewView["attention"][number] }) {
+  const meta = ATTENTION_STATUS[row.kind] ?? { label: "Issue", tone: "muted" as const };
+  return <Badge tone={meta.tone} dot title={row.subtitle ?? undefined}>{meta.label}</Badge>;
 }
 function AttentionList({ entries, total, onActivate }: { readonly entries: OverviewView["attention"]; readonly total: number; readonly onActivate: (entry: OverviewView["attention"][number]) => void }) {
   const [expanded, setExpanded] = useState(false);
@@ -83,7 +116,42 @@ function AttentionList({ entries, total, onActivate }: { readonly entries: Overv
     return true;
   });
   return <>
-    {entries.length === 0 ? <p className="m-0 py-24 text-13 text-text-muted">Everything looks clear.</p> : <ul className="m-0 list-none p-0">{visible.map((row, index) => <li key={`${row.kind}-${row.item_id ?? index}`} className="border-t border-border first:border-0"><button title={row.kind.includes("locked") ? row.subtitle ?? "Global lock" : undefined} className="flex min-h-[48px] w-full items-center justify-between gap-12 bg-transparent py-8 text-left text-text hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus" onClick={() => onActivate(row)}><span className="flex items-start gap-8"><AttentionMarker row={row}/><span><strong className="block text-13">{row.title}</strong><span className="text-11 text-text-muted">{row.subtitle ?? row.kind}</span></span></span><span aria-hidden="true" className="text-text-muted">›</span></button></li>)}</ul>}
+    {entries.length === 0 ? <p className="m-0 py-24 text-13 text-text-muted">Everything looks clear.</p> : (
+      <ul className="m-0 list-none p-0">
+        {visible.map((row, index) => {
+          const action = ATTENTION_ACTION[row.kind];
+          return (
+            <li key={`${row.kind}-${row.item_id ?? index}`} className="border-t border-border first:border-0">
+              <div className="flex min-h-[48px] items-center justify-between gap-12 py-8">
+                <button
+                  type="button"
+                  title={row.kind.includes("locked") ? row.subtitle ?? "Global lock" : undefined}
+                  className="flex min-w-0 flex-1 items-center gap-12 bg-transparent text-left text-text hover:bg-overlay focus-visible:outline-2 focus-visible:outline-focus"
+                  onClick={() => onActivate(row)}
+                >
+                  <AttentionStatusBadge row={row} />
+                  <span className="min-w-0">
+                    <strong className="block truncate text-13">{row.title}</strong>
+                    <span className="block truncate text-11 text-text-muted">{row.subtitle ?? row.kind}</span>
+                  </span>
+                </button>
+                {action !== undefined && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    aria-label={`${action} for ${row.title}`}
+                    title={row.subtitle ?? undefined}
+                    onClick={() => onActivate(row)}
+                  >
+                    {action}
+                  </Button>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    )}
     {!expanded && total > visible.length && <Button size="sm" variant="secondary" className="mt-8" onClick={() => setExpanded(true)}>Show all {total}</Button>}
   </>;
 }
@@ -104,7 +172,7 @@ function ChangesTimeline({ entries }: { readonly entries: OverviewView["changes"
     const rows = groups.get(group);
     return rows?.length ? <section key={group} aria-label={group}><h3 className="mb-8 mt-0 text-11 font-semibold uppercase tracking-wide text-text-muted">{group}</h3><ol className="m-0 list-none border-l border-border p-0 pl-16">{rows.map((row) => {
       const isExpanded = expanded.has(row.id);
-      return <li key={row.id} className="relative mb-12 last:mb-0"><span aria-hidden="true" className="absolute -left-21 top-4 h-8 w-8 rounded-full bg-scope-project ring-2 ring-raised"/><button type="button" aria-expanded={isExpanded} className="w-full bg-transparent p-0 text-left focus-visible:outline-2 focus-visible:outline-focus" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; })}><strong className="block text-13 text-text">{row.summary ?? row.kind}</strong><span className="text-11 text-text-muted">{relativeTime(row.created_at)} · {row.file_count} files{row.scope ? ` · ${SCOPE_NAMES[row.scope] ?? row.scope}` : ""}</span></button>{isExpanded && <ul className="mt-6 list-none space-y-4 p-0 text-11 text-text-muted">{row.files.length === 0 ? <li>No file paths recorded</li> : row.files.map((file, index) => <li key={`${file.path}-${index}`} className="flex flex-wrap items-center gap-6"><code className="break-all">{file.path}</code>{file.scope && <span className={`rounded-4 px-4 py-2 ${SCOPE_COLORS[file.scope] ?? "bg-overlay"}`}>{SCOPE_NAMES[file.scope] ?? file.scope}</span>}</li>)}</ul>}</li>;
+      return <li key={row.id} className="relative mb-12 last:mb-0"><span aria-hidden="true" className="absolute -left-[20px] top-4 h-8 w-8 rounded-full bg-scope-project ring-2 ring-raised"/><button type="button" aria-expanded={isExpanded} className="w-full bg-transparent p-0 text-left focus-visible:outline-2 focus-visible:outline-focus" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; })}><strong className="block text-13 text-text">{row.summary ?? row.kind}</strong><span className="text-11 text-text-muted">{relativeTime(row.created_at)} · {row.file_count} files{row.scope ? ` · ${SCOPE_NAMES[row.scope] ?? row.scope}` : ""}</span></button>{isExpanded && <ul className="mt-6 list-none space-y-4 p-0 text-11 text-text-muted">{row.files.length === 0 ? <li>No file paths recorded</li> : row.files.map((file, index) => <li key={`${file.path}-${index}`} className="flex flex-wrap items-center gap-6"><code className="break-all">{file.path}</code>{file.scope && <span className={`shrink-0 whitespace-nowrap rounded-4 px-4 py-2 ${SCOPE_COLORS[file.scope] ?? "bg-overlay"}`}>{SCOPE_NAMES[file.scope] ?? file.scope}</span>}</li>)}</ul>}</li>;
     })}</ol></section> : null;
   })}</div>;
 }
@@ -158,41 +226,211 @@ export function ProjectSyncPanel({ projectId, itemId }: { readonly projectId: st
   </section>;
 }
 
-function OverviewContent({ data, activeScope, projectId }: { readonly data: OverviewView; readonly activeScope: string; readonly projectId: string | null }) {
+function OverviewContent({ data, activeScope, projectId, onReload }: { readonly data: OverviewView; readonly activeScope: string; readonly projectId: string | null; readonly onReload: () => void }) {
   const total = data.scopes.reduce((sum, scope) => sum + Number(scope.skills) + Number(scope.mcp) + Number(scope.rules), 0);
   const percentages = useMemo(() => data.scopes.map((scope) => ({ ...scope, value: total === 0 ? 0 : (Number(scope.skills) + Number(scope.mcp) + Number(scope.rules)) / total * 100 })), [data.scopes, total]);
   const app = useAppState();
-  const [globalWritable, setGlobalWritable] = useState(data.global_writable);
+  const [globalStatus, setGlobalStatus] = useState(data.global_store.status);
   const [enablingGlobal, setEnablingGlobal] = useState(false);
   const cards = data.scopes.filter((scope) => scope.scope !== "local");
-  const scopePath = (scope: OverviewScopeView) => scope.scope === "project" ? "./.agentuna" : scope.scope === "user" ? data.user_path : scope.scope === "global" ? data.global_path : "Local store";
+  const scopePath = (scope: OverviewScopeView) => scope.scope === "project" ? "./.agentuna" : scope.scope === "user" ? data.user_path : scope.scope === "global" ? data.global_store.path : "Local store";
+  const globalNote = `Source: ${data.global_store.source} · ${data.global_store.locks.length} lock${data.global_store.locks.length === 1 ? "" : "s"}`;
   const copyUserPath = () => { void navigator.clipboard.writeText(data.user_path).catch(() => undefined); };
   const requestGlobalWrites = () => {
     setEnablingGlobal(true);
-    void enableGlobalWrites().then(() => { setGlobalWritable(true); app.toasts.show({ kind: "success", title: "Global writes enabled", message: "The Global store is ready for reviewed changes." }); }, () => app.toasts.show({ kind: "error", title: "Global writes unavailable", message: "Authorization was declined or the store is still not writable." })).finally(() => setEnablingGlobal(false));
+    void enableGlobalWrites().then(() => { setGlobalStatus("available"); app.toasts.show({ kind: "success", title: "Global writes enabled", message: "The Global store is ready for reviewed changes." }); }, () => app.toasts.show({ kind: "error", title: "Global writes unavailable", message: "Authorization was declined or the store is still not writable." })).finally(() => setEnablingGlobal(false));
   };
-  return <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-24 p-24">
+  const [setupCard, setSetupCard] = useState<OverviewScopeView | null>(null);
+  const [setupPreview, setSetupPreview] = useState<ScopeSetupPreviewView | null>(null);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [comparisonPreview, setComparisonPreview] = useState<{ readonly name: string; readonly view: SkillCompareView } | null>(null);
+  const [attentionBusy, setAttentionBusy] = useState(false);
+  const [attentionError, setAttentionError] = useState<string | null>(null);
+  const startSetup = async (card: OverviewScopeView) => {
+    setSetupCard(card);
+    setSetupPreview(null);
+    setSetupError(null);
+    setSetupBusy(true);
+    try {
+      const preview = await previewScopeSetup(card.scope, projectId);
+      if (preview.already_ready) {
+        setSetupCard(null);
+        app.toasts.show({ kind: "success", title: "Store already ready", message: "This scope already has an AgenTuna store." });
+        onReload();
+        return;
+      }
+      setSetupPreview(preview);
+    } catch {
+      setSetupError(`The ${SCOPE_NAMES[card.scope] ?? card.scope} store could not be prepared.`);
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+  const confirmSetup = async () => {
+    const previewId = setupPreview?.preview_id;
+    if (previewId === null || previewId === undefined) return;
+    setSetupBusy(true);
+    setSetupError(null);
+    try {
+      const result = await applyScopeSetup(previewId);
+      setSetupPreview(null);
+      setSetupCard(null);
+      app.toasts.show({ kind: "success", title: "Scope store created", message: `${SCOPE_NAMES[result.scope] ?? result.scope} is ready at ${result.path}.` });
+      onReload();
+    } catch {
+      setSetupPreview(null);
+      setSetupCard(null);
+      setSetupError("The store changed after review; start the setup again.");
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  /**
+   * Runs one attention row's direct action through the same typed commands
+   * the destination screens use, so the button and the screen cannot diverge.
+   */
+  const activateAttention = (row: OverviewView["attention"][number]) => {
+    const openFallback = () => {
+      const route = row.screen === "mcp" ? "mcp-list" : row.screen === "drift" ? "drift" : row.screen === "agents" ? "agents" : row.screen === "effective" ? "effective" : "skills";
+      if (row.row_id !== null) app.setSelection(route, [row.row_id]);
+      app.navigate(route);
+    };
+    if (row.kind === "drift_event" && row.row_id !== null) {
+      app.setSelection("drift", [row.row_id]);
+      window.dispatchEvent(new CustomEvent("agentuna:menu-action", { detail: ACTION_IDS.drift }));
+      return;
+    }
+    if (row.kind === "missing_agent" && row.row_id !== null) {
+      app.setSelection("agents", [row.row_id]);
+      window.dispatchEvent(new CustomEvent("agentuna:menu-action", { detail: ACTION_IDS.agents }));
+      return;
+    }
+    if (row.kind === "locked_item_not_found" && row.row_id !== null) {
+      app.setSelection("effective", [row.row_id]);
+      window.dispatchEvent(new CustomEvent("agentuna:menu-action", { detail: ACTION_IDS.effective }));
+      return;
+    }
+    if (row.item_id === null) {
+      openFallback();
+      return;
+    }
+    const itemId = row.item_id;
+    if (row.kind === "shadowed_skill") {
+      setAttentionBusy(true);
+      setAttentionError(null);
+      void loadSkillDetail(itemId)
+        .then(async (detail) => {
+          const other = detail.shadow_chain.find((scope) => scope !== detail.scope) ?? detail.shadowed_by;
+          if (other === null) {
+            const item = await invoke<LookupItem | null>("item_lookup", { itemId });
+            if (item === null) openFallback();
+            else app.openItem(itemId, item);
+            return;
+          }
+          setComparisonPreview({ name: detail.name, view: await compareSkillCopies(itemId, other) });
+        })
+        .catch(() => setAttentionError("The two skill copies could not be compared."))
+        .finally(() => setAttentionBusy(false));
+      return;
+    }
+    if (row.kind === "failing_health_check") {
+      // The MCP detail screen opens its token repair dialog when this flag is set.
+      app.setScreenState("mcp-detail:fix-token", true);
+    }
+    void invoke<LookupItem | null>("item_lookup", { itemId }).then(
+      (item) => {
+        if (item === null) openFallback();
+        else app.openItem(itemId, item);
+      },
+      () => openFallback(),
+    );
+  };
+  return <div className="flex flex-col gap-24">
     <header className="flex flex-wrap items-start justify-between gap-16"><div><h1 className="m-0 text-26 font-semibold text-text">Overview</h1><p className="mb-0 mt-8 text-13 text-text-secondary">What your agents load here. Nearest scope wins: Project, then User, then Global.</p></div><Button variant="primary" onClick={() => app.navigate("add-skill")}>Add to this repo</Button></header>
-    {activeScope === "global" && !globalWritable && <section role="status" className="flex flex-wrap items-center justify-between gap-12 rounded-8 border border-warning/40 bg-warning/10 p-12"><span className="text-13 text-text">Global store is read-only{data.global_reason ? `: ${data.global_reason}` : "."}</span><Button size="sm" variant="secondary" loading={enablingGlobal} onClick={requestGlobalWrites}>Enable global writes</Button></section>}
-    <section aria-label="Scope stores" className="grid grid-cols-1 gap-16 md:grid-cols-3">{cards.map((card) => <ScopeCard key={card.scope} card={card} path={scopePath(card)} selected={activeScope === card.scope} onSetUp={() => app.navigate("add-skill")} onCopy={copyUserPath} />)}</section>
+    {(data.startup_warnings ?? []).map((warning) => <section key={`${warning.kind}-${warning.path ?? ""}`} role="status" aria-label="Startup warning" className="rounded-8 border border-warning/40 bg-warning/10 p-12"><p className="m-0 text-13 text-text">{warning.message}</p>{warning.path && <p className="mb-0 mt-4 break-words font-mono text-11 text-text-muted">{warning.path}</p>}</section>)}
+    {activeScope === "global" && globalStatus !== "available" && <section role="status" className="flex flex-wrap items-center justify-between gap-12 rounded-8 border border-warning/40 bg-warning/10 p-12"><span className="text-13 text-text">Global store is read-only{data.global_store.reason ? `: ${data.global_store.reason}` : "."}</span><Button size="sm" variant="secondary" loading={enablingGlobal} onClick={requestGlobalWrites}>Enable global writes</Button></section>}
+    <section aria-label="Scope stores" className="grid grid-cols-1 gap-16 md:grid-cols-3">{cards.map((card) => <ScopeCard key={card.scope} card={card} path={scopePath(card)} selected={activeScope === card.scope} note={card.scope === "global" ? globalNote : undefined} setupBusy={setupBusy && setupCard?.scope === card.scope} onSetUp={() => void startSetup(card)} onCopy={copyUserPath} />)}</section>
+    {setupError && <p role="alert" className="m-0 rounded-8 border border-danger/40 bg-danger/10 p-12 text-13 text-text">{setupError}</p>}
     <section className="grid gap-16 rounded-10 border border-border bg-raised p-16 md:grid-cols-2" aria-label="Effective configuration summary">
       <div><h2 className="m-0 text-14 font-semibold text-text">Effective in this repo</h2><p className="mb-0 mt-8 font-mono text-16 font-semibold text-text">{total} indexed items</p><p className="mb-0 mt-4 text-12 text-text-muted">Skills, servers and instruction files across scopes</p></div>
       <div><div className="mb-8 flex justify-between text-12 text-text-secondary"><span>Where they come from</span><span>{total} items</span></div><div className="flex h-8 overflow-hidden rounded-full bg-overlay" role="img" aria-label="Items by scope">{percentages.map((scope) => scope.value > 0 && <span key={scope.scope} className={SCOPE_COLORS[scope.scope] ?? "bg-overlay"} style={{ width: `${scope.value}%` }} />)}</div><div className="mt-8 flex flex-wrap gap-12 text-11 text-text-muted">{percentages.map((scope) => <span key={scope.scope} className="inline-flex items-center gap-4"><i aria-hidden="true" className={`h-8 w-8 rounded-full ${SCOPE_COLORS[scope.scope] ?? "bg-overlay"}`} />{SCOPE_NAMES[scope.scope] ?? scope.scope} {Math.round(scope.value)}%</span>)}</div></div>
     </section>
-    <div className="grid gap-16 lg:grid-cols-[1.6fr_1fr]">
-      <section className="rounded-10 border border-border bg-raised p-16"><div className="mb-12 flex items-center justify-between"><h2 className="m-0 text-15 font-semibold text-text">Needs attention</h2><span className="text-12 text-text-muted">{Number(data.attention_total)} items</span></div><AttentionList entries={data.attention} total={Number(data.attention_total)} onActivate={(row) => { const route = row.screen === "mcp" ? "mcp-list" : row.screen === "drift" ? "drift" : row.screen === "agents" ? "agents" : "skills"; if (row.row_id) app.setSelection(route, [row.row_id]); app.navigate(route); }} /></section>
+    <div className="grid gap-16 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+      <section className="rounded-10 border border-border bg-raised p-16">
+        <div className="mb-12 flex items-center justify-between"><h2 className="m-0 text-15 font-semibold text-text">Needs attention</h2><span className="text-12 text-text-muted">{Number(data.attention_total)} items</span></div>
+        <AttentionList entries={data.attention} total={Number(data.attention_total)} onActivate={activateAttention} />
+        {attentionBusy && <p role="status" className="m-0 mt-8 text-12 text-text-muted">Comparing the two skill copies…</p>}
+        {attentionError !== null && <p role="alert" className="m-0 mt-8 text-12 text-danger">{attentionError}</p>}
+      </section>
       <section className="rounded-10 border border-border bg-raised p-16"><h2 className="mb-12 mt-0 text-15 font-semibold text-text">Recent changes</h2><ChangesTimeline entries={data.changes} /></section>
     </div>
     {projectId !== null && activeScope === "project" && <ProjectSyncPanel key={projectId} projectId={projectId} />}
+    <Modal
+      open={setupPreview !== null}
+      onOpenChange={(open) => { if (!open && !setupBusy) { setSetupPreview(null); setSetupCard(null); } }}
+      title={`Set up the ${setupCard ? SCOPE_NAMES[setupCard.scope] ?? setupCard.scope : ""} store`}
+      description={setupPreview?.path}
+      footer={<><Button variant="secondary" onClick={() => { setSetupPreview(null); setSetupCard(null); }}>Cancel</Button><Button variant="primary" loading={setupBusy} onClick={() => void confirmSetup()}>Create store</Button></>}
+    >
+      <p className="m-0 text-13 text-text-secondary">These entries will be created. Existing and foreign entries are left untouched.</p>
+      <ul className="mb-0 mt-12 max-h-[260px] list-none overflow-auto p-0" aria-label="Planned store entries">
+        {setupPreview?.files.map((file) => <li key={file.path} className="flex items-center justify-between gap-12 border-t border-border py-6 first:border-0"><span className="font-mono text-11 text-text">{file.path}</span><span className="text-11 text-text-muted">{file.action === "mkdir" ? "folder" : "file"}</span></li>)}
+      </ul>
+      {setupPreview !== null && setupPreview.foreign.length > 0 && <p className="mb-0 mt-12 text-11 text-warning">Left untouched: {setupPreview.foreign.join(", ")}</p>}
+    </Modal>
+    <Modal
+      open={comparisonPreview !== null}
+      onOpenChange={(open) => { if (!open) setComparisonPreview(null); }}
+      title={`Compare ${comparisonPreview?.name ?? "skill"} copies`}
+      description={comparisonPreview === null
+        ? undefined
+        : `${comparisonPreview.view.winner.scope} and ${comparisonPreview.view.shadow.scope} copies ${comparisonPreview.view.identical ? "are identical." : "differ."}`}
+      footer={<Button variant="secondary" onClick={() => setComparisonPreview(null)}>Close</Button>}
+    >
+      {comparisonPreview !== null && (comparisonPreview.view.identical
+        ? <p className="m-0 text-12 text-text-muted">No content differences.</p>
+        : <pre className="m-0 max-h-[420px] overflow-auto whitespace-pre-wrap text-11 text-text-secondary">{comparisonPreview.view.diff}</pre>)}
+    </Modal>
   </div>;
 }
+
+export const scopeScrollPositions = new Map<string, number>();
 
 /** Overview uses only the typed Rust query; errors and loading are never hidden by sample data. */
 export function OverviewScreen() {
   const { scope, activeProject } = useAppSnapshot();
   const activeScope = scope;
-  const resource = useAsyncResource(() => loadOverview(activeScope), { deps: [activeScope], isEmpty: (data) => data.scopes.length === 0 });
-  return <AsyncBoundary state={resource} loadingTitle="Loading overview" loadingBody="Reading scope and change summaries" skeletonRows={3} errorTitle="Overview could not load" minHeight={360} empty={{ title: "No scope data", body: "The overview query returned no scope summaries." }}>
-    {(data) => <OverviewContent data={data} activeScope={activeScope} projectId={activeProject} />}
-  </AsyncBoundary>;
+  const resource = useAsyncResource(() => loadOverview(activeScope), { deps: [activeScope], isEmpty: (data) => !data || !Array.isArray(data.scopes) || data.scopes.length === 0 });
+
+  useEffect(() => {
+    const target = document.getElementById("shell-main");
+    const readScroll = () => target ? target.scrollTop : (typeof window !== "undefined" ? window.scrollY : 0);
+    const applyScroll = (y: number) => {
+      if (target) target.scrollTop = y;
+      else if (typeof window !== "undefined" && typeof window.scrollTo === "function") window.scrollTo(0, y);
+    };
+
+    applyScroll(scopeScrollPositions.get(activeScope) ?? 0);
+
+    const onScroll = () => {
+      scopeScrollPositions.set(activeScope, readScroll());
+    };
+
+    const listenerTarget = target ?? (typeof window !== "undefined" ? window : null);
+    listenerTarget?.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scopeScrollPositions.set(activeScope, readScroll());
+      listenerTarget?.removeEventListener("scroll", onScroll);
+    };
+  }, [activeScope]);
+
+  return (
+    <main aria-label="Overview" className="mx-auto flex w-full max-w-[1240px] flex-col gap-24 p-24">
+      <AsyncBoundary state={resource} loadingTitle="Loading overview" loadingBody="Reading scope and change summaries" skeletonRows={3} errorTitle="Overview could not load" minHeight={360} empty={{ title: "No scope data", body: "The overview query returned no scope summaries." }}>
+        {(data) => <OverviewContent key={activeScope} data={data} activeScope={activeScope} projectId={activeProject} onReload={resource.retry} />}
+      </AsyncBoundary>
+    </main>
+  );
 }

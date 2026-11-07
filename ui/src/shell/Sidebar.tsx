@@ -34,6 +34,8 @@ import {
 export interface SidebarProps {
   /** Section rendered as active; `null` highlights nothing (e.g. `migrate`). */
   readonly activeSection: ShellSectionId | null;
+  /** Active route id; closes menus on route changes and restores focus. */
+  readonly currentRoute?: StateRouteId;
   /** Called with the section's landing route id when a nav item activates. */
   readonly onNavigate: (route: StateRouteId) => void;
   /** Agents detected on this machine, in display order. */
@@ -42,6 +44,8 @@ export interface SidebarProps {
   readonly account?: ShellAccount;
   /** Account menu action forwarded to the shared application dispatcher. */
   readonly onAccountAction?: (action: AccountMenuAction) => void;
+  /** Unavailable account menu actions with reasons. */
+  readonly accountDisabledReasons?: Partial<Record<AccountMenuAction, string>>;
   /** App version line under the logo, for example `v0.1 · local`. */
   readonly versionLabel?: string;
   /** Active theme mode; scope dots use its palette. Defaults to `dark`. */
@@ -72,7 +76,9 @@ export function Sidebar({
   agents = [],
   account,
   versionLabel = "v0.1 · local",
+  currentRoute,
   onAccountAction,
+  accountDisabledReasons,
   themeMode = "dark",
   className,
 }: SidebarProps): JSX.Element {
@@ -116,7 +122,8 @@ export function Sidebar({
   );
 
   return (
-    <div
+    <aside
+      aria-label="Sidebar"
       data-slot="shell-sidebar"
       className={cn(
         "flex h-full w-[200px] shrink-0 flex-col border-r border-border bg-sidebar",
@@ -127,7 +134,7 @@ export function Sidebar({
       <div className="flex items-center gap-8 px-12 pt-12 pb-8">
         <span
           aria-hidden="true"
-          className="flex size-24 shrink-0 items-center justify-center rounded-6 bg-accent text-11 font-bold text-surface"
+          className="flex size-24 shrink-0 items-center justify-center rounded-6 bg-accent-fill text-11 font-bold text-on-accent"
         >
           AT
         </span>
@@ -160,7 +167,7 @@ export function Sidebar({
                   data-slot="shell-nav-item"
                   data-section={section}
                   aria-current={active ? "page" : undefined}
-                  tabIndex={active || (activeSection === null && index === 0) ? 0 : -1}
+                  tabIndex={0}
                   onClick={() => onNavigate(SHELL_SECTION_ROUTE[section])}
                   className={cn(
                     NAV_ITEM_BASE,
@@ -217,9 +224,15 @@ export function Sidebar({
       </nav>
 
       <div className="px-8 pb-12 pt-8">
-        <AccountMenu version={versionLabel} account={account} onAction={onAccountAction} />
+        <AccountMenu
+          version={versionLabel}
+          account={account}
+          onAction={onAccountAction}
+          disabledReasons={accountDisabledReasons}
+          routeKey={currentRoute}
+        />
       </div>
-    </div>
+    </aside>
   );
 }
 

@@ -216,6 +216,11 @@ impl From<RemoteError> for BackupError {
         match error {
             RemoteError::AuthRejected => Self::AuthRejected,
             RemoteError::Offline => Self::Offline,
+            RemoteError::Denied(denied)
+                if denied.reason == at_model::network::DenialReason::Offline =>
+            {
+                Self::Offline
+            }
             RemoteError::NonFastForward => Self::Conflict,
             other => Self::Git(other),
         }
@@ -359,6 +364,11 @@ pub fn push_backup(request: &mut BackupRequest<'_>) -> Result<BackupOutcome, Bac
             let kind = match &error {
                 RemoteError::AuthRejected => "auth_rejected",
                 RemoteError::Offline => "offline",
+                RemoteError::Denied(denied)
+                    if denied.reason == at_model::network::DenialReason::Offline =>
+                {
+                    "offline"
+                }
                 _ => "git",
             };
             let _ = persist_error(request.db, &RemoteBackupStatus::Error, Some(kind));
@@ -404,6 +414,11 @@ pub fn push_backup(request: &mut BackupRequest<'_>) -> Result<BackupOutcome, Bac
                 let kind = match &error {
                     RemoteError::AuthRejected => "auth_rejected",
                     RemoteError::Offline => "offline",
+                    RemoteError::Denied(denied)
+                        if denied.reason == at_model::network::DenialReason::Offline =>
+                    {
+                        "offline"
+                    }
                     _ => "git",
                 };
                 let _ = persist_error(request.db, &RemoteBackupStatus::Error, Some(kind));
@@ -1627,6 +1642,41 @@ mod sync_tests {
     use at_secrets::{MemoryStore, save_token};
     use tempfile::TempDir;
 
+    /// Every file the remote snapshot carries: skills, rules, the MCP document and the manifest.
+    fn payload_hashes(store: &StoreLayout) -> std::collections::BTreeMap<String, String> {
+        let mut hashes = std::collections::BTreeMap::new();
+        for root in [store.skills_dir(), store.rules_dir()] {
+            let mut stack = vec![root];
+            while let Some(directory) = stack.pop() {
+                let Ok(entries) = fs::read_dir(&directory) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else {
+                        let relative = path.strip_prefix(store.root()).expect("inside the store");
+                        hashes.insert(
+                            relative.display().to_string(),
+                            at_fs::sha256_hex(&fs::read(&path).expect("read payload")),
+                        );
+                    }
+                }
+            }
+        }
+        for path in [store.mcp_file(), store.manifest_path()] {
+            if path.is_file() {
+                let relative = path.strip_prefix(store.root()).expect("inside the store");
+                hashes.insert(
+                    relative.display().to_string(),
+                    at_fs::sha256_hex(&fs::read(&path).expect("read payload")),
+                );
+            }
+        }
+        hashes
+    }
+
     #[test]
     fn divergent_remote_edit_is_preserved_and_second_sync_is_noop() {
         let sandbox = TempDir::new().expect("sandbox");
@@ -1648,6 +1698,8 @@ mod sync_tests {
         let skill = store.skills_dir().join("sample").join("SKILL.md");
         fs::create_dir_all(skill.parent().expect("skill parent")).expect("skill directory");
         fs::write(&skill, b"base\n").expect("seed skill");
+        let rule = store.rules_dir().join("AGENTS.md");
+        fs::write(&rule, b"rule fixture\n").expect("seed rule");
         let locally_modified_deleted = store.skills_dir().join("modified-deleted/SKILL.md");
         fs::create_dir_all(
             locally_modified_deleted
@@ -1676,7 +1728,7 @@ mod sync_tests {
         let remote = ProcessRemoteGitRunner::default();
         let redactor = Redactor::new();
         let now = OffsetDateTime::now_utc();
-        {
+        let (first_commit, first_push_at) = {
             let mut request = BackupRequest {
                 store: &store,
                 db: &db,
@@ -1690,7 +1742,87 @@ mod sync_tests {
             };
             let first = push_backup(&mut request).expect("initial backup");
             assert!(first.pushed);
-        }
+            let first_commit = first.commit.expect("first backup commit");
+            let first_state = remote_backup_state(request.db.connection()).expect("first state");
+            let first_push_at = first_state.last_push_at.expect("first push time");
+
+            let repeated = push_backup(&mut request).expect("repeat unchanged backup");
+            assert!(!repeated.committed);
+            assert!(!repeated.pushed);
+            assert_eq!(repeated.commit, None);
+            let unchanged = remote_backup_state(request.db.connection()).expect("no-op state");
+            assert_eq!(
+                unchanged.last_commit.as_deref(),
+                Some(first_commit.as_str())
+            );
+            assert_eq!(
+                unchanged.last_push_at.as_deref(),
+                Some(first_push_at.as_str())
+            );
+            (first_commit, first_push_at)
+        };
+
+        let offline_policy = policy.clone().with_offline(true);
+        let mut offline_log = NetworkEventLog::default();
+        let offline_error = {
+            let mut request = BackupRequest {
+                store: &store,
+                db: &db,
+                secrets: &secrets,
+                policy: &offline_policy,
+                log: &mut offline_log,
+                remote_runner: &remote,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            push_backup(&mut request).expect_err("offline policy refuses backup")
+        };
+        assert!(matches!(offline_error, BackupError::Offline));
+        assert!(offline_error.is_offline());
+        assert!(!offline_error.to_string().contains(fake_token));
+        assert!(
+            offline_log.is_empty(),
+            "offline policy must refuse before egress"
+        );
+        let offline_state = remote_backup_state(db.connection()).expect("offline state");
+        assert_eq!(
+            offline_state.status,
+            RemoteBackupStatus::Error,
+            "offline failures remain visible"
+        );
+        assert_eq!(offline_state.error_kind.as_deref(), Some("offline"));
+        assert_eq!(
+            offline_state.last_commit.as_deref(),
+            Some(first_commit.as_str())
+        );
+        assert_eq!(
+            offline_state.last_push_at.as_deref(),
+            Some(first_push_at.as_str())
+        );
+        let secret_settings: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE instr(value_json, ?1) > 0",
+                [fake_token],
+                |row| row.get(0),
+            )
+            .expect("inspect settings for secret leakage");
+        let secret_operations: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM operations WHERE instr(COALESCE(summary, ''), ?1) > 0 OR instr(COALESCE(error_kind, ''), ?1) > 0",
+                [fake_token],
+                |row| row.get(0),
+            )
+            .expect("inspect operation log for secret leakage");
+        let git_config = fs::read_to_string(bare.join("config")).expect("bare repository config");
+        let manifest = fs::read_to_string(store.manifest_path()).expect("store manifest");
+        assert_eq!(secret_settings, 0);
+        assert_eq!(secret_operations, 0);
+        assert!(!git_config.contains(fake_token));
+        assert!(!manifest.contains(fake_token));
+        assert!(!format!("{log:?}").contains(fake_token));
 
         let remote_work = sandbox.path().join("remote-work");
         let auth = GitAuth::none();
@@ -1707,6 +1839,23 @@ mod sync_tests {
                 .clone_remote(&remote_url, &remote_work, &auth)
                 .expect("clone for second device");
             let store_id = store.read_header().expect("header").store_id.to_string();
+            let snapshot_root = remote_work.join(STORES_DIR).join(&store_id);
+            assert_eq!(
+                fs::read(snapshot_root.join("skills/sample/SKILL.md")).expect("snapshot skill"),
+                b"base\n"
+            );
+            assert_eq!(
+                fs::read(snapshot_root.join("rules/AGENTS.md")).expect("snapshot rule"),
+                b"rule fixture\n"
+            );
+            assert_eq!(
+                fs::read(snapshot_root.join(MCP_FILE)).expect("snapshot MCP config"),
+                fs::read(store.mcp_file()).expect("local MCP config")
+            );
+            assert_eq!(
+                fs::read(snapshot_root.join(MANIFEST_FILE)).expect("snapshot store manifest"),
+                fs::read(store.manifest_path()).expect("local store manifest")
+            );
             let remote_skill = remote_work
                 .join(STORES_DIR)
                 .join(&store_id)
@@ -1772,6 +1921,10 @@ mod sync_tests {
             assert_eq!(fs::read(&skill).expect("local copy"), b"local edit\n");
             assert_eq!(remote_conflict_count(&store).expect("conflict count"), 1);
             let conflict_root = store.state_dir().join("remote-conflicts");
+            assert!(
+                conflict_root.join("laptop").is_dir(),
+                "the conflict folder is named for this device"
+            );
             let preserved = fs::read_dir(conflict_root)
                 .expect("device conflict folder")
                 .flat_map(|entry| {
@@ -1834,6 +1987,103 @@ mod sync_tests {
         ));
         sync_from_remote(&mut request, true).expect("confirmed deletion");
         assert!(!skill.exists());
+
+        // A genuinely separate second device: its own store, its own device name, the same
+        // remote. Both snapshots must coexist and the first device's local state must not move.
+        let second_store = StoreLayout::new(at_model::Scope::User, sandbox.path().join("second"));
+        second_store.init().expect("initialize second store");
+        let second_skill = second_store.skills_dir().join("beta").join("SKILL.md");
+        fs::create_dir_all(second_skill.parent().expect("second skill parent"))
+            .expect("second skill directory");
+        fs::write(&second_skill, b"second device\n").expect("second device skill");
+        let mut second_db = at_db::Database::open_in_memory().expect("second database");
+        set_device_name(&mut second_db, Some("desktop")).expect("second device name");
+        save_remote_backup_state(
+            second_db.connection(),
+            &RemoteBackupState {
+                repo_url: Some(remote_url.clone()),
+                branch: Some("main".to_owned()),
+                ..RemoteBackupState::default()
+            },
+        )
+        .expect("second remote state");
+        let first_state_before = remote_backup_state(db.connection()).expect("first state");
+        let second_outcome = {
+            let mut second_request = BackupRequest {
+                store: &second_store,
+                db: &second_db,
+                secrets: &secrets,
+                policy: &policy,
+                log: &mut log,
+                remote_runner: &remote,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            push_backup(&mut second_request).expect("second device backup")
+        };
+        assert!(
+            second_outcome.pushed,
+            "the second device pushes its own store"
+        );
+        assert_eq!(
+            remote_backup_state(db.connection())
+                .expect("first state after second push")
+                .last_commit,
+            first_state_before.last_commit,
+            "one device's push never rewrites another device's recorded commit"
+        );
+        let coexist_work = sandbox.path().join("coexist-work");
+        {
+            let mut context = RemoteContext {
+                policy: &policy,
+                log: &mut log,
+                runner: &remote,
+                local: &local,
+                redact: &|text| text.to_owned(),
+                now,
+            };
+            context
+                .clone_remote(&remote_url, &coexist_work, &GitAuth::none())
+                .expect("clone for coexistence check");
+        }
+        let first_store_id = store
+            .read_header()
+            .expect("first header")
+            .store_id
+            .to_string();
+        let second_store_id = second_store
+            .read_header()
+            .expect("second header")
+            .store_id
+            .to_string();
+        assert_ne!(first_store_id, second_store_id);
+        for id in [&first_store_id, &second_store_id] {
+            assert!(
+                coexist_work.join(STORES_DIR).join(id).is_dir(),
+                "both device snapshots coexist under stores/{id}"
+            );
+        }
+        assert!(
+            !coexist_work
+                .join(STORES_DIR)
+                .join(&first_store_id)
+                .join("skills/beta/SKILL.md")
+                .is_file(),
+            "the second device's items stay in its own snapshot"
+        );
+        assert!(
+            coexist_work
+                .join(STORES_DIR)
+                .join(&second_store_id)
+                .join("skills/beta/SKILL.md")
+                .is_file(),
+            "the second device's items are in its snapshot"
+        );
+        assert!(
+            store.rules_dir().join("AGENTS.md").is_file(),
+            "the first device's own files are untouched by the second device"
+        );
     }
 
     #[test]
@@ -1934,12 +2184,24 @@ mod sync_tests {
             "---\nname: Echo\ndescription: fixture\n---\nBody\n",
         )
         .expect("skill content");
+        let second_skill = source.skills_dir().join("second/SKILL.md");
+        fs::create_dir_all(second_skill.parent().expect("skill parent")).expect("skill dir");
+        fs::write(
+            &second_skill,
+            "---\nname: Second\ndescription: fixture\n---\nOther body\n",
+        )
+        .expect("second skill content");
+        let rule_file = source.rules_dir().join("AGENTS.md");
+        fs::write(&rule_file, "# Rules\n\nRestore every item.\n").expect("rule content");
+        let mcp_file = source.mcp_file();
+        fs::write(&mcp_file, "{\"servers\":{}}\n").expect("mcp content");
         let loaded = StoreManifest::load(&source).expect("load source manifest");
         let mut manifest = loaded.manifest;
         let slug = crate::layout::Slug::parse("echo").expect("slug");
+        let echo_id = at_model::ItemId::new();
         manifest
             .insert_item(crate::manifest::ManifestItem::new(
-                at_model::ItemId::new(),
+                echo_id,
                 at_model::ItemKind::Skill,
                 slug,
                 crate::manifest::StorePath::parse("skills/echo").expect("item path"),
@@ -1947,6 +2209,30 @@ mod sync_tests {
                     .expect("content hash"),
             ))
             .expect("manifest item");
+        let second_slug = crate::layout::Slug::parse("second").expect("slug");
+        manifest
+            .insert_item(crate::manifest::ManifestItem::new(
+                at_model::ItemId::new(),
+                at_model::ItemKind::Skill,
+                second_slug,
+                crate::manifest::StorePath::parse("skills/second").expect("item path"),
+                crate::manifest::hash_skill_folder(&source.skills_dir().join("second"))
+                    .expect("content hash"),
+            ))
+            .expect("second manifest item");
+        let rule_hash = crate::manifest::ContentHash::parse(&at_fs::sha256_hex(
+            &fs::read(&rule_file).expect("rule bytes"),
+        ))
+        .expect("rule hash");
+        manifest
+            .insert_item(crate::manifest::ManifestItem::new(
+                at_model::ItemId::new(),
+                at_model::ItemKind::Rule,
+                crate::layout::Slug::parse("agents").expect("slug"),
+                crate::manifest::StorePath::parse("rules/AGENTS.md").expect("item path"),
+                rule_hash,
+            ))
+            .expect("rule manifest item");
         manifest
             .save(
                 &source,
@@ -2028,7 +2314,17 @@ mod sync_tests {
             redactor: &redactor,
             now,
         };
+        let source_hashes = payload_hashes(&source);
+        assert!(
+            source_hashes.len() >= 5,
+            "the fixture carries several files: {source_hashes:?}"
+        );
         restore_from_remote(&mut request, &commit, false).expect("restore snapshot");
+        assert_eq!(
+            payload_hashes(&destination),
+            source_hashes,
+            "restore reproduces every item hash, not just one skill"
+        );
         assert_eq!(
             fs::read(destination.skills_dir().join("echo/SKILL.md")).expect("restored skill"),
             fs::read(skill_file).expect("source skill")
@@ -2091,13 +2387,235 @@ mod sync_tests {
             redactor: &redactor,
             now,
         };
-        assert!(matches!(
-            restore_from_remote(&mut corrupt_request, &corrupt_commit, false),
-            Err(BackupError::CorruptSnapshot { .. })
-        ));
+        let corrupt_before = payload_hashes(&corrupt_destination);
+        match restore_from_remote(&mut corrupt_request, &corrupt_commit, false) {
+            Err(BackupError::CorruptSnapshot { item }) => {
+                assert_eq!(
+                    item,
+                    echo_id.to_string(),
+                    "the corrupt snapshot names the failing skill"
+                );
+            }
+            other => panic!("expected CorruptSnapshot, got {other:?}"),
+        }
         assert_eq!(
             fs::read(corrupt_destination.manifest_path()).expect("still empty"),
             corrupt_empty
         );
+        assert_eq!(
+            payload_hashes(&corrupt_destination),
+            corrupt_before,
+            "a corrupt snapshot aborts before any write"
+        );
+    }
+
+    /// Shell script used as the git binary: it drops the first N clone attempts on the loopback
+    /// remote, counting every attempt in a file, then delegates to the real git.
+    const FLAKY_GIT_SCRIPT: &str = r#"#!/bin/sh
+counter="$AGENTUNA_FIXTURE_COUNTER"
+fail_clones="${AGENTUNA_FIXTURE_FAIL_CLONES:-0}"
+if [ "$1" = "clone" ]; then
+  attempts=0
+  if [ -f "$counter" ]; then attempts=$(cat "$counter"); fi
+  attempts=$((attempts + 1))
+  printf '%s' "$attempts" > "$counter"
+  if [ "$attempts" -le "$fail_clones" ]; then
+    printf 'fatal: the remote end hung up unexpectedly\nfatal: early EOF\n' >&2
+    exit 128
+  fi
+fi
+exec git "$@"
+"#;
+
+    /// A runner that fails the first `fail_clones` clones and records every attempt.
+    #[cfg(unix)]
+    fn flaky_remote_runner(
+        sandbox: &TempDir,
+        fail_clones: &str,
+    ) -> (PathBuf, ProcessRemoteGitRunner) {
+        use std::os::unix::fs::PermissionsExt;
+        let counter = sandbox.path().join(format!("clone-attempts-{fail_clones}"));
+        let script = sandbox.path().join(format!("flaky-git-{fail_clones}.sh"));
+        fs::write(&script, FLAKY_GIT_SCRIPT).expect("write flaky git fixture");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+            .expect("executable fixture");
+        let runner = ProcessRemoteGitRunner::new(script, std::time::Duration::from_secs(30))
+            .with_env("AGENTUNA_FIXTURE_COUNTER", &counter)
+            .with_env("AGENTUNA_FIXTURE_FAIL_CLONES", fail_clones)
+            .with_env("HOME", sandbox.path().join("git-home"))
+            .with_env("GIT_CONFIG_NOSYSTEM", "1")
+            .with_env("GIT_CONFIG_GLOBAL", "/dev/null");
+        (counter, runner)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_connection_retry_is_bounded_and_leaves_the_store_unchanged() {
+        let sandbox = TempDir::new().expect("sandbox");
+        let bare = sandbox.path().join("flaky-remote.git");
+        fs::create_dir_all(&bare).expect("remote folder");
+        let local = ProcessLocalGitRunner::default();
+        assert!(
+            local
+                .run(&LocalGitCall {
+                    repo: &bare,
+                    args: &["init", "--bare", "-b", "main"],
+                    stdin: None,
+                    literal_pathspecs: true,
+                })
+                .expect("initialize bare remote")
+                .success
+        );
+        let remote_url = format!("file://localhost{}", bare.display());
+        let source = StoreLayout::new(at_model::Scope::User, sandbox.path().join("source"));
+        source.init().expect("source store");
+        let skill_file = source.skills_dir().join("echo/SKILL.md");
+        fs::create_dir_all(skill_file.parent().expect("skill parent")).expect("skill dir");
+        fs::write(
+            &skill_file,
+            "---\nname: Echo\ndescription: fixture\n---\nBody\n",
+        )
+        .expect("skill content");
+        let loaded = StoreManifest::load(&source).expect("source manifest");
+        let mut manifest = loaded.manifest;
+        manifest
+            .insert_item(crate::manifest::ManifestItem::new(
+                at_model::ItemId::new(),
+                at_model::ItemKind::Skill,
+                crate::layout::Slug::parse("echo").expect("slug"),
+                crate::manifest::StorePath::parse("skills/echo").expect("item path"),
+                crate::manifest::hash_skill_folder(&source.skills_dir().join("echo"))
+                    .expect("content hash"),
+            ))
+            .expect("manifest item");
+        manifest
+            .save(
+                &source,
+                at_fs::ExpectedState::Hash(loaded.hash.to_string()),
+                at_fs::BackupPolicy::None,
+            )
+            .expect("save manifest");
+
+        let mut database = at_db::Database::open_in_memory().expect("database");
+        set_device_name(&mut database, Some("fixture")).expect("device name");
+        save_remote_backup_state(
+            database.connection(),
+            &RemoteBackupState {
+                repo_url: Some(remote_url.clone()),
+                branch: Some("main".to_owned()),
+                ..RemoteBackupState::default()
+            },
+        )
+        .expect("remote config");
+        let secrets = MemoryStore::new();
+        save_token(
+            &secrets,
+            concat!("ghp_", "0123456789abcdef", "0123456789abcdef"),
+        )
+        .expect("fixture token");
+        let policy = NetworkPolicy::default();
+        let mut log = NetworkEventLog::default();
+        let remote = ProcessRemoteGitRunner::default();
+        let redactor = Redactor::new();
+        let now = OffsetDateTime::now_utc();
+        let commit = {
+            let mut request = BackupRequest {
+                store: &source,
+                db: &database,
+                secrets: &secrets,
+                policy: &policy,
+                log: &mut log,
+                remote_runner: &remote,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            push_backup(&mut request)
+                .expect("push fixture backup")
+                .commit
+                .expect("backup commit")
+        };
+        let source_hashes = payload_hashes(&source);
+
+        fs::create_dir_all(sandbox.path().join("git-home")).expect("git home");
+
+        // First attempt drops; the bounded retry completes the download.
+        let (counter, flaky) = flaky_remote_runner(&sandbox, "1");
+        let destination = StoreLayout::new(at_model::Scope::User, sandbox.path().join("retry"));
+        destination.init().expect("fresh store");
+        {
+            let mut request = BackupRequest {
+                store: &destination,
+                db: &database,
+                secrets: &secrets,
+                policy: &policy,
+                log: &mut log,
+                remote_runner: &flaky,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            restore_from_remote(&mut request, &commit, false)
+                .expect("the retry finishes the download");
+        }
+        assert_eq!(
+            fs::read(&counter).expect("clone attempts"),
+            b"2".to_vec(),
+            "exactly one automatic retry"
+        );
+        assert_eq!(payload_hashes(&destination), source_hashes);
+
+        // A persistent drop stops after the bounded attempts and leaves the store untouched.
+        let (failing_counter, failing) = flaky_remote_runner(&sandbox, "99");
+        let destination_b = StoreLayout::new(at_model::Scope::User, sandbox.path().join("aborted"));
+        destination_b.init().expect("fresh store");
+        let before = payload_hashes(&destination_b);
+        let error = {
+            let mut request = BackupRequest {
+                store: &destination_b,
+                db: &database,
+                secrets: &secrets,
+                policy: &policy,
+                log: &mut log,
+                remote_runner: &failing,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            restore_from_remote(&mut request, &commit, false).expect_err("persistent drops abort")
+        };
+        assert!(matches!(error, BackupError::Offline));
+        assert_eq!(
+            fs::read(&failing_counter).expect("clone attempts"),
+            b"2".to_vec(),
+            "retries stay bounded"
+        );
+        assert_eq!(
+            payload_hashes(&destination_b),
+            before,
+            "a dropped download writes nothing to the store"
+        );
+
+        // The single explicit retry the error offers succeeds once the connection is back.
+        let (healed_counter, healed) = flaky_remote_runner(&sandbox, "0");
+        {
+            let mut request = BackupRequest {
+                store: &destination_b,
+                db: &database,
+                secrets: &secrets,
+                policy: &policy,
+                log: &mut log,
+                remote_runner: &healed,
+                local_runner: &local,
+                redactor: &redactor,
+                now,
+            };
+            restore_from_remote(&mut request, &commit, false).expect("the explicit retry succeeds");
+        }
+        assert_eq!(
+            fs::read(&healed_counter).expect("clone attempts"),
+            b"1".to_vec()
+        );
+        assert_eq!(payload_hashes(&destination_b), source_hashes);
     }
 }

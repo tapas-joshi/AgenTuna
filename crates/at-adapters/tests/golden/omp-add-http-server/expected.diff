@@ -1,0 +1,14 @@
+--- fixture
++++ output
+@@ -26,6 +26,11 @@
+         "type": "apikey",
+         "credentialId": "cred_123"
+       }
++    },
++    "added": {
++      "type": "http",
++      "url": "https://mcp.example.test/second",
++      "enabled": true
+     }
+   },
+   "disabledServers": [

@@ -59,3 +59,11 @@ describe("AddMenu", () => {
     expect(onAction).toHaveBeenCalledWith({ id: "add.rule", scope: "project" });
     expect(screen.queryByRole("menu")).toBeNull();
   });
+  it("disables only actions that need a missing agent and exposes the reason", async () => {
+    render(<AddMenu scope="user" disabledReasons={{ "add.skill": "Install an agent first", "add.server": "Install an agent first" }} onAction={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByRole("menuitem", { name: /New skill/ }).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("menuitem", { name: /Add MCP server/ }).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("menuitem", { name: /New rule file/ }).getAttribute("aria-disabled")).not.toBe("true");
+    expect(screen.getAllByText("Unavailable: Install an agent first")).toHaveLength(2);
+  });

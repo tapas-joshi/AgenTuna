@@ -173,3 +173,55 @@ fn list_skills_over_500_seeded_skills_returns_within_the_ci_bound() {
         "list_skills over 500 skills took {elapsed:?}"
     );
 }
+
+#[test]
+fn ignored_upstream_commit_hides_the_update_badge_until_a_newer_one_is_checked() {
+    let mut db = common::open_with(common::ALL_VERSIONS);
+    let id = add_skill(&db, Scope::User, "code-review", "Code Review");
+    let mut spec = at_db::sources::SourceSpec::new(&id, at_db::sources::SourceKind::Git);
+    spec.commit_sha = Some("installed-sha");
+    let source_id = at_db::sources::upsert_source(db.connection_mut(), &spec).expect("source row");
+    at_db::sources::record_update_check(
+        db.connection(),
+        &source_id,
+        &at_db::sources::CheckOutcome {
+            remote_sha: Some("checked-sha"),
+            update_available: true,
+            ..Default::default()
+        },
+    )
+    .expect("record check");
+
+    let badge = |db: &Database| {
+        list_skills(db.connection(), &SkillFilter::default())
+            .expect("query skills")
+            .into_iter()
+            .find(|row| row.item_id == Some(id))
+            .expect("skill row")
+            .update_available
+    };
+    assert!(badge(&db));
+    at_db::sources::set_ignored_sha(db.connection(), &source_id, Some("checked-sha"))
+        .expect("ignore checked sha");
+    assert!(
+        !badge(&db),
+        "the ignored commit must not advertise an update"
+    );
+    assert!(
+        at_db::sources::update_candidates(db.connection())
+            .expect("candidates")
+            .is_empty()
+    );
+
+    at_db::sources::record_update_check(
+        db.connection(),
+        &source_id,
+        &at_db::sources::CheckOutcome {
+            remote_sha: Some("newer-sha"),
+            update_available: true,
+            ..Default::default()
+        },
+    )
+    .expect("record newer check");
+    assert!(badge(&db), "a newer remote sha must show the badge again");
+}

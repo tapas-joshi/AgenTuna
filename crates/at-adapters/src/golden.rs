@@ -245,6 +245,7 @@ impl Suite {
             .golden
             .join(case.id)
             .join(format!("expected.{}", case.format.extension()));
+        let expected_diff = self.golden.join(case.id).join("expected.diff");
         let fail = |detail: String| CaseFailure {
             id: case.id,
             fixture: fixture.clone(),
@@ -282,6 +283,11 @@ impl Suite {
             }
             fs::write(&expected, actual.as_bytes())
                 .map_err(|error| fail(format!("cannot write expected file: {error}")))?;
+            if !case.unchanged {
+                let diff = unified_diff(&source, &actual, "fixture", "output");
+                fs::write(&expected_diff, diff.as_bytes())
+                    .map_err(|error| fail(format!("cannot write expected diff: {error}")))?;
+            }
             return Ok(true);
         }
 
@@ -293,15 +299,28 @@ impl Suite {
                 )));
             }
         };
-        if actual == wanted {
-            Ok(false)
-        } else {
-            Err(fail(format!(
+        if actual != wanted {
+            return Err(fail(format!(
                 "{}\n{}",
                 length_delta(&wanted, &actual),
                 unified_diff(&wanted, &actual, "expected", "actual")
-            )))
+            )));
         }
+        if !case.unchanged {
+            let wanted_diff = fs::read_to_string(&expected_diff).map_err(|error| {
+                fail(format!(
+                    "cannot read expected unified diff ({error}); run `{UPDATE_ENV}=1 cargo test -p at-adapters --test golden`"
+                ))
+            })?;
+            let actual_diff = unified_diff(&source, &actual, "fixture", "output");
+            if actual_diff != wanted_diff {
+                return Err(fail(format!(
+                    "unified diff does not match {}\n--- expected diff ---\n{wanted_diff}--- actual diff ---\n{actual_diff}",
+                    expected_diff.display()
+                )));
+            }
+        }
+        Ok(false)
     }
 }
 

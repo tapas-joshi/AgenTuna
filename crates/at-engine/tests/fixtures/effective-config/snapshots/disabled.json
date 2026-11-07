@@ -1,0 +1,74 @@
+{
+  "effective": {
+    "diagnostics": [],
+    "disabled_here": [
+      {
+        "agent": "claude_code",
+        "item_id": "itm_018f47aa-7a3d-7000-8000-000000000006",
+        "kind": "skill",
+        "logical_id": {
+          "key": {
+            "Name": "formatter"
+          },
+          "kind": "skill"
+        },
+        "name": "formatter",
+        "reason": null,
+        "scope": "project",
+        "tombstone_path": null
+      }
+    ],
+    "items": []
+  },
+  "trace": {
+    "active_scope": "project",
+    "agent": "claude_code",
+    "item_id": "itm_018f47aa-7a3d-7000-8000-000000000006",
+    "steps": [
+      {
+        "location": null,
+        "reason": "No definition at this scope",
+        "scope": "global",
+        "status": "Absent"
+      },
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 2,
+          "path": "<user>/skills/formatter/SKILL.md",
+          "rendering_path": "<agent>/skills/formatter/SKILL.md"
+        },
+        "reason": "Defined here but not selected",
+        "scope": "user",
+        "status": "Defined"
+      },
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 4,
+          "path": "<project>/store.json",
+          "rendering_path": "<agent>/settings.json"
+        },
+        "reason": "Disabled by a tombstone at this scope",
+        "scope": "project",
+        "status": "Disabled"
+      },
+      {
+        "location": null,
+        "reason": "No definition at this scope",
+        "scope": "local",
+        "status": "Absent"
+      }
+    ],
+    "verdict": {
+      "decisive_step": 2,
+      "on": false
+    }
+  }
+}

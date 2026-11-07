@@ -10,7 +10,7 @@ export type ButtonSize = "sm" | "md" | "lg";
 
 const VARIANT_CLASSES: Readonly<Record<ButtonVariant, string>> = {
   primary:
-    "border border-accent bg-accent text-surface hover:border-accent/90 hover:bg-accent/90 active:bg-accent/80",
+    "border border-accent-fill bg-accent-fill text-on-accent hover:border-accent-fill/90 hover:bg-accent-fill/90 active:bg-accent-fill/80",
   secondary: "border border-border bg-raised text-text hover:bg-overlay active:bg-overlay",
   ghost:
     "border border-transparent bg-transparent text-text-secondary hover:bg-overlay hover:text-text active:bg-raised",

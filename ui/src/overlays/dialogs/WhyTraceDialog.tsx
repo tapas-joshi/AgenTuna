@@ -288,9 +288,9 @@ export function WhyTraceDialog({
 
             {trace.load_diagnostics.length > 0 && (
               <section aria-label="Load diagnostics" className="rounded-8 border border-border p-12">
-                <h4 className="m-0 text-12 font-semibold text-text-secondary">
+                <h3 className="m-0 text-12 font-semibold text-text-secondary">
                   Load diagnostics
-                </h4>
+                </h3>
                 <ul className="m-0 mt-6 grid list-none gap-4 p-0 text-11 text-text-muted">
                   {trace.load_diagnostics.map((item, index) => (
                     <li key={`${item.scope}:${item.path}:${index}`}>

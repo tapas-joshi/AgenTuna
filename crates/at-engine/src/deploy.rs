@@ -46,6 +46,31 @@ pub enum DeployWarning {
     },
 }
 
+impl std::fmt::Display for DeployWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SymlinkUnsupported { path } => write!(
+                formatter,
+                "{} does not support symlinks; AgenTuna will copy the skill instead.",
+                path.display()
+            ),
+            Self::SharedRoot { path, agents } => {
+                let names = agents
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    formatter,
+                    "{} also reads {}; this change affects every agent using that folder.",
+                    names,
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
 /// One concrete deployment result, including policy metadata for the preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentPlan {
@@ -239,6 +264,62 @@ mod tests {
             copy.change_set.unwrap().ops[0],
             FileOp::Copy { .. }
         ));
+    }
+
+    /// TA-014 AC3: after the stored setting switches to Copy, the next plan emits copy ops
+    /// and no symlink ops. The mode comes from the persisted settings, as the app does.
+    #[test]
+    fn switching_the_stored_link_mode_to_copy_plans_copy_ops() {
+        let mut database = at_db::Database::open_in_memory().expect("database initializes");
+        let agent = AgentId::Codex;
+        let settings = at_db::settings::load(database.connection()).expect("settings load");
+        assert_eq!(
+            settings.link_mode(&agent),
+            LinkMode::Link,
+            "a known agent defaults to link"
+        );
+        let linked = plan(request(settings.link_mode(&agent), true)).expect("link plan");
+        assert!(matches!(
+            linked.change_set.expect("link ops").ops[0],
+            FileOp::Symlink { .. }
+        ));
+
+        at_db::settings::set_link_mode(
+            database.connection_mut(),
+            &agent,
+            LinkMode::Copy,
+            at_db::ops::OperationActor::Ui,
+        )
+        .expect("setting persists");
+
+        let settings = at_db::settings::load(database.connection()).expect("settings reload");
+        assert_eq!(
+            settings.link_mode(&agent),
+            LinkMode::Copy,
+            "the switch survives a reload"
+        );
+        let planned = plan(request(settings.link_mode(&agent), true)).expect("copy plan");
+        assert_eq!(planned.mode_used, Some(LinkMode::Copy));
+        let change_set = planned.change_set.expect("copy plan has ops");
+        assert!(
+            matches!(change_set.ops[0], FileOp::Copy { .. }),
+            "the planned op is a copy: {:?}",
+            change_set.ops
+        );
+        assert!(
+            !change_set
+                .ops
+                .iter()
+                .any(|op| matches!(op, FileOp::Symlink { .. })),
+            "no symlink op is planned: {:?}",
+            change_set.ops
+        );
+
+        // The other half of AC1: a custom agent's creation-time default is copy. The row is
+        // written when the agent is created, so the settings reader itself only needs the
+        // stored value.
+        let custom = AgentId::custom("my-tool").expect("valid custom id");
+        assert_eq!(crate::link_mode::default_link_mode(&custom), LinkMode::Copy);
     }
 
     #[test]

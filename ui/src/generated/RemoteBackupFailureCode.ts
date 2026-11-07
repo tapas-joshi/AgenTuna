@@ -3,4 +3,4 @@
 /**
  * Stable failure class for remote-backup commands and job events.
  */
-export type RemoteBackupFailureCode = "repository_not_configured" | "token_missing" | "token_rejected" | "offline" | "network_denied" | "remote_conflict" | "confirm_deletions" | "non_empty_target" | "stale_review" | "invalid_store" | "action_failed";
+export type RemoteBackupFailureCode = "repository_not_configured" | "token_missing" | "token_rejected" | "repo_scope_missing" | "repo_name_invalid" | "offline" | "network_denied" | "remote_conflict" | "confirm_deletions" | "non_empty_target" | "stale_review" | "invalid_store" | "action_failed";

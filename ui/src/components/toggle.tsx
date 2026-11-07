@@ -21,7 +21,7 @@ const THUMB_CLASSES: Readonly<Record<ToggleSize, string>> = {
 
 const BASE_CLASSES =
   "relative shrink-0 cursor-pointer rounded-full border border-transparent bg-border transition-colors " +
-  "data-[state=checked]:bg-accent " +
+  "data-[state=checked]:bg-accent-fill " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 

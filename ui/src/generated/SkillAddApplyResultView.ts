@@ -6,9 +6,9 @@ import type { SkillAddDeploymentView } from "./SkillAddDeploymentView";
  */
 export type SkillAddApplyResultView = { 
 /**
- * Display name confirmed by the successful apply result.
+ * Display names confirmed by the successful apply result.
  */
-skill_name: string, 
+skill_names: Array<string>, 
 /**
  * Operation journal identity.
  */

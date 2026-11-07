@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use at_db::projects::{ProjectRegistry, ProjectRegistryError};
 use at_store::project_scan::{
-    CancelFlag, DiscoveredProject, PROJECT_MARKERS, ProjectDiff, ProjectMarker, ProjectRegistry,
-    SKIPPED_DIR_NAMES, ScanApplyError, ScanConfig, ScanObserver, ScanProgress, ScanWarningKind,
-    apply_diff, scan, scan_with, spawn_scan,
+    CancelFlag, PROJECT_MARKERS, ProjectDiff, ProjectMarker, SKIPPED_DIR_NAMES, ScanConfig,
+    ScanObserver, ScanProgress, ScanWarningKind, apply_diff, scan, scan_with, spawn_scan,
 };
 use tempfile::TempDir;
 
@@ -431,25 +431,29 @@ impl FakeRegistry {
 }
 
 impl ProjectRegistry for FakeRegistry {
-    fn insert_discovered(&mut self, project: &DiscoveredProject) -> Result<(), ScanApplyError> {
-        self.calls
-            .push(format!("insert {}", project.path.display()));
+    fn insert_discovered(
+        &mut self,
+        path: &Path,
+        _name: &str,
+        source_root: &Path,
+    ) -> Result<(), ProjectRegistryError> {
+        self.calls.push(format!("insert {}", path.display()));
         // A real upsert must not move an existing row's timestamps.
-        if let Some((_, row)) = self.rows.iter_mut().find(|(path, _)| path == &project.path) {
-            row.source_root = project.source_root.clone();
+        if let Some((_, row)) = self.rows.iter_mut().find(|(row_path, _)| row_path == path) {
+            row.source_root = source_root.to_path_buf();
             return Ok(());
         }
         self.rows.push((
-            project.path.clone(),
+            path.to_path_buf(),
             Row {
                 last_used_at: "scan:never".to_owned(),
-                source_root: project.source_root.clone(),
+                source_root: source_root.to_path_buf(),
             },
         ));
         Ok(())
     }
 
-    fn mark_missing(&mut self, path: &Path) -> Result<(), ScanApplyError> {
+    fn mark_missing(&mut self, path: &Path) -> Result<(), ProjectRegistryError> {
         self.calls.push(format!("missing {}", path.display()));
         self.missing.push(path.to_path_buf());
         Ok(())
@@ -504,6 +508,40 @@ fn applying_a_diff_never_touches_an_existing_projects_last_used_at() {
     assert_eq!(registry.row(&alpha).cloned(), before);
 }
 
+#[test]
+fn applying_a_diff_with_real_database_never_touches_existing_projects_last_used_at() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path().join("root");
+    marker(&root, "alpha/.git/HEAD");
+    marker(&root, "beta/.git/HEAD");
+    let stale = temp.path().join("removed");
+    let outcome = scan(&ScanConfig::new([root.clone()]));
+    let alpha = canonical(&root.join("alpha"));
+
+    let mut db = at_db::Database::open_in_memory().expect("open db");
+    at_db::projects::add_project(db.connection(), &alpha, None, Some(&root)).expect("add alpha");
+    let alpha_summary = at_db::projects::find_project_by_path(db.connection(), &alpha)
+        .expect("find")
+        .expect("alpha exists");
+    at_db::projects::touch_project(db.connection(), &alpha_summary.id).expect("touch");
+    let before_touch = at_db::projects::find_project_by_id(db.connection(), &alpha_summary.id)
+        .expect("find")
+        .expect("alpha exists");
+    let before_last_used_at = before_touch.last_used_at.expect("has timestamp");
+
+    let diff = ProjectDiff::between(&outcome.projects, &[alpha.clone(), stale.clone()]);
+    let applied = apply_diff(&diff, &mut db).expect("apply diff");
+    assert_eq!(applied, 2, "inserted beta, marked stale missing");
+
+    let after = at_db::projects::find_project_by_id(db.connection(), &alpha_summary.id)
+        .expect("find")
+        .expect("alpha exists");
+    assert_eq!(
+        after.last_used_at.as_deref(),
+        Some(before_last_used_at.as_str()),
+        "existing project's last_used_at was not touched by apply_diff"
+    );
+}
 #[test]
 fn the_scan_runs_as_a_tokio_job() {
     let temp = TempDir::new().expect("temp dir");

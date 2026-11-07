@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use at_adapters::adapter::AgentAdapterRegistry;
 use at_db::Database;
 use at_fs::RecentWrites;
 
@@ -37,11 +38,14 @@ pub struct AppState {
     instance: Option<Arc<InstanceState>>,
     database: Option<Arc<Mutex<Database>>>,
     recent_writes: Arc<RecentWrites>,
+    adapters: AgentAdapterRegistry,
     logging: Option<at_store::logging::Logging>,
     recovery: Option<Arc<super::recovery::RecoveryService>>,
     recovery_outcome: Option<super::recovery::RecoveryOutcome>,
     paths: Option<at_store::paths::AppPaths>,
     scope_cache: Mutex<Option<(Option<PathBuf>, at_engine::loader::LoadedScopes)>>,
+    launch_approvals: super::mcp_launch::McpLaunchApprovals,
+    startup_warnings: Vec<super::startup::StartupWarningView>,
 }
 
 impl AppState {
@@ -55,11 +59,14 @@ impl AppState {
             instance: None,
             database: None,
             recent_writes: Arc::new(RecentWrites::new()),
+            adapters: AgentAdapterRegistry::register(),
             logging: None,
             recovery: None,
             recovery_outcome: None,
             paths: None,
             scope_cache: Mutex::new(None),
+            launch_approvals: super::mcp_launch::McpLaunchApprovals::new(),
+            startup_warnings: Vec::new(),
         }
     }
 
@@ -81,6 +88,30 @@ impl AppState {
     pub fn with_database(mut self, database: Database) -> Self {
         self.database = Some(Arc::new(Mutex::new(database)));
         self
+    }
+
+    /// Attaches an already-shared database handle, used when another service (the job bridge's
+    /// operations log) writes to the same connection.
+    #[must_use]
+    pub fn with_database_handle(mut self, database: Arc<Mutex<Database>>) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    /// Attaches the non-blocking warnings recorded while the database was opened.
+    #[must_use]
+    pub fn with_startup_warnings(
+        mut self,
+        warnings: Vec<super::startup::StartupWarningView>,
+    ) -> Self {
+        self.startup_warnings = warnings;
+        self
+    }
+
+    /// Warnings recorded at startup: a quarantine, a failed rebuild or an unreadable index.
+    #[must_use]
+    pub fn startup_warnings(&self) -> &[super::startup::StartupWarningView] {
+        &self.startup_warnings
     }
 
     /// Attaches the resolved, injectable filesystem roots used by read-only engine queries.
@@ -141,6 +172,15 @@ impl AppState {
         Arc::clone(&self.recent_writes)
     }
 
+    /// The process-wide agent adapter registry.
+    ///
+    /// A custom agent is inserted here when it is created, so the Effective agent filter
+    /// observes it without an application restart (TA-029).
+    #[must_use]
+    pub fn adapters(&self) -> &AgentAdapterRegistry {
+        &self.adapters
+    }
+
     /// Records successful writes from an applied ChangeSet for filesystem-event suppression.
     pub fn record_writes(&self, set: &at_model::ChangeSet, store_root: &Path) {
         for operation in &set.ops {
@@ -180,6 +220,12 @@ impl AppState {
     /// Returns an error when the database was not configured.
     pub fn database_handle(&self) -> Result<Arc<Mutex<Database>>, &'static str> {
         self.database.clone().ok_or("database unavailable")
+    }
+
+    /// The process-wide registry of one-shot MCP launch approvals.
+    #[must_use]
+    pub fn launch_approvals(&self) -> &super::mcp_launch::McpLaunchApprovals {
+        &self.launch_approvals
     }
 
     /// Attaches the single-instance state that owns the record and activation listener.
@@ -283,7 +329,7 @@ mod tests {
                 .with_debounce(Duration::from_millis(50))
                 .with_registry(state.recent_writes()),
         );
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(2_500));
         service.start().expect("start");
 
         let app_bytes = b"app write".to_vec();

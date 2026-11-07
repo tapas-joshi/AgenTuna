@@ -52,6 +52,10 @@ export interface ThemeColors {
   };
   /** Primary action colour (CTAs, active states). */
   readonly accent: string;
+  /** Solid fill for primary action controls. */
+  readonly accentFill: string;
+  /** Foreground colour for text on an accent-filled control. */
+  readonly onAccent: string;
   /** Success status. */
   readonly success: string;
   /** Warning status. */
@@ -104,6 +108,8 @@ const dark: ThemeTokens = {
       muted: SLATE_400,
     },
     accent: "#22C55E",
+    accentFill: "#22C55E",
+    onAccent: "#052E16",
     success: "#22C55E",
     warning: "#F59E0B",
     // The design-system red (#EF4444) only reaches 4.16:1 on `raised` and
@@ -112,7 +118,7 @@ const dark: ThemeTokens = {
     danger: "#F87171",
     focus: "#FFFFFF",
     scope: {
-      global: "#A78BFA",
+      global: "#C4B5FD",
       user: "#38BDF8",
       project: "#FBBF24",
       local: SLATE_400,
@@ -162,6 +168,8 @@ const light: ThemeTokens = {
       muted: "#475569",
     },
     accent: "#15803D",
+    accentFill: "#16A34A",
+    onAccent: "#052E16",
     success: "#15803D",
     warning: "#B45309",
     danger: "#B91C1C",
@@ -203,6 +211,8 @@ const VARIABLE_PREFIX = "--at-";
 /** Top-level token groups whose CSS prefix differs from their TS key. */
 const GROUP_ALIASES: Readonly<Record<string, string>> = {
   fontSize: "text",
+  accentFill: "accent-fill",
+  onAccent: "on-accent",
 };
 
 /** A token value mapped to the CSS custom property that carries it. */

@@ -10,6 +10,7 @@ pub mod logging;
 pub mod manifest;
 pub mod manifest_rebuild;
 pub mod mcp_store;
+pub mod move_journal;
 pub mod pathkey;
 pub mod paths;
 pub mod platform_roots;
@@ -19,6 +20,7 @@ pub mod remote_backup;
 pub mod skill;
 pub mod skill_import;
 pub mod skill_package;
+pub mod store_init;
 pub mod store_io;
 
 pub use git_contract::{
@@ -30,9 +32,9 @@ pub use local_store::LocalStorePaths;
 pub use manifest::{
     CanonicalJsonError, ContentHash, ContentHashError, DisabledAgents, DisabledEntry, FieldError,
     FieldProblem, HashError, ItemSource, LoadedManifest, MCP_IDENTITY_KEYS, ManifestError,
-    ManifestItem, PathTrustError, SaveOutcome, SourceKind, StoreManifest, StorePath,
-    StorePathError, canonical_json, hash_bytes, hash_mcp_entry, hash_rule_bytes, hash_skill_folder,
-    mcp_identity_key, resolve_item_path,
+    ManifestItem, PathTrustError, PlannedManifest, SaveOutcome, SourceKind, StoreManifest,
+    StorePath, StorePathError, canonical_json, hash_bytes, hash_mcp_entry, hash_rule_bytes,
+    hash_skill_folder, mcp_identity_key, resolve_item_path,
 };
 pub use mcp_store::{
     LoadedMcpStore, MCP_STORE_MAX_BYTES, MCP_STORE_MAX_SERVERS, McpSaveOutcome, McpStore,
@@ -48,9 +50,9 @@ pub use platform_roots::{
 };
 pub use project_scan::{
     CancelFlag, DEFAULT_MAX_DEPTH, DEFAULT_PROGRESS_EVERY, DEFAULT_ROOT_DIR, DiscoveredProject,
-    MAX_SCAN_DEPTH, NoObserver, PROJECT_MARKERS, ProjectDiff, ProjectMarker, ProjectRegistry,
-    SKIPPED_DIR_NAMES, ScanApplyError, ScanConfig, ScanObserver, ScanOutcome, ScanProgress,
-    ScanWarning, ScanWarningKind, apply_diff, scan, scan_with, spawn_scan,
+    MAX_SCAN_DEPTH, NoObserver, PROJECT_MARKERS, ProjectDiff, ProjectMarker, SKIPPED_DIR_NAMES,
+    ScanConfig, ScanObserver, ScanOutcome, ScanProgress, ScanWarning, ScanWarningKind, apply_diff,
+    scan, scan_with, spawn_scan,
 };
 pub use remote_backup::{
     BackupError, BackupOutcome, BackupRequest, DeviceNameError, RemoteConflict,
@@ -73,6 +75,7 @@ pub use manifest_rebuild::{
     SkippedRebuildEntry, apply_manifest_rebuild, plan_manifest_rebuild,
 };
 pub use rebuild::rebuild_from_app_paths;
+pub use store_init::{PlannedStoreInit, StoreInitError, plan_store_init};
 
 pub use store_io::{
     McpFileState, OrphanEntry, PlannedDrop, PlannedImport, ReconcileMode, ReconcileOutcome,

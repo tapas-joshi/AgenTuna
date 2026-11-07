@@ -291,8 +291,8 @@ pub enum ChangeSetError {
         /// What is wrong with it.
         reason: String,
     },
-    /// An operation kind string is not one of the 26 known names.
-    #[error("unknown operation kind `{value}`; expected one of the 26 journal kinds")]
+    /// An operation kind string is not one of the 27 known names.
+    #[error("unknown operation kind `{value}`; expected one of the 27 journal kinds")]
     InvalidOperationKind {
         /// The rejected value.
         value: String,
@@ -315,17 +315,17 @@ impl ChangeSetError {
 /// What kind of user action produced a change set.
 ///
 /// Kept as a plain string at the model layer so journals written before this type existed stay
-/// readable; known names come from the operations log (`at_db::ops::OperationKind`, 26
+/// readable; known names come from the operations log (`at_db::ops::OperationKind`, 27
 /// variants). [`OperationKind::parse`] validates against that set.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct OperationKind(String);
 
-/// The 26 operation kinds the operations log accepts, in declaration order.
+/// The 27 operation kinds the operations log accepts, in declaration order.
 ///
 /// Mirrors `at_db::ops::OperationKind::WIRE_NAMES`; kept here as data so at-model does not
 /// depend on at-db. A drift test in at-db asserts the two lists stay identical.
-pub const OPERATION_KINDS: [&str; 26] = [
+pub const OPERATION_KINDS: [&str; 27] = [
     "deploy",
     "undeploy",
     "edit_skill",
@@ -352,13 +352,14 @@ pub const OPERATION_KINDS: [&str; 26] = [
     "preset_unapply",
     "lock",
     "unlock",
+    "global_write",
 ];
 
 impl OperationKind {
     /// Parses a wire name.
     ///
     /// # Errors
-    /// [`ChangeSetError::InvalidOperationKind`] when `text` is not one of the 26 known names.
+    /// [`ChangeSetError::InvalidOperationKind`] when `text` is not one of the 27 known names.
     pub fn parse(text: &str) -> Result<Self, ChangeSetError> {
         if OPERATION_KINDS.contains(&text) {
             Ok(Self(text.to_owned()))
@@ -720,7 +721,7 @@ mod tests {
 
     #[test]
     fn operation_kind_accepts_all_26_and_rejects_unknown() {
-        assert_eq!(OPERATION_KINDS.len(), 26);
+        assert_eq!(OPERATION_KINDS.len(), 27);
         for name in OPERATION_KINDS {
             assert!(OperationKind::parse(name).is_ok(), "{name} must parse");
         }

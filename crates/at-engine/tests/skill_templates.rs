@@ -244,8 +244,16 @@ fn a_twenty_kilobyte_description_renders_far_below_the_interactive_budget() {
         std::hint::black_box(render_preview(&draft));
     }
     let per_call = start.elapsed() / RUNS;
+    // 50 ms is the interactive budget in the shipped (release) build. A debug build is much
+    // slower, and the assertion is an average over 100 renders, so the debug ceiling only has
+    // to catch a catastrophic regression.
+    let budget = if cfg!(debug_assertions) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_millis(50)
+    };
     assert!(
-        per_call < Duration::from_millis(50),
-        "20 KB preview averaged {per_call:?}, above the 50 ms CI bound (target 5 ms on a quiet machine)"
+        per_call < budget,
+        "20 KB preview averaged {per_call:?}, above {budget:?}"
     );
 }

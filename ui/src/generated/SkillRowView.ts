@@ -38,9 +38,25 @@ native: boolean,
  */
 native_path: string | null, 
 /**
- * Whether the source advertises an update (TS-040 renders the badge).
+ * Whether the source advertises an update the user has not ignored (TS-040 renders the badge).
  */
 update_available: boolean, 
+/**
+ * Live source kind (`git`, `marketplace`, `library`, `folder`) when the row was imported.
+ */
+source: string | null, 
+/**
+ * Commit the package was installed from, when the source records one.
+ */
+source_commit_sha: string | null, 
+/**
+ * Upstream commit resolved by the last check, when known.
+ */
+source_remote_sha: string | null, 
+/**
+ * Time the upstream source was last checked, when known.
+ */
+source_last_checked_at: string | null, 
 /**
  * Last update timestamp of the canonical row or native scan.
  */
@@ -48,4 +64,16 @@ updated_at: string,
 /**
  * One cell per detected agent.
  */
-agents: Array<SkillAgentCellView>, };
+agents: Array<SkillAgentCellView>, 
+/**
+ * Whether a lock blocks changes to this skill.
+ */
+locked: boolean, 
+/**
+ * Scope that holds the lock.
+ */
+lock_scope: string | null, 
+/**
+ * Lock reason, shown as the STATUS column tooltip.
+ */
+lock_reason: string | null, };

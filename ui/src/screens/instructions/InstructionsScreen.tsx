@@ -6,6 +6,7 @@ import { DiffViewer } from "../../components/diff/diff-viewer";
 import type { InstructionConflictView } from "../../generated/InstructionConflictView";
 import type { InstructionFileView } from "../../generated/InstructionFileView";
 import type { InstructionSaveOutcome } from "../../generated/InstructionSaveOutcome";
+import type { ExternalRefreshEvent } from "../../generated/ExternalRefreshEvent";
 import type { InstructionSaveRequest } from "../../generated/InstructionSaveRequest";
 import { Modal } from "../../overlays";
 import { NewRuleDialog } from "../../overlays/dialogs/NewRuleDialog";
@@ -48,18 +49,33 @@ function fileName(path: string): string {
 
 /** Scope-grouped rule browser and safe markdown editor. */
 export function InstructionsScreen() {
-  const { activeProject, route } = useAppSnapshot();
+  const { activeProject, route, screenState, externalChanges, scope } = useAppSnapshot();
   const app = useAppState();
   const toast = useToast();
   const [files, setFiles] = useState<readonly InstructionFileView[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const requestedItemId = typeof screenState["detail:itemId"] === "string"
+    ? screenState["detail:itemId"]
+    : null;
   const [buffer, setBuffer] = useState("");
   const [mode, setMode] = useState<MarkdownEditorMode>("edit");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState<InstructionConflictView | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
+  const [externalReloadOpen, setExternalReloadOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(() => screenState["instructions:newRuleOpen"] === true);
+  useEffect(() => {
+    const openNewRule = () => setCreateOpen(true);
+    window.addEventListener("agentuna:open-new-rule", openNewRule);
+    return () => window.removeEventListener("agentuna:open-new-rule", openNewRule);
+  }, []);
+  useEffect(() => {
+    if (screenState["instructions:newRuleOpen"] === true) {
+      setCreateOpen(true);
+      app.setScreenState("instructions:newRuleOpen", false);
+    }
+  }, [app, screenState]);
   const editor = useRef<MarkdownEditorHandle | null>(null);
   const selected = useMemo(
     () => files.find((file) => file.path === selectedPath) ?? null,
@@ -67,6 +83,7 @@ export function InstructionsScreen() {
   );
   const savedValue = selected?.content ?? "";
   const dirty = selected !== null && selected.read_error === null && buffer !== savedValue;
+  const externalChange = externalChanges[route] ?? null;
   const lineDelta = useMemo(() => {
     if (!dirty) return 0;
     const before = savedValue.split("\n").length;
@@ -82,15 +99,44 @@ export function InstructionsScreen() {
         projectId: activeProject,
       });
       setFiles(result);
-      setSelectedPath((old) =>
-        result.some((file) => file.path === old) ? old : (result[0]?.path ?? null),
-      );
+      setSelectedPath((old) => {
+        const requested = result.find((file) => file.item_id === requestedItemId);
+        return requested?.path ?? (result.some((file) => file.path === old) ? old : (result[0]?.path ?? null));
+      });
     } catch (cause) {
       setError(String(cause));
     } finally {
       setLoading(false);
     }
-  }, [activeProject]);
+  }, [activeProject, requestedItemId]);
+
+  const reloadExternal = useCallback(async () => {
+    if (selected === null) return;
+    setBusy(true);
+    try {
+      const result = await invoke<InstructionFileView[]>("instructions_list", {
+        projectId: activeProject,
+      });
+      setFiles(result);
+      const diskFile = result.find((file) => file.path === selected.path);
+      if (diskFile === undefined) {
+        setSelectedPath(null);
+        setBuffer("");
+        app.resolveExternalChange(route, "reload", "");
+        setError(`The selected instruction file was removed outside AgenTuna: ${selected.path}`);
+      } else {
+        setSelectedPath(diskFile.path);
+        setBuffer(diskFile.content);
+        app.resolveExternalChange(route, "reload", diskFile.content);
+        setError(null);
+      }
+      setExternalReloadOpen(false);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, [activeProject, app, route, selected]);
 
   useEffect(() => {
     void load();
@@ -99,6 +145,26 @@ export function InstructionsScreen() {
     setBuffer(selected?.content ?? "");
     setConflict(null);
   }, [selected?.path, selected?.content]);
+
+  useEffect(() => {
+    const handleExternalRefresh = (event: Event) => {
+      const payload = (event as CustomEvent<ExternalRefreshEvent>).detail;
+      if (selected === null) {
+        void load();
+        return;
+      }
+      const affectsSelected = payload.full_rescan || payload.paths.includes(selected.path);
+      if (dirty && affectsSelected) {
+        app.markExternalChange(route, selected.hash);
+      } else if (affectsSelected) {
+        void reloadExternal();
+      } else {
+        void load();
+      }
+    };
+    window.addEventListener("agentuna:external-refresh", handleExternalRefresh);
+    return () => window.removeEventListener("agentuna:external-refresh", handleExternalRefresh);
+  }, [app, dirty, load, reloadExternal, route, selected]);
 
   const save = useCallback(
     async (options: { readonly force?: boolean } = {}): Promise<InstructionSaveOutcome> => {
@@ -238,6 +304,20 @@ export function InstructionsScreen() {
           <span aria-hidden="true">＋</span> New rule file
         </Button>
       </header>
+      {externalChange !== null && selected !== null && (
+        <section role="alert" className="flex flex-wrap items-center justify-between gap-8 rounded-8 border border-warning/30 bg-warning/10 p-12 text-13">
+          <span>
+            <strong>Changed outside AgenTuna.</strong>{" "}
+            {externalChange.kept
+              ? "Your edits are kept; the external version remains on disk and is marked as drift."
+              : `The open file changed while you were editing: ${selected.path}`}
+          </span>
+          <span className="flex gap-8">
+            <Button size="sm" variant="secondary" disabled={busy} onClick={() => setExternalReloadOpen(true)}>Reload</Button>
+            {!externalChange.kept && <Button size="sm" disabled={busy} onClick={() => app.resolveExternalChange(route, "keep")}>Keep mine</Button>}
+          </span>
+        </section>
+      )}
 
       {loading ? (
         <p role="status" className="text-13 text-text-secondary">
@@ -283,6 +363,7 @@ export function InstructionsScreen() {
                               : "border-transparent hover:border-border hover:bg-overlay/60"
                           }`}
                           onClick={() => {
+                            app.recordVisitedItem(`rule:${file.item_id}`);
                             if (dirty) app.setEditorBuffer(route, {
                               route,
                               value: buffer,
@@ -327,7 +408,10 @@ export function InstructionsScreen() {
 
           <section className="flex min-w-0 flex-col rounded-10 border border-border bg-raised">
             {selected === null ? (
-              <p className="p-16 text-13 text-text-secondary">Select a rule file.</p>
+              <div className="p-16">
+                {error !== null && <p role="alert" className="m-0 mb-8 text-13 text-danger">{error}</p>}
+                <p className="m-0 text-13 text-text-secondary">Select a rule file.</p>
+              </div>
             ) : (
               <>
                 <div className="flex flex-wrap items-center justify-between gap-8 border-b border-border p-12">
@@ -434,10 +518,26 @@ export function InstructionsScreen() {
           </>
         )}
       </Modal>
+      <Modal
+        open={externalReloadOpen}
+        title="Reload external changes?"
+        description="This replaces your unsaved edits with the version currently on disk."
+        size="md"
+        onOpenChange={(open) => setExternalReloadOpen(open)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setExternalReloadOpen(false)}>Cancel</Button>
+            <Button variant="primary" disabled={busy} onClick={() => void reloadExternal()}>Reload file</Button>
+          </>
+        }
+      >
+        <p className="m-0 text-13 text-text-secondary">{selected?.path}</p>
+      </Modal>
       <NewRuleDialog
         open={createOpen}
         project={activeProject}
-        onClose={() => setCreateOpen(false)}
+        initialScope={scope}
+        onClose={() => { setCreateOpen(false); app.setScreenState("instructions:newRuleOpen", false); }}
         onCreated={async (created) => {
           await load();
           setSelectedPath(created);

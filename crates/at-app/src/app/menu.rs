@@ -1,11 +1,15 @@
 //! Native menu actions shared by the application menu and command dispatcher.
 
+use super::commands::CommandError;
 use serde::{Deserialize, Serialize};
+use tauri::State;
 
 /// Stable identifiers for actions emitted by native menu items.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MenuAction {
+    /// Show the local-only About dialog.
+    About,
     /// Open the app overview.
     NavigateOverview,
     /// Open the Skills screen.
@@ -34,6 +38,8 @@ pub enum MenuAction {
     KeyboardShortcuts,
     /// Show application documentation.
     Documentation,
+    /// Open the CLI install and uninstall dialog.
+    InstallCli,
     /// Run diagnostics.
     RunDoctor,
 }
@@ -50,6 +56,7 @@ impl MenuAction {
             Self::NavigateDrift => "navigate:drift",
             Self::NavigateInstructions => "navigate:instructions",
             Self::NavigateAgents => "navigate:agents",
+            Self::About => "about",
             Self::Preferences => "preferences",
             Self::AddSkill => "add-skill",
             Self::AddMcpServer => "add-mcp-server",
@@ -57,6 +64,7 @@ impl MenuAction {
             Self::Import => "import",
             Self::KeyboardShortcuts => "keyboard-shortcuts",
             Self::Documentation => "documentation",
+            Self::InstallCli => "install-cli",
             Self::RunDoctor => "run-doctor",
         }
     }
@@ -71,6 +79,7 @@ impl MenuAction {
             Self::NavigateEffective,
             Self::NavigateDrift,
             Self::NavigateInstructions,
+            Self::About,
             Self::NavigateAgents,
             Self::Preferences,
             Self::AddSkill,
@@ -79,6 +88,7 @@ impl MenuAction {
             Self::Import,
             Self::KeyboardShortcuts,
             Self::Documentation,
+            Self::InstallCli,
             Self::RunDoctor,
         ]
         .into_iter()
@@ -107,7 +117,7 @@ pub struct MenuSection {
 const APP: &[MenuEntry] = &[
     MenuEntry {
         label: "About AgenTuna",
-        action: None,
+        action: Some(MenuAction::About),
     },
     MenuEntry {
         label: "Preferences…",
@@ -208,6 +218,10 @@ const HELP: &[MenuEntry] = &[
         action: Some(MenuAction::Documentation),
     },
     MenuEntry {
+        label: "Install Command Line Tool…",
+        action: Some(MenuAction::InstallCli),
+    },
+    MenuEntry {
         label: "Run Doctor",
         action: Some(MenuAction::RunDoctor),
     },
@@ -244,11 +258,51 @@ pub const fn menu_sections() -> [MenuSection; 6] {
     ]
 }
 
+/// Native menu handles used to reflect application state without rebuilding the menu.
+pub struct MenuControls {
+    add_skill: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+impl MenuControls {
+    /// Enables or disables the native Add Skill action.
+    ///
+    /// # Errors
+    /// Returns a Tauri menu error if the platform cannot update the menu item.
+    pub fn set_add_skill_enabled(&self, enabled: bool) -> tauri::Result<()> {
+        self.add_skill.set_enabled(enabled)
+    }
+}
+
+/// The menu tree and mutable handles for app-state-dependent menu items.
+pub struct MenuBundle {
+    /// Native menu tree installed on the application.
+    pub menu: tauri::menu::Menu<tauri::Wry>,
+    /// Handles used to update menu item enablement.
+    pub controls: MenuControls,
+}
+
+/// Updates Add Skill availability without rebuilding the native menu.
+#[tauri::command]
+pub fn app_menu_set_add_skill_enabled(
+    controls: State<'_, MenuControls>,
+    enabled: bool,
+) -> Result<(), CommandError> {
+    controls
+        .set_add_skill_enabled(enabled)
+        .map_err(|_| CommandError::unavailable("native menu item could not be updated"))
+}
+
 /// Creates the native menu tree using the same stable IDs as the UI action dispatcher.
-pub fn build(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+pub fn build(app: &tauri::AppHandle) -> tauri::Result<MenuBundle> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-    let about = PredefinedMenuItem::about(app, Some("About AgenTuna"), None)?;
+    let about = MenuItem::with_id(
+        app,
+        MenuAction::About.id(),
+        "About AgenTuna",
+        true,
+        None::<&str>,
+    )?;
     let preferences = MenuItem::with_id(
         app,
         MenuAction::Preferences.id(),
@@ -258,14 +312,15 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::W
     )?;
     let app_separator = PredefinedMenuItem::separator(app)?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit AgenTuna"))?;
+    let add_skill = MenuItem::with_id(
+        app,
+        MenuAction::AddSkill.id(),
+        "Add Skill…",
+        true,
+        None::<&str>,
+    )?;
     let file_items = [
-        MenuItem::with_id(
-            app,
-            MenuAction::AddSkill.id(),
-            "Add Skill…",
-            true,
-            None::<&str>,
-        )?,
+        add_skill.clone(),
         MenuItem::with_id(
             app,
             MenuAction::AddMcpServer.id(),
@@ -358,6 +413,13 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::W
         )?,
         MenuItem::with_id(
             app,
+            MenuAction::InstallCli.id(),
+            "Install Command Line Tool…",
+            true,
+            None::<&str>,
+        )?,
+        MenuItem::with_id(
+            app,
             MenuAction::RunDoctor.id(),
             "Run Doctor",
             true,
@@ -402,7 +464,10 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::W
     ] {
         menu.append(submenu)?;
     }
-    Ok(menu)
+    Ok(MenuBundle {
+        menu,
+        controls: MenuControls { add_skill },
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -422,10 +487,12 @@ mod tests {
                 assert_eq!(MenuAction::from_id(action.id()), Some(action));
             }
         }
+        assert!(ids.contains("about"));
         assert!(ids.contains("navigate:overview"));
         assert!(ids.contains("navigate:skills"));
         assert!(ids.contains("add-skill"));
 
+        assert!(ids.contains("install-cli"));
         assert!(ids.contains("run-doctor"));
     }
     #[test]
@@ -438,7 +505,7 @@ mod tests {
         assert_eq!(APP[1].action, Some(MenuAction::Preferences));
         assert_eq!(FILE.len(), 4);
         assert_eq!(VIEW.len(), 7);
-        assert_eq!(HELP.len(), 3);
+        assert_eq!(HELP.len(), 4);
         assert!(EDIT.iter().all(|entry| entry.action.is_none()));
     }
 }

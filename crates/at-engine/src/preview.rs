@@ -586,4 +586,49 @@ mod tests {
             b"external"
         );
     }
+
+    #[test]
+    fn two_hundred_small_files_preview_within_the_interactive_bound() {
+        // The story targets 300 ms for a 200-file preview in the shipped build; the debug
+        // assertion is generous so a loaded CI machine cannot make it flaky.
+        let sandbox = TempDir::new().expect("tempdir");
+        let mut change_set = set("first.txt", b"", b"body");
+        change_set.ops.clear();
+        let mut expected_bytes = 0_u64;
+        for index in 0..200 {
+            let body = format!("file {index:03}");
+            expected_bytes += body.len() as u64;
+            change_set.ops.push(FileOp::Write {
+                path: PathBuf::from(format!("skills/item-{index:03}/SKILL.md")),
+                bytes: body.into_bytes(),
+                expected: ExpectedState::Absent,
+                follow_symlink: false,
+                backup: true,
+            });
+        }
+        let started = std::time::Instant::now();
+        let review = preview(&change_set, sandbox.path()).expect("bulk preview");
+        let elapsed = started.elapsed();
+        // 300 ms is the interactive budget in the shipped (release) build; a debug build
+        // under a loaded CI runner only has to stay far below a pathological slowdown.
+        let budget = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(10)
+        } else {
+            std::time::Duration::from_millis(300)
+        };
+        assert!(
+            elapsed < budget,
+            "200 small files took {elapsed:?}, above {budget:?}"
+        );
+        assert_eq!(review.totals.files, 200);
+        assert_eq!(review.totals.bytes, expected_bytes);
+        assert_eq!(review.estimated_bytes, expected_bytes);
+        assert!(
+            review
+                .files
+                .iter()
+                .all(|file| file.is_new && matches!(file.diff, DiffKind::Unified { .. })),
+            "every absent text target is a new unified diff"
+        );
+    }
 }

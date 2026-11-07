@@ -10,7 +10,7 @@ use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_migrate::conflicts::detect_conflicts;
 use at_migrate::plan::{
     BuildPlanRequest, ConflictResolution, MigrationAction, MigrationStrategy, PlanError,
-    build_plan, dry_run, persist_plan, validate_plan,
+    build_plan, dry_run, persist_plans, validate_plan,
 };
 use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest, scan};
 use at_migrate::testkit::MigrationFixture;
@@ -71,9 +71,15 @@ fn dry_run_preserves_source_bytes_and_leave_and_watch_records_no_links()
     validate_plan(&plan)?;
     assert_eq!(fs::read(source.join("SKILL.md"))?, before);
     assert_eq!(fs::metadata(&source)?.modified()?, modified);
-    let plan_path = persist_plan(&paths.user_store, &plan)?;
-    let persisted: at_migrate::plan::MigrationPlan = serde_json::from_slice(&fs::read(plan_path)?)?;
-    assert_eq!(persisted, plan);
+    let document = at_migrate::plan::plans_document(std::slice::from_ref(&plan))?;
+    persist_plans(&paths.user_store, &document)?;
+    let persisted: at_migrate::plan::PersistedPlans =
+        serde_json::from_slice(&fs::read(document.path_in(&paths.user_store))?)?;
+    assert_eq!(
+        persisted.plan_hash,
+        at_migrate::plan::plans_hash(std::slice::from_ref(&plan))?
+    );
+    assert_eq!(persisted.plans, vec![plan]);
     Ok(())
 }
 
@@ -181,6 +187,7 @@ fn case_insensitive_names_are_rejected_before_the_plan_runs()
         ],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let conflicts = at_migrate::conflicts::ConflictSet::default();
     let selected = BTreeSet::from([upper, lower]);
@@ -210,6 +217,7 @@ fn case_insensitive_names_are_rejected_before_the_plan_runs()
         items: vec![scanned_item(one.clone(), "bar")],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let mut plan = build_plan(BuildPlanRequest {
         scan: &single,
@@ -250,6 +258,7 @@ fn over_long_destinations_are_rejected_before_the_plan_runs()
         items: vec![scanned_item(folder.clone(), "long-name")],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let long_root = temp
         .path()
@@ -306,6 +315,7 @@ fn shared_skills_root_is_planned_once_for_both_agents() -> Result<(), Box<dyn st
         items: vec![shared.clone()],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let plan = build_plan(BuildPlanRequest {
         scan: &single,

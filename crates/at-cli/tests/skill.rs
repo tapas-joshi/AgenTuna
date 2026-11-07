@@ -86,6 +86,18 @@ fn frontmatter_is_valid_yaml_with_required_skill_metadata() {
     assert!(skill.contains("npx skills add tapas-joshi/AgenTuna"));
     assert!(!skill.contains("/Users/"));
     assert!(skill.contains("agentuna doctor --json"));
+    assert!(skill.contains("Start with help when a command is unfamiliar"));
+    assert!(skill.contains("## Global options"));
+    assert!(skill.contains("## JSON output"));
+    assert!(skill.contains("schema_version"));
+    assert!(skill.contains("## Exit codes"));
+    assert!(skill.contains("| Code | Name | Meaning |"));
+    assert!(skill.contains("--dry-run"));
+    assert!(skill.contains("Never edit agent-owned configuration files directly"));
+    assert!(skill.contains("Never print secret values"));
+    assert!(skill.contains("## Troubleshooting"));
+    assert!(skill.contains("agentuna why"));
+    assert!(!skill.contains("/home/"));
 }
 
 #[test]

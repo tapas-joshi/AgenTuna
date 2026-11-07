@@ -1,0 +1,48 @@
+{
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "code-review",
+        "path": "<home>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "tombstone-restored-inherited-skill",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "User review skill.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "project"
+    }
+  ],
+  "title": "Removing a Project tombstone restores the inherited User skill"
+}

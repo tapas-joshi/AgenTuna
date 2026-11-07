@@ -5,7 +5,7 @@ use std::str::FromStr;
 use at_db::{ReadOnlyDatabase, agents as agent_repo};
 use at_engine::loader::load_scope_snapshots;
 use at_engine::resolve::{ResolveInput, resolve};
-use at_engine::why::{DocumentLocation, StepStatus, TraceEvidence, trace};
+use at_engine::why::{StepStatus, TraceEvidence, store_location, trace};
 use at_model::{AgentId, ItemId, Scope};
 use clap::{Arg, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -28,7 +28,12 @@ impl CommandGroup for WhyGroup {
         root.subcommand(
             Command::new("why")
                 .about("Explain why an item is effective or disabled")
-                .arg(Arg::new("item").required(true).value_name("ITEM_ID"))
+                .arg(
+                    Arg::new("item")
+                        .required(true)
+                        .value_name("ITEM")
+                        .help("Item id, or a skill, server or rule name that matches one item"),
+                )
                 .arg(
                     Arg::new("agent")
                         .long("agent")
@@ -43,14 +48,9 @@ impl CommandGroup for WhyGroup {
         globals: &GlobalArgs,
         matches: &ArgMatches,
     ) -> Result<CommandOutput, CliError> {
-        let item_text = matches.get_one::<String>("item").expect("required by clap");
-        let item_id = ItemId::from_str(item_text).map_err(|error| {
-            CliError::new(
-                ErrorCode::Validation,
-                error.to_string(),
-                "provide a canonical item id from `agentuna effective`",
-            )
-        })?;
+        let item_text = matches
+            .get_one::<String>("item")
+            .ok_or_else(|| CliError::internal("why dispatch without an item"))?;
         let scope = globals.scope().ok_or_else(|| {
             CliError::new(
                 ErrorCode::Validation,
@@ -58,6 +58,7 @@ impl CommandGroup for WhyGroup {
                 "choose global, user, project or local",
             )
         })?;
+        crate::runtime::refresh_agent_registry_if_needed(globals)?;
         let paths = resolve_paths(globals)?;
         let _access = CliAccess::read(&paths)?;
         let agent = match matches.get_one::<String>("agent") {
@@ -72,6 +73,7 @@ impl CommandGroup for WhyGroup {
         };
         let project_root = paths.project_store().and_then(|store| store.parent());
         let loaded = load_scope_snapshots(&paths, project_root).map_err(engine_error)?;
+        let item_id = resolve_item(item_text, &loaded.layers)?;
         let resolution = resolve(
             ResolveInput::new(&loaded.layers)
                 .with_tombstones(&loaded.tombstones)
@@ -120,12 +122,7 @@ impl CommandGroup for WhyGroup {
                 .filter(|item| item.scope == scope_at)
                 .and_then(|item| item.lock_reason())
                 .map(str::to_owned);
-            let location = definition.map(|definition| DocumentLocation {
-                path: definition.path.clone(),
-                byte_span: None,
-                line: None,
-                rendering_path: None,
-            });
+            let location = definition.map(|definition| store_location(definition, None));
             (
                 scope_at,
                 TraceEvidence {
@@ -144,6 +141,90 @@ impl CommandGroup for WhyGroup {
         let human = render_trace(&result);
         Ok(CommandOutput::new(data, human))
     }
+}
+
+/// Resolves the `why` argument: a canonical item id, or a name that matches exactly one item.
+///
+/// A skill's folder slug and its frontmatter name are both accepted, because either is what
+/// a reader sees. A name that matches several items is a typed refusal that lists every
+/// candidate with its scope, so the caller can retry with the id instead of guessing.
+fn resolve_item(text: &str, layers: &[at_model::ScopeSnapshot]) -> Result<ItemId, CliError> {
+    if let Ok(item_id) = ItemId::from_str(text) {
+        return Ok(item_id);
+    }
+    let needle = text.trim().to_lowercase();
+    if needle.is_empty() {
+        return Err(CliError::new(
+            ErrorCode::Validation,
+            "the item to explain is empty",
+            "pass an item id or a name from `agentuna effective --scope <scope> --json`",
+        ));
+    }
+    let mut candidates: Vec<(ItemId, Scope, at_model::ItemKind, String, String)> = Vec::new();
+    for layer in layers {
+        for definition in &layer.definitions {
+            let Some(item_id) = definition.item_id else {
+                continue;
+            };
+            if !matches_item_name(definition, &needle)
+                || candidates.iter().any(|(id, ..)| *id == item_id)
+            {
+                continue;
+            }
+            candidates.push((
+                item_id,
+                layer.scope,
+                definition.kind,
+                definition.name.clone(),
+                definition.path.display().to_string(),
+            ));
+        }
+    }
+    match candidates.as_slice() {
+        [] => Err(CliError::new(
+            ErrorCode::NotFound,
+            format!("no item named `{text}` is present in the selected stores"),
+            "list the items with `agentuna effective --scope <scope> --json`, or pass an item id",
+        )),
+        [(item_id, ..)] => Ok(*item_id),
+        many => Err(CliError::new(
+            ErrorCode::Validation,
+            format!(
+                "`{text}` matches {} items; pass the item id of the one to explain",
+                many.len()
+            ),
+            "rerun with one of the item ids in `error.details.candidates`",
+        )
+        .with_details(json!({
+            "candidates": many
+                .iter()
+                .map(|(item_id, scope, kind, name, path)| json!({
+                    "item_id": item_id.to_string(),
+                    "scope": scope.to_string(),
+                    "kind": kind.to_string(),
+                    "name": name,
+                    "path": path,
+                }))
+                .collect::<Vec<_>>(),
+        }))),
+    }
+}
+
+/// Whether a definition answers to `needle`: its display name, or a skill's folder slug.
+fn matches_item_name(definition: &at_model::Definition, needle: &str) -> bool {
+    if definition.normalized_name() == needle {
+        return true;
+    }
+    if definition.kind != at_model::ItemKind::Skill {
+        return false;
+    }
+    // A skill lives in `<store>/skills/<slug>/SKILL.md`; the folder is its slug.
+    definition
+        .path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_lowercase() == needle)
 }
 
 fn default_agent(path: &std::path::Path) -> Result<AgentId, CliError> {

@@ -7,7 +7,10 @@
 
 use std::path::PathBuf;
 
-use at_migrate::adopt::{AdoptError, AdoptHandling, AdoptRequest, adopt_item, preview_adopt};
+use at_migrate::adopt::{
+    AdoptError, AdoptHandling, AdoptPreviewRequest, AdoptRequest, adopt_item_with_actor,
+    preview_adopt,
+};
 use at_store::layout::StoreLayout;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -17,7 +20,7 @@ use crate::globals::GlobalArgs;
 use crate::migrate::{apply_error, authorized_roots, plan_error, run_scan};
 use crate::output::CommandOutput;
 use crate::registry::CommandGroup;
-use crate::runtime::{CliAccess, resolve_paths};
+use crate::runtime::CliAccess;
 
 /// `agentuna adopt <PATH>`: one native item becomes a canonical, owned store item.
 pub struct AdoptGroup;
@@ -78,7 +81,11 @@ fn requested_handling(sub: &clap::ArgMatches) -> Result<AdoptHandling, CliError>
 
 /// `agentuna adopt <PATH>`: preview with `--dry-run`, otherwise a confirmed apply.
 fn adopt(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, CliError> {
-    let paths = resolve_paths(globals)?;
+    let access = CliAccess::for_command(globals, !globals.dry_run)?;
+    if !globals.dry_run {
+        access.ensure_writable()?;
+    }
+    let paths = access.paths().clone();
     let raw_path = sub
         .get_one::<String>("path")
         .map(String::as_str)
@@ -117,13 +124,13 @@ fn adopt(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, 
     let authorized = authorized_roots(&paths)?;
 
     if globals.dry_run {
-        let preview = preview_adopt(&AdoptRequest {
+        let preview = preview_adopt(&AdoptPreviewRequest {
             scan: &scan,
             path: &item.path,
+            name: None,
             store_root: &store_root,
             backup_root: paths.backup_dir(),
             authorized_roots: &authorized,
-            database: &mut adopt_database(&paths)?,
             scope,
             handling,
         })
@@ -147,19 +154,31 @@ fn adopt(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, 
             "inspect `adopt --dry-run`, then rerun with --yes",
         ));
     }
-    let _access = CliAccess::write(&paths)?;
     let mut database = adopt_database(&paths)?;
-    let outcome = adopt_item(AdoptRequest {
-        scan: &scan,
-        path: &item.path,
-        store_root: &store_root,
-        backup_root: paths.backup_dir(),
-        authorized_roots: &authorized,
-        database: &mut database,
-        scope,
-        handling,
-    })
+    let project_id = crate::skills::project_id_for(&database, &paths, scope)?;
+    let outcome = adopt_item_with_actor(
+        AdoptRequest {
+            scan: &scan,
+            path: &item.path,
+            name: None,
+            store_root: &store_root,
+            backup_root: paths.backup_dir(),
+            authorized_roots: &authorized,
+            database: &mut database,
+            scope,
+            handling,
+            project_id: project_id.as_deref(),
+        },
+        at_db::ops::OperationActor::Cli,
+    )
     .map_err(adopt_error)?;
+    let mut warnings = Vec::new();
+    if let Err(error) = at_engine::refresh::refresh_agents(database.connection(), &paths) {
+        warnings.push(crate::output::Warning::new(
+            "agent_registry_refresh",
+            format!("agent detection was not refreshed: {error}"),
+        ));
+    }
     Ok(CommandOutput {
         data: json!({
             "operation_id": outcome.operation_id,
@@ -180,7 +199,7 @@ fn adopt(globals: &GlobalArgs, sub: &clap::ArgMatches) -> Result<CommandOutput, 
             outcome.handling.as_str(),
             outcome.operation_id
         ),
-        warnings: Vec::new(),
+        warnings,
         warnings_in_report: false,
     })
 }
@@ -271,7 +290,7 @@ fn adopt_error(error: AdoptError) -> CliError {
 ///
 /// Project and Local items adopt into the project store when one is selected; everything
 /// else adopts into the user store.
-fn store_scope_for_item(
+pub(crate) fn store_scope_for_item(
     paths: &at_store::paths::AppPaths,
     item_scope: at_model::Scope,
 ) -> Result<(at_model::Scope, PathBuf), CliError> {

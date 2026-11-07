@@ -25,7 +25,7 @@ describe("Button", () => {
 
   test("variants paint with theme tokens, not raw colours", () => {
     const { rerender } = render(<Button variant="primary">Primary</Button>);
-    expect(screen.getByRole("button").className).toContain("bg-accent");
+    expect(screen.getByRole("button").className).toContain("bg-accent-fill");
 
     rerender(<Button variant="destructive">Destructive</Button>);
     expect(screen.getByRole("button").className).toContain("text-danger");

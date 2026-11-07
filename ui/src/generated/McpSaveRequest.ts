@@ -11,4 +11,8 @@ preview_id: string,
 /**
  * Selected target agents in the reviewed plan.
  */
-selected_agents: Array<string>, };
+selected_agents: Array<string>, 
+/**
+ * Explicit confirmation of the fields the reviewed preview drops.
+ */
+acknowledge_unsupported: boolean, };

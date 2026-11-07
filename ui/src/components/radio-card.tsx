@@ -101,7 +101,7 @@ export function RadioCardGroup<T extends string>({
                 aria-hidden="true"
                 className="mt-2 flex size-16 shrink-0 items-center justify-center rounded-full border border-border group-data-[state=checked]:border-accent"
               >
-                <RadioGroupPrimitive.Indicator className="size-8 rounded-full bg-accent" />
+                <RadioGroupPrimitive.Indicator className="size-8 rounded-full bg-accent-fill" />
               </span>
               <span className="flex min-w-0 flex-1 flex-col gap-2">
                 <span className="flex min-w-0 flex-wrap items-center gap-8">

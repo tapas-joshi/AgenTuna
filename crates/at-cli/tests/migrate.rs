@@ -220,6 +220,230 @@ fn apply_dry_run_lists_operations_and_creates_no_file_lock_or_journal() {
 }
 
 #[test]
+fn a_freshly_migrated_file_is_not_reported_as_drifted() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    let output = agentuna(&sandbox, &["migrate", "plan", "--json"]);
+    let envelope = assert_exit(&output, 0);
+    let plan_id = envelope["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id")
+        .to_owned();
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "apply", "--plan", &plan_id, "--yes", "--json"],
+    );
+    assert_exit(&output, 0);
+
+    // The deployment baselines must describe the rendered files, not the scan sources.
+    let output = agentuna(&sandbox, &["drift", "list", "--json"]);
+    let envelope = assert_exit(&output, 0);
+    assert_eq!(
+        envelope["data"]["events"],
+        Value::Array(Vec::new()),
+        "a fresh migration must not look drifted: {envelope}"
+    );
+}
+
+#[test]
+fn apply_succeeds_when_the_selected_project_has_no_store_directory() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    let project = sandbox.path("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let project_arg = project.to_string_lossy().into_owned();
+    let added = agentuna(&sandbox, &["projects", "add", &project_arg, "--json"]);
+    assert_exit(&added, 0);
+    assert!(
+        !project.join(".agentuna").exists(),
+        "precondition: the project has no store yet"
+    );
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "plan",
+            "--project",
+            &project_arg,
+            "--scope",
+            "user",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    let plan_id = envelope["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id")
+        .to_owned();
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "apply",
+            "--project",
+            &project_arg,
+            "--scope",
+            "user",
+            "--plan",
+            &plan_id,
+            "--yes",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    assert!(
+        envelope["data"]["completed"].as_u64().unwrap_or(0) > 0,
+        "the apply wrote its files: {envelope}"
+    );
+}
+
+#[test]
+fn project_scope_apply_initializes_a_missing_project_store() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    let project = sandbox.path("project");
+    fs::create_dir_all(&project).expect("project directory");
+    write(&project.join("AGENTS.md"), "# Project Guidelines\n");
+    let project_arg = project.to_string_lossy().into_owned();
+
+    let added = agentuna(&sandbox, &["projects", "add", &project_arg, "--json"]);
+    assert_exit(&added, 0);
+    assert!(
+        !project.join(".agentuna").exists(),
+        "precondition: the project has no store yet"
+    );
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "plan",
+            "--project",
+            &project_arg,
+            "--scope",
+            "project",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    let plan_id = envelope["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id")
+        .to_owned();
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "apply",
+            "--project",
+            &project_arg,
+            "--scope",
+            "project",
+            "--plan",
+            &plan_id,
+            "--yes",
+            "--json",
+        ],
+    );
+    assert_exit(&output, 0);
+    assert!(
+        project.join(".agentuna/store.json").exists(),
+        "apply initialized the missing project store"
+    );
+
+    let database = at_db::Database::open_file(sandbox.paths().db_path()).expect("open the index");
+    let stored: Option<String> = database
+        .connection()
+        .query_row(
+            "SELECT project_id FROM items WHERE scope = 'project' AND kind = 'rule'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the project-scope rule row exists");
+    assert!(
+        stored.is_some(),
+        "the project-scope item carries the selected project id"
+    );
+}
+
+#[test]
+fn undo_resolves_a_project_scope_operation_without_the_project_flag() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    let project = sandbox.path("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let rule = project.join("CLAUDE.md");
+    write(&rule, "# Project Guidelines\n");
+    let original_rule = fs::read(&rule).expect("read the original rule");
+    let project_arg = project.to_string_lossy().into_owned();
+
+    let added = agentuna(&sandbox, &["projects", "add", &project_arg, "--json"]);
+    assert_exit(&added, 0);
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "plan",
+            "--project",
+            &project_arg,
+            "--scope",
+            "project",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    let plan_id = envelope["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id")
+        .to_owned();
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "apply",
+            "--project",
+            &project_arg,
+            "--scope",
+            "project",
+            "--plan",
+            &plan_id,
+            "--yes",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    let operation_id = envelope["data"]["operation_id"]
+        .as_str()
+        .expect("operation_id")
+        .to_owned();
+    assert!(
+        project.join(".agentuna/store.json").exists(),
+        "the apply wrote the project store"
+    );
+
+    // No `--project`: a Project-scope operation names its own project in the stored record.
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "undo", &operation_id, "--yes", "--json"],
+    );
+    let envelope = assert_exit(&output, 0);
+    assert!(
+        envelope["data"]["undo_operation_id"].is_string(),
+        "the undo ran without --project: {envelope}"
+    );
+    assert_eq!(
+        fs::read(&rule).expect("read the restored rule"),
+        original_rule,
+        "the project rule is restored byte-identically"
+    );
+}
+
+#[test]
 fn ambiguous_conflict_without_keep_flag_exits_needs_resolution_and_writes_nothing() {
     let sandbox = Sandbox::new();
     seed_simple(&sandbox);
@@ -230,11 +454,40 @@ fn ambiguous_conflict_without_keep_flag_exits_needs_resolution_and_writes_nothin
     let envelope = json_envelope(&output);
     assert_eq!(envelope["ok"], Value::Bool(false));
     assert_eq!(envelope["error"]["code"], "needs_resolution");
+    let details = &envelope["error"]["details"];
+    assert_eq!(details["conflict"], "dup");
+    assert_eq!(details["kind"], "skill");
+    let copies = details["copies"].as_array().expect("copies array");
+    assert_eq!(copies.len(), 2, "both copies are listed: {details}");
+    for (agent, directory) in [("claude_code", ".claude"), ("codex", ".codex")] {
+        assert!(
+            copies.iter().any(|copy| copy["agent"] == agent
+                && copy["origin"] == "native"
+                && copy["path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains(&format!("{directory}/skills/dup")))),
+            "the {agent} copy carries its agent, origin and path: {details}"
+        );
+    }
+    for flag in ["keep_a", "keep_b", "keep_both"] {
+        let command = details[flag].as_str().expect("ready-to-run command");
+        assert!(
+            command.contains(&format!("--{}", flag.replace('_', "-")))
+                && command.contains("dup")
+                && command.contains("--strategy links"),
+            "`{flag}` is a ready-to-run command: {command}"
+        );
+    }
+    let hint = envelope["error"]["hint"]
+        .as_str()
+        .expect("the failure explains the next step");
     assert!(
-        !envelope["error"]["hint"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
+        hint.contains("--keep-both dup"),
+        "the hint shows the exact resolution flag: {hint}"
+    );
+    assert!(
+        hint.contains(".claude/skills/dup") && hint.contains(".codex/skills/dup"),
+        "the hint names both conflicting paths: {hint}"
     );
     assert!(
         !plans_dir(&sandbox).exists(),
@@ -248,6 +501,38 @@ fn ambiguous_conflict_without_keep_flag_exits_needs_resolution_and_writes_nothin
     );
     let envelope = assert_exit(&output, 0);
     assert_eq!(envelope["ok"], Value::Bool(true));
+}
+
+#[test]
+fn plan_accepts_repeated_conflict_resolution_flags() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    seed_conflict(&sandbox);
+    let home = sandbox.path("home");
+    write(&home.join(".codex/AGENTS.md"), "# Codex rules\n");
+    write(&home.join(".omp/agent/AGENTS.md"), "# omp rules\n");
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "plan",
+            "--keep-both",
+            "dup",
+            "--keep-both",
+            "agents",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    assert_eq!(envelope["data"]["persisted"], Value::Bool(false));
+    assert!(
+        !envelope["data"]["steps"]
+            .as_array()
+            .expect("plan steps")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -429,6 +714,84 @@ fn adopt_previews_then_replaces_the_original_with_a_link() {
 }
 
 #[test]
+fn adopt_of_a_project_scope_rule_records_the_selected_project_id() {
+    let sandbox = Sandbox::new();
+    init_store(&sandbox);
+    let project = sandbox.path("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let rule = project.join("AGENTS.md");
+    write(&rule, "# Project Guidelines\n");
+    let project_arg = project.to_string_lossy().into_owned();
+
+    let registered = agentuna(&sandbox, &["projects", "add", &project_arg, "--json"]);
+    let envelope = assert_exit(&registered, 0);
+    let project_id = envelope["data"]["project"]["id"]
+        .as_str()
+        .expect("registered project id")
+        .to_owned();
+
+    let path_arg = rule.display().to_string();
+    let output = agentuna(
+        &sandbox,
+        &[
+            "adopt",
+            &path_arg,
+            "--project",
+            &project_arg,
+            "--yes",
+            "--json",
+        ],
+    );
+    assert_exit(&output, 0);
+
+    let database = at_db::Database::open_file(sandbox.paths().db_path()).expect("open the index");
+    let stored: Option<String> = database
+        .connection()
+        .query_row(
+            "SELECT project_id FROM items WHERE scope = 'project' AND kind = 'rule'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the adopted project-scope item row exists");
+    assert_eq!(
+        stored.as_deref(),
+        Some(project_id.as_str()),
+        "a project-scope adoption records the selected project"
+    );
+}
+
+#[test]
+fn adopt_of_a_project_scope_rule_without_a_registered_project_has_a_typed_error() {
+    let sandbox = Sandbox::new();
+    init_store(&sandbox);
+    let project = sandbox.path("unregistered");
+    fs::create_dir_all(&project).expect("project directory");
+    let rule = project.join("AGENTS.md");
+    write(&rule, "# Unregistered Project\n");
+    let project_arg = project.to_string_lossy().into_owned();
+
+    let path_arg = rule.display().to_string();
+    let output = agentuna(
+        &sandbox,
+        &[
+            "adopt",
+            &path_arg,
+            "--project",
+            &project_arg,
+            "--yes",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        exit_code(&output),
+        4,
+        "an unregistered project is a not-found user error: {}",
+        stderr(&output)
+    );
+    assert_eq!(json_envelope(&output)["error"]["code"], "not_found");
+}
+
+#[test]
 fn status_lists_counts_pending_plans_and_recent_operations() {
     let sandbox = Sandbox::new();
     seed_simple(&sandbox);
@@ -488,4 +851,242 @@ fn migrate_human_output_renders_counts() {
     let human = stdout(&output);
     assert!(human.contains("2 native item(s)"), "counts: {human}");
     assert!(human.contains("alpha"), "item rows: {human}");
+}
+
+#[test]
+fn a_mixed_selection_migrates_into_each_scope_store_and_one_undo_restores_the_tree() {
+    let sandbox = Sandbox::new();
+    let (user_skill, _) = seed_simple(&sandbox);
+    let project = sandbox.path("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let project_skill = project.join(".claude/skills/alpha");
+    write(
+        &project_skill.join("SKILL.md"),
+        &skill_doc("alpha", "Project copy of the plain native skill"),
+    );
+    write(&project.join("CLAUDE.md"), "# Project Guidelines\n");
+    let project_arg = project.to_string_lossy().into_owned();
+    assert_exit(
+        &agentuna(&sandbox, &["projects", "add", &project_arg, "--json"]),
+        0,
+    );
+
+    let before_home = snapshot(&sandbox.path("home"));
+    let before_project = snapshot(&project);
+
+    // The two `alpha` copies live in different scopes, so they never contend for one store name.
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "plan",
+            "--project",
+            &project_arg,
+            "--keep-a",
+            "alpha",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    let plan_id = envelope["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id")
+        .to_owned();
+    let scopes = envelope["data"]["scopes"]
+        .as_array()
+        .expect("scopes")
+        .clone();
+    let user_plan = scopes
+        .iter()
+        .find(|entry| entry["scope"] == "user")
+        .expect("the plan names the User store");
+    let project_plan = scopes
+        .iter()
+        .find(|entry| entry["scope"] == "project")
+        .expect("the plan names the Project store");
+    let expected_user_store = sandbox.user_store().display().to_string();
+    let expected_project_store = project.join(".agentuna").display().to_string();
+    assert_eq!(
+        user_plan["store_path"].as_str(),
+        Some(expected_user_store.as_str())
+    );
+    assert_eq!(
+        project_plan["store_path"].as_str(),
+        Some(expected_project_store.as_str())
+    );
+    assert_eq!(user_plan["counts"]["items"].as_i64(), Some(2));
+    assert_eq!(project_plan["counts"]["items"].as_i64(), Some(2));
+
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "apply",
+            "--project",
+            &project_arg,
+            "--plan",
+            &plan_id,
+            "--yes",
+            "--json",
+        ],
+    );
+    let envelope = assert_exit(&output, 0);
+    let operation_id = envelope["data"]["operation_id"]
+        .as_str()
+        .expect("operation_id")
+        .to_owned();
+
+    let user_store = sandbox.user_store();
+    let project_store = project.join(".agentuna");
+    assert!(
+        user_store.join("skills/alpha/SKILL.md").exists(),
+        "the user skill landed in the User store"
+    );
+    assert!(
+        user_store.join("mcp.json").exists(),
+        "the MCP server landed in the User store"
+    );
+    assert!(
+        project_store.join("skills/alpha/SKILL.md").exists(),
+        "the project skill landed in the Project store"
+    );
+    assert!(
+        project_store.join("rules/claude.md").exists(),
+        "the project rule landed in the Project store"
+    );
+    assert_eq!(
+        fs::canonicalize(&user_skill).expect("user link"),
+        fs::canonicalize(user_store.join("skills/alpha")).expect("user item"),
+        "the user native skill links into the User store"
+    );
+    assert_eq!(
+        fs::canonicalize(&project_skill).expect("project link"),
+        fs::canonicalize(project_store.join("skills/alpha")).expect("project item"),
+        "the project native skill links into the Project store"
+    );
+
+    // One Undo reverses both stores and every native original; the stores keep their own
+    // bookkeeping, so only the native tree is compared.
+    let output = agentuna(
+        &sandbox,
+        &["migrate", "undo", &operation_id, "--yes", "--json"],
+    );
+    assert_exit(&output, 0);
+    assert_eq!(snapshot(&sandbox.path("home")), before_home);
+    let restored_project = snapshot(&project)
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with(".agentuna"))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(restored_project, before_project);
+}
+
+#[test]
+fn a_project_scope_item_without_a_registered_project_refuses_the_plan() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    let project = sandbox.path("project");
+    write(
+        &project.join(".claude/skills/alpha/SKILL.md"),
+        &skill_doc("alpha", "Project copy of the plain native skill"),
+    );
+    let project_arg = project.to_string_lossy().into_owned();
+
+    // Deliberately not registered: the item has no project identity to record, so the plan
+    // refuses instead of writing it into the User store.
+    let output = agentuna(
+        &sandbox,
+        &[
+            "migrate",
+            "plan",
+            "--project",
+            &project_arg,
+            "--keep-a",
+            "alpha",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&output), 3, "a missing project maps to exit 3");
+    let envelope = json_envelope(&output);
+    assert_eq!(envelope["error"]["code"], "validation");
+    let message = envelope["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        message.contains("project-scope"),
+        "the refusal names the scope: {message}"
+    );
+    assert!(
+        !project.join(".agentuna").exists(),
+        "a refused plan writes nothing"
+    );
+    assert!(
+        !plans_dir(&sandbox).exists(),
+        "a refused plan persists nothing"
+    );
+}
+
+#[test]
+fn apply_without_a_plan_lists_the_persisted_ids_and_the_next_command() {
+    let sandbox = Sandbox::new();
+    seed_simple(&sandbox);
+    let planned = agentuna(&sandbox, &["migrate", "plan", "--json"]);
+    let planned = assert_exit(&planned, 0);
+    let plan_id = planned["data"]["plan_id"]
+        .as_str()
+        .expect("migrate plan prints its id")
+        .to_owned();
+
+    // TC-030 names the plan on the command line, so a planless apply stays a usage error;
+    // the refusal now lists what the caller could pass instead of stopping at "missing".
+    let output = agentuna(&sandbox, &["migrate", "apply", "--json"]);
+    let envelope = assert_exit(&output, 2);
+    assert_eq!(envelope["error"]["code"], "usage");
+    let details = &envelope["error"]["details"];
+    assert_eq!(details["latest"], plan_id);
+    let listed = details["plans"].as_array().expect("plans array");
+    assert!(
+        listed
+            .iter()
+            .any(|plan| plan["plan_id"] == plan_id.as_str()),
+        "the persisted plan is listed: {details}"
+    );
+    let next = details["next_command"]
+        .as_str()
+        .expect("the refusal carries the next command");
+    assert!(next.contains("agentuna migrate apply --plan"));
+    assert!(next.contains(&plan_id));
+    assert!(
+        next.ends_with("--dry-run"),
+        "the next command reviews first: {next}"
+    );
+    let hint = envelope["error"]["hint"].as_str().expect("hint");
+    assert!(
+        hint.contains(&plan_id),
+        "the hint names the available plan: {hint}"
+    );
+    assert!(
+        hint.contains("agentuna migrate status"),
+        "the hint names the listing command: {hint}"
+    );
+}
+
+#[test]
+fn apply_without_a_plan_and_none_persisted_explains_how_to_build_one() {
+    let sandbox = Sandbox::new();
+    sandbox.healthy();
+
+    let output = agentuna(&sandbox, &["migrate", "apply", "--json"]);
+    let envelope = assert_exit(&output, 2);
+    assert_eq!(envelope["error"]["code"], "usage");
+    assert!(envelope["error"]["details"]["plans"].is_null());
+    let hint = envelope["error"]["hint"].as_str().expect("hint");
+    assert!(
+        hint.contains("agentuna migrate plan"),
+        "the hint says how to build a plan: {hint}"
+    );
+    assert!(
+        hint.contains("--dry-run"),
+        "the hint previews before applying: {hint}"
+    );
 }

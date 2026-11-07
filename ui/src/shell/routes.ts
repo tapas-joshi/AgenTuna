@@ -51,7 +51,7 @@ export function parseItemDeepLink(value: string): string | null {
 /** Routes which require an active project context. */
 export function routeRequiresProject(route: RouteId): boolean {
   return route === "skill-detail" || route === "mcp-detail" || route === "mcp-form" ||
-    route === "effective" || route === "drift" || route === "instructions" ||
+    route === "effective" || route === "instructions" ||
     route === "add-skill" || route === "migrate";
 }
 

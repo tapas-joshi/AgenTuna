@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
-use at_engine::effective::{AgentLoads, EffectiveQuery};
-use at_engine::locks::{LockId, LockRecord, LockStore, MemoryLockStore};
+use at_adapters::adapter::AgentEnvironment;
+use at_engine::effective::{EffectiveQuery, EffectiveQueryView};
+use at_engine::locks::MemoryLockStore;
 use at_engine::resolve::{ResolveInput, resolve};
-use at_model::{AgentId, ItemId, ItemKind, ItemState, Scope};
+use at_model::{AgentId, ItemId, ItemKind, Scope};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use ts_rs::TS;
@@ -27,20 +27,6 @@ pub struct EffectiveQueryRequest {
     pub kind: Option<String>,
     /// Optional agent filter.
     pub agent: Option<String>,
-}
-
-/// Effective configuration rows and recoverable store diagnostics.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/generated/")]
-pub struct EffectiveQueryView {
-    /// Resolved effective items, sorted by kind then display name.
-    pub items: Vec<at_engine::effective::EffectiveItem>,
-    /// Items disabled here, sorted by kind, name, scope and agent.
-    pub disabled_here: Vec<at_engine::effective::EffectiveDisabled>,
-    /// Non-fatal lock/tombstone resolution warnings.
-    pub diagnostics: Vec<at_engine::effective::EffectiveDiagnostic>,
-    /// Store-entry diagnostics that did not prevent this query.
-    pub load_diagnostics: Vec<at_engine::loader::LoadDiagnostic>,
 }
 
 /// Input to the scope explanation query.
@@ -108,51 +94,21 @@ pub fn effective_query(
     let (loaded, active_project, project_id) = active_scopes(&state)?;
     let locks = load_locks(&state)?;
     let environment = adapter_environment(&state, active_project.as_deref())?;
-    let observations =
-        at_engine::loader::observe_agents(&AgentAdapterRegistry::register(), &environment)
-            .map_err(|error| {
-                CommandError::internal(format!("agent adapters unavailable: {error}"))
-            })?;
+    let observations = observe_effective_agents(&state, &environment)?;
     let mut agents = Vec::with_capacity(observations.len());
-    for observation in observations {
-        let deployments = at_db::deployments::list_deployments_for_agent(
-            state
-                .database()
-                .map_err(CommandError::unavailable)?
-                .connection(),
-            &observation.agent,
+    let database = state.database().map_err(CommandError::unavailable)?;
+    agents.extend(
+        at_engine::loader::agent_loads(
+            database.connection(),
+            &observations,
+            &loaded.layers,
+            scope,
+            project_id.as_deref(),
         )
         .map_err(|error| {
             CommandError::internal(format!("cannot read agent deployments: {error}"))
-        })?;
-        let mut observed = BTreeMap::new();
-        for definition in loaded.layers.iter().flat_map(|layer| &layer.definitions) {
-            let deployment = deployments
-                .iter()
-                .filter(|row| Some(row.item_id) == definition.item_id)
-                .filter(|row| row.scope.precedence() <= scope.precedence())
-                .filter(|row| match row.scope {
-                    Scope::Global | Scope::User => row.project_id.is_none(),
-                    Scope::Project | Scope::Local => {
-                        row.project_id.as_deref() == project_id.as_deref()
-                    }
-                })
-                .max_by_key(|row| row.scope.precedence());
-            if let Some(deployment) = deployment {
-                observed.insert(definition.logical_id(), deployment.state);
-            } else if observation.native.iter().any(|native| {
-                native.kind == definition.kind
-                    && at_model::normalized_name(&native.name) == definition.normalized_name()
-            }) {
-                observed.insert(definition.logical_id(), ItemState::Native);
-            }
-        }
-        agents.push(AgentLoads {
-            agent: observation.agent,
-            installed: observation.installed,
-            loaded: observed,
-        });
-    }
+        })?,
+    );
     let result = at_engine::effective::query(EffectiveQuery {
         scope,
         layers: &loaded.layers,
@@ -162,12 +118,10 @@ pub fn effective_query(
         locks: Some(&locks),
         tombstones: Some(&loaded.tombstones),
     });
-    Ok(EffectiveQueryView {
-        items: result.items,
-        disabled_here: result.disabled_here,
-        diagnostics: result.diagnostics,
-        load_diagnostics: loaded.diagnostics,
-    })
+    Ok(at_engine::effective::EffectiveQueryView::new(
+        result,
+        loaded.diagnostics,
+    ))
 }
 
 /// Places a Global lock and returns its reason for the updated row presentation.
@@ -278,11 +232,7 @@ pub fn why_trace(
     let (loaded, active_project, _) = active_scopes(&state)?;
     let locks = load_locks(&state)?;
     let environment = adapter_environment(&state, active_project.as_deref())?;
-    let observations =
-        at_engine::loader::observe_agents(&AgentAdapterRegistry::register(), &environment)
-            .map_err(|error| {
-                CommandError::internal(format!("agent adapters unavailable: {error}"))
-            })?;
+    let observations = observe_effective_agents(&state, &environment)?;
     let native = observations
         .iter()
         .find(|observation| observation.agent == agent)
@@ -329,12 +279,8 @@ pub fn why_trace(
                 })
                 .map(|item| item.path.clone())
         });
-        let location = definition.map(|definition| at_engine::why::DocumentLocation {
-            path: definition.path.clone(),
-            byte_span: None,
-            line: None,
-            rendering_path,
-        });
+        let location =
+            definition.map(|definition| at_engine::why::store_location(definition, rendering_path));
         evidence.push((
             scope,
             at_engine::why::TraceEvidence {
@@ -399,33 +345,20 @@ fn active_scopes(
 
 fn load_locks(state: &AppState) -> Result<MemoryLockStore, CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
-    let rows = at_db::locks::list_locks(database.connection())
-        .map_err(|error| CommandError::internal(format!("cannot read item locks: {error}")))?;
-    let store = MemoryLockStore::new();
-    for row in rows {
-        let locked_at = time::OffsetDateTime::parse(
-            &row.locked_at,
-            &time::format_description::well_known::Rfc3339,
-        )
-        .map_err(|_| CommandError::internal("stored lock timestamp is invalid"))?;
-        store
-            .put(LockRecord {
-                id: LockId::new(),
-                lock: at_model::Lock {
-                    scope: row.scope,
-                    item_id: row.item_id,
-                    locked_at,
-                    reason: row
-                        .reason
-                        .ok_or_else(|| CommandError::internal("stored lock has no reason"))?,
-                    locked_by: row
-                        .locked_by
-                        .ok_or_else(|| CommandError::internal("stored lock has no owner"))?,
-                },
-            })
-            .map_err(|error| CommandError::internal(format!("cannot load item locks: {error}")))?;
-    }
-    Ok(store)
+    at_engine::locks::load_database_locks(database.connection())
+        .map_err(|error| CommandError::internal(format!("cannot load item locks: {error}")))
+}
+
+/// Agents the Effective view offers as filters, read through the app's live registry.
+///
+/// The registry is the shared one on [`AppState`], not a freshly registered built-in set, so a
+/// custom agent created in this session joins the filter without an application restart.
+pub(crate) fn observe_effective_agents(
+    state: &AppState,
+    environment: &AgentEnvironment,
+) -> Result<Vec<at_engine::loader::AgentObservation>, CommandError> {
+    at_engine::loader::observe_agents(state.adapters(), environment)
+        .map_err(|error| CommandError::internal(format!("agent adapters unavailable: {error}")))
 }
 
 fn adapter_environment(

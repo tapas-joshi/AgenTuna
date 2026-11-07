@@ -473,8 +473,11 @@ fn pathological_inputs_stay_linear() {
     );
     assert_eq!(redacted_urls, urls, "`://` alone is not credentials");
 
+    // The contract is the release budget; a debug build under a loaded CI runner is far
+    // slower than the shipped code, so debug keeps enough headroom to report a real
+    // regression (an accidental quadratic scan) instead of machine noise.
     let budget = if cfg!(debug_assertions) {
-        Duration::from_millis(500)
+        Duration::from_secs(5)
     } else {
         Duration::from_millis(50)
     };

@@ -430,7 +430,7 @@ fn removing_a_server_touches_only_its_entry() {
 }
 
 #[test]
-fn secret_env_values_are_written_as_references_never_values() {
+fn secret_env_values_refuse_unverified_expansion() {
     let mut env = BTreeMap::new();
     env.insert(
         String::from("GITHUB_TOKEN"),
@@ -451,35 +451,48 @@ fn secret_env_values_are_written_as_references_never_values() {
     );
 
     let config = OmpMcpAdapter::create_document(None).expect("empty document");
-    let updated = config.upsert_server(&server).expect("upsert");
-    let reparsed = OmpMcpConfig::parse(&updated).expect("reparse");
-    let entry = reparsed.server("github").expect("github");
-    match &entry.transport {
-        McpTransport::Stdio { env, .. } => {
-            assert_eq!(
-                env.get("GITHUB_TOKEN"),
-                Some(&EnvValue::Literal(String::from("${GITHUB_TOKEN}")))
-            );
-        }
-        other => panic!("expected stdio, got {other:?}"),
-    }
-    assert!(!updated.contains("keychain_account"));
+    let error = config
+        .upsert_server(&server)
+        .expect_err("secret in omp env must be refused");
+    assert!(
+        matches!(
+            error,
+            OmpMcpError::UnverifiedSecretExpansion { ref server, ref variable }
+            if server == "github" && variable == "GITHUB_TOKEN"
+        ),
+        "expected UnverifiedSecretExpansion, got {error:?}"
+    );
 }
 
 #[test]
-fn an_external_edit_between_read_and_write_is_refused() {
+fn an_external_edit_between_read_and_write_is_refused_and_retry_preserves_it() {
     let adapter = OmpMcpAdapter::new();
     let (_dir, path) = seeded(GOLDEN);
+    let original_mtime = fs::metadata(&path)
+        .expect("original metadata")
+        .modified()
+        .expect("original mtime");
     let config = adapter.read(&path).expect("read").expect("exists");
     let planned = config
         .upsert_server(&stdio_server("planned", "planned-mcp", &[]))
         .expect("plan");
 
-    // Another writer (omp itself, or the user) lands first.
+    // Another writer (omp itself, or the user) lands first with different bytes and mtime.
     let external = config
         .upsert_server(&stdio_server("external", "external-mcp", &[]))
         .expect("external patch");
     fs::write(&path, &external).expect("external write");
+    let external_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    fs::File::open(&path)
+        .expect("open external config")
+        .set_times(fs::FileTimes::new().set_modified(external_mtime))
+        .expect("set external mtime");
+    let changed_mtime = fs::metadata(&path)
+        .expect("external metadata")
+        .modified()
+        .expect("external mtime");
+    assert_ne!(changed_mtime, original_mtime, "the external mtime changed");
+    assert_eq!(read_text(&path), external, "the external content changed");
 
     let error = adapter
         .save_edit(&path, &config, &planned, BackupPolicy::None)
@@ -495,6 +508,13 @@ fn an_external_edit_between_read_and_write_is_refused() {
         external,
         "the other writer's version stays"
     );
+    assert_eq!(
+        fs::read_dir(path.parent().expect("config parent"))
+            .expect("list config directory")
+            .count(),
+        1,
+        "a conflict leaves no temp sibling"
+    );
 
     // Re-reading and re-applying succeeds and keeps the external entry.
     let fresh = adapter.read(&path).expect("re-read").expect("exists");
@@ -507,6 +527,13 @@ fn an_external_edit_between_read_and_write_is_refused() {
     let text = read_text(&path);
     assert!(text.contains("\"external\": {"));
     assert!(text.contains("\"planned\": {"));
+    assert_eq!(
+        fs::read_dir(path.parent().expect("config parent"))
+            .expect("list config directory")
+            .count(),
+        1,
+        "a successful retry also leaves no temp sibling"
+    );
 }
 
 #[test]

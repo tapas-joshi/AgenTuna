@@ -141,9 +141,7 @@ fn windows_roots(
     let home = match home {
         Some(home) => home.to_path_buf(),
         None => {
-            env_windows("USERPROFILE", &mut lookup)?.ok_or(PlatformRootError::MissingVariable {
-                variable: "USERPROFILE",
-            })?
+            env_windows("USERPROFILE", &mut lookup)?.ok_or(PlatformRootError::HomeUnavailable)?
         }
     };
     let roaming =
@@ -154,9 +152,9 @@ fn windows_roots(
         env_windows("LOCALAPPDATA", &mut lookup)?.ok_or(PlatformRootError::MissingVariable {
             variable: "LOCALAPPDATA",
         })?;
-    let support = windows_child(&roaming, APP_DIR_NAME);
-    let local_state = windows_child(&local, APP_DIR_NAME);
-    let cache = windows_child(&local_state, "cache");
+    let support = join_child(&roaming, APP_DIR_NAME);
+    let local_state = join_child(&local, APP_DIR_NAME);
+    let cache = join_child(&local_state, "cache");
     Ok(PlatformRoots {
         home,
         support_dir: support,
@@ -190,7 +188,7 @@ fn env_windows(
 
 /// Appends a child with a `\` separator when the base already uses Windows separators, so the
 /// pure function returns the documented Windows path even when called from a Unix test host.
-fn windows_child(base: &Path, name: &str) -> PathBuf {
+pub(crate) fn join_child(base: &Path, name: &str) -> PathBuf {
     let text = base.to_string_lossy();
     if text.contains('\\') {
         PathBuf::from(format!("{}\\{name}", text.trim_end_matches('\\')))

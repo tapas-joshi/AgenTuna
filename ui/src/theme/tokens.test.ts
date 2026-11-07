@@ -17,6 +17,8 @@ const REQUIRED_PATHS = [
   "color.text.secondary",
   "color.text.muted",
   "color.accent",
+  "color.accentFill",
+  "color.onAccent",
   "color.success",
   "color.warning",
   "color.danger",

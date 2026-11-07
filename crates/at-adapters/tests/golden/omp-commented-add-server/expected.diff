@@ -1,0 +1,15 @@
+--- fixture
++++ output
+@@ -12,6 +12,12 @@
+       ],
+       "enabled": true, // keep this comment
+     },
++    "beta": {
++      "type": "stdio",
++      "command": "beta-mcp",
++      "args": ["--stdio"],
++      "enabled": true,
++    },
+   },
+   "disabledServers": [
+     "legacy", // trailing comma keeps the array multiline

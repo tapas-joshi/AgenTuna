@@ -131,6 +131,131 @@ const AUDIT_ALLOWLIST: &[AllowEntry] = &[
         line_substring: "fs::rename",
         justification: "Rename only the SQLite database and its WAL/SHM sidecars into quarantine",
     },
+    AllowEntry {
+        file_pattern: "at-adapters/src/golden.rs",
+        line_substring: "fs::create_dir_all",
+        justification: "Development-only golden file update harness when UPDATE_GOLDEN=1",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/skill_package.rs",
+        line_substring: "create_dir_all",
+        justification: "Creating directories inside private staged skill package tree",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/skill_package.rs",
+        line_substring: "remove_dir_all",
+        justification: "Staging cleanup removes temporary directory tree",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/skill_package.rs",
+        line_substring: "set_permissions",
+        justification: "Setting permissions on files inside private staged skill package tree",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/skill_package.rs",
+        line_substring: "copy",
+        justification: "Copying files inside private staged skill package tree",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/skill_import.rs",
+        line_substring: "create_dir_all",
+        justification: "Creating cache directories for zip skill import extraction",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/skill_import.rs",
+        line_substring: "OpenOptions",
+        justification: "Extracting files from zip archive into cache directory",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/logging.rs",
+        line_substring: "create_dir_all",
+        justification: "Creation of support-area log directory for daily log files",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/logging.rs",
+        line_substring: "OpenOptions",
+        justification: "Opening daily append-only log file in support area",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/instance.rs",
+        line_substring: "create_dir_all",
+        justification: "Creating support directory for instance lock file",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/instance.rs",
+        line_substring: "OpenOptions",
+        justification: "OS advisory file locking on instance lock file",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/store_io.rs",
+        line_substring: "OpenOptions",
+        justification: "OS advisory file locking on store lock file",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/remote_backup.rs",
+        line_substring: "create_dir_all",
+        justification: "Creation of isolated temporary work directory for git remote backup",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/remote_backup.rs",
+        line_substring: "set_permissions",
+        justification: "Tighten permissions of isolated temporary git remote backup directory",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/remote_backup.rs",
+        line_substring: "copy",
+        justification: "Copying store snapshot into isolated temporary git remote backup work tree",
+    },
+    AllowEntry {
+        file_pattern: "at-store/src/remote_backup.rs",
+        line_substring: "remove_dir_all",
+        justification: "Cleanup of isolated temporary git remote backup work tree",
+    },
+    AllowEntry {
+        file_pattern: "at-git/src/remote.rs",
+        line_substring: "create_dir_all",
+        justification: "Creating temporary directory for credential authentication helper",
+    },
+    AllowEntry {
+        file_pattern: "at-git/src/remote.rs",
+        line_substring: "set_permissions",
+        justification: "Restricting permissions of temporary credential helper directory and script to 0700",
+    },
+    AllowEntry {
+        file_pattern: "at-git/src/remote.rs",
+        line_substring: "remove_dir_all",
+        justification: "Cleanup of temporary credential helper directory",
+    },
+    AllowEntry {
+        file_pattern: "at-git/src/import.rs",
+        line_substring: "create_dir_all",
+        justification: "Creating local temporary cache directory for git repository imports",
+    },
+    AllowEntry {
+        file_pattern: "at-migrate/src/testkit.rs",
+        line_substring: "create_dir_all",
+        justification: "Testkit fixture generation for synthetic agent environments",
+    },
+    AllowEntry {
+        file_pattern: "at-migrate/src/testkit.rs",
+        line_substring: "set_permissions",
+        justification: "Testkit fixture generation for synthetic agent environments",
+    },
+    AllowEntry {
+        file_pattern: "at-app/src/app/remote_backup_actions.rs",
+        line_substring: "remove_dir_all",
+        justification: "Cleanup of temporary directory for remote backup operations",
+    },
+    AllowEntry {
+        file_pattern: "at-app/src/app/updater/install.rs",
+        line_substring: "let _ = fs::remove_dir_all(path)",
+        justification: "Remove the private update extraction tree under the OS temp directory; it is outside every store and native-agent root",
+    },
+    AllowEntry {
+        file_pattern: "at-app/src/app/updater/install.rs",
+        line_substring: "match fs::remove_file(path)",
+        justification: "Remove the persisted update install queue record in the app cache after it is consumed or cancelled",
+    },
 ];
 
 #[derive(Debug, Default)]
@@ -156,6 +281,15 @@ const DISALLOWED_MUTATIONS: &[&str] = &[
     "fs::rename",
     "std::fs::remove_file",
     "fs::remove_file",
+    "std::fs::set_permissions",
+    "fs::set_permissions",
+    "std::fs::create_dir_all",
+    "fs::create_dir_all",
+    "std::fs::copy",
+    "fs::copy",
+    "std::fs::remove_dir_all",
+    "fs::remove_dir_all",
+    "OpenOptions",
 ];
 
 #[derive(Debug)]
@@ -257,7 +391,9 @@ fn safety_audit_scans_workspace_sources_and_verifies_justified_allows() {
                 continue;
             }
             for &token in DISALLOWED_MUTATIONS {
-                if trimmed.contains(token) {
+                if trimmed.contains(token)
+                    && !(token.starts_with("fs::") && trimmed.contains(&format!("at_{token}")))
+                {
                     let has_code_allow = (idx > 0
                         && lines[idx - 1].contains("allow(clippy::disallowed_methods)"))
                         || (idx > 1

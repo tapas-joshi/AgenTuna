@@ -578,11 +578,14 @@ fn read_or_create(
                 return Ok(None);
             }
             if let Some(parent) = path.parent()
-                && let Err(source) = fs::create_dir_all(parent)
+                && let Err(source) = at_fs::ensure_dir(parent)
             {
                 return Err(ConfigError::CreateDefault {
                     path: path.to_path_buf(),
-                    source,
+                    source: match source {
+                        at_fs::FsError::Io { source, .. } => source,
+                        other => std::io::Error::other(other.to_string()),
+                    },
                 });
             }
             fs::write(path, DEFAULT_FILE).map_err(|source| ConfigError::CreateDefault {

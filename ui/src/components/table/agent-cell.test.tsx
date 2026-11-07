@@ -189,4 +189,26 @@ describe("AgentCell", () => {
     expect(toggle.disabled).toBe(true);
     expect(onToggle).not.toHaveBeenCalled();
   });
+
+  test("TA-020 AC5: Unsupported kind surfaces as a disabled toggle with reason, not a panic", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    renderCell(
+      {
+        kind: "off",
+        disabledReason: "agent claude-code does not support MCP configuration",
+      },
+      onToggle,
+    );
+
+    const toggle = screen.getByRole("switch", { name: "Claude Code: Off" }) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    const group = screen.getByRole("group", { name: "Claude Code" });
+    expect(group.getAttribute("title")).toBe("agent claude-code does not support MCP configuration");
+
+    await user.click(toggle);
+    expect(onToggle).not.toHaveBeenCalled();
+  });
 });

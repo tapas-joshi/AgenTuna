@@ -228,9 +228,15 @@ fn success_prepares_the_store_writes_the_file_and_records_exactly_one_row() {
     );
 
     let rows = log.rows();
-    assert_eq!(rows.len(), 1, "one row per elevated write");
-    assert_eq!(rows[0].files, vec![target]);
+    assert_eq!(
+        rows.len(),
+        2,
+        "one row for authorization consent, one for the elevated write"
+    );
+    assert!(rows[0].files.is_empty(), "consent row has no files");
     assert_eq!(rows[0].root, store);
+    assert_eq!(rows[1].files, vec![target]);
+    assert_eq!(rows[1].root, store);
     assert_eq!(GlobalWriteOperation::KIND, "global_write");
     assert_eq!(GlobalWriteOperation::STATUS, "succeeded");
     assert_eq!(elevator.calls(), 1, "writes never prompt again");

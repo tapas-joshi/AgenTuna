@@ -214,6 +214,14 @@ pub struct RecoveryLocations {
     pub journal_dirs: Vec<PathBuf>,
     /// Directories scanned for `.<name>.agentuna-tmp-*` debris.
     pub temp_roots: Vec<PathBuf>,
+    /// Roots this app may write: the user's home, the stores of every scope it resolved and the
+    /// selected project. Journals are untrusted, so recovery authorizes nothing outside them.
+    pub authorized_roots: Vec<PathBuf>,
+    /// Backup directories this app configured. A journal can name a backup root of its own; only
+    /// these are searched, and a journal naming anything else is parked.
+    pub backup_roots: Vec<PathBuf>,
+    /// The selected project's store, which a cloned repository may ship journals inside.
+    pub project_store: Option<PathBuf>,
 }
 
 impl RecoveryLocations {
@@ -224,8 +232,9 @@ impl RecoveryLocations {
             paths.user_store().to_path_buf(),
             paths.global_store().to_path_buf(),
         ];
-        if let Some(project) = paths.project_store() {
-            stores.push(project.to_path_buf());
+        let project_store = paths.project_store().map(Path::to_path_buf);
+        if let Some(project) = &project_store {
+            stores.push(project.clone());
         }
         let mut journal_dirs = vec![paths.cache_dir().join(PENDING_DIR)];
         journal_dirs.extend(
@@ -238,12 +247,27 @@ impl RecoveryLocations {
             paths.cache_dir().to_path_buf(),
             paths.backup_dir().to_path_buf(),
         ];
-        temp_roots.extend(stores);
+        temp_roots.extend(stores.iter().cloned());
+        // Native agent documents live in the user's home (`~/.claude.json`, `~/.codex`,
+        // `~/.omp`), so home is the root those writes were authorized against.
+        let mut authorized_roots = Vec::new();
+        if let Some(home) = paths.home_dir() {
+            authorized_roots.push(home.to_path_buf());
+        }
+        authorized_roots.extend(stores.iter().cloned());
+        if let Some(project) = paths.project_store().and_then(Path::parent) {
+            authorized_roots.push(project.to_path_buf());
+        }
+        let mut backup_roots = vec![paths.backup_dir().to_path_buf()];
+        backup_roots.extend(stores.iter().map(|store| store.join("backups")));
         Self {
             support_dir: paths.support_dir().to_path_buf(),
             backup_dir: paths.backup_dir().to_path_buf(),
             journal_dirs,
             temp_roots,
+            authorized_roots,
+            backup_roots,
+            project_store,
         }
     }
 }
@@ -292,6 +316,19 @@ pub trait RecoveryOperations: Send + Sync {
         Ok(None)
     }
 
+    /// Finds the saved node that holds a completed delete's original, when the catalogue has it.
+    ///
+    /// A delete is undone by renaming the saved node back, so recovery needs its location rather
+    /// than its bytes. Returning `None` sends recovery to its own `<store>/backups` scan.
+    fn delete_backup(
+        &self,
+        _journal: &fs_recovery::PendingJournal,
+        _index: usize,
+        _entry: &fs_recovery::JournalEntry,
+    ) -> Result<Option<PathBuf>, RecoveryError> {
+        Ok(None)
+    }
+
     /// Records the terminal state of startup journal recovery.
     fn finish_journal(
         &self,
@@ -300,6 +337,22 @@ pub trait RecoveryOperations: Send + Sync {
         _manual_review: bool,
     ) -> Result<(), RecoveryError> {
         Ok(())
+    }
+
+    /// Whether `operation_id` names an operation that was still in flight when this app stopped.
+    ///
+    /// Startup recovery asks this for a project store, whose journals can arrive from a cloned
+    /// repository. The default answers `false`, which parks such a journal for manual review.
+    fn operation_in_flight(&self, _operation_id: &str) -> Result<bool, RecoveryError> {
+        Ok(false)
+    }
+
+    /// Whether `store_root` belongs to a project this installation registered.
+    ///
+    /// The default answers `false`: a caller that cannot prove the project owns the store must
+    /// not replay journals found in it.
+    fn is_registered_project_store(&self, _store_root: &Path) -> Result<bool, RecoveryError> {
+        Ok(false)
     }
 }
 
@@ -415,6 +468,48 @@ impl RecoveryOperations for DatabaseRecoveryOperations {
         )
     }
 
+    fn delete_backup(
+        &self,
+        journal: &fs_recovery::PendingJournal,
+        index: usize,
+        entry: &fs_recovery::JournalEntry,
+    ) -> Result<Option<PathBuf>, RecoveryError> {
+        let Some(expected) = entry.before_hash.as_deref() else {
+            return Ok(None);
+        };
+        let catalogued = {
+            let database = self
+                .database
+                .lock()
+                .map_err(|_| RecoveryError::Operations {
+                    message: "database lock poisoned".to_owned(),
+                })?;
+            let backups =
+                at_db::backups::backups_for_operation(database.connection(), &journal.operation_id)
+                    .map_err(|error| RecoveryError::Operations {
+                        message: error.to_string(),
+                    })?;
+            let entry_path = entry.path.to_string_lossy();
+            backups
+                .into_iter()
+                .find(|backup| {
+                    backup.original_path.as_deref() == Some(entry_path.as_ref())
+                        && backup.content_hash.as_deref() == Some(expected)
+                })
+                .and_then(|backup| backup.backup_path)
+                .map(PathBuf::from)
+        };
+        if catalogued.is_some() {
+            return Ok(catalogued);
+        }
+        // A crash between the rename and the catalogue insert leaves only the saved node, so
+        // search the configured backup root the same way at-fs searches its default one.
+        let Some(root) = &self.backup_root else {
+            return Ok(None);
+        };
+        find_delete_blob(root, &journal.operation_id, index, expected)
+    }
+
     fn finish_journal(
         &self,
         operation_id: &str,
@@ -447,6 +542,45 @@ impl RecoveryOperations for DatabaseRecoveryOperations {
         .map_err(|error| RecoveryError::Operations {
             message: error.to_string(),
         })
+    }
+
+    fn operation_in_flight(&self, operation_id: &str) -> Result<bool, RecoveryError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RecoveryError::Operations {
+                message: "database lock poisoned".to_owned(),
+            })?;
+        database
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM operations \
+                 WHERE id = ?1 AND status IN ('running', 'interrupted'))",
+                [operation_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| RecoveryError::Operations {
+                message: error.to_string(),
+            })
+    }
+
+    fn is_registered_project_store(&self, store_root: &Path) -> Result<bool, RecoveryError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RecoveryError::Operations {
+                message: "database lock poisoned".to_owned(),
+            })?;
+        let canonical = fs::canonicalize(store_root).unwrap_or_else(|_| store_root.to_path_buf());
+        let projects = at_db::projects::list_projects(database.connection()).map_err(|error| {
+            RecoveryError::Operations {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(projects.iter().any(|project| {
+            let store = PathBuf::from(&project.path).join(at_store::paths::STORE_DIR_NAME);
+            fs::canonicalize(&store).is_ok_and(|candidate| candidate == canonical)
+        }))
     }
 }
 
@@ -507,6 +641,57 @@ fn find_backup_bytes(
         }
     }
     Ok(None)
+}
+
+/// Finds the saved `.deleted` node a completed delete renamed into the configured backup root.
+///
+/// Searches `<operation-id>-<index>.deleted` and the legacy `<operation-id>.deleted`, confirming
+/// the recorded content hash so a same-named node from another operation is never restored.
+fn find_delete_blob(
+    root: &Path,
+    operation_id: &str,
+    index: usize,
+    expected_hash: &str,
+) -> Result<Option<PathBuf>, RecoveryError> {
+    let wanted = format!("{operation_id}-{index}.deleted");
+    let legacy = format!("{operation_id}.deleted");
+    let mut pending = vec![root.to_path_buf()];
+    let mut matches = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&directory, error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| io_error(&directory, error))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let name = entry.file_name();
+            let wanted_name =
+                name == std::ffi::OsStr::new(&wanted) || name == std::ffi::OsStr::new(&legacy);
+            if metadata.is_dir() && !wanted_name {
+                pending.push(path);
+                continue;
+            }
+            if !wanted_name {
+                continue;
+            }
+            if at_fs::hash_node(&path)
+                .map_err(|error| io_error(&path, error))?
+                .as_deref()
+                == Some(expected_hash)
+            {
+                matches.push(path);
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
 }
 
 /// Runs the production database integrity check used after an unclean exit.
@@ -737,6 +922,17 @@ impl fs_recovery::RecoveryCallbacks for AppJournalCallbacks<'_> {
             .map_err(|error| error.to_string())
     }
 
+    fn delete_backup(
+        &mut self,
+        journal: &fs_recovery::PendingJournal,
+        index: usize,
+        entry: &fs_recovery::JournalEntry,
+    ) -> Result<Option<PathBuf>, String> {
+        self.0
+            .delete_backup(journal, index, entry)
+            .map_err(|error| error.to_string())
+    }
+
     fn finish(
         &mut self,
         operation_id: &str,
@@ -745,6 +941,12 @@ impl fs_recovery::RecoveryCallbacks for AppJournalCallbacks<'_> {
     ) -> Result<(), String> {
         self.0
             .finish_journal(operation_id, succeeded, manual_review)
+            .map_err(|error| error.to_string())
+    }
+
+    fn operation_in_flight(&mut self, operation_id: &str) -> Result<bool, String> {
+        self.0
+            .operation_in_flight(operation_id)
             .map_err(|error| error.to_string())
     }
 }
@@ -866,8 +1068,28 @@ impl RecoveryService {
             let Some(store_root) = journal_dir.parent().and_then(Path::parent) else {
                 continue;
             };
+            let is_project_store = self.locations.project_store.as_deref() == Some(store_root);
+            // A project store is committed to Git along with the repository, so its journals may
+            // come from a clone of an untrusted source. Only a store of a project this
+            // installation registered is replayed at all, and then only for an operation the
+            // database still shows in flight.
+            if is_project_store && !self.operations.is_registered_project_store(store_root)? {
+                tracing::warn!(
+                    store = %store_root.display(),
+                    "startup recovery left an unregistered project store's journals for review"
+                );
+                continue;
+            }
+            let mut policy = fs_recovery::RecoveryPolicy::new(
+                store_root,
+                self.locations.authorized_roots.iter().cloned(),
+                self.locations.backup_roots.iter().cloned(),
+            );
+            if is_project_store {
+                policy = policy.requiring_recorded_operation();
+            }
             let mut callbacks = AppJournalCallbacks(self.operations.as_ref());
-            fs_recovery::recover_journals(journal_dir, store_root, &mut callbacks)?;
+            fs_recovery::recover_journals(journal_dir, &policy, &mut callbacks)?;
         }
         let mut sheet = RecoverySheet {
             interrupted: Vec::new(),

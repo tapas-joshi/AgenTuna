@@ -71,6 +71,19 @@ pub fn strategy_status(agent: &AgentId) -> Option<&'static SecretStrategyStatus>
     SECRET_STRATEGY_TABLE.iter().find(|row| row.agent == key)
 }
 
+/// Returns `true` if the agent's strategy table entry explicitly verifies `${VAR}` expansion.
+///
+/// An agent whose entry marks `${VAR}` expansion as `UNVERIFIED` will return `false`.
+#[must_use]
+pub fn verifies_var_expansion(agent: &AgentId) -> bool {
+    strategy_status(agent).is_some_and(|status| {
+        !status
+            .verified_expansion
+            .contains("${VAR} expansion UNVERIFIED")
+            && !status.verified_expansion.starts_with("UNVERIFIED")
+    })
+}
+
 /// Agent-specific safe action for a secret environment variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -188,10 +201,30 @@ mod tests {
             panic!("unverified omp expansion must be refused")
         };
         assert_eq!(variable, "TOKEN");
-        assert!(shell_snippet.contains("dev.agentuna.mcp"));
-        assert!(shell_snippet.contains("account"));
+        assert_eq!(
+            shell_snippet,
+            format!(
+                "export TOKEN=$(security find-generic-password -s '{}' -a 'account' -w)",
+                at_secrets::KEYCHAIN_SERVICE
+            )
+        );
         assert!(!shell_snippet.contains("SENTINEL_SECRET_VALUE"));
         assert_eq!(CapabilityVerification::Unverified, omp.env_interpolation);
+        for agent in [AgentId::Cursor, AgentId::Custom("generic".to_owned())] {
+            let capabilities = capabilities(&agent, home).expect("capabilities");
+            assert!(
+                matches!(
+                    plan_secret_injection(
+                        &capabilities,
+                        Path::new("/tmp/mcp.json"),
+                        "TOKEN",
+                        "account"
+                    ),
+                    SecretInjection::Refused { variable, .. } if variable == "TOKEN"
+                ),
+                "{agent} must refuse an unverified secret reference"
+            );
+        }
         let invalid =
             plan_secret_injection(&omp, Path::new("/tmp/mcp.json"), "TOKEN;false", "acct");
         assert_eq!(

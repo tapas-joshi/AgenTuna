@@ -154,6 +154,8 @@ ops_enum! {
         Lock => "lock",
         /// Removed a lock.
         Unlock => "unlock",
+        /// Wrote into the machine-wide Global store after the authorization prompt.
+        GlobalWrite => "global_write",
     }
 }
 
@@ -710,6 +712,57 @@ pub fn finish(
     Ok(updated == 1)
 }
 
+/// Marks a finished operation as undone and returns whether the row changed.
+///
+/// Undo is a later event on an operation that already succeeded, so it cannot go through
+/// [`finish`]: only the `succeeded` status becomes `undone`, and an already-undone row is left
+/// alone. `error_kind` and `finished_at` keep their values; `undo_of` on the reversing operation
+/// is what records the pair.
+///
+/// # Errors
+///
+/// [`DbError`] when the update cannot be written.
+pub fn mark_undone(connection: &Connection, operation: &OperationId) -> Result<bool, DbError> {
+    let updated = connection.execute(
+        "UPDATE operations SET status = 'undone' WHERE id = ?1 AND status = 'succeeded'",
+        params![operation.as_str()],
+    )?;
+    Ok(updated == 1)
+}
+
+/// Records that a reversible operation was rolled back after its apply had already finished.
+///
+/// A phase-applied operation is written `succeeded` before the caller can know whether a later
+/// phase fails. Rolling the phase back means none of its writes exist, so history must not keep
+/// describing them: every file row takes its before value as the after value (a created file
+/// becomes "nothing there", a deleted file "still there") and the operation ends `failed` with
+/// `error_kind = 'rolled_back'`. A row that is not `running` or `succeeded` is left alone.
+///
+/// Returns whether the operation row changed.
+///
+/// # Errors
+///
+/// [`DbError`] when the update cannot be written.
+pub fn record_rollback(connection: &Connection, operation: &OperationId) -> Result<bool, DbError> {
+    // Two statements rather than a transaction: callers may hold their own savepoint on this
+    // connection, and the update is idempotent, so a retry repairs a partial write.
+    connection.execute(
+        "UPDATE operation_files \
+            SET after_hash = before_hash, bytes_after = bytes_before \
+          WHERE operation_id = ?1",
+        params![operation.as_str()],
+    )?;
+    let updated = connection.execute(
+        "UPDATE operations \
+            SET status = 'failed', \
+                error_kind = 'rolled_back', \
+                finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+          WHERE id = ?1 AND status IN ('running', 'succeeded')",
+        params![operation.as_str()],
+    )?;
+    Ok(updated == 1)
+}
+
 /// Writes an operation, its files and its terminal status in one transaction.
 ///
 /// Use this when the outcome is already known; nothing is left in `running`
@@ -1232,6 +1285,31 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Current high-water mark of the operation rowid sequence.
+///
+/// # Errors
+/// Returns the database failure when the history cannot be read.
+pub fn rowid_high_water(connection: &Connection) -> Result<i64, DbError> {
+    Ok(connection.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM operations",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Operation ids created after `after_rowid`, oldest first, excluding undo rows.
+///
+/// # Errors
+/// Returns the database failure when the history cannot be read.
+pub fn ids_after(connection: &Connection, after_rowid: i64) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT id FROM operations WHERE rowid > ?1 AND undo_of IS NULL \
+         AND status = 'succeeded' ORDER BY rowid",
+    )?;
+    let rows = statement.query_map([after_rowid], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use at_model::Scope;
@@ -1242,7 +1320,7 @@ mod tests {
 
     #[test]
     fn operation_kind_wire_names_round_trip() {
-        assert_eq!(OperationKind::ALL.len(), 26);
+        assert_eq!(OperationKind::ALL.len(), 27);
         for kind in OperationKind::ALL {
             let parsed: OperationKind = kind.as_str().parse().expect("wire name parses");
             assert_eq!(parsed, *kind);

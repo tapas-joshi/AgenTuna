@@ -232,52 +232,20 @@ fn migrate_fixture() -> MigrateFixture {
 }
 
 fn migrate_plan(fixture: &MigrateFixture) -> at_migrate::plan::MigrationPlan {
-    let normalized = at_store::manifest::hash_skill_folder(&fixture.native)
-        .expect("skill hash")
-        .to_string();
-    let item = ScanItem {
-        kind: ItemKind::Skill,
-        name: "sample-skill".to_owned(),
-        agents: BTreeSet::from([AgentId::ClaudeCode]),
-        path: fixture.native.clone(),
-        scope: Scope::User,
-        content_hash: Some(fixture.native_hash.clone()),
-        normalized_hash: Some(normalized),
-        parse_status: ParseStatus::Parsed,
-        store_link: false,
-        ownership: Ownership::NotInAgenTuna,
-    };
-    let scan = ScanReport {
-        items: vec![item],
-        partial: false,
-        skipped_roots: Vec::new(),
-    };
-    let conflicts = detect_conflicts(&scan);
-    let selected = BTreeSet::from([fixture.native.clone()]);
-    build_plan(BuildPlanRequest {
-        scan: &scan,
-        conflicts: &conflicts,
-        resolutions: &BTreeMap::new(),
-        selected_paths: &selected,
-        store_root: fixture.store.clone(),
-        copy_agents: &BTreeSet::new(),
-        strategy: MigrationStrategy::ReplaceWithLinks,
-        scope: Scope::User,
-        backup_root: fixture.backups.clone(),
-    })
-    .expect("migration plan")
+    plan_for(
+        fixture,
+        vec![skill_item(
+            &fixture.native,
+            "sample-skill",
+            &[AgentId::ClaudeCode],
+        )],
+        &BTreeSet::new(),
+    )
 }
 
 fn apply_migrate(fixture: &mut MigrateFixture) -> at_migrate::apply::MigrationApplyOutcome {
     let plan = migrate_plan(fixture);
-    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
-    let mut context = ApplyPlanContext {
-        store_root: &fixture.store,
-        backup_root: &fixture.backups,
-        authorized_roots: &roots,
-        database: &mut fixture.database,
-    };
-    apply_plan(&plan, &mut context).expect("apply migration")
+    apply_plan_for(fixture, &plan)
 }
 
 fn undo_request<'a>(
@@ -298,6 +266,111 @@ fn tree_hash(path: &Path) -> String {
     at_fs::changeset::hash_node(path)
         .expect("hash tree")
         .expect("tree exists")
+}
+
+fn skill_item(path: &Path, name: &str, agents: &[AgentId]) -> ScanItem {
+    let content_hash = at_fs::changeset::hash_node(path)
+        .expect("content hash")
+        .expect("native skill exists");
+    let normalized_hash = at_store::manifest::hash_skill_folder(path)
+        .expect("normalized hash")
+        .to_string();
+    ScanItem {
+        kind: ItemKind::Skill,
+        name: name.to_owned(),
+        agents: agents.iter().cloned().collect(),
+        path: path.to_path_buf(),
+        scope: Scope::User,
+        content_hash: Some(content_hash),
+        normalized_hash: Some(normalized_hash),
+        parse_status: ParseStatus::Parsed,
+        store_link: false,
+        ownership: Ownership::NotInAgenTuna,
+    }
+}
+
+fn plan_for(
+    fixture: &MigrateFixture,
+    items: Vec<ScanItem>,
+    copy_agents: &BTreeSet<AgentId>,
+) -> at_migrate::plan::MigrationPlan {
+    let selected_paths = items
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<BTreeSet<_>>();
+    let scan = ScanReport {
+        items,
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let conflicts = detect_conflicts(&scan);
+    build_plan(BuildPlanRequest {
+        scan: &scan,
+        conflicts: &conflicts,
+        resolutions: &BTreeMap::new(),
+        selected_paths: &selected_paths,
+        store_root: fixture.store.clone(),
+        copy_agents,
+        strategy: MigrationStrategy::ReplaceWithLinks,
+        scope: Scope::User,
+        backup_root: fixture.backups.clone(),
+    })
+    .expect("migration plan")
+}
+
+/// [`plan_for`] for one receiving scope and store, so a test can plan a multi-scope selection.
+fn plan_for_scope(
+    fixture: &MigrateFixture,
+    items: Vec<ScanItem>,
+    scope: Scope,
+    store_root: &Path,
+) -> at_migrate::plan::MigrationPlan {
+    let selected_paths = items
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<BTreeSet<_>>();
+    let scan = ScanReport {
+        items,
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let conflicts = detect_conflicts(&scan);
+    build_plan(BuildPlanRequest {
+        scan: &scan,
+        conflicts: &conflicts,
+        resolutions: &BTreeMap::new(),
+        selected_paths: &selected_paths,
+        store_root: store_root.to_path_buf(),
+        copy_agents: &BTreeSet::new(),
+        strategy: MigrationStrategy::ReplaceWithLinks,
+        scope,
+        backup_root: fixture.backups.clone(),
+    })
+    .expect("migration plan")
+}
+
+fn apply_plan_for(
+    fixture: &mut MigrateFixture,
+    plan: &at_migrate::plan::MigrationPlan,
+) -> at_migrate::apply::MigrationApplyOutcome {
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let mut context = ApplyPlanContext {
+        store_root: &fixture.store,
+        backup_root: &fixture.backups,
+        authorized_roots: &roots,
+        database: &mut fixture.database,
+        project_id: None,
+    };
+    apply_plan(plan, &mut context).expect("apply migration")
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .expect("deployed path")
+        .file_type()
+        .is_symlink()
 }
 
 #[test]
@@ -354,10 +427,37 @@ fn undo_of_a_migrate_operation_restores_originals_and_removes_metadata() {
             .is_symlink()
     );
     assert!(!store_item.exists(), "store item removed");
+    // The manifest is merged, not restored byte-for-byte (a later install may share the file):
+    // the migrated record is gone and nothing else reappeared.
+    let manifest = at_store::manifest::StoreManifest::load(&at_store::layout::StoreLayout::new(
+        Scope::User,
+        &fixture.store,
+    ))
+    .expect("manifest")
+    .manifest;
+    assert!(
+        manifest
+            .item_by_slug(
+                ItemKind::Skill,
+                &at_store::layout::Slug::parse("sample-skill").expect("slug")
+            )
+            .is_none(),
+        "the migrated item record is removed"
+    );
+    let before =
+        at_store::manifest::StoreManifest::parse(&fixture.store_manifest_bytes).expect("before");
     assert_eq!(
-        fs::read(fixture.store.join("store.json")).expect("manifest"),
-        fixture.store_manifest_bytes,
-        "manifest restored to its pre-migration bytes"
+        manifest
+            .items()
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        before
+            .items()
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        "the merged manifest holds exactly the pre-migration records"
     );
 
     // Metadata: deployments, native adoption and the item row are gone.
@@ -411,6 +511,479 @@ fn undo_of_a_migrate_operation_restores_originals_and_removes_metadata() {
             .file_type()
             .is_symlink()
     );
+}
+
+#[test]
+fn undo_of_migration_with_sibling_skills_restores_each_native_tree() {
+    let mut fixture = migrate_fixture();
+    let second = fixture
+        .native
+        .parent()
+        .expect("native skills parent")
+        .join("second-skill");
+    fs::create_dir_all(&second).expect("second native tree");
+    fs::write(second.join("SKILL.md"), b"# Secondary\nbody\n").expect("second document");
+    let originals = [
+        (fixture.native.clone(), b"# Sample\nbody\n".to_vec()),
+        (second.clone(), b"# Secondary\nbody\n".to_vec()),
+    ];
+    let items = originals
+        .iter()
+        .map(|(path, _)| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("skill name")
+                .to_owned();
+            let content_hash = at_fs::changeset::hash_node(path)
+                .expect("content hash")
+                .expect("native skill exists");
+            let normalized_hash = at_store::manifest::hash_skill_folder(path)
+                .expect("normalized hash")
+                .to_string();
+            ScanItem {
+                kind: ItemKind::Skill,
+                name,
+                agents: BTreeSet::from([AgentId::ClaudeCode]),
+                path: path.clone(),
+                scope: Scope::User,
+                content_hash: Some(content_hash),
+                normalized_hash: Some(normalized_hash),
+                parse_status: ParseStatus::Parsed,
+                store_link: false,
+                ownership: Ownership::NotInAgenTuna,
+            }
+        })
+        .collect::<Vec<_>>();
+    let scan = ScanReport {
+        items,
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let conflicts = detect_conflicts(&scan);
+    let selected_paths = originals
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    let plan = build_plan(BuildPlanRequest {
+        scan: &scan,
+        conflicts: &conflicts,
+        resolutions: &BTreeMap::new(),
+        selected_paths: &selected_paths,
+        store_root: fixture.store.clone(),
+        copy_agents: &BTreeSet::new(),
+        strategy: MigrationStrategy::ReplaceWithLinks,
+        scope: Scope::User,
+        backup_root: fixture.backups.clone(),
+    })
+    .expect("migration plan");
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let applied = {
+        let mut context = ApplyPlanContext {
+            store_root: &fixture.store,
+            backup_root: &fixture.backups,
+            authorized_roots: &roots,
+            database: &mut fixture.database,
+            project_id: None,
+        };
+        apply_plan(&plan, &mut context).expect("apply migration")
+    };
+
+    let store_items = [
+        fixture.store.join("skills/sample-skill"),
+        fixture.store.join("skills/second-skill"),
+    ];
+    for ((native, _), store_item) in originals.iter().zip(&store_items) {
+        assert!(store_item.join("SKILL.md").is_file());
+        assert!(
+            fs::symlink_metadata(native)
+                .expect("migrated native link")
+                .file_type()
+                .is_symlink()
+        );
+    }
+    let result = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo migration");
+    assert!(matches!(result, UndoOutcome::Restored { .. }));
+
+    for ((native, bytes), store_item) in originals.iter().zip(&store_items) {
+        assert_eq!(
+            fs::read(native.join("SKILL.md")).expect("restored document"),
+            *bytes
+        );
+        assert!(
+            !fs::symlink_metadata(native)
+                .expect("restored native directory")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!store_item.exists(), "store item removed");
+    }
+    let merged = at_store::manifest::StoreManifest::load(&at_store::layout::StoreLayout::new(
+        Scope::User,
+        &fixture.store,
+    ))
+    .expect("manifest")
+    .manifest;
+    let before = at_store::manifest::StoreManifest::parse(&fixture.store_manifest_bytes)
+        .expect("pre-migration manifest");
+    assert_eq!(
+        merged
+            .items()
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        before
+            .items()
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        "the merged manifest holds exactly the pre-migration records"
+    );
+}
+
+#[test]
+fn undo_of_a_copy_strategy_migration_restores_the_original_and_removes_metadata() {
+    let mut fixture = migrate_fixture();
+    let copies = BTreeSet::from([AgentId::ClaudeCode]);
+    let plan = plan_for(
+        &fixture,
+        vec![skill_item(
+            &fixture.native,
+            "sample-skill",
+            &[AgentId::ClaudeCode],
+        )],
+        &copies,
+    );
+    let applied = apply_plan_for(&mut fixture, &plan);
+    let store_item = fixture.store.join("skills/sample-skill");
+    assert!(store_item.join("SKILL.md").is_file(), "store item created");
+    assert!(
+        !is_symlink(&fixture.native),
+        "a copy deployment leaves a real directory at the native path"
+    );
+    assert_eq!(
+        fs::read(fixture.native.join("SKILL.md")).expect("copied document"),
+        b"# Sample\nbody\n",
+        "the copy holds the original content (plus its copy manifest)"
+    );
+    let item_id = at_db::items::item_id_by_identity(
+        fixture.database.connection(),
+        ItemKind::Skill,
+        Scope::User,
+        None,
+        "sample-skill",
+    )
+    .expect("item lookup")
+    .expect("item row written");
+    let deployments =
+        at_db::deployments::list_deployments_for_item(fixture.database.connection(), &item_id)
+            .expect("deployments");
+    assert_eq!(deployments.len(), 1, "one deployment row");
+    assert_eq!(
+        deployments[0].link_mode,
+        Some(at_model::LinkMode::Copy),
+        "the plan deployed a copy, not a link"
+    );
+
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let readiness =
+        at_migrate::undo::undo_readiness(fixture.database.connection(), &applied.operation_id)
+            .expect("undo readiness");
+    assert!(readiness.known, "the operation is known");
+    assert!(!readiness.already_undone && !readiness.expired);
+    assert!(
+        readiness.conflicted_paths.is_empty(),
+        "the check must agree with the undo on a deployment the operation owns: {readiness:?}"
+    );
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo migration");
+    let restored = matches!(outcome, UndoOutcome::Restored { .. });
+    assert!(restored, "expected a completed undo, got {outcome:?}");
+
+    assert_eq!(
+        tree_hash(&fixture.native),
+        fixture.native_hash,
+        "the original tree is back byte-identically"
+    );
+    assert!(
+        !is_symlink(&fixture.native),
+        "the original directory is back"
+    );
+    assert!(!store_item.exists(), "store item removed");
+    assert!(
+        at_db::deployments::list_deployments_for_item(fixture.database.connection(), &item_id)
+            .expect("deployments")
+            .is_empty(),
+        "the copy deployment row is gone with the store item"
+    );
+    assert!(
+        at_db::items::item_id_by_identity(
+            fixture.database.connection(),
+            ItemKind::Skill,
+            Scope::User,
+            None,
+            "sample-skill",
+        )
+        .expect("item lookup")
+        .is_none(),
+        "item row removed with the store files"
+    );
+}
+
+#[test]
+fn undo_check_and_undo_agree_when_the_original_bytes_are_already_back() {
+    let mut fixture = migrate_fixture();
+    let applied = apply_migrate(&mut fixture);
+    let store_item = fixture.store.join("skills/sample-skill");
+    // The user replaces the deployment link with their own copy of the original bytes.
+    fs::remove_file(&fixture.native).expect("remove the deployment link");
+    fs::create_dir_all(&fixture.native).expect("native directory");
+    fs::write(fixture.native.join("SKILL.md"), b"# Sample\nbody\n").expect("restored document");
+    assert_eq!(tree_hash(&fixture.native), fixture.native_hash);
+
+    let readiness =
+        at_migrate::undo::undo_readiness(fixture.database.connection(), &applied.operation_id)
+            .expect("undo readiness");
+    assert!(
+        readiness.conflicted_paths.is_empty(),
+        "the end state already holds, so the check reports no conflict: {readiness:?}"
+    );
+
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo migration");
+    let restored = matches!(outcome, UndoOutcome::Restored { .. });
+    assert!(restored, "expected a completed undo, got {outcome:?}");
+    assert_eq!(
+        tree_hash(&fixture.native),
+        fixture.native_hash,
+        "the restored bytes stay as they are"
+    );
+    assert_eq!(
+        fs::read(fixture.native.join("SKILL.md")).expect("kept document"),
+        b"# Sample\nbody\n"
+    );
+    assert!(!store_item.exists(), "the store item still goes");
+}
+
+#[test]
+fn undo_of_a_nested_directory_skill_restores_every_nested_file() {
+    let mut fixture = migrate_fixture();
+    fs::create_dir_all(fixture.native.join("assets/icons")).expect("nested directory");
+    fs::write(fixture.native.join("assets/icons/logo.svg"), b"<svg/>\n").expect("nested asset");
+    fs::create_dir_all(fixture.native.join("docs")).expect("docs directory");
+    fs::write(fixture.native.join("docs/guide.md"), b"# Guide\n").expect("nested document");
+    fs::create_dir_all(fixture.native.join("empty")).expect("empty directory");
+    let native_hash = tree_hash(&fixture.native);
+    let plan = plan_for(
+        &fixture,
+        vec![skill_item(
+            &fixture.native,
+            "sample-skill",
+            &[AgentId::ClaudeCode],
+        )],
+        &BTreeSet::new(),
+    );
+    let applied = apply_plan_for(&mut fixture, &plan);
+    assert!(
+        is_symlink(&fixture.native),
+        "the nested tree is replaced by a link"
+    );
+
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo migration");
+    let restored = matches!(outcome, UndoOutcome::Restored { .. });
+    assert!(restored, "expected a completed undo, got {outcome:?}");
+
+    assert_eq!(
+        tree_hash(&fixture.native),
+        native_hash,
+        "the restored tree is byte-identical, nested entries included"
+    );
+    assert_eq!(
+        fs::read(fixture.native.join("assets/icons/logo.svg")).expect("restored asset"),
+        b"<svg/>\n"
+    );
+    assert_eq!(
+        fs::read(fixture.native.join("docs/guide.md")).expect("restored document"),
+        b"# Guide\n"
+    );
+    assert!(
+        fixture.native.join("empty").is_dir(),
+        "empty nested directories are restored too"
+    );
+}
+
+#[test]
+fn undo_of_a_mixed_link_and_copy_migration_restores_each_native_tree() {
+    let mut fixture = migrate_fixture();
+    let second = fixture
+        .native
+        .parent()
+        .expect("native skills parent")
+        .join("second-skill");
+    fs::create_dir_all(&second).expect("second native tree");
+    fs::write(second.join("SKILL.md"), b"# Secondary\nbody\n").expect("second document");
+    let first_hash = tree_hash(&fixture.native);
+    let second_hash = tree_hash(&second);
+    // Only Claude Code gets a copy; an item also deployed to Codex must stay a link.
+    let copies = BTreeSet::from([AgentId::ClaudeCode]);
+    let plan = plan_for(
+        &fixture,
+        vec![
+            skill_item(&fixture.native, "sample-skill", &[AgentId::ClaudeCode]),
+            skill_item(
+                &second,
+                "second-skill",
+                &[AgentId::ClaudeCode, AgentId::Codex],
+            ),
+        ],
+        &copies,
+    );
+    let applied = apply_plan_for(&mut fixture, &plan);
+    assert!(
+        !is_symlink(&fixture.native),
+        "a copy-only item stays a real directory"
+    );
+    assert!(
+        is_symlink(&second),
+        "an item shared with another agent stays a link"
+    );
+
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo mixed migration");
+    let restored = matches!(outcome, UndoOutcome::Restored { .. });
+    assert!(restored, "expected a completed undo, got {outcome:?}");
+
+    assert_eq!(
+        tree_hash(&fixture.native),
+        first_hash,
+        "the copied item's original is back byte-identically"
+    );
+    assert_eq!(
+        tree_hash(&second),
+        second_hash,
+        "the linked item's original is back byte-identically"
+    );
+    assert!(
+        !is_symlink(&fixture.native) && !is_symlink(&second),
+        "both native paths are plain directories again"
+    );
+    assert!(!fixture.store.join("skills/sample-skill").exists());
+    assert!(!fixture.store.join("skills/second-skill").exists());
+}
+
+#[test]
+fn undo_refuses_a_foreign_directory_at_the_original_path_without_writing() {
+    let mut fixture = migrate_fixture();
+    let applied = apply_migrate(&mut fixture);
+    let store_item = fixture.store.join("skills/sample-skill");
+    let store_hash = tree_hash(&store_item);
+    let item_id = at_db::items::item_id_by_identity(
+        fixture.database.connection(),
+        ItemKind::Skill,
+        Scope::User,
+        None,
+        "sample-skill",
+    )
+    .expect("item lookup")
+    .expect("item row written");
+    // The user removes the deployment link and writes their own tree there.
+    fs::remove_file(&fixture.native).expect("remove the deployment link");
+    fs::create_dir_all(fixture.native.join("mine")).expect("user directory");
+    fs::write(fixture.native.join("SKILL.md"), b"# User rewrite\n").expect("user document");
+    let foreign_hash = tree_hash(&fixture.native);
+
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo attempt");
+    match outcome {
+        UndoOutcome::Conflict { paths } => assert_eq!(
+            paths,
+            vec![fixture.native.clone()],
+            "the refusal names the foreign path"
+        ),
+        other => panic!("expected a conflict refusal, got {other:?}"),
+    }
+
+    assert_eq!(
+        tree_hash(&fixture.native),
+        foreign_hash,
+        "the foreign tree is untouched"
+    );
+    assert_eq!(
+        fs::read(fixture.native.join("SKILL.md")).expect("user document kept"),
+        b"# User rewrite\n"
+    );
+    assert!(fixture.native.join("mine").is_dir());
+    assert_eq!(
+        tree_hash(&store_item),
+        store_hash,
+        "the store item is untouched"
+    );
+    assert_eq!(
+        at_db::deployments::list_deployments_for_item(fixture.database.connection(), &item_id)
+            .expect("deployments")
+            .len(),
+        1,
+        "the deployment row survives a refused undo"
+    );
+    let native = at_db::native::native_item_by_path(
+        fixture.database.connection(),
+        &fixture.native.to_string_lossy(),
+    )
+    .expect("native lookup")
+    .expect("native row survives");
+    assert_eq!(native.status, at_db::native::NativeStatus::Adopted);
+    assert_eq!(native.adopted_item_id, Some(item_id.to_string()));
+    let undo_rows: i64 = fixture
+        .database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM operations WHERE undo_of = ?1",
+            [applied.operation_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("undo history");
+    assert_eq!(undo_rows, 0, "a refused undo writes no operation row");
+}
+
+#[test]
+fn failed_undo_is_not_reported_as_already_undone_and_can_be_retried() {
+    struct FailChangeSetOperation;
+    impl at_fs::failpoint::FailInjector for FailChangeSetOperation {
+        fn fault(
+            &self,
+            point: at_fs::failpoint::FaultPoint,
+            _: &Path,
+        ) -> Option<at_fs::failpoint::Fault> {
+            (point == at_fs::failpoint::FaultPoint::ChangeSetOperation)
+                .then_some(at_fs::failpoint::Fault::Fail(5))
+        }
+    }
+
+    let mut fixture = migrate_fixture();
+    let applied = apply_migrate(&mut fixture);
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let error =
+        at_fs::failpoint::with_injector(std::sync::Arc::new(FailChangeSetOperation), || {
+            undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        })
+        .expect_err("injected undo failure");
+    assert!(error.to_string().contains("ChangeSet operation 0"));
+    let readiness =
+        at_migrate::undo::undo_readiness(fixture.database.connection(), &applied.operation_id)
+            .expect("undo readiness");
+    assert!(!readiness.already_undone);
+
+    let retry = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("retry failed undo");
+    assert!(matches!(retry, UndoOutcome::Restored { .. }));
+    assert_eq!(tree_hash(&fixture.native), fixture.native_hash);
 }
 
 #[test]
@@ -624,4 +1197,237 @@ fn undo_of_an_operation_without_file_rows_is_recorded_and_idempotent() {
         UndoOutcome::AlreadyUndone
     );
     let _ = ItemId::new();
+}
+
+#[test]
+fn undo_of_a_migrate_operation_keeps_an_item_installed_afterwards() {
+    let mut fixture = migrate_fixture();
+    let applied = apply_migrate(&mut fixture);
+    let layout = at_store::layout::StoreLayout::new(Scope::User, &fixture.store);
+    let later_dir = fixture.store.join("skills/later-skill");
+    fs::create_dir_all(&later_dir).expect("later skill folder");
+    fs::write(later_dir.join("SKILL.md"), b"# later\n").expect("later skill document");
+    let later_hash = at_store::manifest::hash_skill_folder(&later_dir)
+        .expect("later hash")
+        .to_string();
+    let later_id = ItemId::new();
+    let mut manifest = at_store::manifest::StoreManifest::load(&layout)
+        .expect("manifest")
+        .manifest;
+    manifest
+        .insert_item(
+            at_store::manifest::ManifestItem::new(
+                later_id,
+                ItemKind::Skill,
+                at_store::layout::Slug::parse("later-skill").expect("slug"),
+                at_store::manifest::StorePath::parse("skills/later-skill").expect("path"),
+                at_store::manifest::ContentHash::parse(&later_hash).expect("hash"),
+            )
+            .with_name("later-skill"),
+        )
+        .expect("record the later item");
+    fs::write(
+        layout.manifest_path(),
+        manifest.to_bytes().expect("manifest bytes"),
+    )
+    .expect("write the shared manifest");
+
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo the migration");
+
+    assert!(
+        matches!(outcome, UndoOutcome::Restored { .. }),
+        "a later install must not block the undo: {outcome:?}"
+    );
+    let merged = at_store::manifest::StoreManifest::load(&layout)
+        .expect("merged manifest")
+        .manifest;
+    assert!(
+        merged.item(later_id).is_some(),
+        "the later install survives the undo"
+    );
+    assert!(
+        merged
+            .item_by_slug(
+                ItemKind::Skill,
+                &at_store::layout::Slug::parse("sample-skill").expect("slug")
+            )
+            .is_none(),
+        "the migrated record is removed"
+    );
+    assert_eq!(
+        fs::read(later_dir.join("SKILL.md")).expect("later skill content"),
+        b"# later\n"
+    );
+    assert_eq!(tree_hash(&fixture.native), fixture.native_hash);
+}
+
+#[test]
+fn undo_of_a_migrate_operation_recreates_the_tree_when_the_link_was_removed() {
+    let mut fixture = migrate_fixture();
+    let applied = apply_migrate(&mut fixture);
+    fs::remove_file(&fixture.native).expect("the user removes the managed link");
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+
+    let outcome = undo_operation(undo_request(&fixture, &roots), &applied.operation_id)
+        .expect("undo the migration");
+
+    assert!(
+        matches!(outcome, UndoOutcome::Restored { .. }),
+        "a removed managed link must not be a stale target: {outcome:?}"
+    );
+    assert_eq!(
+        tree_hash(&fixture.native),
+        fixture.native_hash,
+        "the original native tree comes back from the operation backup"
+    );
+    assert!(
+        !fs::symlink_metadata(&fixture.native)
+            .expect("restored tree")
+            .file_type()
+            .is_symlink(),
+        "the link is not re-created"
+    );
+    assert!(
+        !fixture.store.join("skills/sample-skill").exists(),
+        "the store item is removed"
+    );
+}
+
+/// A selection that spans scopes is applied as one operation that writes several stores' shared
+/// documents. Undo has to merge each of them entry by entry, not restore the whole file from the
+/// operation backup, or a later unrelated change in the other store is silently lost.
+fn multi_scope_migration(fixture: &mut MigrateFixture) -> (PathBuf, PathBuf, String) {
+    let global_store = fixture.root.join("global-store");
+    at_store::layout::init_store(Scope::Global, &global_store).expect("global store");
+    let global_native = fixture.root.join("native/global/other-skill");
+    fs::create_dir_all(&global_native).expect("global native tree");
+    fs::write(global_native.join("SKILL.md"), b"# Other\nbody\n").expect("global document");
+
+    let user_plan = plan_for_scope(
+        fixture,
+        vec![skill_item(
+            &fixture.native,
+            "sample-skill",
+            &[AgentId::ClaudeCode],
+        )],
+        Scope::User,
+        &fixture.store,
+    );
+    let global_plan = plan_for_scope(
+        fixture,
+        vec![skill_item(
+            &global_native,
+            "other-skill",
+            &[AgentId::ClaudeCode],
+        )],
+        Scope::Global,
+        &global_store,
+    );
+
+    let mut stores = at_migrate::plan::ScopeStores::new();
+    stores.insert(Scope::User, fixture.store.clone());
+    stores.insert(Scope::Global, global_store.clone());
+    let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized roots");
+    let mut context = at_migrate::apply::ApplyPlansContext {
+        stores: &stores,
+        backup_root: &fixture.backups,
+        authorized_roots: &roots,
+        database: &mut fixture.database,
+        project_id: None,
+    };
+    let applied = at_migrate::apply::apply_plans(&[user_plan, global_plan], &mut context)
+        .expect("multi-scope migration");
+    (global_store, global_native, applied.operation_id)
+}
+
+/// Adds an unrelated item to a store manifest, the way a later `skills install` would.
+fn add_later_manifest_entry(store: &Path) -> ItemId {
+    let manifest_path = store.join("store.json");
+    let mut manifest = at_store::manifest::StoreManifest::parse(
+        &fs::read(&manifest_path).expect("manifest bytes"),
+    )
+    .expect("parse manifest");
+    let later = ItemId::new();
+    manifest
+        .insert_item(at_store::manifest::ManifestItem::new(
+            later,
+            ItemKind::Skill,
+            at_store::layout::Slug::parse("later-skill").expect("slug"),
+            at_store::manifest::StorePath::parse("skills/later-skill").expect("store path"),
+            at_store::ContentHash::parse(&at_fs::sha256_hex(b"later skill")).expect("content hash"),
+        ))
+        .expect("insert later entry");
+    fs::write(
+        &manifest_path,
+        manifest.to_bytes().expect("manifest serializes"),
+    )
+    .expect("write manifest");
+    later
+}
+
+fn manifest_has_slug(store: &Path, slug: &str) -> bool {
+    let manifest = at_store::manifest::StoreManifest::parse(
+        &fs::read(store.join("store.json")).expect("manifest bytes"),
+    )
+    .expect("parse manifest");
+    manifest
+        .items()
+        .iter()
+        .any(|item| item.slug.as_str() == slug)
+}
+
+#[test]
+fn multi_scope_undo_keeps_a_later_entry_in_the_second_stores_manifest() {
+    for force in [false, true] {
+        let mut fixture = migrate_fixture();
+        let (global_store, global_native, operation_id) = multi_scope_migration(&mut fixture);
+        assert!(
+            manifest_has_slug(&global_store, "other-skill"),
+            "the migration wrote the Global manifest"
+        );
+        let later = add_later_manifest_entry(&global_store);
+        let roots = ApplyRoots::new([fixture.root.clone()]).expect("authorized root");
+
+        let outcome = undo_operation(
+            UndoOperationRequest {
+                connection: fixture.database.connection(),
+                store_root: &fixture.store,
+                backup_root: &fixture.backups,
+                authorized_roots: &roots,
+                actor: ops::OperationActor::Ui,
+                force,
+            },
+            &operation_id,
+        )
+        .expect("undo the multi-scope migration");
+
+        assert!(
+            matches!(outcome, UndoOutcome::Restored { .. }),
+            "force={force}: a shared document another command changed is merged, not refused: {outcome:?}"
+        );
+        let manifest = at_store::manifest::StoreManifest::parse(
+            &fs::read(global_store.join("store.json")).expect("Global manifest bytes"),
+        )
+        .expect("parse Global manifest");
+        assert!(
+            manifest.item(later).is_some(),
+            "force={force}: the later, unrelated Global entry survives the undo"
+        );
+        assert!(
+            !manifest
+                .items()
+                .iter()
+                .any(|item| item.slug.as_str() == "other-skill"),
+            "force={force}: the migrated Global item is reverted"
+        );
+        assert!(
+            !fs::symlink_metadata(&global_native)
+                .expect("restored native tree")
+                .file_type()
+                .is_symlink(),
+            "force={force}: the migrated Global skill is restored from its backup"
+        );
+    }
 }

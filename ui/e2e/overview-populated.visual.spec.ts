@@ -8,14 +8,14 @@ test("populated Overview uses compact scope cards and usable attention and chang
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12).toISOString();
     mocks.commandOverrides.overview_load = {
       scopes: [
-        { scope: "global", skills: 5, mcp: 2, rules: 0, locks: 2, last_edited: "2026-11-03T10:00:00Z", disabled: 0 },
-        { scope: "user", skills: 11, mcp: 4, rules: 1, locks: 0, last_edited: "2026-11-06T08:00:00Z", disabled: 0 },
-        { scope: "project", skills: 5, mcp: 1, rules: 1, locks: 0, last_edited: "2026-11-06T09:48:00Z", disabled: 1 },
+        { scope: "global", skills: 5, mcp: 2, rules: 0, locks: 2, last_edited: "2026-11-03T10:00:00Z", disabled: 0, store_ready: true },
+        { scope: "user", skills: 11, mcp: 4, rules: 1, locks: 0, last_edited: "2026-11-06T08:00:00Z", disabled: 0, store_ready: true },
+        { scope: "project", skills: 5, mcp: 1, rules: 1, locks: 0, last_edited: "2026-11-06T09:48:00Z", disabled: 1, store_ready: true },
       ],
       attention: [
-        { item_id: "itm_health", title: "MCP server fails health check", subtitle: "User · 401 Unauthorized", kind: "failing_health", screen: "mcp", row_id: "itm_health" },
+        { item_id: "itm_health", title: "MCP server fails health check", subtitle: "User · 401 Unauthorized", kind: "failing_health_check", screen: "mcp", row_id: "itm_health" },
         { item_id: "itm_shadow", title: "Skill is shadowed", subtitle: "Project copy wins", kind: "shadowed_skill", screen: "skills", row_id: "itm_shadow" },
-        { item_id: "itm_drift", title: "Configuration changed outside AgenTuna", subtitle: "Review the file diff", kind: "drift", screen: "drift", row_id: "itm_drift" },
+        { item_id: "itm_drift", title: "Configuration changed outside AgenTuna", subtitle: "Review the file diff", kind: "drift_event", screen: "drift", row_id: "itm_drift" },
         { item_id: null, title: "Cursor not found on this Mac", subtitle: "3 skills target Cursor", kind: "missing_agent", screen: "agents", row_id: "cursor" },
         { item_id: "itm_orphan_lock", title: "Locked item not found", subtitle: "Policy lock reason", kind: "locked_item_not_found", screen: "effective", row_id: "itm_orphan_lock" },
       ],
@@ -24,7 +24,9 @@ test("populated Overview uses compact scope cards and usable attention and chang
         { id: "op_today", kind: "skill_added", summary: "Added MCP server 'postgres'", created_at: today, file_count: 2, scope: "project", files: [{ path: "/sandbox/Projects/AgenTuna/.agentuna/mcp.json", scope: "project" }, { path: "/sandbox/Projects/AgenTuna/.agentuna/store.json", scope: "project" }] },
         { id: "op_yesterday", kind: "skill_enabled", summary: "Enabled 'ui-ux-pro-max' for omp", created_at: yesterday, file_count: 1, scope: "user", files: [{ path: "/sandbox/user/.agentuna/skills/ui-ux-pro-max", scope: "user" }] },
       ],
-      user_path: "/sandbox/user/.agentuna", global_path: "/sandbox/global", global_writable: false, global_reason: "read only",
+      user_path: "/sandbox/user/.agentuna",
+      global_store: { path: "/sandbox/global", source: "environment", status: "read_only", reason: "read only", needs_elevation: true, locks: [] },
+      startup_warnings: [],
     };
     mocks.commandOverrides.project_sync_status = [
       { item_id: "itm_project", scope: "project", name: "Search Skill", label: "project_newer", action: "push" },
@@ -40,6 +42,11 @@ test("populated Overview uses compact scope cards and usable attention and chang
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
   await expect(page.getByText("MCP server fails health check")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Fix token for MCP server fails health check" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Compare for Skill is shadowed" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review diff for Configuration changed outside AgenTuna" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Set path for Cursor not found on this Mac" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open for Locked item not found" })).toHaveAttribute("title", "Policy lock reason");
   await expect(page.getByRole("heading", { name: "Today" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Yesterday" })).toBeVisible();
   await page.getByRole("radio", { name: "Project" }).click();
@@ -65,7 +72,10 @@ test("populated Overview uses compact scope cards and usable attention and chang
   await expect(page.getByRole("button", { name: "Copy path" })).toBeVisible();
   await page.getByRole("radio", { name: "Global" }).click();
   await expect(page.getByText(/Global store is read-only/)).toBeVisible();
-  await expect(page.getByRole("button", { name: /Locked item not found/ })).toHaveAttribute("title", "Policy lock reason");
+  await expect(page.getByRole("button", { name: /Locked item not found/ }).first()).toHaveAttribute("title", "Policy lock reason");
   await page.getByRole("button", { name: "Enable global writes" }).click();
   await expect(page.getByText(/Global store is read-only/)).toBeHidden();
+  await page.getByRole("button", { name: "Compare for Skill is shadowed" }).click();
+  await expect(page.getByRole("dialog", { name: "Compare Code Review copies" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Compare Code Review copies" })).toContainText("project and user copies differ.");
 });

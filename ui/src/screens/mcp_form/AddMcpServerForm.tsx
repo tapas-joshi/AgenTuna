@@ -2,7 +2,10 @@ import { useState } from "react";
 import type { FormEvent, JSX } from "react";
 import { SecretEnvField } from "../secrets/SecretEnvField";
 import type { McpChangeSetPreviewView } from "../../generated/McpChangeSetPreviewView";
-import { McpFilesThatWillChangePanel } from "../../components/mcp_form";
+import type { McpLaunchApproval } from "../../generated/McpLaunchApproval";
+import type { McpLaunchApprovalView } from "../../generated/McpLaunchApprovalView";
+import type { McpTestResultView } from "../../generated/McpTestResultView";
+import { McpFilesThatWillChangePanel, McpLaunchConfirmDialog, McpTestConnectionPanel } from "../../components/mcp_form";
 
 type Transport = "stdio" | "http";
 type Scope = "global" | "user" | "project" | "local";
@@ -30,6 +33,7 @@ export interface AddMcpServerDraft {
 export interface AddMcpServerFormProps {
   readonly mode?: "add" | "edit";
   readonly initialState?: McpServerFormInitialState;
+  readonly initialScope?: Scope;
   readonly installedAgents?: readonly Agent[];
   readonly defaultAgents?: readonly Agent[];
   readonly globalAllowed?: boolean;
@@ -38,13 +42,22 @@ export interface AddMcpServerFormProps {
   readonly onMoveScope?: (scope: Scope) => void;
   readonly onNameChange?: (name: string) => void;
   readonly onPlan: (draft: AddMcpServerDraft, itemId?: string) => Promise<McpChangeSetPreviewView>;
-  readonly onSave: (previewId: string, selectedAgents: readonly string[]) => Promise<void>;
+  readonly onSave: (previewId: string, selectedAgents: readonly string[], acknowledgeUnsupported: boolean) => Promise<void>;
+  readonly onPrepareLaunch?: (draft: AddMcpServerDraft) => Promise<McpLaunchApprovalView>;
+  readonly onTest?: (draft: AddMcpServerDraft, approval: McpLaunchApproval) => Promise<McpTestResultView>;
+  readonly onSuggestedAction?: (action: string) => void;
+}
+
+/** Whether a rejected save is the typed external-write conflict the dialog answers. */
+function isWriteConflict(error: unknown): error is { readonly code: "external_write_conflict" } {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "external_write_conflict";
 }
 
 /** Shared add/edit MCP form. Planning and filesystem changes are delegated to the app command. */
 export function AddMcpServerForm({
   mode = "add",
   initialState,
+  initialScope = "user",
   installedAgents = ["claude_code", "codex", "omp", "cursor"],
   defaultAgents = [],
   globalAllowed = false,
@@ -54,6 +67,9 @@ export function AddMcpServerForm({
   onNameChange,
   onPlan,
   onSave,
+  onPrepareLaunch,
+  onTest,
+  onSuggestedAction,
 }: AddMcpServerFormProps): JSX.Element {
   const [name, setName] = useState(initialState?.name ?? "");
   const [transport, setTransport] = useState<Transport>(initialState?.transport ?? "stdio");
@@ -62,7 +78,7 @@ export function AddMcpServerForm({
   const [url, setUrl] = useState(initialState?.url ?? "");
   const [headers, setHeaders] = useState<Array<{ name: string; value: string }>>(initialState ? initialState.headers.map((header) => ({ ...header })) : [{ name: "", value: "" }]);
   const [env, setEnv] = useState<EnvRow[]>(initialState ? initialState.env.map((row) => ({ ...row })) : []);
-  const [scope, setScope] = useState<Scope>(initialState?.scope ?? "user");
+  const [scope, setScope] = useState<Scope>(initialState?.scope ?? initialScope);
   const [localExpanded, setLocalExpanded] = useState(scope === "local");
   const [agents, setAgents] = useState<Agent[]>([...(initialState?.agents ?? defaultAgents)].filter((agent) => installedAgents.includes(agent)));
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -71,6 +87,14 @@ export function AddMcpServerForm({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [preview, setPreview] = useState<McpChangeSetPreviewView | null>(null);
   const [discardPrompt, setDiscardPrompt] = useState(false);
+  const [testResult, setTestResult] = useState<McpTestResultView | null>(null);
+  const [testedSignature, setTestedSignature] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<McpLaunchApprovalView | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [renameConfirm, setRenameConfirm] = useState<McpChangeSetPreviewView | null>(null);
+  const [conflict, setConflict] = useState(false);
   const current = JSON.stringify({
     name, transport, command, args: args.filter(Boolean), url,
     headers: headers.filter((header) => header.name.trim()),
@@ -81,10 +105,48 @@ export function AddMcpServerForm({
     command: initialState?.command ?? "", args: (initialState?.args ?? []).filter(Boolean),
     url: initialState?.url ?? "", headers: (initialState?.headers ?? []).filter((header) => header.name.trim()),
     env: (initialState?.env ?? []).filter((row) => row.name.trim()),
-    scope: initialState?.scope ?? "user",
+    scope: initialState?.scope ?? initialScope,
     agents: (initialState?.agents ?? defaultAgents).filter((agent) => installedAgents.includes(agent)),
   });
   const dirty = mode === "add" || current !== initial;
+  const signature = current;
+  const testStale = testResult !== null && testedSignature !== signature;
+  const renamed = mode === "edit" && name.trim() !== (initialState?.name ?? "");
+  const buildDraft = (): AddMcpServerDraft => ({
+    name: name.trim(),
+    transport,
+    command: command.trim(),
+    args: args.filter(Boolean),
+    url: url.trim(),
+    headers: headers.filter((header) => header.name.trim()),
+    env: env.filter((row) => row.name.trim()).map((row) => ({
+      name: row.name.trim(),
+      value: row.kind === "secret" ? `\u0024{${row.value}}` : row.value,
+      kind: row.kind,
+    })),
+    scope,
+    agents,
+  });
+  const initialDraft = (): AddMcpServerDraft => ({
+    name: initialState?.name ?? "",
+    transport: initialState?.transport ?? "stdio",
+    command: initialState?.command ?? "",
+    args: [...(initialState?.args ?? [])],
+    url: initialState?.url ?? "",
+    headers: (initialState?.headers ?? []).map((header) => ({ ...header })),
+    env: (initialState?.env ?? []).map((row) => ({ ...row })),
+    scope: initialState?.scope ?? "user",
+    agents: (initialState?.agents ?? defaultAgents).filter((agent) => installedAgents.includes(agent)),
+  });
+  const restoreInitial = () => {
+    setName(initialState?.name ?? "");
+    setTransport(initialState?.transport ?? "stdio");
+    setCommand(initialState?.command ?? "");
+    setArgs(initialState ? [...initialState.args] : [""]);
+    setUrl(initialState?.url ?? "");
+    setHeaders(initialState ? initialState.headers.map((header) => ({ ...header })) : [{ name: "", value: "" }]);
+    setEnv(initialState ? initialState.env.map((row) => ({ ...row })) : []);
+  };
   const closeForm = () => {
     if (mode === "edit" && dirty) setDiscardPrompt(true);
     else onCancel();
@@ -101,33 +163,77 @@ export function AddMcpServerForm({
     setErrors(next);
     return Object.keys(next).length === 0 && duplicateScope === null;
   };
+  const failedTestResult = (error: unknown): McpTestResultView => ({
+    ok: false,
+    server_name: name.trim(),
+    server_version: null,
+    transport,
+    latency_ms: 0n,
+    tools_count: 0n,
+    tools: [],
+    error: {
+      kind: "test_failed",
+      message: error instanceof Error ? error.message : "The connection test could not run.",
+      suggested_action: "Try again",
+    },
+    stderr_excerpt: null,
+  });
+  const requestLaunch = async () => {
+    if (!onPrepareLaunch || preparing || testing) return;
+    setPreparing(true);
+    setSaveError(null);
+    try {
+      setPendingApproval(await onPrepareLaunch(buildDraft()));
+    } catch (error) {
+      setTestResult(failedTestResult(error));
+    } finally {
+      setPreparing(false);
+    }
+  };
+  const confirmLaunch = async () => {
+    if (!onTest || pendingApproval === null || testing) return;
+    const approval: McpLaunchApproval = {
+      approval_id: pendingApproval.approval_id,
+      request_hash: pendingApproval.request_hash,
+    };
+    const snapshot = signature;
+    setPendingApproval(null);
+    setTesting(true);
+    setSaveError(null);
+    try {
+      setTestResult(await onTest(buildDraft(), approval));
+    } catch (error) {
+      setTestResult(failedTestResult(error));
+    } finally {
+      setTestedSignature(snapshot);
+      setTesting(false);
+    }
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!validate() || saving || (mode === "edit" && !dirty)) return;
     setSaving(true);
     setSaveError(null);
     try {
-      setPreview(await onPlan({
-        name: name.trim(), transport, command: command.trim(), args: args.filter(Boolean), url: url.trim(),
-        headers: headers.filter((header) => header.name.trim()),
-        env: env.filter((row) => row.name.trim()).map((row) => ({
-          name: row.name.trim(), value: row.kind === "secret" ? `\u0024{${row.value}}` : row.value, kind: row.kind,
-        })),
-        scope, agents,
-      }, mode === "edit" ? initialState?.id : undefined));
+      setPreview(await onPlan(buildDraft(), mode === "edit" ? initialState?.id : undefined));
+      setAcknowledged(false);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "The server could not be saved.");
     } finally {
       setSaving(false);
     }
   };
-  const saveReviewedPlan = async () => {
-    if (!preview || saving) return;
+  const applyReviewedPlan = async (value: McpChangeSetPreviewView) => {
+    if (saving) return;
     setSaving(true);
     setSaveError(null);
     try {
-      await onSave(preview.preview_id, [...new Set(preview.files.filter((file) => file.selected && file.agent !== "AgenTuna").map((file) => file.agent))]);
+      const targets = [...new Set(value.files.filter((file) => file.selected && file.agent !== "AgenTuna").map((file) => file.agent))];
+      await onSave(value.preview_id, targets, acknowledged);
       setPreview(null);
+      setRenameConfirm(null);
+      setConflict(false);
+      setAcknowledged(false);
       if (mode === "add") {
         setName("");
         setCommand("");
@@ -136,13 +242,35 @@ export function AddMcpServerForm({
         setHeaders([{ name: "", value: "" }]);
         setEnv([]);
         setAgents(defaultAgents.filter((agent) => installedAgents.includes(agent)));
+        setScope(initialScope);
         setErrors({});
         setSaved(true);
       } else {
         onCancel();
       }
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "The server could not be saved.");
+      if (isWriteConflict(error)) setConflict(true);
+      else setSaveError(error instanceof Error ? error.message : "The server could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const requestApply = (value: McpChangeSetPreviewView) => {
+    if (renamed) setRenameConfirm(value);
+    else void applyReviewedPlan(value);
+  };
+  const replan = async (keepMine: boolean) => {
+    setConflict(false);
+    setSaving(true);
+    setSaveError(null);
+    const draft = keepMine ? buildDraft() : initialDraft();
+    if (!keepMine) restoreInitial();
+    try {
+      setPreview(await onPlan(draft, mode === "edit" ? initialState?.id : undefined));
+      setAcknowledged(false);
+    } catch (error) {
+      setPreview(null);
+      setSaveError(error instanceof Error ? error.message : "The server could not be planned.");
     } finally {
       setSaving(false);
     }
@@ -165,10 +293,24 @@ export function AddMcpServerForm({
       {mode === "edit" ? <section className="rounded-8 border border-border p-12"><p className="m-0 text-13">Scope: <strong>{scope}</strong></p><button type="button" onClick={() => onMoveScope?.(scope)}>Move to another scope</button></section> : <fieldset className="grid gap-8"><legend className="text-13 font-medium text-text">Scope</legend><div className="grid grid-cols-1 gap-8 md:grid-cols-3">{(["global", "user", "project"] as const).map((value) => <label key={value} title={value === "global" && !globalAllowed ? "Administrator permission is unavailable" : undefined} className={`rounded-8 border p-12 ${value === "global" && !globalAllowed ? "opacity-50" : "border-border"}`}><input aria-label={value[0]?.toUpperCase() + value.slice(1)} type="radio" name="scope" value={value} disabled={value === "global" && !globalAllowed} checked={scope === value} onChange={() => setScope(value)} /> <span className="ml-6 text-13">{value[0]?.toUpperCase()}{value.slice(1)}</span><span className="mt-4 block text-11 text-muted">{value === "global" ? "Needs admin" : value === "user" ? "Best for personal tokens" : "Committed"}</span></label>)}</div><details open={localExpanded} onToggle={(event) => setLocalExpanded(event.currentTarget.open)} className="rounded-8 border border-border p-10"><summary className="cursor-pointer text-13">Local (only you, this repo)</summary>{localExpanded && <label className="mt-8 flex items-center gap-8 text-13"><input type="radio" aria-label="Local" name="scope" checked={scope === "local"} onChange={() => setScope("local")} />Save into .agentuna/local/</label>}</details></fieldset>}
       <fieldset className="grid gap-8"><legend className="text-13 font-medium text-text">Agents</legend>{(["claude_code", "codex", "omp", "cursor"] as const).map((agent) => { const label = agent === "claude_code" ? "Claude Code" : agent === "codex" ? "Codex" : agent; const selected = agents.includes(agent); return <div key={agent} className="flex items-center gap-8"><button type="button" aria-pressed={selected} disabled={!installedAgents.includes(agent)} onClick={() => toggleAgent(agent, !selected)} className={`rounded-8 border px-10 py-6 text-13 ${selected ? "border-accent bg-accent/10" : "border-border"}`}>{label}</button>{!installedAgents.includes(agent) && <span className="text-11 text-muted">not installed</span>}</div>; })}{errors.agents && <span role="alert" className="text-danger">{errors.agents}</span>}</fieldset>
       {saveError && <p role="alert" className="text-13 text-danger">Save failed: {saveError}</p>}
-      <footer className="flex justify-end gap-8 border-t border-border pt-12"><button type="button" onClick={closeForm} className="rounded-8 border border-border px-14 py-8 text-13">Cancel</button><button type="submit" disabled={saving || duplicateScope !== null || preview !== null || (mode === "edit" && !dirty)} className="rounded-8 bg-accent px-14 py-8 text-13 text-on-accent disabled:opacity-50">{saving ? "Planning…" : mode === "edit" ? "Review edit" : "Review changes"}</button></footer>
+      <footer className="flex justify-end gap-8 border-t border-border pt-12"><button type="button" onClick={closeForm} className="rounded-8 border border-border px-14 py-8 text-13">Cancel</button><button type="submit" disabled={saving || duplicateScope !== null || preview !== null || (mode === "edit" && !dirty)} className="rounded-8 bg-accent-fill px-14 py-8 text-13 text-on-accent disabled:opacity-50">{saving ? "Planning…" : mode === "edit" ? "Review edit" : "Review changes"}</button></footer>
     </form>
     {discardPrompt && <div role="dialog" aria-modal="true" aria-labelledby="mcp-discard-title" className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-16"><section className="grid max-w-[420px] gap-12 rounded-12 border border-border bg-surface p-20"><h2 id="mcp-discard-title" className="m-0 text-18">Discard unsaved changes?</h2><p className="m-0 text-13 text-muted">Your MCP server edits have not been applied.</p><div className="flex justify-end gap-8"><button type="button" onClick={() => setDiscardPrompt(false)}>Keep editing</button><button type="button" onClick={onCancel}>Discard changes</button></div></section></div>}
     {mode === "edit" && preview && <section aria-label="Edit summary" className="rounded-8 border border-warning/40 bg-warning/10 p-12"><h2 className="m-0 text-14 font-medium">Review edit summary</h2><ul className="mb-0 mt-8 list-disc pl-20 text-12">{name !== initialState?.name && <li>Rename: native configuration files may lose the old server key.</li>}{transport !== initialState?.transport && <li>Transport change: transport-specific keys may be removed.</li>}<li>{preview.files.length} file(s) will change.</li></ul></section>}
-    {preview && <McpFilesThatWillChangePanel preview={preview} onAgentSelectedChange={(agent, selected) => setPreview((value) => value === null ? value : { ...value, files: value.files.map((file) => file.agent === agent ? { ...file, selected } : file) })} onSave={() => void saveReviewedPlan()} onCancel={() => setPreview(null)} />}
+    {onTest && onPrepareLaunch && <McpTestConnectionPanel
+      result={testStale ? null : testResult}
+      running={testing || preparing}
+      stale={testStale}
+      onRunTest={() => void requestLaunch()}
+      onSuggestedAction={onSuggestedAction}
+    />}
+    {pendingApproval !== null && <McpLaunchConfirmDialog
+      approval={pendingApproval}
+      onRun={() => void confirmLaunch()}
+      onCancel={() => setPendingApproval(null)}
+    />}
+    {preview && <McpFilesThatWillChangePanel preview={preview} onAgentSelectedChange={(agent, selected) => setPreview((value) => value === null ? value : { ...value, files: value.files.map((file) => file.agent === agent ? { ...file, selected } : file) })} acknowledged={acknowledged} onAcknowledgedChange={setAcknowledged} onSave={() => requestApply(preview)} onCancel={() => setPreview(null)} />}
+    {renameConfirm && <div role="dialog" aria-modal="true" aria-labelledby="mcp-rename-title" className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-16"><section className="grid max-w-[520px] gap-12 rounded-12 border border-border bg-surface p-20"><h2 id="mcp-rename-title" className="m-0 text-18">Rename “{initialState?.name}” to “{name.trim()}”?</h2><p className="m-0 text-13 text-muted">Each file below loses the old server key and gains the new one.</p><ul className="mb-0 grid gap-4 pl-20 text-12 text-text-secondary">{renameConfirm.files.map((file) => <li key={`${file.agent}:${file.path}`}>{file.agent} · {file.path} loses “{initialState?.name}” and gains “{name.trim()}”.</li>)}</ul><div className="flex justify-end gap-8"><button type="button" onClick={() => setRenameConfirm(null)} className="rounded-8 border border-border px-12 py-8 text-13">Cancel</button><button type="button" disabled={saving} onClick={() => void applyReviewedPlan(renameConfirm)} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent disabled:opacity-50">Apply</button></div></section></div>}
+    {conflict && <div role="dialog" aria-modal="true" aria-labelledby="mcp-conflict-title" className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-16"><section className="grid max-w-[460px] gap-12 rounded-12 border border-border bg-surface p-20"><h2 id="mcp-conflict-title" className="m-0 text-18">This server changed outside AgenTuna</h2><p className="m-0 text-13 text-muted">A reviewed file changed while you were editing. Keep your edits or reload the server as it is now.</p><div className="flex justify-end gap-8"><button type="button" onClick={() => void replan(false)} className="rounded-8 border border-border px-12 py-8 text-13">Reload</button><button type="button" onClick={() => void replan(true)} className="rounded-8 bg-accent-fill px-12 py-8 text-13 text-on-accent">Keep mine (re-apply)</button></div></section></div>}
   </main>;
 }

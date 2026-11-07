@@ -16,14 +16,16 @@ use at_fs::{RecentWrites, WatchEvent, WatchService};
 use at_store::paths::AppPaths;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use ts_rs::TS;
 
 use super::detection::watch_roots_for;
 
 /// Event emitted with every drift notice produced by one batch.
 pub const EVENT_DRIFT_DETECTED: &str = "agentuna:drift-detected";
 
-/// One drift notice as the UI receives it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Drift event payload emitted to the UI after watcher processing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct DriftNoticeView {
     /// Persisted drift-event row id.
     pub event_id: i64,
@@ -45,40 +47,145 @@ pub struct DriftNoticeView {
     pub link_target: Option<String>,
     /// Number of changed files represented by the coalesced notice.
     pub changed_file_count: usize,
+    /// Whether this watcher batch is eligible for a drift toast.
+    pub toast_eligible: bool,
+}
+
+/// Current watcher condition shown in the Sync & drift header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct DriftWatcherStatusView {
+    /// `active`, `paused` or `error`.
+    pub status: String,
+    /// Root path that failed, when the watcher is in an error state.
+    pub path: Option<String>,
+    /// Safe, user-facing watcher failure reason.
+    pub error: Option<String>,
+}
+
+/// Managed watcher lifecycle for Sync & drift.
+#[derive(Clone)]
+pub struct DriftWatcherControl {
+    watcher: Arc<WatchService>,
+    status: Arc<Mutex<DriftWatcherStatusView>>,
+}
+
+impl DriftWatcherControl {
+    fn new(watcher: Arc<WatchService>) -> Self {
+        Self {
+            watcher,
+            status: Arc::new(Mutex::new(DriftWatcherStatusView {
+                status: "paused".to_owned(),
+                path: None,
+                error: None,
+            })),
+        }
+    }
+
+    /// Returns the current watcher condition.
+    #[must_use]
+    pub fn status(&self) -> DriftWatcherStatusView {
+        self.status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_else(|_| DriftWatcherStatusView {
+                status: "error".to_owned(),
+                path: None,
+                error: Some("The watcher status is unavailable.".to_owned()),
+            })
+    }
+
+    /// Pauses or resumes watching and returns the resulting condition.
+    ///
+    /// # Errors
+    /// Returns the watcher failure when it cannot stop or install its native watches.
+    pub fn set_paused(&self, paused: bool) -> Result<DriftWatcherStatusView, String> {
+        if paused {
+            self.watcher.stop().map_err(|error| error.to_string())?;
+            self.set_status("paused", None, None);
+            return Ok(self.status());
+        }
+        match self.watcher.start() {
+            Ok(()) => {
+                self.set_status("active", None, None);
+                Ok(self.status())
+            }
+            Err(error) => {
+                let path = watcher_error_path(&error, self.watcher.roots());
+                let message = error.to_string();
+                self.set_status("error", path, Some(message.clone()));
+                Err(message)
+            }
+        }
+    }
+
+    fn set_status(&self, status: &str, path: Option<String>, error: Option<String>) {
+        if let Ok(mut current) = self.status.lock() {
+            *current = DriftWatcherStatusView {
+                status: status.to_owned(),
+                path,
+                error,
+            };
+        }
+    }
 }
 
 /// Starts drift processing over the agent and store roots.
 ///
-/// # Errors
-/// Returns the watcher failure when the platform refuses the roots; drift processing is skipped
-/// rather than blocking startup.
+/// Startup reconciliation is intentionally not toast-eligible: the Drift tab owns the persisted
+/// list, while the toast stream is reserved for external changes observed during this session.
 pub fn start(
     app: AppHandle,
     paths: AppPaths,
     database: Arc<Mutex<Database>>,
     registry: Arc<RecentWrites>,
-) -> Result<(), at_fs::WatchError> {
+) -> DriftWatcherControl {
     let roots = watch_roots_for(&paths);
     let watcher = Arc::new(WatchService::new(drift_watch_config(roots, registry)));
-    watcher.start()?;
+    let control = DriftWatcherControl::new(Arc::clone(&watcher));
+    match watcher.start() {
+        Ok(()) => control.set_status("active", None, None),
+        Err(error) => {
+            control.set_status(
+                "error",
+                watcher_error_path(&error, watcher.roots()),
+                Some(error.to_string()),
+            );
+            tracing::warn!(%error, "drift watcher unavailable");
+        }
+    }
+    let worker_control = control.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // Startup reconciliation uses the same baseline comparison as ordinary batches, so a
-        // change made while AgenTuna was closed is reported once.
         reconcile_once(&app, &database);
         loop {
             let Some(event) = watcher.next_event(Duration::from_secs(1)) else {
                 continue;
             };
-            match event {
-                WatchEvent::Batch(_) | WatchEvent::RescanRequired { .. } => {
-                    process_event(&app, &database, &event);
+            match &event {
+                WatchEvent::Batch(_) => process_event(&app, &database, &event, true),
+                WatchEvent::RescanRequired { .. } => {
+                    process_event(&app, &database, &event, false);
                 }
-                // WatchEvent can grow; an event this module does not know needs no drift pass.
+                WatchEvent::PathGone { path, .. } => {
+                    process_event(&app, &database, &event, false);
+                    worker_control.set_status(
+                        "error",
+                        Some(path.display().to_string()),
+                        Some("A watched path is unavailable.".to_owned()),
+                    );
+                }
                 _ => {}
             }
         }
     });
-    Ok(())
+    control
+}
+
+fn watcher_error_path(error: &at_fs::WatchError, roots: &[at_fs::WatchRoot]) -> Option<String> {
+    match error {
+        at_fs::WatchError::WatchFailed { path, .. } => Some(path.display().to_string()),
+        _ => roots.first().map(|root| root.path.display().to_string()),
+    }
 }
 
 fn reconcile_once(app: &AppHandle, database: &Arc<Mutex<Database>>) {
@@ -93,17 +200,29 @@ fn reconcile_once(app: &AppHandle, database: &Arc<Mutex<Database>>) {
             return;
         }
     };
+    let targets = match at_engine::drift::open_targets(database.connection(), targets) {
+        Ok(targets) => targets,
+        Err(error) => {
+            tracing::warn!(%error, "open drift events unavailable");
+            return;
+        }
+    };
     let service = DriftService {
         database: &database,
         targets: &targets,
     };
     match service.reconcile() {
-        Ok(notices) => emit(app, &notices),
+        Ok(notices) => emit(app, &notices, false),
         Err(error) => tracing::warn!(%error, "drift reconciliation failed"),
     }
 }
 
-fn process_event(app: &AppHandle, database: &Arc<Mutex<Database>>, event: &WatchEvent) {
+fn process_event(
+    app: &AppHandle,
+    database: &Arc<Mutex<Database>>,
+    event: &WatchEvent,
+    toast_eligible: bool,
+) {
     let Ok(database) = database.lock() else {
         tracing::warn!("database lock poisoned during drift processing");
         return;
@@ -115,27 +234,37 @@ fn process_event(app: &AppHandle, database: &Arc<Mutex<Database>>, event: &Watch
             return;
         }
     };
+    let targets = match at_engine::drift::open_targets(database.connection(), targets) {
+        Ok(targets) => targets,
+        Err(error) => {
+            tracing::warn!(%error, "open drift events unavailable");
+            return;
+        }
+    };
     let service = DriftService {
         database: &database,
         targets: &targets,
     };
     match service.process(event) {
-        Ok(notices) => emit(app, &notices),
+        Ok(notices) => emit(app, &notices, toast_eligible),
         Err(error) => tracing::warn!(%error, "drift processing failed"),
     }
 }
 
-fn emit(app: &AppHandle, notices: &[DriftNotice]) {
+fn emit(app: &AppHandle, notices: &[DriftNotice], toast_eligible: bool) {
     if notices.is_empty() {
         return;
     }
-    let views = notices.iter().map(notice_view).collect::<Vec<_>>();
+    let views = notices
+        .iter()
+        .map(|notice| notice_view(notice, toast_eligible))
+        .collect::<Vec<_>>();
     if let Err(error) = app.emit(EVENT_DRIFT_DETECTED, &views) {
         tracing::warn!(%error, "drift event emission failed");
     }
 }
 
-fn notice_view(notice: &DriftNotice) -> DriftNoticeView {
+fn notice_view(notice: &DriftNotice, toast_eligible: bool) -> DriftNoticeView {
     DriftNoticeView {
         event_id: notice.event_id,
         kind: kind_name(notice.kind).to_owned(),
@@ -150,6 +279,7 @@ fn notice_view(notice: &DriftNotice) -> DriftNoticeView {
             .as_ref()
             .map(|path| path.display().to_string()),
         changed_file_count: notice.changed_file_count,
+        toast_eligible,
     }
 }
 

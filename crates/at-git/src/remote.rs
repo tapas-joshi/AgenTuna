@@ -37,6 +37,12 @@ use crate::policy::{
 /// How long one remote git command may run before it is killed.
 pub const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How many times one clone is attempted when git reports a dropped connection.
+const CLONE_ATTEMPTS: u32 = 2;
+
+/// Backoff before retrying a clone after a dropped connection.
+const CLONE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
 /// Longest diagnostic kept from git's stderr, in characters.
 pub const MAX_REMOTE_DIAGNOSTIC_CHARS: usize = 2048;
 
@@ -526,7 +532,7 @@ pub fn looks_like_auth_failure(stderr: &[u8]) -> bool {
         || text.contains("terminal prompts disabled")
 }
 
-/// True when git's stderr reports the remote is unreachable.
+/// True when git's stderr reports the remote is unreachable or the transfer dropped.
 pub fn looks_like_offline(stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr).to_lowercase();
     text.contains("could not resolve host")
@@ -537,6 +543,12 @@ pub fn looks_like_offline(stderr: &[u8]) -> bool {
         || text.contains("no route to host")
         || text.contains("temporary failure in name resolution")
         || text.contains("operation timed out")
+        || text.contains("remote end hung up")
+        || text.contains("unexpected disconnect")
+        || text.contains("connection reset")
+        || text.contains("early eof")
+        || text.contains("transfer closed")
+        || text.contains("rpc failed")
 }
 
 /// True when a push was rejected because the remote moved ahead.
@@ -854,9 +866,36 @@ pub fn stage_all(
 impl RemoteContext<'_> {
     /// Clones `remote` into `dest` (which must not exist) on the remote's default branch.
     ///
+    /// A dropped connection is retried once after a short fixed backoff; a partial clone from
+    /// the first attempt is removed first. Two failed attempts return the typed offline error so
+    /// the caller can offer the explicit retry action.
+    ///
     /// # Errors
     /// [`RemoteError`] on policy refusal, git failure or auth/offline classification.
     pub fn clone_remote(
+        &mut self,
+        remote: &str,
+        dest: &Path,
+        auth: &GitAuth,
+    ) -> Result<(), RemoteError> {
+        let mut attempt = 1;
+        loop {
+            match self.clone_remote_once(remote, dest, auth) {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt < CLONE_ATTEMPTS && matches!(error, RemoteError::Offline) => {
+                    if fs::symlink_metadata(dest).is_ok() {
+                        let _ = fs::remove_dir_all(dest);
+                    }
+                    thread::sleep(CLONE_RETRY_BACKOFF);
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// One clone attempt; [`Self::clone_remote`] owns the bounded retry.
+    fn clone_remote_once(
         &mut self,
         remote: &str,
         dest: &Path,

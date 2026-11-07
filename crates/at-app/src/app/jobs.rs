@@ -245,6 +245,9 @@ pub struct ExecutionContext<'a, R> {
     pub database: &'a Mutex<Database>,
     /// App-lifetime cancellation token.
     pub cancellation: &'a tokio_util::sync::CancellationToken,
+    /// Per-check wall-clock budget. Production passes [`HEALTH_CHECK_DEADLINE`];
+    /// process-level tests shorten it so a hung fixture is bounded in test time.
+    pub deadline: Duration,
     /// Deterministic jitter provider.
     pub jitter: &'a dyn Jitter,
     /// UI event publisher; absent for jobs that only need persistence.
@@ -421,7 +424,7 @@ impl HealthScheduler {
                     http_host = Some(authorized);
                 }
                 let result = tokio::select! {
-                    result = tokio::time::timeout(HEALTH_CHECK_DEADLINE, context.runner.check(&target, context.network, context.cancellation)) => {
+                    result = tokio::time::timeout(context.deadline, context.runner.check(&target, context.network, context.cancellation)) => {
                         result.unwrap_or_else(|_| failed_check("check_timeout"))
                     },
                     _ = context.cancellation.cancelled() => {
@@ -950,6 +953,7 @@ pub async fn run_scheduler<R: HealthRunner, T: SchedulerTimer>(
                         network: environment.network,
                         database: environment.database,
                         cancellation: &cancellation,
+                        deadline: HEALTH_CHECK_DEADLINE,
                         jitter: environment.jitter,
                         event_sink: environment.event_sink,
                     },
@@ -1122,6 +1126,7 @@ mod tests {
                     network: &network,
                     database: &database,
                     cancellation: &cancellation,
+                    deadline: HEALTH_CHECK_DEADLINE,
                     jitter: &jitter,
                     event_sink: None,
                 },
@@ -1138,6 +1143,7 @@ mod tests {
                     network: &network,
                     database: &database,
                     cancellation: &cancellation,
+                    deadline: HEALTH_CHECK_DEADLINE,
                     jitter: &jitter,
                     event_sink: None,
                 },
@@ -1194,6 +1200,7 @@ mod tests {
                         network: &network,
                         database: &database,
                         cancellation: &cancellation,
+                        deadline: HEALTH_CHECK_DEADLINE,
                         jitter: &jitter,
                         event_sink: Some(&events),
                     },
@@ -1202,13 +1209,126 @@ mod tests {
                 .expect("failed check is recorded");
         }
 
-        assert_eq!(events.0.lock().unwrap().len(), 1);
-        let database = database.lock().unwrap();
-        let rows: i64 = database
+        assert_eq!(
+            events.0.lock().unwrap().len(),
+            1,
+            "ten identical failures are one state, not ten events"
+        );
+        let rows = health_row_count(&database);
+        assert_eq!(rows, 10, "every check is still persisted");
+
+        // The next state change (failure -> success) publishes exactly one more event.
+        let now_ms = scheduler.states["test"].due_at_ms;
+        let due = scheduler
+            .due_checks(now_ms, policy, std::slice::from_ref(&target), &jitter)
+            .into_iter()
+            .next()
+            .expect("recovery check due");
+        scheduler
+            .execute(
+                due,
+                &ExecutionContext {
+                    clock: &TestClock(now_ms),
+                    interval: HealthInterval::FiveMinutes,
+                    runner: &PassingRunner,
+                    network: &network,
+                    database: &database,
+                    cancellation: &cancellation,
+                    deadline: HEALTH_CHECK_DEADLINE,
+                    jitter: &jitter,
+                    event_sink: Some(&events),
+                },
+            )
+            .await
+            .expect("recovery check is recorded");
+        let recorded = events.0.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "one event per state transition, not per check"
+        );
+        assert_eq!(recorded[1].status, McpHealthEventStatus::Ok);
+        assert_eq!(health_row_count(&database), 11);
+    }
+
+    /// Counts persisted health rows.
+    fn health_row_count(database: &Mutex<Database>) -> i64 {
+        database
+            .lock()
+            .expect("database lock")
             .connection()
             .query_row("SELECT COUNT(*) FROM health_checks", [], |row| row.get(0))
-            .expect("all failed checks persisted");
-        assert_eq!(rows, 10);
+            .expect("count health rows")
+    }
+
+    #[tokio::test]
+    async fn hidden_window_writes_no_scheduled_rows_and_resume_writes_one_per_due_server() {
+        let mut scheduler = HealthScheduler::new();
+        let targets = [
+            target("alpha", HealthTransport::Stdio, true),
+            target("beta", HealthTransport::Stdio, true),
+        ];
+        let policy = policy(HealthInterval::FiveMinutes, BackgroundHealth::Local, true);
+        let jitter = FixedJitter(0);
+        let database = Mutex::new(Database::open_in_memory().expect("database initializes"));
+        let network = NetworkState::default();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let control = JobsControl::default();
+        // One visible pass registers each server's first due time, as the real loop does.
+        control.apply_window_to_scheduler(&mut scheduler, 0, 1_500);
+        assert!(
+            scheduler
+                .due_checks(0, policy, &targets, &jitter)
+                .is_empty()
+        );
+        control.update_window(false, false, false, 0);
+
+        // Thirty simulated minutes minimized: the loop sees no due check and writes nothing.
+        let mut now_ms = 0_i64;
+        for _ in 0..1_800 {
+            control.apply_window_to_scheduler(&mut scheduler, now_ms, 1_500);
+            let due = scheduler.due_checks(now_ms, policy, &targets, &jitter);
+            assert!(due.is_empty(), "no check runs while the window is hidden");
+            now_ms += 1_000;
+        }
+        assert_eq!(
+            health_row_count(&database),
+            0,
+            "a hidden window writes zero scheduled rows"
+        );
+
+        // Visible again: the stagger puts every overdue server within two simulated seconds.
+        control.update_window(true, false, true, now_ms);
+        let mut executed = 0_usize;
+        for tick in 0..=2 {
+            let at = now_ms + tick * 1_000;
+            control.apply_window_to_scheduler(&mut scheduler, at, 1_500);
+            for check in scheduler.due_checks(at, policy, &targets, &jitter) {
+                scheduler
+                    .execute(
+                        check,
+                        &ExecutionContext {
+                            clock: &TestClock(at),
+                            interval: HealthInterval::FiveMinutes,
+                            runner: &PassingRunner,
+                            network: &network,
+                            database: &database,
+                            cancellation: &cancellation,
+                            deadline: HEALTH_CHECK_DEADLINE,
+                            jitter: &jitter,
+                            event_sink: None,
+                        },
+                    )
+                    .await
+                    .expect("resumed check is recorded");
+                executed += 1;
+            }
+        }
+        assert_eq!(
+            executed, 2,
+            "exactly one row per due server within two simulated seconds"
+        );
+        assert_eq!(health_row_count(&database), 2);
     }
 
     fn policy(
@@ -1264,6 +1384,7 @@ mod tests {
                     network: &NetworkState::default(),
                     database: &database,
                     cancellation: &tokio_util::sync::CancellationToken::new(),
+                    deadline: HEALTH_CHECK_DEADLINE,
                     jitter: &zero,
                     event_sink: None,
                 },

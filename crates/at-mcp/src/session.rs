@@ -1094,13 +1094,22 @@ impl StdioClient {
 
         debug!(pid, "stdio MCP server started");
 
+        // `open` is cancel-safe: a caller may drop this future at any await below (the
+        // scheduler's per-check deadline, app quit). Dropping `tokio::process::Child` alone
+        // leaves the server running (`kill_on_drop(false)`), so an armed guard kills the
+        // whole process group unless the session takes ownership of it.
+        let mut spawn_guard = SpawnGuard::new(pid);
+
         let buffer = Arc::new(StderrBuffer::default());
         let drain = spawn_stderr_drain(stderr, buffer.clone());
 
         let transport = AsyncRwTransport::<RoleClient, _, _>::new_client(stdout, stdin);
         let config = ClientConfig::new(ClientCapabilities::default(), self.client.clone());
         let budget = policy.handshake_budget();
-        let handshake = serve_client_with_ct(config, transport, cancel.clone());
+        // rmcp's `RunningService` holds a `DropGuard` on this token and cancels it when the
+        // service ends. Hand it a child: cancellation still flows parent -> child, but a
+        // finished check must never cancel the caller's app-lifetime token.
+        let handshake = serve_client_with_ct(config, transport, cancel.child_token());
 
         enum Outcome {
             Ready(RunningService<RoleClient, ClientConfig>),
@@ -1135,22 +1144,27 @@ impl StdioClient {
         };
 
         match outcome {
-            Outcome::Ready(running) => Ok(StdioSession {
-                running: Some(running),
-                child: Some(child),
-                pid,
-                stderr: buffer,
-                redactor: prepared.redactor,
-                policy,
-                drain: Some(drain),
-            }),
+            Outcome::Ready(running) => {
+                spawn_guard.disarm();
+                Ok(StdioSession {
+                    running: Some(running),
+                    child: Some(child),
+                    pid,
+                    stderr: buffer,
+                    redactor: prepared.redactor,
+                    policy,
+                    drain: Some(drain),
+                })
+            }
             Outcome::Exited(exit) => {
+                spawn_guard.disarm();
                 abort_child(&mut child).await;
                 await_drain(&mut Some(drain), policy.interrupt_grace).await;
                 let error = SessionError::exited(exit);
                 Err(error.with_stderr(excerpt(buffer.snapshot().text.as_str(), &prepared.redactor)))
             }
             Outcome::Failed(error) => {
+                spawn_guard.disarm();
                 // A protocol error that raced the process exit is really "it died":
                 // the exit detail and its stderr are more useful than the transport
                 // complaint.
@@ -1176,6 +1190,30 @@ impl fmt::Debug for StdioClient {
             .field("version", &self.client.version)
             .field("timeouts", &self.timeouts)
             .finish_non_exhaustive()
+    }
+}
+
+/// Kills a spawned server's process group if [`StdioClient::open`] is dropped before the
+/// session owns the child.
+struct SpawnGuard {
+    pgid: Option<u32>,
+}
+
+impl SpawnGuard {
+    fn new(pgid: u32) -> Self {
+        Self { pgid: Some(pgid) }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for SpawnGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.pgid {
+            let _ = signal_group(pgid, GroupSignal::Kill);
+        }
     }
 }
 

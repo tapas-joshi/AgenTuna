@@ -15,12 +15,20 @@
  */
 
 import * as Dialog from "@radix-ui/react-dialog";
-import { useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { ReactNode, RefObject } from "react";
 import { cn } from "../../components/cn";
 import { useOverlayLayer } from "../stack/OverlayStackProvider";
 import type { ModalSize } from "./types";
 import "./modal.css";
+
+/**
+ * Open modals in the order they opened. A closing modal must not pull focus out
+ * of a modal that opened after it, so `onCloseAutoFocus` leaves focus alone when
+ * a newer modal is still open.
+ */
+const modalOpenOrder = new Map<string, number>();
+let modalOpenSeq = 0;
 
 /** Properties of {@link Modal}. */
 export interface ModalProps {
@@ -41,6 +49,8 @@ export interface ModalProps {
   readonly dismissible?: boolean;
   /** Element that receives focus instead of the first tabbable child. */
   readonly initialFocusRef?: RefObject<HTMLElement | null>;
+  /** Fallback element to focus on close if the opener was not an interactive element (e.g. body on shortcut). */
+  readonly fallbackFocusRef?: RefObject<HTMLElement | null>;
   /** Action row rendered below the body (usually Cancel plus one primary action). */
   readonly footer?: ReactNode;
   /** Panel content. */
@@ -65,11 +75,26 @@ export function Modal({
   size = "md",
   dismissible = true,
   initialFocusRef,
+  fallbackFocusRef,
   footer,
   children,
   className,
 }: ModalProps) {
   const zIndex = useOverlayLayer("modal", open);
+  const modalId = useId();
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const notify = (isOpen: boolean) => window.dispatchEvent(new CustomEvent("agentuna:modal-state", { detail: { id: modalId, open: isOpen } }));
+    if (open) modalOpenOrder.set(modalId, ++modalOpenSeq);
+    else modalOpenOrder.delete(modalId);
+    notify(open);
+    return () => {
+      if (open) {
+        modalOpenOrder.delete(modalId);
+        notify(false);
+      }
+    };
+  }, [modalId, open]);
   // Radix Dialog restores focus to its Trigger; `Modal` is used without one, so
   // the opener is captured as focus moves in and restored as it moves out.
   const restoreFocusRef = useRef<HTMLElement | null>(null);
@@ -105,12 +130,23 @@ export function Modal({
             target.focus();
           }}
           onCloseAutoFocus={(event) => {
-            const restore = restoreFocusRef.current;
-            if (restore === null || !restore.isConnected) {
+            const mine = modalOpenOrder.get(modalId) ?? 0;
+            if ([...modalOpenOrder.values()].some((order) => order > mine)) {
+              // A modal that opened later owns focus now; restoring the opener here would strand it.
+              event.preventDefault();
               return;
             }
-            event.preventDefault();
-            restore.focus();
+            const restore = restoreFocusRef.current;
+            if (restore !== null && restore !== document.body && restore.isConnected) {
+              event.preventDefault();
+              restore.focus();
+              return;
+            }
+            const fallback = fallbackFocusRef?.current;
+            if (fallback != null && fallback.isConnected) {
+              event.preventDefault();
+              fallback.focus();
+            }
           }}
         >
           <div className="at-modal__header">

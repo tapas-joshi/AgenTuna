@@ -67,30 +67,56 @@ pub(crate) fn dispatch_projects(
 
 /// Runs `agentuna scan [--depth N]`.
 ///
-/// The scan is read-only: it walks the configured roots, diffs the result
-/// against the registered project paths and reports the four sets. Permission
-/// problems become warnings; the command exits 0 unless the index itself fails.
+/// Walks configured roots, reports the project diff, and records it unless
+/// `--read-only` or `--dry-run` was requested. The `at-db` registry hides
+/// missing rows without deleting project history; newly discovered folders
+/// are upserted with their discovery root. Permission problems become
+/// warnings, and the command exits 0 unless the index or registry fails.
 ///
 /// # Errors
-/// `Locked` under a busy lock, or a conflict when the index cannot be opened.
+/// `Locked` under a busy lock or read-only write attempt, and `Conflict` when
+/// the index or registry cannot be updated.
 pub(crate) fn dispatch_scan(
     globals: &GlobalArgs,
     depth: Option<u32>,
 ) -> Result<CommandOutput, CliError> {
-    let access = CliAccess::for_command(globals, false)?;
+    let writes = !globals.read_only && !globals.dry_run;
+    let access = CliAccess::for_command(globals, writes)?;
+    if writes {
+        access.ensure_writable()?;
+    }
     let paths = access.paths();
-    let index = ReadIndex::open(paths)?;
-
-    let registered = index.list_projects()?;
+    let mut database = if writes {
+        Some(open_write_index(paths)?)
+    } else {
+        None
+    };
+    let registered = match database.as_ref() {
+        Some(database) => projects::list_projects(database.connection()).map_err(db_error)?,
+        None => ReadIndex::open(paths)?.list_projects()?,
+    };
     let roots = scan_roots(paths, &registered);
     let mut config = ScanConfig::new(roots.iter().cloned());
     if let Some(depth) = depth {
         config = config.with_max_depth(depth as usize);
     }
-    let outcome = project_scan::scan(&config);
+    let default_root = paths
+        .home_dir()
+        .map(|home| home.join(project_scan::DEFAULT_ROOT_DIR));
+    let mut outcome = project_scan::scan(&config);
+    suppress_absent_default_root(&mut outcome, default_root.as_deref());
     let known: Vec<PathBuf> = registered.iter().map(|p| PathBuf::from(&p.path)).collect();
     let diff = ProjectDiff::between(&outcome.projects, &known);
 
+    if let Some(database) = database.as_mut() {
+        project_scan::apply_diff(&diff, database).map_err(|error| {
+            CliError::new(
+                ErrorCode::Conflict,
+                format!("the project registry could not be updated: {error}"),
+                "check the index permissions and rerun `agentuna scan`",
+            )
+        })?;
+    }
     Ok(scan_output(&config, &registered, &outcome, &diff))
 }
 
@@ -477,6 +503,24 @@ fn scan_roots(paths: &AppPaths, registered: &[ProjectSummary]) -> Vec<PathBuf> {
         }
     }
     roots.into_iter().collect()
+}
+
+/// Drops the warning a missing *default* scan root would otherwise produce.
+///
+/// `~/Projects` is a convenience root, not something the user stated: a machine without it
+/// is normal on first run, so its absence is skipped silently. A registered root that
+/// disappeared still warns, because a folder the user chose is really gone.
+fn suppress_absent_default_root(outcome: &mut ScanOutcome, default_root: Option<&Path>) {
+    let Some(default_root) = default_root else {
+        return;
+    };
+    outcome.warnings.retain(|warning| {
+        warning.path != default_root
+            || !matches!(
+                warning.kind,
+                ScanWarningKind::MissingRoot | ScanWarningKind::NotADirectory
+            )
+    });
 }
 
 /// One registered project as the JSON contract spells it.

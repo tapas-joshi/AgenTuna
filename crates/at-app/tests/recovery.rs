@@ -51,6 +51,8 @@ impl ProcessProbe for FakeProbe {
 struct RecordingOperations {
     interrupted: Mutex<Vec<InterruptedOperation>>,
     restores: Mutex<Vec<Vec<PathBuf>>>,
+    registered_stores: Mutex<Vec<PathBuf>>,
+    in_flight: Mutex<Vec<String>>,
 }
 
 impl RecoveryOperations for RecordingOperations {
@@ -63,6 +65,24 @@ impl RecoveryOperations for RecordingOperations {
         let mut restores = self.restores.lock().unwrap();
         restores.push(files.to_vec());
         Ok(format!("restore-{}", restores.len()))
+    }
+
+    fn operation_in_flight(&self, operation_id: &str) -> Result<bool, RecoveryError> {
+        Ok(self
+            .in_flight
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|known| known == operation_id))
+    }
+
+    fn is_registered_project_store(&self, store_root: &Path) -> Result<bool, RecoveryError> {
+        Ok(self
+            .registered_stores
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|known| known == store_root))
     }
 }
 
@@ -102,6 +122,8 @@ fn pending_journal(paths: &AppPaths, operation_id: &str, entries: Vec<JournalEnt
             completed_ops: Vec::new(),
             created_dirs: Vec::new(),
             committed: false,
+            authorized_roots: None,
+            backup_root: None,
         },
     )
     .unwrap()
@@ -238,6 +260,8 @@ fn discard_removes_the_debris_keeps_the_bytes_and_keeps_the_audit_row() {
         completed_ops: Vec::new(),
         created_dirs: Vec::new(),
         committed: false,
+        authorized_roots: None,
+        backup_root: None,
     };
     let journal_path = write_journal(&paths.cache_dir().join("pending"), &journal).unwrap();
 
@@ -454,4 +478,155 @@ fn a_malformed_journal_is_reported_for_manual_review_not_skipped() {
         1,
         "the unreadable journal still marks its operation interrupted"
     );
+}
+
+#[test]
+fn delete_backup_falls_back_to_the_configured_root_after_a_crash() {
+    use at_app::app::recovery::DatabaseRecoveryOperations;
+
+    let temp = tempfile::tempdir().unwrap();
+    let backup_root = temp.path().join("backups/migration");
+    let directory = backup_root.join("user").join("skills");
+    fs::create_dir_all(&directory).unwrap();
+    let payload = b"original tree bytes";
+    let expected = at_fs::sha256_hex(payload);
+    let blob = directory.join("01JAZZ-0.deleted");
+    fs::write(&blob, payload).unwrap();
+    let database = at_db::Database::open_in_memory().unwrap();
+    let operations = DatabaseRecoveryOperations::new(std::sync::Arc::new(Mutex::new(database)))
+        .with_backup_root(&backup_root);
+    let journal = PendingJournal {
+        journal_version: JOURNAL_VERSION,
+        operation_id: "01JAZZ".to_owned(),
+        started_at: OffsetDateTime::now_utc(),
+        entries: Vec::new(),
+        temp_files: Vec::new(),
+        change_set: None,
+        completed_ops: Vec::new(),
+        created_dirs: Vec::new(),
+        committed: false,
+        authorized_roots: None,
+        backup_root: Some(backup_root.clone()),
+    };
+    let entry = JournalEntry {
+        path: temp.path().join("native/skills/review"),
+        before_hash: Some(expected),
+        after_hash: String::new(),
+    };
+
+    let found = operations
+        .delete_backup(&journal, 0, &entry)
+        .expect("lookup");
+
+    assert_eq!(found, Some(blob));
+}
+
+/// A project store is committed to Git along with the repository, so it can arrive by clone.
+/// This writes the forgery the review found: a completed delete whose saved original is a blob
+/// inside the repository and whose destination is a user-writable path outside every root the
+/// app authorized.
+fn forged_project_store_journal(sandbox: &Path) -> (AppPaths, PathBuf, PathBuf) {
+    let project = sandbox.join("cloned-repo");
+    fs::create_dir_all(&project).unwrap();
+    let paths = AppPaths::resolve(&PathEnvironment {
+        home: HomeSource::Injected(sandbox.join("home")),
+        overrides: PathOverrides {
+            global_store: Some(sandbox.join("global")),
+            ..PathOverrides::default()
+        },
+        project_root: Some(project.clone()),
+    })
+    .expect("resolve sandboxed paths");
+    paths.create_dirs().unwrap();
+    write_marker(paths.support_dir(), &marker(4_242, false));
+
+    let store = paths.project_store().expect("project store").to_path_buf();
+    let journal_dir = store.join(".state").join("journal");
+    let backups = store.join("backups");
+    fs::create_dir_all(&journal_dir).unwrap();
+    fs::create_dir_all(&backups).unwrap();
+    let payload = b"<?xml version=\"1.0\"?><plist><dict/></plist>";
+    fs::write(backups.join("op-forged-0.deleted"), payload).unwrap();
+    let target = project.join("skill.md");
+    let journal = PendingJournal {
+        journal_version: JOURNAL_VERSION,
+        operation_id: "op-forged".to_owned(),
+        started_at: OffsetDateTime::now_utc(),
+        entries: vec![JournalEntry {
+            path: target.clone(),
+            before_hash: Some(at_fs::sha256_hex(payload)),
+            after_hash: String::new(),
+        }],
+        temp_files: Vec::new(),
+        change_set: Some(at_model::ChangeSet {
+            id: "set-forged".to_owned(),
+            preview_id: "preview-forged".to_owned(),
+            operation_kind: at_model::OperationKind::parse("delete").unwrap(),
+            scope: Some(at_model::Scope::Project),
+            project_id: None,
+            summary: "forged delete".to_owned(),
+            ops: vec![at_model::FileOp::Delete {
+                path: target.clone(),
+                expected: at_model::ExpectedState::hash(at_fs::sha256_hex(payload)).unwrap(),
+            }],
+            created_at_unix_seconds: 0,
+        }),
+        completed_ops: vec![0],
+        created_dirs: Vec::new(),
+        committed: false,
+        authorized_roots: None,
+        backup_root: Some(backups),
+    };
+    write_journal(&journal_dir, &journal).unwrap();
+    (paths, target, store)
+}
+
+#[test]
+fn a_journal_from_an_unregistered_project_store_is_reviewed_and_never_replayed() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let (paths, target, _store) = forged_project_store_journal(sandbox.path());
+    let operations = std::sync::Arc::new(RecordingOperations::default());
+
+    let outcome = service(&paths, &operations, FakeProbe::default())
+        .run()
+        .unwrap();
+
+    assert!(
+        !target.exists(),
+        "a project store that arrived by clone must never be replayed"
+    );
+    let sheet = outcome.sheet().expect("sheet");
+    assert!(
+        sheet
+            .interrupted
+            .iter()
+            .any(|operation| operation.id == "op-forged"),
+        "the journal is parked on the recovery sheet: {:?}",
+        sheet.interrupted
+    );
+}
+
+#[test]
+fn a_registered_project_store_journal_with_a_live_operation_is_recovered() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let (paths, target, store) = forged_project_store_journal(sandbox.path());
+    let operations = std::sync::Arc::new(RecordingOperations::default());
+    operations.registered_stores.lock().unwrap().push(store);
+    operations
+        .in_flight
+        .lock()
+        .unwrap()
+        .push("op-forged".to_owned());
+
+    let outcome = service(&paths, &operations, FakeProbe::default())
+        .run()
+        .unwrap();
+
+    assert_eq!(
+        fs::read(&target).unwrap(),
+        b"<?xml version=\"1.0\"?><plist><dict/></plist>",
+        "a registered project's own interrupted delete is recovered"
+    );
+    let sheet = outcome.sheet().expect("sheet");
+    assert!(sheet.manual_review.is_empty(), "{:?}", sheet.manual_review);
 }

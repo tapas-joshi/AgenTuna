@@ -426,53 +426,21 @@ impl ProjectDiff {
     }
 }
 
-/// Why a [`ProjectRegistry`] could not record a change.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{}: {message}", .path.display())]
-pub struct ScanApplyError {
-    /// Path whose row could not be written.
-    pub path: PathBuf,
-    /// Database message.
-    pub message: String,
-}
-
-/// The seam a scan diff is applied to.
-///
-/// The SQLite implementation lives outside this crate; discovery only depends on these two
-/// operations. An unchanged project never reaches this trait: [`apply_diff`] dispatches new and
-/// missing rows only, so a scan cannot refresh (or clear) an existing project's `last_used_at`.
-pub trait ProjectRegistry {
-    /// Registers a project found on disk.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ScanApplyError`] the caller's implementation reports.
-    fn insert_discovered(&mut self, project: &DiscoveredProject) -> Result<(), ScanApplyError>;
-
-    /// Flags a registered project that no longer looks like a project on disk.
-    ///
-    /// # Errors
-    ///
-    /// Any [`ScanApplyError`] the caller's implementation reports.
-    fn mark_missing(&mut self, path: &Path) -> Result<(), ScanApplyError>;
-}
-
-/// Applies a diff to `registry` and returns how many rows were touched.
+/// Applies a diff through the `at-db` project-registry contract and returns the number of rows touched.
 ///
 /// Unchanged projects are skipped on purpose: they are already registered, and re-writing them
-/// would move `last_used_at` on every scan.
+/// would move their `last_used_at`.
 ///
 /// # Errors
 ///
-/// The first [`ScanApplyError`] the registry reports; earlier rows stay applied, as a diff is
-/// idempotent and the next scan recomputes it.
+/// The first registry error; earlier rows stay applied, as a diff is idempotent and the next scan recomputes it.
 pub fn apply_diff(
     diff: &ProjectDiff,
-    registry: &mut dyn ProjectRegistry,
-) -> Result<usize, ScanApplyError> {
+    registry: &mut dyn at_db::projects::ProjectRegistry,
+) -> Result<usize, at_db::projects::ProjectRegistryError> {
     let mut applied = 0;
     for project in &diff.new {
-        registry.insert_discovered(project)?;
+        registry.insert_discovered(&project.path, &project.name, &project.source_root)?;
         applied += 1;
     }
     for path in &diff.missing {

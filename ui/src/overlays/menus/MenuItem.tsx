@@ -90,6 +90,7 @@ export function MenuItem({
       className="at-menu__item"
       data-tone={tone}
       disabled={disabled}
+      aria-description={disabled ? disabledReason : undefined}
       aria-keyshortcuts={mnemonic === undefined ? undefined : `Alt+${mnemonic.toUpperCase()}`}
       onSelect={() => {
         selectRef.current?.();

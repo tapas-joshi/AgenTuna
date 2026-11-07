@@ -373,9 +373,14 @@ fn the_skills_screen_matrix_query_uses_the_agent_scope_index_and_stays_under_50_
         .expect("cells read back");
     let elapsed = start.elapsed();
     assert_eq!(rows.len(), 3_000);
+    let budget = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_millis(50)
+    };
     assert!(
-        elapsed < Duration::from_millis(500),
-        "one agent's 3k-cell matrix slice took {elapsed:?}, above the 50 ms target"
+        elapsed < budget,
+        "one agent's 3k-cell matrix slice took {elapsed:?}, above {budget:?}"
     );
 }
 

@@ -22,9 +22,12 @@
 
 mod adopt;
 mod agents;
+mod backups;
 mod builtin;
 pub mod cli;
+pub mod discovery;
 pub mod doctor;
+mod drift;
 mod effective;
 pub mod error;
 pub mod globals;
@@ -37,6 +40,8 @@ pub mod registry;
 mod rules;
 mod run;
 pub mod runtime;
+mod skills;
+mod sync_remote;
 mod why;
 
 pub use cli::{Cli, CompletionShell, ProjectsCommand, RootCommand};

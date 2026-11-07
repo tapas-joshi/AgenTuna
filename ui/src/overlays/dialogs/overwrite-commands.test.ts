@@ -10,10 +10,12 @@ afterEach(() => {
 
 describe("overwrite command bridge", () => {
   it("invokes the registered at-fs command and exposes its preserved destination", async () => {
-    invoke.mockResolvedValue({ original: "/sandbox/agent/skill", moved_to: "/sandbox/agent/skill.agentuna-backup-20261106T100000Z" });
+    invoke.mockResolvedValue({ original: "/sandbox/agent/skill", moved_to: "/sandbox/agent/skill.agentuna-backup-20261106T100000Z", operation_id: "op_move_1" });
     await expect(moveRefusedItemAside("/sandbox/agent/skill")).resolves.toEqual({
       summary: "The unmanaged item was moved aside without replacing its contents.",
       movedTo: "/sandbox/agent/skill.agentuna-backup-20261106T100000Z",
+      operationId: "op_move_1",
+      remedy: "move",
     });
     expect(invoke).toHaveBeenCalledWith("overwrite_move_aside", { path: "/sandbox/agent/skill" });
   });

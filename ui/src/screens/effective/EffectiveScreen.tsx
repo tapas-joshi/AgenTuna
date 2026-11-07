@@ -4,9 +4,15 @@ import { Badge, Button, Input } from "../../components";
 import type { EffectiveCountsView } from "../../generated/EffectiveCountsView";
 import type { EffectiveQueryView } from "../../generated/EffectiveQueryView";
 import type { WhyTraceView } from "../../generated/WhyTraceView";
+import { Modal } from "../../overlays/dialogs";
 import { WhyTraceDialog } from "../../overlays/dialogs/WhyTraceDialog";
+import { McpCopyDialog } from "../../overlays/dialogs/McpCopyDialog";
+import { SkillActionDialogs } from "../../overlays/dialogs/SkillActionDialogs";
+import type { SkillActionDialogRequest } from "../../overlays/dialogs/SkillActionDialogs";
 import { useToast } from "../../overlays/toasts";
-import { useAppSnapshot } from "../../state/context";
+import { useAppSnapshot, useAppState } from "../../state/context";
+import type { McpActionPreviewView } from "../../generated/McpActionPreviewView";
+import type { McpServerActionOutcome } from "../../generated/McpServerActionOutcome";
 
 type Kind = "skill" | "mcp_server" | "rule";
 
@@ -56,6 +62,7 @@ function stepTone(status: unknown): "success" | "warning" | "danger" | "neutral"
 /** Effective configuration: kind tabs, filterable table and a scope-trace detail panel. */
 export function EffectiveScreen() {
   const { scope, activeProject } = useAppSnapshot();
+  const app = useAppState();
   const toast = useToast();
   const [tab, setTab] = useState<Kind>("skill");
   const [filter, setFilter] = useState("");
@@ -76,6 +83,16 @@ export function EffectiveScreen() {
   const [lockTarget, setLockTarget] = useState<{ itemId: string; name: string; locked: boolean; reason: string } | null>(null);
   const [lockReason, setLockReason] = useState("");
   const [lockBusy, setLockBusy] = useState(false);
+  const [actionDialog, setActionDialog] = useState<SkillActionDialogRequest | null>(null);
+  const [mcpCopy, setMcpCopy] = useState<{ itemId: string; scope: string } | null>(null);
+  const [repoDisable, setRepoDisable] = useState<{
+    readonly preview: McpActionPreviewView;
+    readonly itemId: string;
+    readonly scope: string;
+    readonly name: string;
+  } | null>(null);
+  const [repoBusy, setRepoBusy] = useState(false);
+  const [repoError, setRepoError] = useState<string | null>(null);
   const detailRef = useRef<HTMLElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -84,13 +101,13 @@ export function EffectiveScreen() {
     try {
       const [result, overview, nextCounts] = await Promise.all([
         invoke<EffectiveQueryView>("effective_query", { request: { scope, kind: tab, agent: null } }),
-        invoke<{ global_writable: boolean; global_reason: string | null }>("overview_load", {
+        invoke<{ global_store: { status: string; reason: string | null } }>("overview_load", {
           activeScope: scope,
         }),
         invoke<EffectiveCountsView>("effective_counts"),
       ]);
-      setGlobalWritable(overview.global_writable);
-      setGlobalReason(overview.global_reason ?? "Global store is read-only");
+      setGlobalWritable(overview.global_store.status === "available");
+      setGlobalReason(overview.global_store.reason ?? "Global store is read-only");
       setRows(result.items);
       setDisabledHere(result.disabled_here);
       setDiagnostics(result.diagnostics);
@@ -202,6 +219,67 @@ export function EffectiveScreen() {
     const value = kind === "skill" ? counts.skills : kind === "mcp_server" ? counts.mcp_servers : counts.rules;
     return Number.isFinite(value) ? value : 0;
   };
+
+  /** Opens the reviewed "Disable in this repo" plan for the selected item. */
+  async function disableInRepo(item: EffectiveQueryView["items"][number]): Promise<void> {
+    if (activeProject === null || item.item_id === null) return;
+    if (item.kind === "skill") {
+      setActionDialog({ kind: "disable-in-repo", itemId: item.item_id });
+      return;
+    }
+    if (item.kind !== "mcp_server") return;
+    setRepoBusy(true);
+    setRepoError(null);
+    setRepoDisable(null);
+    try {
+      const outcome = await invoke<McpServerActionOutcome>("mcp_server_disable", {
+        request: {
+          item_id: item.item_id,
+          scope: item.winner_scope,
+          project_id: activeProject,
+          agent: null,
+          in_repo: true,
+          apply: false,
+          preview_id: null,
+        },
+      });
+      if (outcome.stage === "preview") {
+        setRepoDisable({ preview: outcome.preview, itemId: item.item_id, scope: item.winner_scope, name: item.name });
+      }
+    } catch (cause) {
+      setRepoError(String(cause));
+    } finally {
+      setRepoBusy(false);
+    }
+  }
+
+  /** Applies the reviewed project tombstone after the user confirms the listed files. */
+  async function applyRepoDisable(): Promise<void> {
+    if (repoDisable === null) return;
+    setRepoBusy(true);
+    setRepoError(null);
+    try {
+      await invoke<McpServerActionOutcome>("mcp_server_disable", {
+        request: {
+          item_id: repoDisable.itemId,
+          scope: repoDisable.scope,
+          project_id: activeProject,
+          agent: null,
+          in_repo: true,
+          apply: true,
+          preview_id: repoDisable.preview.preview_id,
+        },
+      });
+      toast.success(`Disabled ${repoDisable.name} in this repo`);
+      setRepoDisable(null);
+      await refresh();
+    } catch (cause) {
+      setRepoError(String(cause));
+      setRepoDisable(null);
+    } finally {
+      setRepoBusy(false);
+    }
+  }
   const columnLabel = tab === "skill" ? "Skill" : tab === "mcp_server" ? "Server" : "File";
   const loadedAgents =
     selected !== null && "agents" in selected
@@ -477,6 +555,86 @@ export function EffectiveScreen() {
                         </div>
                       ))}
                     </div>
+                    {activeProject !== null && selectedItemId !== null && selected.winner_scope !== "project" && selected.winner_scope !== "local" && (
+                      <section aria-label="Change it for this repo" className="mt-4 grid gap-8 rounded-8 border border-border bg-surface p-12">
+                        <div>
+                          <h3 className="m-0 text-11 font-semibold uppercase tracking-wide text-text-muted">Change it for this repo</h3>
+                          <p className="mb-0 mt-4 text-11 text-text-muted">
+                            {selected.kind === "mcp_server"
+                              ? `Writes the project MCP configuration. Your ${SCOPE_LABEL[selected.winner_scope] ?? selected.winner_scope} definition stays the same.`
+                              : selected.kind === "skill"
+                                ? `Writes a Project-scope copy. Your ${SCOPE_LABEL[selected.winner_scope] ?? selected.winner_scope} copy stays the same.`
+                                : `Manage this rule in this repo or edit the original ${SCOPE_LABEL[selected.winner_scope] ?? selected.winner_scope} rule.`}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-8">
+                          {selected.kind !== "rule" && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={locked !== null || repoBusy}
+                                title={locked === null ? undefined : locked.reason}
+                                onClick={() => void disableInRepo(selected)}
+                              >
+                                {repoBusy ? "Reviewing…" : "Disable in this repo"}
+                              </Button>
+                              {selected.kind === "skill" ? (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={locked !== null}
+                                  title={locked === null ? undefined : locked.reason}
+                                  onClick={() => setActionDialog({ kind: "transfer", itemId: selectedItemId, transfer: "promote", targetScope: "project" })}
+                                >
+                                  Override in Project
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={locked !== null}
+                                  title={locked === null ? undefined : locked.reason}
+                                  onClick={() => {
+                                    if (selectedItemId === null) return;
+                                    setMcpCopy({ itemId: selectedItemId, scope: selected.winner_scope });
+                                  }}
+                                >
+                                  Override in Project
+                                </Button>
+                              )}
+                            </>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={
+                              locked !== null ||
+                              (selected.winner_scope === "global" && !globalWritable)
+                            }
+                            title={
+                              locked !== null
+                                ? locked.reason
+                                : selected.winner_scope === "global" && !globalWritable
+                                  ? globalReason
+                                  : undefined
+                            }
+                            aria-label="Edit User definition"
+                            onClick={() => {
+                              app.openItem(selectedItemId, {
+                                kind: selected.kind,
+                                 scope: selected.winner_scope,
+                                project_id: selected.winner_scope === "project" ? activeProject : null,
+                              });
+                            }}
+                          >
+                            Edit User definition
+                          </Button>
+                        </div>
+                        {locked !== null && <p className="m-0 text-11 text-warning">Locked: {locked.reason}</p>}
+                        {repoError !== null && <p role="alert" className="m-0 text-11 text-danger">{repoError}</p>}
+                      </section>
+                    )}
                   </>
                 )}
               </>
@@ -498,6 +656,49 @@ export function EffectiveScreen() {
         </div>
       )}
 
+      <Modal
+        open={repoDisable !== null}
+        onOpenChange={(open) => { if (!open && !repoBusy) setRepoDisable(null); }}
+        title={`Disable ${repoDisable?.name ?? "server"} in this repo?`}
+        description="Every listed agent configuration is backed up before the project tombstone is written."
+        footer={<><Button variant="ghost" disabled={repoBusy} onClick={() => setRepoDisable(null)}>Cancel</Button><Button variant="primary" disabled={repoBusy} onClick={() => void applyRepoDisable()}>{repoBusy ? "Disabling…" : "Disable in repo"}</Button></>}
+      >
+        <ul className="m-0 grid max-h-[320px] list-none gap-6 overflow-auto p-0 text-12 text-text-secondary">
+          {(repoDisable?.preview.files ?? []).map((file) => (
+            <li key={file.path} className="break-all font-mono text-11">{file.agent}: {file.path}</li>
+          ))}
+        </ul>
+      </Modal>
+      <SkillActionDialogs
+        action={actionDialog}
+        projectId={activeProject}
+        onClose={() => setActionDialog(null)}
+        onTransferSuccess={(result) => {
+          setActionDialog(null);
+          toast.success(`Project copy written. Backup: ${result.backup_location}`);
+          void refresh();
+        }}
+        onDeleteSuccess={() => setActionDialog(null)}
+        onDisableSuccess={(result) => {
+          setActionDialog(null);
+          toast.success(`Disabled in this repo for ${result.agents_disabled} agent(s).`);
+          void refresh();
+        }}
+      />
+      {mcpCopy !== null && (
+        <McpCopyDialog
+          itemId={mcpCopy.itemId}
+          scope={mcpCopy.scope}
+          projectId={activeProject}
+          targetScope="project"
+          onClose={() => setMcpCopy(null)}
+          onSuccess={(result) => {
+            setMcpCopy(null);
+            toast.success(`Copied into Project as ${result.target_slug}. Backup: ${result.backup_location}`);
+            void refresh();
+          }}
+        />
+      )}
       {why !== null && (
         <WhyTraceDialog itemId={why.itemId} scope={scope} agent={why.agent} onClose={() => setWhy(null)} />
       )}

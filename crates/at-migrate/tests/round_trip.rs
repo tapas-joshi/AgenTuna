@@ -381,6 +381,7 @@ fn apply_failure_midway_rolls_back_every_touched_path() -> Result<(), Box<dyn Er
             trip.record(MigrationStep::Scan, || scenario.scan())?;
             trip.record(MigrationStep::Plan, || scenario.plan())?;
             trip.record(MigrationStep::DryRun, || scenario.dry_run())?;
+            let deployments_before = deployment_row_count(&scenario)?;
             trip.record(MigrationStep::Apply, || scenario.apply())?;
 
             trip.ensure_failed_apply_rolled_back()?;
@@ -389,10 +390,20 @@ fn apply_failure_midway_rolls_back_every_touched_path() -> Result<(), Box<dyn Er
                 record.failure().is_some(),
                 "injected failure at operation {fail_index} is recorded"
             );
+            assert_eq!(
+                deployment_row_count(&scenario)?,
+                deployments_before,
+                "a failed apply leaves no deployment rows behind (operation {fail_index})"
+            );
             let omp_target = scenario
                 .fixture()
                 .deployment_target(AgentId::Omp, MANAGED_SKILL)
                 .expect("omp skills folder");
+            assert_eq!(
+                deployment_rows_for(&scenario, &omp_target)?,
+                0,
+                "no deployment row targets the rolled-back path (operation {fail_index})"
+            );
             assert!(fs::symlink_metadata(&omp_target).is_err());
             let created_store_skill = paths
                 .user_store
@@ -626,6 +637,7 @@ impl Scenario {
             backup_root: &backup_root,
             authorized_roots: &roots,
             database: &mut self.database,
+            project_id: None,
         };
         match self.fail_at {
             Some(index) => {
@@ -788,4 +800,21 @@ fn walk_tree(root: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn file_mode(path: &Path) -> io::Result<u32> {
     Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
+/// How many `deployments` rows the scenario's database holds.
+fn deployment_row_count(scenario: &Scenario) -> Result<i64, Box<dyn Error>> {
+    Ok(scenario
+        .database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM deployments", [], |row| row.get(0))?)
+}
+
+/// How many `deployments` rows target exactly `path`.
+fn deployment_rows_for(scenario: &Scenario, path: &Path) -> Result<i64, Box<dyn Error>> {
+    Ok(scenario.database.connection().query_row(
+        "SELECT COUNT(*) FROM deployments WHERE target_path = ?1",
+        [path.to_string_lossy().into_owned()],
+        |row| row.get(0),
+    )?)
 }

@@ -182,3 +182,37 @@ fn the_registered_group_exposes_config_and_its_help_parses() {
     let help = config.clone().try_get_matches_from(["config", "--help"]);
     assert!(help.is_err_and(|error| error.exit_code() == 0));
 }
+
+#[test]
+fn a_recorded_native_scan_completes_the_derived_index_marker() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = paths_for(temp.path());
+    std::fs::create_dir_all(paths.support_dir()).expect("support dir");
+    let database = at_db::Database::open_file(paths.db_path()).expect("open index");
+
+    let missing = missing_derived_rows(&paths).expect("an empty index has missing rows");
+    assert!(
+        missing.native,
+        "an index with no recorded scan still needs one"
+    );
+
+    database
+        .connection()
+        .execute(
+            "INSERT INTO settings (key, value_json, updated_at) \
+             VALUES (?1, 'true', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [at_engine::native_index::NATIVE_SCAN_MARKER_KEY],
+        )
+        .expect("record the scan marker");
+    let missing = missing_derived_rows(&paths).expect("the registry is still empty");
+    assert!(
+        !missing.native,
+        "a completed scan is not repeated on every command"
+    );
+
+    let absent = paths_for(&temp.path().join("absent"));
+    assert!(
+        missing_derived_rows(&absent).is_none(),
+        "read commands never create a database"
+    );
+}

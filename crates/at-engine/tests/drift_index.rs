@@ -7,7 +7,9 @@
 use std::fs;
 use std::path::Path;
 
-use at_engine::drift::{DriftKind, DriftService, DriftTarget, targets_from_index};
+use at_engine::drift::{
+    DriftKind, DriftService, DriftTarget, reconcile_indexed, targets_from_index,
+};
 use at_fs::{WatchBatch, WatchChange};
 use at_model::{AgentId, ItemId, ItemState, Scope};
 
@@ -32,13 +34,16 @@ fn seed_deployment(
             ],
         )
         .expect("item row");
-    let mut spec =
-        at_db::deployments::DeploymentSpec::new(item_id, agent, Scope::User, ItemState::Linked)
-            .with_mode("native")
-            .with_target_path(&target_text);
-    if let Some(baseline) = baseline {
-        spec = spec.with_hashes(None, Some(baseline), Some(baseline));
-    }
+    let hashes = at_db::deployments::DeploymentHashes::new(None, baseline, baseline);
+    let spec = at_db::deployments::DeploymentSpec::applied(
+        item_id,
+        agent,
+        Scope::User,
+        ItemState::Linked,
+        Some("native"),
+        Some(&target_text),
+        hashes,
+    );
     at_db::deployments::upsert_deployment(connection, &spec).expect("deployment row");
 }
 
@@ -229,18 +234,67 @@ fn off_rows_are_not_watched() {
             [item_id.to_string()],
         )
         .expect("item row");
-    at_db::deployments::upsert_deployment(
-        database.connection(),
-        &at_db::deployments::DeploymentSpec::new(
-            &item_id,
-            &AgentId::ClaudeCode,
-            Scope::User,
-            ItemState::Off,
-        )
-        .with_target_path(target.to_string_lossy().as_ref()),
-    )
-    .expect("deployment row");
+    let target_text = target.to_string_lossy();
+    let spec = at_db::deployments::DeploymentSpec::applied(
+        &item_id,
+        &AgentId::ClaudeCode,
+        Scope::User,
+        ItemState::Off,
+        None,
+        Some(target_text.as_ref()),
+        at_db::deployments::DeploymentHashes::none(),
+    );
+    at_db::deployments::upsert_deployment(database.connection(), &spec).expect("deployment row");
     let targets: Vec<DriftTarget> =
         targets_from_index(database.connection()).expect("index targets");
     assert!(targets.is_empty());
+}
+
+#[test]
+fn reconcile_indexed_detects_an_edit_without_a_watcher_and_never_duplicates_it() {
+    let temp = tempfile::tempdir().expect("sandbox");
+    let target = temp.path().join(".claude.json");
+    fs::write(&target, b"{\"mcpServers\":{}}").expect("baseline file");
+    let baseline = at_fs::sha256_hex(b"{\"mcpServers\":{}}");
+    let database = at_db::Database::open_in_memory().expect("database");
+    let item_id = ItemId::new();
+    seed_deployment(
+        database.connection(),
+        &item_id,
+        &AgentId::ClaudeCode,
+        &target,
+        "mcp_server",
+        Some(&baseline),
+    );
+    fs::write(&target, b"{\"mcpServers\":{\"alpha\":{}}}").expect("external edit");
+    let edited = fs::read(&target).expect("edited bytes");
+
+    let first = reconcile_indexed(&database).expect("first reconciliation");
+    assert_eq!(first.len(), 1, "one changed path is one notice");
+    assert_eq!(first[0].kind, DriftKind::Drifted);
+    assert_eq!(
+        first[0].actual_hash.as_deref(),
+        Some(at_fs::sha256_hex(&edited).as_str())
+    );
+    let open = at_db::drift::open_drift_events(database.connection(), Some(Scope::User))
+        .expect("open events");
+    assert_eq!(open.len(), 1, "the scan records the event for the UI");
+    assert_eq!(
+        open[0].item_id.as_deref(),
+        Some(item_id.to_string().as_str())
+    );
+    assert_eq!(
+        fs::read(&target).expect("target bytes"),
+        edited,
+        "detection must not write the agent file"
+    );
+
+    let second = reconcile_indexed(&database).expect("second reconciliation");
+    assert!(second.is_empty(), "an open event must not be duplicated");
+    assert_eq!(
+        at_db::drift::open_drift_events(database.connection(), Some(Scope::User))
+            .expect("open events")
+            .len(),
+        1
+    );
 }

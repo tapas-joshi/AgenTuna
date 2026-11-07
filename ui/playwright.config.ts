@@ -4,7 +4,11 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
   snapshotPathTemplate: "{testDir}/snapshots/{projectName}/{arg}{ext}",
-  reporter: "list",
+  // CI keeps the HTML report as an artifact next to Playwright's own diff files; the side-by-side
+  // reporter merges expected/actual/diff into one image per failed comparison.
+  reporter: process.env.CI
+    ? [["list"], ["html", { open: "never" }], ["./e2e/support/side-by-side-reporter.ts"]]
+    : [["list"], ["./e2e/support/side-by-side-reporter.ts"]],
   use: {
     baseURL: "http://127.0.0.1:4173",
     ...devices["Desktop Chrome"],

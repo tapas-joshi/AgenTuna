@@ -1,0 +1,79 @@
+{
+  "agent": "omp",
+  "agents": [
+    {
+      "name": "omp"
+    }
+  ],
+  "expect": {
+    "diagnostics": [],
+    "gitignore": "created",
+    "items": [
+      {
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "code-review",
+        "path": "<project>/.agentuna/local/skills/code-review/SKILL.md",
+        "scope": "local",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "project"
+          },
+          {
+            "outcome": "winner",
+            "scope": "local"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "code-review"
+        },
+        "kind": "skill",
+        "name": "code-review",
+        "path": "<project>/.agentuna/skills/code-review/SKILL.md",
+        "scope": "project",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/local/skills/code-review/SKILL.md",
+          "scope": "local"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "skill-omp-local-over-project",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "description": "Project review.",
+          "slug": "code-review"
+        }
+      ]
+    },
+    {
+      "scope": "local",
+      "skills": [
+        {
+          "description": "Local review.",
+          "slug": "code-review"
+        }
+      ]
+    }
+  ],
+  "title": "Omp resolves the Local skill above the Project copy"
+}

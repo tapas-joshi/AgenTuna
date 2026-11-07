@@ -14,8 +14,23 @@ name = "at_app"
 name = "agentuna-app"
 path = "src/main.rs"
 
+[[bin]]
+name = "at-app-health-fixture"
+path = "tests/support/health_fixture_server.rs"
+required-features = ["testkit"]
+
 [lints]
 workspace = true
+
+[features]
+# Builds the TM-030 health fixture server used by the scheduler process tests.
+# It is never part of a shipped AgenTuna binary.
+testkit = []
+# Embeds `build.frontendDist` into the binary instead of loading `build.devUrl`.
+# `tauri build` enables `tauri/custom-protocol` itself through this feature; a direct
+# `cargo build` (scripts/bundle.sh) must pass `--features custom-protocol` or the
+# release app would load http://localhost:1420 and only work beside a dev server.
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build.workspace = true
@@ -56,6 +71,11 @@ rusqlite.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
+# Synthesizes a platform watch refusal so TA-081's tolerant-root policy is testable.
+notify.workspace = true
 # TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
 at-fs = { workspace = true, features = ["testkit"] }
 at-migrate = { workspace = true, features = ["testkit"] }
+# Dev-only cycle: the crate under test needs its own `testkit` feature during `cargo test`
+# so `CARGO_BIN_EXE_at-app-health-fixture` exists (same pattern as at-migrate and at-fs).
+at-app = { path = ".", features = ["testkit"] }

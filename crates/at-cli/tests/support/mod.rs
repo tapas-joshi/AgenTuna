@@ -7,7 +7,7 @@
 //! test target is unused in the others.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use at_store::{AppPaths, PathEnvironment, PathOverrides};
@@ -25,12 +25,17 @@ impl Default for Sandbox {
 }
 
 impl Sandbox {
-    /// Creates the temporary root.
+    /// Creates the temporary root and the working directory spawned commands run in.
+    ///
+    /// The working directory exists before any test snapshots the sandbox tree, so
+    /// spawning a command never changes a hash a test computed earlier.
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        let sandbox = Self {
             root: TempDir::new().expect("a temp directory"),
-        }
+        };
+        let _ = sandbox.cwd();
+        sandbox
     }
 
     /// A path inside the sandbox; parents are not created.
@@ -96,14 +101,43 @@ impl Sandbox {
             ("HOME", self.path("home")),
         ]
     }
+
+    /// The working directory spawned commands run in, created on first use.
+    ///
+    /// Project discovery reads the working directory, so a spawned binary must not
+    /// inherit the repository the test itself runs from: a `.git` directory here would
+    /// silently make the developer's checkout the active project.
+    #[must_use]
+    pub fn cwd(&self) -> PathBuf {
+        let cwd = self.path("cwd");
+        std::fs::create_dir_all(&cwd).expect("create the sandbox working directory");
+        cwd
+    }
+}
+
+/// A command for the real binary with the sandbox environment and no colour.
+fn command(sandbox: &Sandbox) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agentuna"));
+    command
+        .env("NO_COLOR", "1")
+        .envs(sandbox.vars())
+        .current_dir(sandbox.cwd());
+    command
 }
 
 /// Runs the real binary with the sandbox environment and no colour.
 pub fn agentuna(sandbox: &Sandbox, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_agentuna"))
+    command(sandbox)
         .args(args)
-        .env("NO_COLOR", "1")
-        .envs(sandbox.vars())
+        .output()
+        .expect("spawn the agentuna binary")
+}
+
+/// Runs the real binary from `cwd`, which project discovery reads.
+pub fn agentuna_in(sandbox: &Sandbox, cwd: &Path, args: &[&str]) -> Output {
+    command(sandbox)
+        .current_dir(cwd)
+        .args(args)
         .output()
         .expect("spawn the agentuna binary")
 }
@@ -113,10 +147,8 @@ pub fn agentuna_with_stdin(sandbox: &Sandbox, args: &[&str], stdin: &[u8]) -> Ou
     use std::io::Write as _;
     use std::process::Stdio;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_agentuna"))
+    let mut child = command(sandbox)
         .args(args)
-        .env("NO_COLOR", "1")
-        .envs(sandbox.vars())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

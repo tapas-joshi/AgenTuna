@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use at_db::{Database, ops};
 use at_fs::ApplyRoots;
 use at_migrate::adopt::{
-    AdoptError, AdoptHandling, AdoptRequest, PathState, adopt_item, preview_adopt,
+    AdoptError, AdoptHandling, AdoptPreviewRequest, AdoptRequest, PathState, adopt_item,
+    preview_adopt,
 };
 use at_migrate::apply::{UndoOperationRequest, UndoOutcome, undo_operation};
 use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
@@ -64,6 +65,7 @@ fn report(items: Vec<ScanItem>) -> ScanReport {
         items,
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -92,12 +94,14 @@ fn adopting_a_scanned_skill_creates_the_store_item_and_leaves_a_symlink() {
     let outcome = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect("adopt skill");
 
@@ -168,12 +172,14 @@ fn an_adopt_after_the_file_changed_returns_stale_scan_record_and_writes_nothing(
     let error = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect_err("stale scan record");
     match error {
@@ -219,12 +225,14 @@ fn an_adopt_of_a_vanished_file_reports_the_missing_state() {
     let error = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect_err("vanished scan record");
     assert!(matches!(
@@ -261,13 +269,13 @@ fn adopting_an_mcp_server_patches_only_that_entry_and_keeps_comments() {
     };
     let scan = report(vec![item.clone()]);
     let authorized = roots(&fixture);
-    let preview = preview_adopt(&AdoptRequest {
+    let preview = preview_adopt(&AdoptPreviewRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
-        database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
     })
@@ -279,12 +287,14 @@ fn adopting_an_mcp_server_patches_only_that_entry_and_keeps_comments() {
     let outcome = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect("adopt mcp");
     assert_eq!(outcome.store_destination, fixture.store.join("mcp.json"));
@@ -330,12 +340,14 @@ fn the_adopt_operation_id_is_accepted_by_undo_and_restores_the_pre_adopt_tree() 
     let outcome = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect("adopt skill");
 
@@ -389,24 +401,26 @@ fn a_name_collision_chooses_a_suffixed_slug_for_store_and_agent_copies() {
     let first_outcome = adopt_item(AdoptRequest {
         scan: &scan,
         path: &first.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect("adopt first copy");
     assert_eq!(first_outcome.slug, "sample-skill");
 
     // The store copy exists, so the second copy is adopted under the next free slug.
-    let preview = preview_adopt(&AdoptRequest {
+    let preview = preview_adopt(&AdoptPreviewRequest {
         scan: &scan,
         path: &second.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
-        database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
     })
@@ -416,12 +430,14 @@ fn a_name_collision_chooses_a_suffixed_slug_for_store_and_agent_copies() {
     let second_outcome = adopt_item(AdoptRequest {
         scan: &scan,
         path: &second.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect("adopt second copy");
     assert_eq!(second_outcome.slug, "sample-skill-2");
@@ -444,12 +460,14 @@ fn watch_handling_leaves_the_original_in_place_and_records_it() {
     let outcome = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Watch,
+        project_id: None,
     })
     .expect("adopt watched skill");
     assert_eq!(tree_hash(&item.path), before, "original untouched");
@@ -478,12 +496,14 @@ fn an_already_managed_item_is_refused() {
     let error = adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect_err("already managed");
     assert!(matches!(error, AdoptError::AlreadyManaged(_)));
@@ -504,12 +524,14 @@ fn adopt_initialises_a_missing_store() {
     adopt_item(AdoptRequest {
         scan: &scan,
         path: &item.path,
+        name: None,
         store_root: &fixture.store,
         backup_root: &fixture.backups,
         authorized_roots: &authorized,
         database: &mut fixture.database,
         scope: Scope::User,
         handling: AdoptHandling::Link,
+        project_id: None,
     })
     .expect("adopt into a new store");
     assert!(fixture.store.join("store.json").is_file());

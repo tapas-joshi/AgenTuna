@@ -27,11 +27,16 @@ pub fn production_registry() -> Result<Registry, RegistryError> {
         Box::new(crate::mcp::McpGroup),
         Box::new(crate::migrate::MigrateGroup),
         Box::new(crate::adopt::AdoptGroup),
+        Box::new(crate::drift::DriftGroup),
+        Box::new(crate::backups::BackupsGroup),
+        Box::new(crate::sync_remote::SyncGroup),
+        Box::new(crate::sync_remote::RemoteGroup),
         Box::new(crate::agents::AgentsGroup),
         Box::new(crate::effective::EffectiveGroup),
         Box::new(crate::why::WhyGroup),
         Box::new(crate::overview::OverviewGroup),
         Box::new(crate::rules::RulesGroup),
+        Box::new(crate::skills::SkillsGroup),
     ])
 }
 
@@ -69,7 +74,9 @@ pub fn run(registry: &Registry, argv: &[OsString], stdio: &mut Stdio<'_>) -> i32
     let command = registry.command();
     let matches = match command.try_get_matches_from(argv) {
         Ok(matches) => matches,
-        Err(error) => return report_parse_error(&error, argv, stdio),
+        // A failed parse has no `ArgMatches`, so the tree is rebuilt to recover the
+        // command path the caller typed for the JSON envelope.
+        Err(error) => return report_parse_error(&error, &registry.command(), argv, stdio),
     };
 
     let path = command_path(&matches);
@@ -213,14 +220,19 @@ fn write_diagnostic(error: &CliError, stdio: &mut Stdio<'_>) {
 /// mode they still produce exactly one object, with the text in `data.text`, so a
 /// machine consumer never sees a bare stream of prose. Usage errors exit 2 on stderr,
 /// as the acceptance contract requires.
-fn report_parse_error(error: &clap::Error, argv: &[OsString], stdio: &mut Stdio<'_>) -> i32 {
+fn report_parse_error(
+    error: &clap::Error,
+    tree: &clap::Command,
+    argv: &[OsString],
+    stdio: &mut Stdio<'_>,
+) -> i32 {
     let code = error.exit_code();
     let text = render_clap(error, stdio.color);
     let json = flag_present(argv, "--json");
 
     if code == exit_code::SUCCESS {
         if json {
-            let command = documentation_command(error, argv);
+            let command = documentation_command(tree, error, argv);
             let output = CommandOutput::new(json!({ "text": text }), String::new());
             return report_ok(&command, &output, true, stdio);
         }
@@ -249,7 +261,7 @@ fn report_parse_error(error: &clap::Error, argv: &[OsString], stdio: &mut Stdio<
             message,
             "run `agentuna --help` to see the accepted commands and flags",
         );
-        emit_json_error(&guess_command(argv), &failure, stdio);
+        emit_json_error(&invoked_path(tree, argv), &failure, stdio);
     }
     code
 }
@@ -263,10 +275,10 @@ fn is_mcp_secret_set(argv: &[OsString]) -> bool {
 }
 
 /// The noun a help or version request names, for the JSON envelope.
-fn documentation_command(error: &clap::Error, argv: &[OsString]) -> String {
-    let guessed = guess_command(argv);
-    if !guessed.is_empty() {
-        return guessed;
+fn documentation_command(tree: &clap::Command, error: &clap::Error, argv: &[OsString]) -> String {
+    let walked = invoked_path(tree, argv);
+    if !walked.is_empty() {
+        return walked;
     }
     match error.kind() {
         clap::error::ErrorKind::DisplayVersion => "version",
@@ -285,14 +297,52 @@ fn render_clap(error: &clap::Error, color: Color) -> String {
     text
 }
 
-/// Best-effort command name for a failed parse, where no `ArgMatches` exist.
-fn guess_command(argv: &[OsString]) -> String {
-    argv.iter()
-        .skip(1)
-        .filter_map(|arg| arg.to_str())
-        .find(|arg| !arg.starts_with('-'))
-        .unwrap_or("")
-        .to_owned()
+/// The command path `argv` selects, recovered from the tree when the parse failed.
+///
+/// A failed parse carries no `ArgMatches`, so the path is walked token by token: a token
+/// that names a subcommand descends, a flag is skipped (with its value when it takes one),
+/// and the first positional value ends the path. That keeps `command` equal to what the
+/// caller typed — `projects add`, not just `projects` — without trusting argv blindly.
+fn invoked_path(tree: &clap::Command, argv: &[OsString]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = tree;
+    let mut index = 1; // argv[0] is the binary name
+    while index < argv.len() {
+        let Some(token) = argv[index].to_str() else {
+            break;
+        };
+        index += 1;
+        if let Some(subcommand) = current
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == token)
+        {
+            parts.push(token.to_owned());
+            current = subcommand;
+            continue;
+        }
+        if let Some(long) = token.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            let takes_value = current.get_arguments().any(|argument| {
+                argument.get_long() == Some(name) && argument.get_action().takes_values()
+            });
+            if takes_value && !long.contains('=') {
+                index += 1; // the flag's value is not part of the path
+            }
+            continue;
+        }
+        if token.starts_with('-') && token.len() > 1 {
+            let short = token.chars().nth(1);
+            let takes_value = current.get_arguments().any(|argument| {
+                argument.get_short() == short && argument.get_action().takes_values()
+            });
+            if takes_value && token.len() == 2 {
+                index += 1;
+            }
+            continue;
+        }
+        break; // a positional value ends the subcommand path
+    }
+    parts.join(" ")
 }
 
 fn flag_present(argv: &[OsString], flag: &str) -> bool {
