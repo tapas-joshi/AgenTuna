@@ -24,10 +24,10 @@ export default defineConfig({
     { name: "2x", use: { deviceScaleFactor: 2 } },
   ],
   webServer: {
-    command: "pnpm run build && pnpm run preview -- --host 127.0.0.1 --port 4173 --strictPort",
+    command: `${process.env.PLAYWRIGHT_SKIP_BUILD === "1" ? "" : "pnpm run build && "}pnpm run preview -- --host 127.0.0.1 --port 4173 --strictPort`,
     url: "http://127.0.0.1:4173",
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 300_000,
   },
   expect: {
     toHaveScreenshot: { animations: "disabled", maxDiffPixelRatio: 0.001 },

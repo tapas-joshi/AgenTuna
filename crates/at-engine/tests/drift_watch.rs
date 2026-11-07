@@ -333,6 +333,10 @@ fn a_deleted_link_is_link_removed_not_an_edit() -> Result<(), Box<dyn std::error
     )])?;
 
     fs::remove_file(&link)?;
+    // A slower runner can hold a lone delete event back in the OS stream; a second, untracked
+    // change in the same watched root forces the flush without adding a drift target.
+    std::thread::sleep(SETTLE);
+    fs::write(fixture.skills.join(".settle-nudge"), b"nudge")?;
     let (batch, _) = next_batch(&service, BUDGET).expect("deleting the link produces a batch");
     let notices = fixture.process(&WatchEvent::Batch(batch))?;
     assert_eq!(notices.len(), 1, "{notices:?}");

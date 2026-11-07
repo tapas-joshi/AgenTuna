@@ -259,7 +259,36 @@ pub fn set_device_name(db: &mut at_db::Database, name: Option<&str>) -> Result<(
 /// usable name.
 #[must_use]
 pub fn default_device_name() -> String {
-    hostname().unwrap_or_else(|| "device".to_owned())
+    hostname().map_or_else(|| "device".to_owned(), |name| sanitize_device_name(&name))
+}
+
+/// Turns a host name into a valid device name: control characters and slashes become `-`,
+/// surrounding whitespace is trimmed and the result is cut to the longest allowed length. A
+/// name that is empty afterwards becomes `device`, so a machine with an unusual host name can
+/// still back up.
+#[must_use]
+pub fn sanitize_device_name(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_control() || c == '/' || c == '\\' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut name: String = cleaned.chars().take(MAX_DEVICE_NAME_CHARS).collect();
+    while name.len() > MAX_DEVICE_NAME_CHARS {
+        name.pop();
+    }
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        "device".to_owned()
+    } else {
+        name
+    }
 }
 
 fn hostname() -> Option<String> {
