@@ -287,3 +287,37 @@ fn project_shared_roots_are_grouped_by_real_destination() {
         "{roots:?}"
     );
 }
+
+#[test]
+fn unsupported_kind_returns_unsupported_error_without_panic() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let env = environment(temp.path());
+    let registry = AgentAdapterRegistry::register();
+
+    // Codex adapter does not support Claude project settings
+    let codex = registry
+        .get(&AgentId::Codex)
+        .expect("registry")
+        .expect("codex");
+    let result = codex.plan_settings_server_enabled(&env, "{}", "some_server", true, 0);
+    assert!(
+        matches!(
+            &result,
+            Err(at_adapters::adapter::AgentError::Unsupported { agent, kind })
+                if *agent == AgentId::Codex && kind.contains("Claude project settings")
+        ),
+        "expected Unsupported error, got: {result:?}"
+    );
+
+    // Omp adapter does not support Claude project settings
+    let omp = registry.get(&AgentId::Omp).expect("registry").expect("omp");
+    let result = omp.plan_settings_server_enabled(&env, "{}", "some_server", true, 0);
+    assert!(
+        matches!(
+            &result,
+            Err(at_adapters::adapter::AgentError::Unsupported { agent, kind })
+                if *agent == AgentId::Omp && kind.contains("Claude project settings")
+        ),
+        "expected Unsupported error, got: {result:?}"
+    );
+}

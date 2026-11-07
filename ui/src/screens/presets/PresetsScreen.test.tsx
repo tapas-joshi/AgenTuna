@@ -116,4 +116,19 @@ describe("PresetsScreen", () => {
     ).toBeTruthy();
     expect((screen.getByRole("button", { name: "Rename" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  test("deleting a preset calls preset_delete after confirmation and refreshes the list", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    ipc.reply = (command) =>
+      Promise.resolve(command === "presets_list" ? [preset] : command === "preset_member_candidates" ? [] : undefined);
+    renderScreen();
+    const deleteBtn = await screen.findByRole("button", { name: "Delete" });
+    fireEvent.click(deleteBtn);
+    expect(confirmSpy).toHaveBeenCalledWith("Delete the preset “Code review”?");
+    await waitFor(() => expect(ipc.calls.some((call) => call.command === "preset_delete")).toBe(true));
+    expect(ipc.calls.find((call) => call.command === "preset_delete")?.args).toMatchObject({
+      presetId: "prst_1",
+    });
+    confirmSpy.mockRestore();
+  });
 });

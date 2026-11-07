@@ -211,7 +211,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().expect("temporary directory");
         let binary = root.path().join("hang");
-        std::fs::write(&binary, "#!/bin/sh\nsleep 5\n").expect("write script");
+        // The child hangs far longer than any sane probe deadline, so a generous wall-clock
+        // bound still proves the probe timed out instead of waiting for the process.
+        std::fs::write(&binary, "#!/bin/sh\nsleep 60\n").expect("write script");
         let mut permissions = std::fs::metadata(&binary).expect("metadata").permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&binary, permissions).expect("set executable bit");
@@ -224,6 +226,6 @@ mod tests {
             .await,
             (false, None)
         );
-        assert!(start.elapsed() < Duration::from_secs(4));
+        assert!(start.elapsed() < Duration::from_secs(20));
     }
 }

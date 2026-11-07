@@ -6,13 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::undo::{UndoError, UndoOperationRequest, UndoOutcome, undo_operation};
 use at_fs::{ApplyContext as FsApplyContext, ApplyRoots, ChangeSetApplyError};
-use at_model::{
-    ChangeSet, DeployMode, ExpectedState, FileOp, ItemId, ItemKind, ItemState, SyncLabel,
-};
+use at_model::{ChangeSet, DeployMode, ExpectedState, FileOp, ItemId, ItemKind, ItemState};
 use at_store::layout::{Slug, StoreLayout};
 use at_store::manifest::{ContentHash, ManifestItem, StoreManifest, StorePath};
 
-use crate::plan::{MigrationAction, MigrationPlan, PlanError, validate_plan};
+use crate::plan::{
+    MigrationAction, MigrationPlan, PlanError, ScopeStores, plans_hash, validate_plan,
+};
 
 /// Inputs required to apply a reviewed plan. Paths are injected by the caller.
 pub struct ApplyPlanContext<'a> {
@@ -24,6 +24,31 @@ pub struct ApplyPlanContext<'a> {
     pub authorized_roots: &'a ApplyRoots,
     /// Database for the operation journal and migration metadata.
     pub database: &'a mut at_db::Database,
+    /// Active project id when migrating Project or Local scope items.
+    pub project_id: Option<&'a str>,
+}
+
+/// Inputs required to apply one reviewed selection that may span scopes.
+pub struct ApplyPlansContext<'a> {
+    /// Store root per receiving scope; the first plan's scope root holds the journal and lock.
+    pub stores: &'a ScopeStores,
+    /// Operation backup root.
+    pub backup_root: &'a Path,
+    /// Existing roots authorized for absolute native paths.
+    pub authorized_roots: &'a ApplyRoots,
+    /// Database for the operation journal and migration metadata.
+    pub database: &'a mut at_db::Database,
+    /// Active project id when migrating Project or Local scope items.
+    pub project_id: Option<&'a str>,
+}
+
+/// One plan's filesystem and metadata contribution to a shared ChangeSet.
+struct PreparedPlan {
+    ops: Vec<FileOp>,
+    touched: Vec<PathBuf>,
+    items: Vec<CanonicalMigrationItem>,
+    manifest: Option<(PathBuf, PathBuf, Vec<u8>, ExpectedState)>,
+    sources: Vec<(PathBuf, String)>,
 }
 
 struct CanonicalMigrationItem {
@@ -118,6 +143,26 @@ pub enum ApplyPlanError {
     /// Migration index rows could not be committed.
     #[error("migration metadata failed: {0}")]
     Metadata(String),
+    /// A failed phase could not be rolled back, so both failures are reported.
+    #[error("migration failed: {cause}; filesystem rollback failed: {rollback}")]
+    Rollback {
+        /// Failure that began the rollback.
+        cause: String,
+        /// Why the filesystem rollback could not restore what the phase wrote.
+        rollback: String,
+    },
+    /// A project-scoped migration requires an active project identity.
+    #[error("project-scope item `{0}` requires a project id")]
+    MissingProjectId(String),
+    /// No plan was supplied to apply.
+    #[error("an empty plan selection cannot be applied")]
+    EmptyPlans,
+    /// No store root was supplied for a scope a plan writes into.
+    #[error("no {scope} store is available to receive the migrated items")]
+    MissingStore {
+        /// Receiving scope whose store root was not injected.
+        scope: at_model::Scope,
+    },
 }
 
 /// Applies the reviewed plan through one at-fs journal and operation record.
@@ -152,14 +197,246 @@ pub fn apply_plan(
     plan: &MigrationPlan,
     context: &mut ApplyPlanContext<'_>,
 ) -> Result<MigrationApplyOutcome, ApplyPlanError> {
-    validate_plan(plan)?;
-    preflight_native_access(plan)?;
-    let layout = StoreLayout::new(plan.scope, context.store_root);
-    let loaded_manifest =
-        StoreManifest::load(&layout).map_err(|error| ApplyPlanError::Store(error.to_string()))?;
-    let mut manifest = loaded_manifest.manifest;
-    let manifest_expected = ExpectedState::hash(loaded_manifest.hash.as_str())
+    apply_plan_with_actor(plan, context, at_db::ops::OperationActor::Ui)
+}
+
+/// Applies a reviewed plan and records the supplied operation actor.
+///
+/// # Errors
+/// Returns the same failures as [`apply_plan`].
+pub fn apply_plan_with_actor(
+    plan: &MigrationPlan,
+    context: &mut ApplyPlanContext<'_>,
+    actor: at_db::ops::OperationActor,
+) -> Result<MigrationApplyOutcome, ApplyPlanError> {
+    let stores = ScopeStores::single(plan.scope, context.store_root.to_path_buf());
+    let mut scoped = ApplyPlansContext {
+        stores: &stores,
+        backup_root: context.backup_root,
+        authorized_roots: context.authorized_roots,
+        database: &mut *context.database,
+        project_id: context.project_id,
+    };
+    apply_plans_with_actor(std::slice::from_ref(plan), &mut scoped, actor)
+}
+
+/// Applies every reviewed plan as one journalled ChangeSet and one operation record.
+///
+/// A selection that spans scopes is reviewed as one plan per scope and applied here as a
+/// single operation: one journal, one operation row and therefore one Undo, even though the
+/// items land in several stores. The first plan's store root holds the journal and lock.
+///
+/// # Errors
+/// Returns [`ApplyPlanError::EmptyPlans`] for an empty selection,
+/// [`ApplyPlanError::MissingStore`] when a receiving scope has no injected root,
+/// [`ApplyPlanError::MissingProjectId`] for Project or Local items without a project, or the
+/// same failures as [`apply_plan`].
+pub fn apply_plans(
+    plans: &[MigrationPlan],
+    context: &mut ApplyPlansContext<'_>,
+) -> Result<MigrationApplyOutcome, ApplyPlanError> {
+    apply_plans_with_actor(plans, context, at_db::ops::OperationActor::Ui)
+}
+
+/// Applies every reviewed plan and records the supplied operation actor.
+///
+/// # Errors
+/// Returns the same failures as [`apply_plans`].
+pub fn apply_plans_with_actor(
+    plans: &[MigrationPlan],
+    context: &mut ApplyPlansContext<'_>,
+    actor: at_db::ops::OperationActor,
+) -> Result<MigrationApplyOutcome, ApplyPlanError> {
+    let Some(first_plan) = plans.first() else {
+        return Err(ApplyPlanError::EmptyPlans);
+    };
+    let mut store_roots = std::collections::BTreeMap::new();
+    for plan in plans {
+        validate_plan(plan)?;
+        let Some(store_root) = context.stores.root(plan.scope) else {
+            return Err(ApplyPlanError::MissingStore { scope: plan.scope });
+        };
+        if matches!(
+            plan.scope,
+            at_model::Scope::Project | at_model::Scope::Local
+        ) && context.project_id.is_none()
+        {
+            return Err(ApplyPlanError::MissingProjectId(plan.scope.to_string()));
+        }
+        preflight_native_access(plan)?;
+        store_roots.insert(plan.scope, store_root.to_path_buf());
+    }
+    let operation_root =
+        store_roots
+            .get(&first_plan.scope)
+            .cloned()
+            .ok_or(ApplyPlanError::MissingStore {
+                scope: first_plan.scope,
+            })?;
+    // A project id belongs on the operation only when project-scoped stores received items.
+    let operation_project = plans
+        .iter()
+        .any(|plan| {
+            matches!(
+                plan.scope,
+                at_model::Scope::Project | at_model::Scope::Local
+            )
+        })
+        .then_some(context.project_id)
+        .flatten();
+    let mut ops = Vec::new();
+    let mut touched = Vec::new();
+    let mut canonical_items = Vec::new();
+    let mut sources = Vec::new();
+    let mut manifests = Vec::new();
+    for plan in plans {
+        let Some(store_root) = store_roots.get(&plan.scope) else {
+            return Err(ApplyPlanError::MissingStore { scope: plan.scope });
+        };
+        let prepared = prepare_plan(
+            plan,
+            store_root,
+            &operation_root,
+            context.project_id,
+            &mut *context.database,
+        )?;
+        ops.extend(prepared.ops);
+        touched.extend(prepared.touched);
+        canonical_items.extend(prepared.items);
+        sources.extend(prepared.sources);
+        if let Some(manifest) = prepared.manifest {
+            manifests.push(manifest);
+        }
+    }
+    for (changeset_path, absolute_path, bytes, expected) in manifests {
+        ops.push(FileOp::Write {
+            path: changeset_path,
+            bytes,
+            expected,
+            follow_symlink: false,
+            backup: true,
+        });
+        touched.push(absolute_path);
+    }
+    for (source, expected) in &sources {
+        let actual = hash_source(source).map_err(|source_error| ApplyPlanError::SourceRead {
+            path: source.clone(),
+            source: source_error,
+        })?;
+        if &actual != expected {
+            return Err(ApplyPlanError::Plan(PlanError::StalePlan));
+        }
+    }
+    let created_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApplyPlanError::Clock)?
+        .as_secs();
+    let operation_kind = at_model::OperationKind::parse("migrate")
+        .map_err(|error| ApplyPlanError::OperationKind(error.to_string()))?;
+    let total_items = plans.iter().map(|plan| plan.counts.items).sum::<usize>();
+    let mut change_set = ChangeSet {
+        id: first_plan.id.clone(),
+        preview_id: plans_hash(plans)?,
+        operation_kind,
+        scope: Some(first_plan.scope),
+        project_id: operation_project.map(str::to_owned),
+        summary: format!("Migrate {total_items} native items"),
+        ops,
+        created_at_unix_seconds,
+    };
+    // A receiving scope with no store yet gets its skeleton in this same reviewed set, so the
+    // reviewed plan, its dry run, the apply and the undo all include the store creation. The
+    // store owning the operation is addressed relatively; every other store absolutely.
+    for plan in plans {
+        let Some(store_root) = store_roots.get(&plan.scope) else {
+            return Err(ApplyPlanError::MissingStore { scope: plan.scope });
+        };
+        let layout = StoreLayout::new(plan.scope, store_root);
+        at_store::store_init::plan_store_init_in(
+            &layout,
+            &mut change_set,
+            store_root != &operation_root,
+        )
         .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+    }
+    let mut outcome = {
+        let mut recorder = at_fs::DbOperationRecorder::new_with_actor(
+            context.database.connection_mut(),
+            30,
+            actor,
+        );
+        let mut fs_context = FsApplyContext {
+            store_root: &operation_root,
+            backup_folder: context.backup_root,
+            recorder: &mut recorder,
+        };
+        at_fs::apply_with_roots_reversible(&change_set, &mut fs_context, context.authorized_roots)?
+    };
+    let applied_items = canonical_items;
+    let warnings = match record_migration_metadata(
+        context.database,
+        &applied_items,
+        &outcome.operation_id,
+        context.project_id,
+    ) {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            if let Some(handle) = outcome.rollback_handle.take() {
+                let mut recorder = at_fs::DbOperationRecorder::new_with_actor(
+                    context.database.connection_mut(),
+                    30,
+                    actor,
+                );
+                if let Err(rollback) = at_fs::rollback_committed(handle, &mut recorder) {
+                    // The caller needs both: the metadata write started the rollback, and a
+                    // rollback that itself failed leaves files the journal still describes.
+                    return Err(ApplyPlanError::Rollback {
+                        cause: error.to_string(),
+                        rollback: rollback.to_string(),
+                    });
+                }
+            }
+            return Err(error);
+        }
+    };
+    if let Some(handle) = outcome.rollback_handle.take() {
+        at_fs::commit_reversible(handle)?;
+    }
+    touched.sort();
+    touched.dedup();
+    Ok(MigrationApplyOutcome {
+        operation_id: outcome.operation_id,
+        touched_paths: touched,
+        completed: outcome.completed,
+        warnings,
+    })
+}
+
+/// Builds one plan's ChangeSet operations, manifest update and metadata rows.
+///
+/// Store paths are written relative to the operation root for a plan that owns it and absolute
+/// for every other store, so one ChangeSet can span scopes while a single-scope migration keeps
+/// exactly the operations it always had. Native paths are absolute either way.
+fn prepare_plan(
+    plan: &MigrationPlan,
+    store_root: &Path,
+    operation_root: &Path,
+    project_id: Option<&str>,
+    database: &mut at_db::Database,
+) -> Result<PreparedPlan, ApplyPlanError> {
+    let layout = StoreLayout::new(plan.scope, store_root);
+    // A first migration into a scope can run before that scope's store directory exists (a
+    // project that was just selected, a brand-new user store, an enabled Global store). The
+    // plan extends an empty manifest instead of writing the store here: the merged ChangeSet
+    // carries the store skeleton, so the reviewed plan, the apply and the undo all include it.
+    let manifest_plan = StoreManifest::load_for_plan(&layout)
+        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+    let mut manifest = manifest_plan.manifest;
+    let manifest_expected = match &manifest_plan.hash {
+        Some(hash) => ExpectedState::hash(hash.as_str())
+            .map_err(|error| ApplyPlanError::Store(error.to_string()))?,
+        None => ExpectedState::Absent,
+    };
     let mut manifest_changed = false;
     let requests = plan
         .steps
@@ -187,7 +464,7 @@ pub fn apply_plan(
             Ok(crate::native_projection::NativeProjectionRequest {
                 plan,
                 step,
-                store_root: context.store_root,
+                store_root,
                 native_source_path: source,
                 agent,
                 item_name: step
@@ -216,7 +493,7 @@ pub fn apply_plan(
     let mut canonical_items = Vec::new();
     let mut ops = Vec::new();
     let mut touched = Vec::new();
-    let mut sources: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
     for step in &plan.steps {
         match step.action {
             MigrationAction::CreateStoreItem => {
@@ -229,9 +506,13 @@ pub fn apply_plan(
                     .as_ref()
                     .ok_or_else(|| ApplyPlanError::Unsupported(source.clone()))?;
                 let relative = destination
-                    .strip_prefix(context.store_root)
+                    .strip_prefix(store_root)
                     .map_err(|_| ApplyPlanError::OutsideStore(destination.clone()))?;
-                push_store_item_ops(source, relative, &mut ops)?;
+                push_store_item_ops(
+                    source,
+                    &changeset_path(operation_root, store_root, destination),
+                    &mut ops,
+                )?;
                 touched.push(destination.clone());
                 let hash = step
                     .expected_source_hash
@@ -248,11 +529,18 @@ pub fn apply_plan(
                         .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
                 let content_hash = ContentHash::parse(hash)
                     .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                let scope_project_id = if plan.scope == at_model::Scope::Project
+                    || plan.scope == at_model::Scope::Local
+                {
+                    project_id
+                } else {
+                    None
+                };
                 let item_id = at_db::items::item_id_by_identity(
-                    context.database.connection(),
+                    database.connection(),
                     ItemKind::Skill,
                     plan.scope,
-                    None,
+                    scope_project_id,
                     slug_text,
                 )
                 .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
@@ -317,9 +605,12 @@ pub fn apply_plan(
                     mode,
                 });
                 manifest_changed = true;
-                sources.push((source.clone(), destination.clone(), hash.to_owned()));
+                sources.push((source.clone(), hash.to_owned()));
             }
             MigrationAction::RecordWatched => {}
+            // The store skeleton is merged into the same ChangeSet after the item operations
+            // are assembled; this step is the reviewed line item that announces it.
+            MigrationAction::CreateStore => {}
             MigrationAction::UpdateManifest => manifest_changed = true,
             MigrationAction::WriteLink | MigrationAction::WriteCopy => {
                 let destination = step
@@ -399,17 +690,24 @@ pub fn apply_plan(
                         ApplyPlanError::Unsupported(projection_item.source_path.clone())
                     })?;
                     let relative = destination
-                        .strip_prefix(context.store_root)
+                        .strip_prefix(store_root)
                         .map_err(|_| ApplyPlanError::OutsideStore(destination.clone()))?;
                     // Rule files are named `AGENTS`/`CLAUDE`; store slugs are lowercase.
                     let slug_text = projection_item.item_name.to_ascii_lowercase();
                     let slug = Slug::parse(&slug_text)
                         .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+                    let scope_project_id = if plan.scope == at_model::Scope::Project
+                        || plan.scope == at_model::Scope::Local
+                    {
+                        project_id
+                    } else {
+                        None
+                    };
                     let item_id = at_db::items::item_id_by_identity(
-                        context.database.connection(),
+                        database.connection(),
                         projection_item.kind,
                         plan.scope,
-                        None,
+                        scope_project_id,
                         slug.as_str(),
                     )
                     .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
@@ -419,7 +717,13 @@ pub fn apply_plan(
                         .iter()
                         .find(|write| write.path == *destination)
                         .ok_or_else(|| ApplyPlanError::Unsupported(destination.clone()))?;
-                    let content_hash = at_fs::sha256_hex(&canonical.bytes);
+                    // `mcp.json` holds every server, so its file hash is not this item's
+                    // hash: the manifest and the index record one canonical hash per entry
+                    // (`hash_mcp_entry`). Recording the file hash made the next `store.json`
+                    // rebuild miss the entry, allocate a new ItemId and orphan every
+                    // deployment that still pointed at the old one.
+                    let content_hash =
+                        store_item_hash(projection_item.kind, &slug_text, &canonical.bytes)?;
                     let store_path =
                         StorePath::parse(&relative.to_string_lossy().replace('\\', "/"))
                             .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
@@ -453,12 +757,11 @@ pub fn apply_plan(
                     });
                 }
                 for write in &projections.canonical_writes {
-                    let relative = write
-                        .path
-                        .strip_prefix(context.store_root)
-                        .map_err(|_| ApplyPlanError::OutsideStore(write.path.clone()))?;
+                    if !write.path.starts_with(store_root) {
+                        return Err(ApplyPlanError::OutsideStore(write.path.clone()));
+                    }
                     ops.push(FileOp::Write {
-                        path: relative.to_path_buf(),
+                        path: changeset_path(operation_root, store_root, &write.path),
                         bytes: write.bytes.clone(),
                         expected: write.expected.clone(),
                         follow_symlink: false,
@@ -481,87 +784,51 @@ pub fn apply_plan(
             }
         }
     }
-    if manifest_changed {
+    let manifest = if manifest_changed {
         let manifest_path = layout.manifest_path();
-        let relative = manifest_path
-            .strip_prefix(context.store_root)
-            .map_err(|_| ApplyPlanError::OutsideStore(manifest_path.clone()))?;
+        if !manifest_path.starts_with(store_root) {
+            return Err(ApplyPlanError::OutsideStore(manifest_path));
+        }
         let bytes = manifest
             .to_bytes()
             .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
-        ops.push(FileOp::Write {
-            path: relative.to_path_buf(),
+        Some((
+            changeset_path(operation_root, store_root, &manifest_path),
+            manifest_path,
             bytes,
-            expected: manifest_expected,
-            follow_symlink: false,
-            backup: true,
-        });
-        touched.push(manifest_path);
-    }
-    for (source, _, expected) in &sources {
-        let actual = hash_source(source).map_err(|source_error| ApplyPlanError::SourceRead {
-            path: source.clone(),
-            source: source_error,
-        })?;
-        if &actual != expected {
-            return Err(ApplyPlanError::Plan(PlanError::StalePlan));
-        }
-    }
-    let created_at_unix_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ApplyPlanError::Clock)?
-        .as_secs();
-    let operation_kind = at_model::OperationKind::parse("migrate")
-        .map_err(|error| ApplyPlanError::OperationKind(error.to_string()))?;
-    let change_set = ChangeSet {
-        id: plan.id.clone(),
-        preview_id: plan.plan_hash.clone(),
-        operation_kind,
-        scope: Some(plan.scope),
-        project_id: None,
-        summary: format!("Migrate {} native items", plan.counts.items),
+            manifest_expected,
+        ))
+    } else {
+        None
+    };
+    Ok(PreparedPlan {
         ops,
-        created_at_unix_seconds,
-    };
-    let mut outcome = {
-        let mut recorder = at_fs::DbOperationRecorder::new(context.database.connection_mut(), 30);
-        let mut fs_context = FsApplyContext {
-            store_root: context.store_root,
-            backup_folder: context.backup_root,
-            recorder: &mut recorder,
-        };
-        at_fs::apply_with_roots_reversible(&change_set, &mut fs_context, context.authorized_roots)?
-    };
-    let warnings = match record_migration_metadata(
-        context.database,
-        &canonical_items,
-        &outcome.operation_id,
-    ) {
-        Ok(warnings) => warnings,
-        Err(error) => {
-            if let Some(handle) = outcome.rollback_handle.take() {
-                at_fs::rollback_committed(handle)?;
-            }
-            return Err(error);
-        }
-    };
-    if let Some(handle) = outcome.rollback_handle.take() {
-        at_fs::commit_reversible(handle)?;
-    }
-    touched.sort();
-    touched.dedup();
-    Ok(MigrationApplyOutcome {
-        operation_id: outcome.operation_id,
-        completed: outcome.completed,
-        touched_paths: touched,
-        warnings,
+        touched,
+        items: canonical_items,
+        manifest,
+        sources,
     })
+}
+
+/// ChangeSet path for `path` inside one plan's store.
+///
+/// A plan whose store owns the operation keeps relative paths, so a single-scope migration
+/// produces exactly the ChangeSet it always did. Every other store is addressed absolutely so
+/// one ChangeSet can carry several stores; at-fs authorizes those against the injected roots.
+fn changeset_path(operation_root: &Path, store_root: &Path, path: &Path) -> PathBuf {
+    if store_root == operation_root {
+        path.strip_prefix(operation_root)
+            .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 fn record_migration_metadata(
     database: &mut at_db::Database,
     items: &[CanonicalMigrationItem],
     operation_id: &str,
+    project_id: Option<&str>,
 ) -> Result<Vec<MigrationWarning>, ApplyPlanError> {
     let transaction = database
         .connection_mut()
@@ -571,11 +838,20 @@ fn record_migration_metadata(
     let mut warnings = Vec::new();
     for item in items {
         let source_path = item.store_path.to_string_lossy();
+        let item_project_id =
+            if item.scope == at_model::Scope::Project || item.scope == at_model::Scope::Local {
+                let Some(id) = project_id else {
+                    return Err(ApplyPlanError::MissingProjectId(item.slug.clone()));
+                };
+                Some(id)
+            } else {
+                None
+            };
         let spec = at_db::items::AdoptedItemSpec {
             proposed_id: item.id,
             kind: item.kind,
             scope: item.scope,
-            project_id: None,
+            project_id: item_project_id,
             slug: &item.slug,
             name: &item.name,
             source_path: &source_path,
@@ -615,23 +891,31 @@ fn record_migration_metadata(
                 observed_mode: mode,
             });
         }
+        let (store_hash, target_hash) = observed_hashes(item);
         for agent_id in &item.agents {
             let state = if mode == "native" {
                 ItemState::Native
             } else {
                 ItemState::Linked
             };
-            let mut deployment =
-                at_db::deployments::DeploymentSpec::new(&item.id, agent_id, item.scope, state)
-                    .with_mode(mode)
-                    .with_target_path(&target_path)
-                    .with_hashes(
-                        Some(&item.content_hash),
-                        Some(&item.content_hash),
-                        Some(&item.content_hash),
-                    )
-                    .with_sync_label(SyncLabel::InSync)
-                    .with_operation(operation_id);
+            let hashes = at_db::deployments::DeploymentHashes::new(
+                Some(&store_hash),
+                Some(&target_hash),
+                Some(&target_hash),
+            );
+            let mut deployment = at_db::deployments::DeploymentSpec::applied(
+                &item.id,
+                agent_id,
+                item.scope,
+                state,
+                Some(mode),
+                Some(&target_path),
+                hashes,
+            )
+            .with_operation(operation_id);
+            if let Some(id) = item_project_id {
+                deployment = deployment.with_project(id);
+            }
             if mode == "symlink" || mode == "junction" {
                 deployment = deployment.with_link_target(&store_path);
             }
@@ -643,6 +927,40 @@ fn record_migration_metadata(
         .commit()
         .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
     Ok(warnings)
+}
+
+/// Hashes of the store item and the native target as they exist after the apply.
+///
+/// Drift compares the deployment baseline with the bytes on disk, so it must record the
+/// rendered native file (a managed block for a rule, the merged document for MCP, the tree or
+/// link target for a skill) and not the source hash the plan carried. A source hash made every
+/// migrated rule and MCP document look drifted immediately after a successful migration.
+fn observed_hashes(item: &CanonicalMigrationItem) -> (String, String) {
+    let store_hash = match item.kind {
+        ItemKind::Skill => at_store::hash_skill_folder(&item.store_path)
+            .map(|hash| hash.to_string())
+            .unwrap_or_else(|_| item.content_hash.clone()),
+        _ => fs::read(&item.store_path)
+            .map(|bytes| at_fs::sha256_hex(&bytes))
+            .unwrap_or_else(|_| item.content_hash.clone()),
+    };
+    let target = if item.kind == ItemKind::Skill {
+        fs::canonicalize(&item.target_path).unwrap_or_else(|_| item.target_path.clone())
+    } else {
+        item.target_path.clone()
+    };
+    let target_hash = match item.kind {
+        ItemKind::Skill => at_store::hash_skill_folder(&target)
+            .map(|hash| hash.to_string())
+            .unwrap_or_else(|_| item.content_hash.clone()),
+        ItemKind::Rule => fs::read(&target)
+            .map(|bytes| at_store::hash_rule_bytes(&bytes).to_string())
+            .unwrap_or_else(|_| item.content_hash.clone()),
+        _ => fs::read(&target)
+            .map(|bytes| at_fs::sha256_hex(&bytes))
+            .unwrap_or_else(|_| item.content_hash.clone()),
+    };
+    (store_hash, target_hash)
 }
 
 fn observed_mode(item: &CanonicalMigrationItem) -> Result<&'static str, ApplyPlanError> {
@@ -791,4 +1109,28 @@ fn required_permission(path: &Path) -> &'static str {
     } else {
         REQUIRED_WRITE_ACCESS
     }
+}
+
+/// Canonical hash of one projected store item.
+///
+/// Rules and skills are their own file or tree, so their bytes hash directly. An MCP server is
+/// one entry inside the shared `mcp.json`, so the hash covers only that entry.
+fn store_item_hash(
+    kind: ItemKind,
+    slug: &str,
+    canonical_bytes: &[u8],
+) -> Result<String, ApplyPlanError> {
+    if kind != ItemKind::McpServer {
+        return Ok(at_fs::sha256_hex(canonical_bytes));
+    }
+    let store = at_store::mcp_store::McpStore::parse(canonical_bytes)
+        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+    let definition = store.get(slug).ok_or_else(|| {
+        ApplyPlanError::Store(format!("the projected mcp.json has no server `{slug}`"))
+    })?;
+    let value = serde_json::to_value(definition)
+        .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
+    at_store::manifest::hash_mcp_entry(&value)
+        .map(|hash| hash.to_string())
+        .map_err(|error| ApplyPlanError::Store(error.to_string()))
 }

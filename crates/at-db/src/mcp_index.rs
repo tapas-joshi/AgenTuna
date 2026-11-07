@@ -193,9 +193,17 @@ pub fn mcp_list_rows(
                     reason: e.to_string(),
                 })?;
         let native_agent_matches = native_agent.as_deref() == Some(agent_id.to_string().as_str());
+        // A native MCP row stores the document plus the entry key so several servers in one
+        // configuration stay separate rows; the list, its cells and the adopt dialog name the
+        // file the agent actually reads.
+        let native_document = native_path
+            .as_deref()
+            .and_then(crate::native::split_mcp_entry_path)
+            .map(|(document, _)| document.to_owned());
+        let native_display = native_document.or_else(|| native_path.clone());
         let cell_state = if native_only && native_agent_matches {
             McpCellState::Native {
-                path: native_path.clone().unwrap_or_default(),
+                path: native_display.clone().unwrap_or_default(),
             }
         } else if native_only {
             if installed {
@@ -228,7 +236,7 @@ pub fn mcp_list_rows(
             config_path: if native_only && !native_agent_matches {
                 None
             } else {
-                target_path.or(native_path.clone())
+                target_path.or_else(|| native_display.clone())
             },
         };
         let key = item_id
@@ -248,7 +256,11 @@ pub fn mcp_list_rows(
                 item_id,
                 display_name: name,
                 scope: row_scope,
-                source_path,
+                source_path: if native_only {
+                    native_display.clone()
+                } else {
+                    source_path
+                },
                 transport_subtitle,
                 locked_by,
                 latest_health: health,

@@ -7,12 +7,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::state::{DeploymentFacts, DerivedState, classify};
+use crate::state::DerivedState;
 use at_db::deployments::list_deployments_for_item;
 use at_db::{Database, DbError};
 use at_fs::changeset::{ApplyContext, ApplyOutcome, ChangeSetApplyError};
 use at_model::{
-    ChangeSet, ExpectedState as ModelExpectedState, FileOp, ItemId, OperationKind, Scope, SyncLabel,
+    ChangeSet, ExpectedState as ModelExpectedState, FileOp, ItemId, ItemState, OperationKind,
+    Scope, SyncLabel,
 };
 
 /// The UI action allowed for a project/library relationship.
@@ -90,21 +91,72 @@ impl ProjectSyncProvider for DatabaseProjectSyncProvider<'_> {
 
     fn sync_record(&self, item_id: ItemId) -> Result<Option<SyncRecord>, DbError> {
         let rows = list_deployments_for_item(self.database.connection(), &item_id)?;
-        Ok(rows
-            .into_iter()
-            .find(|row| {
-                row.scope == Scope::Project && row.project_id.as_deref() == Some(self.project_id)
-            })
-            .and_then(|row| {
-                let facts = DeploymentFacts::managed(
-                    row.store_hash.as_deref(),
-                    row.target_hash.as_deref(),
-                    row.baseline_hash.as_deref(),
-                )
-                .with_state_version(self.version);
-                SyncRecord::from_derived(classify(facts))
-            }))
+        Ok(sync_record_from_rows(&rows, self.project_id))
     }
+}
+
+/// Copies TA-005's stored classification out of already-read deployment rows.
+///
+/// The first Project-scope row for `project_id` is the only input, and both the label and the
+/// evidence come straight from that row: `deployments.sync_label` is what TA-005 wrote, and
+/// `deployments.state` only covers the rows TA-005 stores without a label (a conflict, and the
+/// `ProjectNewer` relation drift implies). No hash is compared here, so a row TA-005 changed is
+/// followed without local recomputation. Callers that hold a read-only connection (for example the CLI's
+/// `sync status`) use this instead of [`DatabaseProjectSyncProvider`].
+#[must_use]
+pub fn sync_record_from_rows(
+    rows: &[at_db::shared::DeploymentCell],
+    project_id: &str,
+) -> Option<SyncRecord> {
+    let row = rows
+        .iter()
+        .find(|row| row.scope == Scope::Project && row.project_id.as_deref() == Some(project_id))?;
+    let label = match row.sync_label {
+        Some(label) => label,
+        // TA-005 stores no label for a conflict: both sides moved, so its derivation reports
+        // the conflict state and this label.
+        None if row.state == ItemState::Conflict => SyncLabel::Conflict,
+        // Drift means the store still equals the recorded baseline, which TA-005 labels
+        // `ProjectNewer`; a row without a stored label is projected the same way.
+        None if row.state == ItemState::Drifted => SyncLabel::ProjectNewer,
+        None => return None,
+    };
+    Some(SyncRecord {
+        label,
+        evidence: SyncEvidence {
+            project_hash: row.store_hash.clone(),
+            library_hash: row.target_hash.clone(),
+            base_hash: row.baseline_hash.clone(),
+        },
+    })
+}
+
+/// Exact bytes of every file in `package`, keyed by store-relative path.
+///
+/// This is the byte set a reviewed sync preview compares; it never follows a symlink.
+#[must_use]
+pub fn package_files(package: &at_store::SkillPackage) -> BTreeMap<PathBuf, Vec<u8>> {
+    package
+        .paths()
+        .filter_map(|path| {
+            package
+                .get(path)
+                .map(|file| (PathBuf::from(path), file.bytes.clone()))
+        })
+        .collect()
+}
+
+/// SHA-256 of every file in `package`, keyed by the same store-relative path.
+#[must_use]
+pub fn package_hashes(package: &at_store::SkillPackage) -> BTreeMap<PathBuf, String> {
+    package
+        .paths()
+        .filter_map(|path| {
+            package
+                .get(path)
+                .map(|file| (PathBuf::from(path), at_fs::sha256_hex(&file.bytes)))
+        })
+        .collect()
 }
 
 /// Direction of a reviewed project/library synchronization.

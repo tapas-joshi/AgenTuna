@@ -1,12 +1,12 @@
 //! Typed commands for reviewing and applying project/library skill syncs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use at_engine::project_sync::{
     DatabaseProjectSyncProvider, ProjectSyncProvider, SyncAction, SyncDirection, SyncPlan,
-    SyncTreeRequest,
+    SyncTreeRequest, package_files, package_hashes,
 };
 use at_model::{ItemId, Scope, SyncLabel};
 use serde::{Deserialize, Serialize};
@@ -488,26 +488,4 @@ fn sync_error(error: at_engine::project_sync::SyncPlanError) -> CommandError {
         }
         _ => CommandError::unavailable(error.to_string()),
     }
-}
-
-fn package_files(package: &at_store::SkillPackage) -> BTreeMap<PathBuf, Vec<u8>> {
-    package
-        .paths()
-        .filter_map(|path| {
-            package
-                .get(path)
-                .map(|file| (PathBuf::from(path), file.bytes.clone()))
-        })
-        .collect()
-}
-
-fn package_hashes(package: &at_store::SkillPackage) -> BTreeMap<PathBuf, String> {
-    package
-        .paths()
-        .filter_map(|path| {
-            package
-                .get(path)
-                .map(|file| (PathBuf::from(path), at_fs::sha256_hex(&file.bytes)))
-        })
-        .collect()
 }

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AdoptApplyView } from "../../generated/AdoptApplyView";
 import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
 import type { OverwriteMoveAsideView } from "../../generated/OverwriteMoveAsideView";
+import type { OverwriteUndoMoveView } from "../../generated/OverwriteUndoMoveView";
 import type { AdoptHandling, OverwriteRemedyResult } from "./OverwriteRefusalDialog";
 
 /** Invokes the backend's path-guarded at-fs move-aside command. */
@@ -10,7 +11,14 @@ export async function moveRefusedItemAside(path: string): Promise<OverwriteRemed
   return {
     summary: "The unmanaged item was moved aside without replacing its contents.",
     movedTo: result.moved_to,
+    operationId: result.operation_id,
+    remedy: "move",
   };
+}
+
+/** Moves a previously moved-aside tree back to its original path through the move journal. */
+export async function undoMoveAside(operationId: string): Promise<OverwriteUndoMoveView> {
+  return invoke<OverwriteUndoMoveView>("overwrite_undo_move", { operationId });
 }
 
 /** Reviews adopting the refused native item; the backend refuses a stale scan. */

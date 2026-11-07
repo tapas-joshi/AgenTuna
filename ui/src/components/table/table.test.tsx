@@ -343,6 +343,18 @@ describe("DataTable row actions and spans", () => {
     await user.click(trigger);
     expect(screen.queryByRole("menu")).toBeNull();
   });
+  test("a disabled row-menu trigger is exposed and does not activate", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    render(<RowMenuTrigger label="Actions for alpha" open={false} disabled onToggle={onToggle} />);
+    const trigger = screen.getByRole("button", { name: "Actions for alpha" });
+
+    expect(trigger.getAttribute("aria-disabled")).toBe("true");
+    expect(trigger.className).toContain("aria-disabled:text-text-secondary");
+    await user.click(trigger);
+    await user.keyboard("{Enter}");
+    expect(onToggle).not.toHaveBeenCalled();
+  });
 
   test("getColumnSpan merges agent columns into one cell", () => {
     const { container } = itemTable({

@@ -195,7 +195,7 @@ impl AgentAdapter for CustomAgentAdapter {
                     let path = if path.is_absolute() {
                         path.clone()
                     } else {
-                        base.join(path)
+                        resolve_on_disk(&base, path)
                     };
                     candidate("rules_file", path, scope, Some("markdown"), true)
                 })
@@ -220,6 +220,11 @@ impl AgentAdapter for CustomAgentAdapter {
                     "custom MCP read is delegated to the registered TM adapter",
                 ),
             });
+        }
+        if kind == ItemKind::Skill {
+            // The declared skills folder is scanned into the shared native listing; reading
+            // it as one file would fail with EISDIR.
+            return crate::adapter::read_io_default(self, kind, scope, env);
         }
         let candidates = self.paths(kind, scope, env);
         let candidate = candidates
@@ -267,6 +272,42 @@ impl AgentAdapter for CustomAgentAdapter {
             content: deployment.content.clone(),
         })
     }
+}
+
+/// Resolves a declared rule path under `base`, preferring the spelling found on disk.
+///
+/// Rule file names are matched case-insensitively (macOS volumes usually are, so a spec may
+/// say `AGENTS.md` while the file is `agents.md`). Returning the entry's real name keeps a
+/// later write on that file instead of creating a second, differently-cased one.
+fn resolve_on_disk(base: &Path, declared: &Path) -> PathBuf {
+    // Never shortcut on `base.join(declared).exists()`: on a case-insensitive volume that is
+    // true for `AGENTS.md`/`agents.md` alike and would report the declared spelling.
+    let mut current = base.to_path_buf();
+    for component in declared.components() {
+        let Component::Normal(part) = component else {
+            return base.join(declared);
+        };
+        let wanted = part.to_string_lossy().into_owned();
+        let mut exact = None;
+        let mut folded = None;
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy() == wanted {
+                    exact = Some(name);
+                    break;
+                }
+                if folded.is_none() && name.to_string_lossy().eq_ignore_ascii_case(&wanted) {
+                    folded = Some(name);
+                }
+            }
+        }
+        match exact.or(folded) {
+            Some(name) => current.push(name),
+            None => return base.join(declared),
+        }
+    }
+    current
 }
 
 fn candidate(

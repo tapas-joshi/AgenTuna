@@ -45,6 +45,10 @@ pub enum RemoteBackupFailureCode {
     TokenMissing,
     /// The stored GitHub credential was rejected.
     TokenRejected,
+    /// The saved token lacks the classic `repo` scope required for private repository creation.
+    RepoScopeMissing,
+    /// The requested GitHub repository name is invalid.
+    RepoNameInvalid,
     /// Offline mode prevents the request.
     Offline,
     /// A network allow-list or policy rule refused the request.
@@ -75,6 +79,10 @@ pub enum RemoteBackupRemedy {
     SaveToken,
     /// Replace the rejected token in Preferences.
     ReplaceToken,
+    /// Add the `repo` scope to a GitHub token and save it in Preferences.
+    AddRepoScope,
+    /// Edit the repository name before retrying.
+    EditRepoName,
     /// Turn off offline mode and retry explicitly.
     TurnNetworkOn,
     /// Review network policy and host permissions.
@@ -735,8 +743,8 @@ fn backup_failure(error: at_store::remote_backup::BackupError) -> RemoteBackupFa
         ),
         BackupError::Offline => failure(
             RemoteBackupFailureCode::Offline,
-            "The remote could not be reached; check offline mode and retry.",
-            RemoteBackupRemedy::TurnNetworkOn,
+            "The remote could not be reached; check the connection and retry.",
+            RemoteBackupRemedy::Retry,
         ),
         BackupError::Conflict => failure(
             RemoteBackupFailureCode::RemoteConflict,
@@ -2120,6 +2128,18 @@ mod tests {
         assert_eq!(
             remote.status,
             at_db::remote_backup::RemoteBackupStatus::Idle
+        );
+    }
+
+    #[test]
+    fn dropped_connection_offers_one_retry_and_keeps_the_offline_code() {
+        let error = backup_failure(at_store::remote_backup::BackupError::Offline);
+        assert_eq!(error.code, RemoteBackupFailureCode::Offline);
+        assert_eq!(error.remedy, super::RemoteBackupRemedy::Retry);
+        assert!(
+            error.message.to_lowercase().contains("retry"),
+            "the failure names the single retry action: {}",
+            error.message
         );
     }
 

@@ -245,8 +245,11 @@ fn project_fixture_registers_its_path_and_cleans_up() {
     assert!(!root_of_home.exists(), "dropping the home removes the tree");
 }
 
+static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn env_scope_restores_previous_values_after_a_panic() {
+    let _lock = ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let previous: Vec<(&str, Option<String>)> = ENV_VARS
         .iter()
         .map(|name| (*name, std::env::var(name).ok()))
@@ -279,6 +282,7 @@ fn env_scope_restores_previous_values_after_a_panic() {
 
 #[test]
 fn env_scope_release_restores_values_without_waiting_for_drop() {
+    let _lock = ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let before = std::env::var("HOME").ok();
     let home = TestHome::new().expect("home");
     let scope = at_fs::testkit::EnvScope::new(home.home()).expect("scope");

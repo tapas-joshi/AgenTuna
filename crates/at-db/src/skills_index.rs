@@ -41,7 +41,7 @@ pub struct SkillRow {
     pub deployed: BTreeMap<AgentId, DeploymentState>,
     /// Native path if the item exists only in an agent folder.
     pub native_path: Option<String>,
-    /// Whether the source advertises an update.
+    /// Whether the source advertises an update the user has not ignored.
     pub update_available: bool,
     /// Last item update timestamp or native scan timestamp.
     pub updated_at: String,
@@ -70,7 +70,8 @@ pub fn list_skills(
                    AND CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END > \
                        CASE i.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END \
                    ORDER BY CASE i2.scope WHEN 'global' THEN 0 WHEN 'user' THEN 1 WHEN 'project' THEN 2 ELSE 3 END DESC LIMIT 1), \
-                (SELECT s.update_available FROM sources s WHERE s.item_id=i.id AND s.deleted_at IS NULL LIMIT 1), \
+                (SELECT s.update_available AND (s.ignored_sha IS NULL OR s.ignored_sha != s.remote_sha) \
+                   FROM sources s WHERE s.item_id=i.id AND s.deleted_at IS NULL LIMIT 1), \
                 (SELECT n.path FROM native_items n WHERE n.kind='skill' AND n.status='new' AND n.adopted_item_id IS NULL \
                    AND (n.name=i.name OR n.name=i.slug) ORDER BY n.path LIMIT 1), a.id, a.installed, d.state, \
                 json_extract(i.tags_json,'$.description') \

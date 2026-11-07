@@ -60,6 +60,18 @@ pub const JOURNAL_VERSION: u32 = 2;
 /// unexpectedly large tree from turning a startup scan into a full disk walk.
 pub const MAX_SCAN_DEPTH: usize = 6;
 
+/// Largest journal file [`read_journal`] parses.
+///
+/// A journal holds paths and digests for one change set; anything larger is not a journal this
+/// app wrote. The bound keeps a forged or corrupt file from turning startup into a large parse.
+pub const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Most entries [`read_journal`] accepts from one journal.
+///
+/// The same rationale as [`MAX_JOURNAL_BYTES`]: a startup scan must stay bounded whatever the
+/// journal directory contains.
+pub const MAX_JOURNAL_ENTRIES: usize = 4096;
+
 /// Directory names a scan never descends into.
 const SKIPPED_DIRS: [&str; 1] = [".git"];
 
@@ -129,6 +141,20 @@ pub struct PendingJournal {
     /// Whether every op completed and the caller committed the operation.
     #[serde(default)]
     pub committed: bool,
+    /// Roots the operation's writer recorded (additive optional field, backward compatible).
+    ///
+    /// Untrusted input: a journal can arrive from a cloned repository, so recovery never
+    /// authorizes anything from this list. [`RecoveryPolicy`] carries the roots the caller
+    /// itself configured.
+    #[serde(default)]
+    pub authorized_roots: Option<Vec<PathBuf>>,
+    /// Operation backup root the apply used for delete backups and blobs (additive optional
+    /// field).
+    ///
+    /// Equally untrusted: recovery only uses it when it names a directory the caller configured
+    /// in [`RecoveryPolicy`] and otherwise parks the journal for manual review.
+    #[serde(default)]
+    pub backup_root: Option<PathBuf>,
 }
 
 /// What the destination currently holds relative to a [`JournalEntry`].
@@ -307,6 +333,22 @@ pub trait RecoveryCallbacks {
         entry: &JournalEntry,
     ) -> Result<Option<Vec<u8>>, String>;
 
+    /// Returns the saved node that holds the original of a completed
+    /// [`at_model::FileOp::Delete`].
+    ///
+    /// A delete is undone by renaming the saved node back, so recovery needs its location, not
+    /// its bytes. The default returns `None`, which sends recovery to its own scan of
+    /// `<store>/backups` for the operation's `<operation-id>-<operation-index>.deleted` entry;
+    /// a caller that catalogues backups elsewhere should answer from that catalogue instead.
+    fn delete_backup(
+        &mut self,
+        _journal: &PendingJournal,
+        _op_index: usize,
+        _entry: &JournalEntry,
+    ) -> Result<Option<PathBuf>, String> {
+        Ok(None)
+    }
+
     /// Records a terminal operation state. `manual_review` means recovery deliberately left the
     /// journal and destinations untouched because it could not safely decide what to restore.
     fn finish(
@@ -315,6 +357,16 @@ pub trait RecoveryCallbacks {
         succeeded: bool,
         manual_review: bool,
     ) -> Result<(), String>;
+
+    /// Whether `operation_id` names an operation this app recorded and that was still in flight.
+    ///
+    /// Asked only for a store built by [`RecoveryPolicy::requiring_recorded_operation`], which is
+    /// how a project store — possibly a clone of an untrusted repository, journals and all — is
+    /// told apart from debris the app itself wrote. The default answers `false`, so a caller that
+    /// cannot answer parks the journal for manual review instead of replaying it.
+    fn operation_in_flight(&mut self, _operation_id: &str) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 /// A journal left in place for a human because startup recovery could not safely resolve it.
@@ -341,6 +393,161 @@ pub struct RecoveryReport {
     pub legacy: Vec<PathBuf>,
 }
 
+/// What the caller authorizes startup recovery to act on for one store.
+///
+/// Journals are read back from disk and, for a project store, may have travelled through a Git
+/// checkout of a repository the user cloned. A journal is therefore untrusted data: its own
+/// `authorized_roots` and `backup_root` prove nothing, and only the roots and backup directories
+/// the caller names here authorize anything. Anything outside them — and every journal of a
+/// store built with [`Self::requiring_recorded_operation`] that does not name an operation the
+/// caller recorded as in flight — is parked for manual review, typed and logged, never executed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPolicy {
+    store_root: PathBuf,
+    authorized_roots: Vec<PathBuf>,
+    backup_roots: Vec<PathBuf>,
+    require_recorded_operation: bool,
+}
+
+impl RecoveryPolicy {
+    /// Builds the policy for the store that owns the journal directory.
+    ///
+    /// Roots are canonicalized; one that is not an absolute existing directory is dropped. The
+    /// store root is always authorized, so a journal with store-relative destinations stays
+    /// recoverable without the caller repeating it.
+    #[must_use]
+    pub fn new(
+        store_root: impl Into<PathBuf>,
+        authorized_roots: impl IntoIterator<Item = PathBuf>,
+        backup_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        let store_root = store_root.into();
+        let mut roots = Vec::new();
+        for root in std::iter::once(store_root.clone()).chain(authorized_roots) {
+            if let Some(root) = canonical_root(&root)
+                && !roots.contains(&root)
+            {
+                roots.push(root);
+            }
+        }
+        roots.sort();
+        let mut backups = Vec::new();
+        for root in backup_roots {
+            if let Some(root) = canonical_root(&root)
+                && !backups.contains(&root)
+            {
+                backups.push(root);
+            }
+        }
+        backups.sort();
+        Self {
+            store_root,
+            authorized_roots: roots,
+            backup_roots: backups,
+            require_recorded_operation: false,
+        }
+    }
+
+    /// Requires every journal of this store to name an operation the caller recorded and that
+    /// was still in flight.
+    ///
+    /// A project store can be committed to Git and cloned from an untrusted source, so a journal
+    /// there proves nothing by itself; a user or Global store is written only by this app. This
+    /// is the switch between the two, and it is also what keeps a forged operation id out of the
+    /// caller's operation history.
+    #[must_use]
+    pub fn requiring_recorded_operation(mut self) -> Self {
+        self.require_recorded_operation = true;
+        self
+    }
+
+    /// The store root these journals belong to, as the caller named it.
+    #[must_use]
+    pub fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
+    /// Whether the caller authorized `path`, after resolving every symbolic link in its existing
+    /// prefix and refusing `..` segments.
+    #[must_use]
+    pub fn authorizes(&self, path: &Path) -> bool {
+        let Some(candidate) = canonical_candidate(path) else {
+            return false;
+        };
+        self.authorized_roots
+            .iter()
+            .any(|root| strictly_within(root, &candidate))
+    }
+
+    /// Whether the caller configured `path` as one of its backup directories.
+    fn authorizes_backup(&self, path: &Path) -> bool {
+        let Some(candidate) = canonical_candidate(path) else {
+            return false;
+        };
+        self.backup_roots
+            .iter()
+            .any(|root| root == &candidate || strictly_within(root, &candidate))
+    }
+}
+
+/// `root` when it is an absolute, canonicalizable existing directory.
+fn canonical_root(root: &Path) -> Option<PathBuf> {
+    if !root.is_absolute() || root == Path::new("/") {
+        return None;
+    }
+    let root = fs::canonicalize(root).ok()?;
+    root.is_dir().then_some(root)
+}
+
+/// `path` with every existing ancestor canonicalized and the missing tail appended component by
+/// component, or `None` when the path is relative, walks upward or cannot be resolved.
+///
+/// Resolving the deepest existing ancestor is what makes a symlinked parent part of the check:
+/// the destination is validated against the directory the write would actually reach.
+fn canonical_candidate(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::CurDir | Component::ParentDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let mut ancestor = path;
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name = ancestor.file_name()?.to_os_string();
+                missing.push(name);
+                ancestor = ancestor.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+    let mut candidate = fs::canonicalize(ancestor).ok()?;
+    for component in missing.iter().rev() {
+        if component == std::ffi::OsStr::new(".") || component == std::ffi::OsStr::new("..") {
+            return None;
+        }
+        candidate.push(component);
+    }
+    Some(candidate)
+}
+
+/// Whether `path` is a strict descendant of `root`, comparing resolved components.
+fn strictly_within(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|rest| {
+        !rest.as_os_str().is_empty()
+            && rest
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+    })
+}
+
 /// Recovers pending v2 ChangeSet journals in sorted order.
 ///
 /// Each operation is preflighted before any destination is changed. Completed operations are
@@ -349,24 +556,94 @@ pub struct RecoveryReport {
 /// Committed v2 journals are only cleaned up. V1 journals remain readable and are retained for
 /// assessment because they do not record a ChangeSet or completed-operation progress.
 ///
+/// Every journal is untrusted input and is validated against `policy` before anything moves: a
+/// journal whose destinations, move sources or created directories escape the caller's roots, or
+/// whose backup root is not one the caller configured, is parked in
+/// [`RecoveryReport::manual_review`] without writing anything. Journals that cannot be read as a
+/// journal this app wrote, and journals of a store built with
+/// [`RecoveryPolicy::requiring_recorded_operation`] whose operation the caller did not record,
+/// are parked the same way.
+///
 /// The application startup call site is owned by TF-027; this crate provides the recovery
 /// primitive and does not initialize or update SQLite itself.
 ///
 /// # Errors
-/// Returns [`RecoveryError`] when a journal cannot be read, a filesystem action fails, or a
-/// caller callback fails. A divergence or missing original backup is returned in
-/// [`RecoveryReport::manual_review`] instead and leaves that journal untouched.
+/// Returns [`RecoveryError`] when a journal directory cannot be scanned, a filesystem action
+/// fails, or a caller callback fails. A divergence, a missing original backup or an untrusted
+/// journal is returned in [`RecoveryReport::manual_review`] instead and leaves that journal
+/// untouched.
 pub fn recover_journals(
     journal_dir: &Path,
-    store_root: &Path,
+    policy: &RecoveryPolicy,
     callbacks: &mut dyn RecoveryCallbacks,
 ) -> Result<RecoveryReport, RecoveryError> {
+    let store_root = policy.store_root();
     let mut report = RecoveryReport::default();
     for path in scan_journals(journal_dir)? {
-        let journal = read_journal(&path)?;
+        let journal = match read_journal(&path) {
+            Ok(journal) => journal,
+            Err(
+                error @ (RecoveryError::MalformedJournal { .. }
+                | RecoveryError::JournalVersionUnsupported { .. }
+                | RecoveryError::TooLarge { .. }),
+            ) => {
+                quarantine_journal(
+                    &path,
+                    None,
+                    &format!("journal cannot be read as one this app wrote: {error}"),
+                    &mut report,
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let expected_name = journal_file_name(&journal.operation_id);
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+            quarantine_journal(
+                &path,
+                Some(&journal),
+                "journal file name does not match its operation id",
+                &mut report,
+            );
+            continue;
+        }
         if journal.journal_version == 1 {
             report.legacy.push(path);
             continue;
+        }
+        if journal.entries.len() > MAX_JOURNAL_ENTRIES {
+            quarantine_journal(
+                &path,
+                Some(&journal),
+                "journal records more entries than any change set this app wrote",
+                &mut report,
+            );
+            continue;
+        }
+        if let Some(backup_root) = journal.backup_root.as_deref()
+            && !policy.authorizes_backup(backup_root)
+        {
+            quarantine_journal(
+                &path,
+                Some(&journal),
+                "journal backup root is not a backup directory this app configured",
+                &mut report,
+            );
+            continue;
+        }
+        if policy.require_recorded_operation {
+            let recorded = callbacks
+                .operation_in_flight(&journal.operation_id)
+                .map_err(|message| callback_error(&journal, message))?;
+            if !recorded {
+                quarantine_journal(
+                    &path,
+                    Some(&journal),
+                    "journal names an operation this app did not record as in flight",
+                    &mut report,
+                );
+                continue;
+            }
         }
         if journal.committed {
             callbacks
@@ -397,7 +674,7 @@ pub fn recover_journals(
             )?;
             continue;
         }
-        if let Some(reason) = validate_progress(&journal, store_root) {
+        if let Some(reason) = validate_progress(&journal, policy) {
             retain_for_manual_review(&path, &journal, &reason, callbacks, &mut report)?;
             continue;
         }
@@ -413,7 +690,8 @@ pub fn recover_journals(
                 divergence = Some(format!("journal entry for operation {index} is missing"));
                 break;
             };
-            let state = classify_recovery_op(op, entry, store_root)?;
+            let replaced_later = later_completed_op_replaces(&journal, index, entry, policy);
+            let state = classify_recovery_op(op, entry, policy, replaced_later)?;
             if matches!(state, RecoveryState::Diverged) {
                 divergence = Some(format!(
                     "destination state diverged for {}",
@@ -425,6 +703,7 @@ pub fn recover_journals(
                 index,
                 state,
                 before_bytes: None,
+                delete_backup: None,
             });
         }
         if let Some(reason) = divergence {
@@ -446,13 +725,28 @@ pub fn recover_journals(
                     ));
                     break;
                 };
-                if find_delete_backup(store_root, &journal.operation_id, expected_hash)?.is_none() {
+                let offered = callbacks
+                    .delete_backup(&journal, recovery.index, entry)
+                    .map_err(|message| callback_error(&journal, message))?;
+                let backup = match offered {
+                    // The catalogue may name any path; only a backup directory the caller
+                    // configured is used, and never a symbolic link standing in for one.
+                    Some(path) if policy.authorizes_backup(&path) => {
+                        let observed = observe_node(&path)?;
+                        let verified = !matches!(observed, ObservedNode::Symlink(_))
+                            && observed.hash().is_some_and(|hash| hash == expected_hash);
+                        verified.then_some(path)
+                    }
+                    _ => find_delete_backup(policy, &journal, recovery.index, expected_hash)?,
+                };
+                let Some(backup) = backup else {
                     divergence = Some(format!(
                         "verified delete backup is unavailable for {}",
                         entry.path.display()
                     ));
                     break;
-                }
+                };
+                recovery.delete_backup = Some(backup);
             }
             if !needs_before_bytes(op, entry) {
                 continue;
@@ -489,12 +783,17 @@ pub fn recover_journals(
                     &change_set.ops[recovery.index],
                     &journal.entries[recovery.index],
                     recovery.before_bytes.as_deref(),
-                    store_root,
-                    &journal.operation_id,
+                    recovery.delete_backup.as_deref(),
+                    policy,
                 )?;
             }
         }
         for directory in &journal.created_dirs {
+            // `validate_progress` already refused the journal when a directory escaped the
+            // caller's roots; re-check so a bug in that path can never remove anything else.
+            if !policy.authorizes(directory) {
+                continue;
+            }
             match fs::remove_dir(directory) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -526,22 +825,90 @@ struct PlannedRecovery {
     index: usize,
     state: RecoveryState,
     before_bytes: Option<Vec<u8>>,
+    /// Verified saved node that a completed `Delete` moved aside.
+    delete_backup: Option<PathBuf>,
 }
 
 enum ObservedNode {
     Missing,
     File(String),
-    Directory { empty: bool, hash: String },
-    Symlink,
+    Directory {
+        empty: bool,
+        hash: String,
+    },
+    /// A symbolic link, carrying the hash of its target text, which is how both the journal and
+    /// [`crate::changeset::hash_node`] represent a link.
+    Symlink(String),
     Other,
 }
 
-fn validate_progress(journal: &PendingJournal, store_root: &Path) -> Option<String> {
+impl ObservedNode {
+    /// The hash this node contributes to a journal entry, or `None` when it has none.
+    fn hash(&self) -> Option<&str> {
+        match self {
+            Self::File(hash) | Self::Symlink(hash) => Some(hash),
+            Self::Directory { hash, .. } => Some(hash),
+            Self::Missing | Self::Other => None,
+        }
+    }
+}
+
+/// Whether `node` still holds exactly what the journal recorded before the operation ran.
+///
+/// A recorded `None` means the path was absent, so only [`ObservedNode::Missing`] matches.
+fn holds_before(node: &ObservedNode, before: Option<&str>) -> bool {
+    match before {
+        None => matches!(node, ObservedNode::Missing),
+        Some(before) => node.hash() == Some(before),
+    }
+}
+
+/// Whether `node` already holds what the operation wrote.
+///
+/// An empty `after_hash` records that the operation kind has no single-file digest to compare.
+fn holds_after(node: &ObservedNode, after: &str) -> bool {
+    !after.is_empty() && node.hash() == Some(after)
+}
+
+fn validate_progress(journal: &PendingJournal, policy: &RecoveryPolicy) -> Option<String> {
     let Some(change_set) = journal.change_set.as_ref() else {
         return Some("v2 journal has no complete ChangeSet".to_owned());
     };
     if journal.entries.len() != change_set.ops.len() {
         return Some("journal entry count does not match the ChangeSet".to_owned());
+    }
+    for (index, (op, entry)) in change_set.ops.iter().zip(&journal.entries).enumerate() {
+        let Some(destination) = op.destination() else {
+            return Some(format!("operation {index} has no recovery destination"));
+        };
+        let Some(dest) = journal_destination(policy, destination) else {
+            return Some(format!(
+                "destination for operation {index} is outside authorized roots: {}",
+                destination.display()
+            ));
+        };
+        if dest != entry.path {
+            return Some(format!(
+                "journal destination does not match operation {index}: {}",
+                entry.path.display()
+            ));
+        }
+        if let FileOp::Move { from, .. } = op
+            && journal_destination(policy, from).is_none()
+        {
+            return Some(format!(
+                "move source for operation {index} is outside authorized roots: {}",
+                from.display()
+            ));
+        }
+    }
+    for directory in &journal.created_dirs {
+        if !policy.authorizes(directory) {
+            return Some(format!(
+                "journal created directory is outside authorized roots: {}",
+                directory.display()
+            ));
+        }
     }
     let mut previous = None;
     for &index in &journal.completed_ops {
@@ -552,35 +919,24 @@ fn validate_progress(journal: &PendingJournal, store_root: &Path) -> Option<Stri
             return Some("completed operation progress is not strictly increasing".to_owned());
         }
         previous = Some(index);
-        let Some(op) = change_set.ops.get(index) else {
-            return Some(format!("completed operation index {index} is out of range"));
-        };
-        let Some(entry) = journal.entries.get(index) else {
-            return Some(format!("journal entry for operation {index} is missing"));
-        };
-        let Some(destination) = op.destination() else {
-            return Some(format!("operation {index} has no recovery destination"));
-        };
-        if !is_safe_relative_path(destination) || store_root.join(destination) != entry.path {
-            return Some(format!(
-                "journal destination does not match operation {index}: {}",
-                entry.path.display()
-            ));
-        }
-        if let FileOp::Move { from, .. } = op {
-            let Some(source) = resolve_store_path(store_root, from) else {
-                return Some(format!(
-                    "move source for operation {index} leaves the store root"
-                ));
-            };
-            if !is_within_root(store_root, &source) {
-                return Some(format!(
-                    "move source for operation {index} leaves the store root"
-                ));
-            }
-        }
     }
     None
+}
+
+/// The absolute path a journal entry must hold for `destination`.
+///
+/// A store-relative destination resolves against the caller's store root; an absolute one is used
+/// as written. Either way the caller's policy must authorize the resolved path — the journal's own
+/// `authorized_roots` are never consulted.
+fn journal_destination(policy: &RecoveryPolicy, destination: &Path) -> Option<PathBuf> {
+    let resolved = if destination.is_absolute() {
+        destination.to_path_buf()
+    } else if is_safe_relative_path(destination) {
+        policy.store_root.join(destination)
+    } else {
+        return None;
+    };
+    policy.authorizes(&resolved).then_some(resolved)
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
@@ -608,7 +964,10 @@ fn observe_node(path: &Path) -> Result<ObservedNode, RecoveryError> {
         Err(error) => return Err(io_error(path, error)),
     };
     if metadata.file_type().is_symlink() {
-        return Ok(ObservedNode::Symlink);
+        let target = fs::read_link(path).map_err(|error| io_error(path, error))?;
+        return Ok(ObservedNode::Symlink(sha256_hex(
+            target.as_os_str().as_encoded_bytes(),
+        )));
     }
     if metadata.is_file() {
         let size = metadata.len();
@@ -674,94 +1033,146 @@ fn tree_hash(path: &Path) -> Result<String, RecoveryError> {
     Ok(sha256_hex(&bytes))
 }
 
+/// Whether a completed operation after `index` writes the same destination as `index`.
+///
+/// A `Delete` followed by a deployment of the same path is the migration shape: the original
+/// node is moved to a backup and a link is created in its place. When that later operation
+/// completed, whatever sits at the path now belongs to it, so the delete's own effect (the
+/// original node is gone) still holds and recovery must undo the later operation first.
+fn later_completed_op_replaces(
+    journal: &PendingJournal,
+    index: usize,
+    entry: &JournalEntry,
+    policy: &RecoveryPolicy,
+) -> bool {
+    let Some(change_set) = journal.change_set.as_ref() else {
+        return false;
+    };
+    journal.completed_ops.iter().copied().any(|later| {
+        later > index
+            && change_set
+                .ops
+                .get(later)
+                .and_then(FileOp::destination)
+                .and_then(|destination| journal_destination(policy, destination))
+                .as_deref()
+                == Some(entry.path.as_path())
+    })
+}
+
 fn classify_recovery_op(
     op: &FileOp,
     entry: &JournalEntry,
-    store_root: &Path,
+    policy: &RecoveryPolicy,
+    replaced_later: bool,
 ) -> Result<RecoveryState, RecoveryError> {
+    let store_root = policy.store_root();
     let node = observe_node(&entry.path)?;
     let before = entry.before_hash.as_deref();
+    let after = entry.after_hash.as_str();
+    let unchanged = holds_before(&node, before);
     let result = match op {
         FileOp::Write {
             follow_symlink: false,
             ..
-        } => match node {
-            ObservedNode::File(hash) if before == Some(hash.as_str()) => RecoveryState::Before,
-            ObservedNode::File(hash) if hash == entry.after_hash => RecoveryState::After,
-            _ => RecoveryState::Diverged,
-        },
+        } => {
+            if unchanged {
+                RecoveryState::Before
+            } else if matches!(node, ObservedNode::File(_)) && holds_after(&node, after) {
+                RecoveryState::After
+            } else {
+                RecoveryState::Diverged
+            }
+        }
+        // A write through a symbolic link lands on the resolved target, and the journal stores
+        // the target's digest, so recovery resolves the link exactly like the writer did. A
+        // dangling or removed link cannot be classified and stays for a human.
         FileOp::Write {
             follow_symlink: true,
             ..
-        } => RecoveryState::Diverged,
-        FileOp::Delete { .. } => match node {
-            ObservedNode::Missing if before.is_some() => RecoveryState::After,
-            ObservedNode::File(hash) if before == Some(hash.as_str()) => RecoveryState::Before,
-            ObservedNode::Directory { hash, .. } if before == Some(hash.as_str()) => {
-                RecoveryState::Before
-            }
-            _ => RecoveryState::Diverged,
-        },
-        FileOp::Copy { source, .. } => match node {
-            ObservedNode::Missing if before.is_none() => RecoveryState::Before,
-            ObservedNode::Directory { .. } => {
-                if copy_manifest_matches(&entry.path, source, store_root)? {
+        } => match crate::symlink::resolve(&entry.path, true) {
+            Ok((target, _)) => {
+                let node = observe_node(&target)?;
+                if holds_before(&node, before) {
+                    RecoveryState::Before
+                } else if matches!(node, ObservedNode::File(_)) && holds_after(&node, after) {
                     RecoveryState::After
                 } else {
                     RecoveryState::Diverged
                 }
             }
-            ObservedNode::File(hash) if hash == entry.after_hash => RecoveryState::After,
-            _ => RecoveryState::Diverged,
+            Err(_) => RecoveryState::Diverged,
         },
-        FileOp::CopyTree { .. } => match node {
-            ObservedNode::Missing if before.is_none() => RecoveryState::Before,
-            ObservedNode::Directory { hash, .. } if hash == entry.after_hash => {
+        FileOp::Delete { .. } => {
+            if unchanged {
+                RecoveryState::Before
+            } else if before.is_none() {
+                RecoveryState::Diverged
+            } else if matches!(node, ObservedNode::Missing) || replaced_later {
+                // Nothing is there, or a completed later operation re-created the path: either
+                // way the original node is gone and its saved copy restores it.
                 RecoveryState::After
+            } else {
+                RecoveryState::Diverged
             }
-            ObservedNode::File(hash) if hash == entry.after_hash => RecoveryState::After,
-            _ => RecoveryState::Diverged,
-        },
+        }
+        FileOp::Copy { source, .. } => {
+            if unchanged {
+                RecoveryState::Before
+            } else if (matches!(node, ObservedNode::Directory { .. })
+                && copy_manifest_matches(&entry.path, source, store_root)?)
+                || (matches!(node, ObservedNode::File(_)) && holds_after(&node, after))
+            {
+                RecoveryState::After
+            } else {
+                RecoveryState::Diverged
+            }
+        }
+        FileOp::CopyTree { .. } => {
+            if unchanged {
+                RecoveryState::Before
+            } else if holds_after(&node, after) {
+                RecoveryState::After
+            } else {
+                RecoveryState::Diverged
+            }
+        }
         FileOp::Move { from, expected, .. } => {
-            let Some(source) = resolve_store_path(store_root, from) else {
+            let Some(source) = journal_destination(policy, from) else {
                 return Ok(RecoveryState::Diverged);
             };
             let source = observe_node(&source)?;
             let expected_hash = expected_content_hash(expected);
-            match (node, source) {
-                (ObservedNode::Missing, ObservedNode::File(hash))
-                    if before.is_none() && expected_hash == Some(hash.as_str()) =>
+            match (&node, &source) {
+                (ObservedNode::Missing, observed)
+                    if before.is_none() && expected_hash == observed.hash() =>
                 {
                     RecoveryState::Before
                 }
-                (ObservedNode::Missing, ObservedNode::Directory { hash, .. })
-                    if before.is_none() && expected_hash == Some(hash.as_str()) =>
-                {
-                    RecoveryState::Before
-                }
-                (ObservedNode::File(hash), ObservedNode::Missing)
-                    if expected_hash == Some(hash.as_str()) =>
-                {
-                    RecoveryState::After
-                }
-                (ObservedNode::Directory { hash, .. }, ObservedNode::Missing)
-                    if expected_hash == Some(hash.as_str()) =>
-                {
+                (observed, ObservedNode::Missing) if expected_hash == observed.hash() => {
                     RecoveryState::After
                 }
                 _ => RecoveryState::Diverged,
             }
         }
-        FileOp::Mkdir { .. } => match node {
-            ObservedNode::Missing if before.is_none() => RecoveryState::Before,
-            ObservedNode::Directory { empty: true, .. } => RecoveryState::After,
-            _ => RecoveryState::Diverged,
-        },
+        FileOp::Mkdir { .. } => {
+            if unchanged {
+                RecoveryState::Before
+            } else if before.is_none()
+                && matches!(node, ObservedNode::Directory { empty: true, .. })
+            {
+                RecoveryState::After
+            } else {
+                RecoveryState::Diverged
+            }
+        }
         FileOp::Symlink { target, mode, .. } => {
-            if matches!(node, ObservedNode::Missing) && before.is_none() {
+            if matches!(node, ObservedNode::Missing) || unchanged {
+                // Either the operation never ran, or the `Delete` that clears the original path
+                // ran and this link was never written. Neither leaves anything to undo here.
                 RecoveryState::Before
             } else if matches!(mode, at_model::DeployMode::Link)
-                && matches!(node, ObservedNode::Symlink)
+                && matches!(node, ObservedNode::Symlink(_))
             {
                 let Some(source) = resolve_model_source(store_root, target) else {
                     return Ok(RecoveryState::Diverged);
@@ -770,6 +1181,12 @@ fn classify_recovery_op(
                     (Ok(linked), Ok(source)) if linked == source => RecoveryState::After,
                     _ => RecoveryState::Diverged,
                 }
+            } else if matches!(node, ObservedNode::Directory { .. })
+                && copy_manifest_matches(&entry.path, target, store_root)?
+            {
+                // `DeployMode::Link` falls back to a manifest-bearing copy, so both modes can
+                // leave a directory here.
+                RecoveryState::After
             } else {
                 RecoveryState::Diverged
             }
@@ -908,40 +1325,50 @@ fn needs_before_bytes(op: &FileOp, entry: &JournalEntry) -> bool {
 }
 
 fn find_delete_backup(
-    store_root: &Path,
-    operation_id: &str,
+    policy: &RecoveryPolicy,
+    journal: &PendingJournal,
+    operation_index: usize,
     expected_hash: &str,
 ) -> Result<Option<PathBuf>, RecoveryError> {
-    let root = store_root.join("backups");
-    if !root.exists() {
-        return Ok(None);
-    }
-    let mut pending = vec![(root, 0usize)];
+    let roots = policy.backup_roots.clone();
+    let wanted_name = format!("{}-{operation_index}.deleted", journal.operation_id);
+    let legacy_name = format!("{}.deleted", journal.operation_id);
     let mut matches = Vec::new();
-    let wanted_name = format!("{operation_id}.deleted");
-    while let Some((directory, depth)) = pending.pop() {
-        if depth > 8 {
+    for root in roots {
+        if !root.exists() {
             continue;
         }
-        for entry in fs::read_dir(&directory).map_err(|error| io_error(&directory, error))? {
-            let entry = entry.map_err(|error| io_error(&directory, error))?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
-            if metadata.file_type().is_symlink() {
+        let mut pending = vec![(root, 0usize)];
+        while let Some((directory, depth)) = pending.pop() {
+            if depth > 8 {
                 continue;
             }
-            if entry.file_name() == std::ffi::OsStr::new(&wanted_name) {
-                let observed = observe_node(&path)?;
-                if matches!(&observed, ObservedNode::File(hash) if hash == expected_hash)
-                    || matches!(&observed, ObservedNode::Directory { hash, .. } if hash == expected_hash)
-                {
-                    matches.push(path);
+            for entry in fs::read_dir(&directory).map_err(|error| io_error(&directory, error))? {
+                let entry = entry.map_err(|error| io_error(&directory, error))?;
+                let path = entry.path();
+                let metadata =
+                    fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+                if metadata.file_type().is_symlink() {
+                    continue;
                 }
-            } else if metadata.is_dir() {
-                pending.push((path, depth + 1));
+                let file_name = entry.file_name();
+                if file_name == std::ffi::OsStr::new(&wanted_name)
+                    || file_name == std::ffi::OsStr::new(&legacy_name)
+                {
+                    let observed = observe_node(&path)?;
+                    if matches!(&observed, ObservedNode::File(hash) if hash == expected_hash)
+                        || matches!(&observed, ObservedNode::Directory { hash, .. } if hash == expected_hash)
+                    {
+                        matches.push(path);
+                    }
+                } else if metadata.is_dir() {
+                    pending.push((path, depth + 1));
+                }
             }
         }
     }
+    matches.sort();
+    matches.dedup();
     Ok((matches.len() == 1).then(|| matches.remove(0)))
 }
 
@@ -949,20 +1376,29 @@ fn rollback_recovery_op(
     op: &FileOp,
     entry: &JournalEntry,
     before_bytes: Option<&[u8]>,
-    store_root: &Path,
-    operation_id: &str,
+    delete_backup: Option<&Path>,
+    policy: &RecoveryPolicy,
 ) -> Result<(), RecoveryError> {
+    let store_root = policy.store_root();
     match op {
-        FileOp::Write { .. } if entry.before_hash.is_none() => {
-            fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))
+        FileOp::Write { follow_symlink, .. } if entry.before_hash.is_none() => {
+            let target = crate::symlink::resolve(&entry.path, *follow_symlink)
+                .map(|(target, _)| target)
+                .map_err(RecoveryError::from)?;
+            fs::remove_file(&target).map_err(|error| io_error(&target, error))
         }
-        FileOp::Write { .. } => {
+        FileOp::Write { follow_symlink, .. } => {
             let bytes = before_bytes.ok_or_else(|| RecoveryError::MalformedJournal {
                 path: entry.path.clone(),
                 reason: "recovery backup bytes were not loaded".to_owned(),
             })?;
+            // The journal digest describes the resolved target, so restore through the link
+            // instead of refusing it and parking the journal.
+            let target = crate::symlink::resolve(&entry.path, *follow_symlink)
+                .map(|(target, _)| target)
+                .map_err(RecoveryError::from)?;
             let write = WriteRequest {
-                path: entry.path.clone(),
+                path: target,
                 new_bytes: bytes.to_vec(),
                 expected: ExpectedState::Hash(entry.after_hash.clone()),
                 backup: BackupPolicy::None,
@@ -975,21 +1411,10 @@ fn rollback_recovery_op(
             apply(&write).map(|_| ()).map_err(RecoveryError::from)
         }
         FileOp::Delete { .. } => {
-            let expected_hash =
-                entry
-                    .before_hash
-                    .as_deref()
-                    .ok_or_else(|| RecoveryError::MalformedJournal {
-                        path: entry.path.clone(),
-                        reason: "deleted path has no recorded before hash".to_owned(),
-                    })?;
-            let backup =
-                find_delete_backup(store_root, operation_id, expected_hash)?.ok_or_else(|| {
-                    RecoveryError::MalformedJournal {
-                        path: entry.path.clone(),
-                        reason: "verified delete backup is unavailable".to_owned(),
-                    }
-                })?;
+            let backup = delete_backup.ok_or_else(|| RecoveryError::MalformedJournal {
+                path: entry.path.clone(),
+                reason: "verified delete backup was not resolved".to_owned(),
+            })?;
             if !matches!(observe_node(&entry.path)?, ObservedNode::Missing) {
                 return Err(io_error(
                     &entry.path,
@@ -999,7 +1424,7 @@ fn rollback_recovery_op(
                     ),
                 ));
             }
-            fs::rename(&backup, &entry.path).map_err(|error| io_error(&entry.path, error))
+            fs::rename(backup, &entry.path).map_err(|error| io_error(&entry.path, error))
         }
         FileOp::Copy { source, .. } => {
             let metadata =
@@ -1033,16 +1458,23 @@ fn rollback_recovery_op(
             }
         }
         FileOp::Symlink { .. } => {
-            fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))
+            let metadata =
+                fs::symlink_metadata(&entry.path).map_err(|error| io_error(&entry.path, error))?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                // `DeployMode::Link` falls back to a manifest-bearing copy directory.
+                fs::remove_dir_all(&entry.path).map_err(|error| io_error(&entry.path, error))
+            } else {
+                fs::remove_file(&entry.path).map_err(|error| io_error(&entry.path, error))
+            }
         }
         FileOp::Mkdir { .. } => {
             fs::remove_dir(&entry.path).map_err(|error| io_error(&entry.path, error))
         }
         FileOp::Move { from, .. } => {
-            let source = resolve_store_path(store_root, from).ok_or_else(|| {
+            let source = journal_destination(policy, from).ok_or_else(|| {
                 RecoveryError::MalformedJournal {
                     path: entry.path.clone(),
-                    reason: "move source leaves the store root".to_owned(),
+                    reason: "move source is not a usable path".to_owned(),
                 }
             })?;
             if !matches!(observe_node(&source)?, ObservedNode::Missing) {
@@ -1092,6 +1524,34 @@ fn retain_for_manual_review(
         reason: reason.to_owned(),
     });
     Ok(())
+}
+
+/// Parks a journal that is not provably one this app wrote.
+///
+/// Nothing is touched: no destination, no backup and no operation row. Calling `finish` here
+/// would itself be a write keyed by an attacker-chosen operation id, so the reason travels in
+/// the report and the log instead.
+fn quarantine_journal(
+    path: &Path,
+    journal: Option<&PendingJournal>,
+    reason: &str,
+    report: &mut RecoveryReport,
+) {
+    let operation_id = journal.map_or_else(
+        || journal_operation_id(path).unwrap_or_default(),
+        |journal| journal.operation_id.clone(),
+    );
+    tracing::warn!(
+        journal = %path.display(),
+        operation_id = %operation_id,
+        reason,
+        "startup recovery parked an untrusted journal for manual review"
+    );
+    report.manual_review.push(ManualReviewJournal {
+        journal_path: path.to_path_buf(),
+        operation_id,
+        reason: reason.to_owned(),
+    });
 }
 
 fn callback_error(journal: &PendingJournal, message: String) -> RecoveryError {
@@ -1242,7 +1702,10 @@ pub fn journal_operation_id(path: &Path) -> Option<String> {
     path.file_stem()?.to_str().map(ToOwned::to_owned)
 }
 
-/// Every `*.journal` file in `dir`, sorted by path. A missing directory has no journals.
+/// Every `*.journal` entry in `dir`, sorted by path. A missing directory has no journals.
+///
+/// Symbolic links are listed but never followed: [`read_journal`] rejects them, so a store that
+/// arrived through Git can neither redirect the scan nor hide a link from the recovery sheet.
 ///
 /// # Errors
 /// [`RecoveryError::Io`] when the directory exists but cannot be read.
@@ -1255,8 +1718,16 @@ pub fn scan_journals(dir: &Path) -> Result<Vec<PathBuf>, RecoveryError> {
     let mut journals = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if journal_operation_id(&path).is_some() && path.is_file() {
-            journals.push(path);
+        if journal_operation_id(&path).is_none() {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+                journals.push(path);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&path, error)),
         }
     }
     journals.sort();
@@ -1283,17 +1754,44 @@ pub fn write_journal(dir: &Path, journal: &PendingJournal) -> Result<PathBuf, Re
     let mut file = fs::File::create(&path).map_err(|error| io_error(&path, error))?;
     file.write_all(&bytes)
         .map_err(|error| io_error(&path, error))?;
-    file.sync_all().map_err(|error| io_error(&path, error))?;
+    crate::durability::sync_all(&file).map_err(|error| io_error(&path, error))?;
     Ok(path)
 }
 
 /// Reads and validates one journal file.
 ///
+/// The file must be a regular file no larger than [`MAX_JOURNAL_BYTES`] with no more than
+/// [`MAX_JOURNAL_ENTRIES`] entries, and a symbolic link is never followed: a journal is untrusted
+/// input, and a link would let a store that arrived through Git point the read anywhere on disk.
+///
 /// # Errors
 /// [`RecoveryError::Io`] when the file cannot be read, [`RecoveryError::MalformedJournal`] when it
-/// is not JSON or carries a version this binary does not understand.
+/// is not a regular file or bounded journal, is not JSON, or names more entries than any change
+/// set this app writes, and [`RecoveryError::JournalVersionUnsupported`] for an unknown version.
 pub fn read_journal(path: &Path) -> Result<PendingJournal, RecoveryError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(RecoveryError::MalformedJournal {
+            path: path.to_path_buf(),
+            reason: "journal is a symbolic link or not a regular file".to_owned(),
+        });
+    }
+    if metadata.len() > MAX_JOURNAL_BYTES {
+        return Err(RecoveryError::MalformedJournal {
+            path: path.to_path_buf(),
+            reason: format!(
+                "journal is {} bytes, above the {MAX_JOURNAL_BYTES} byte limit",
+                metadata.len()
+            ),
+        });
+    }
     let bytes = fs::read(path).map_err(|error| io_error(path, error))?;
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err(RecoveryError::MalformedJournal {
+            path: path.to_path_buf(),
+            reason: "journal grew past the size limit while it was read".to_owned(),
+        });
+    }
     let journal: PendingJournal =
         serde_json::from_slice(&bytes).map_err(|error| RecoveryError::MalformedJournal {
             path: path.to_path_buf(),
@@ -1303,6 +1801,15 @@ pub fn read_journal(path: &Path) -> Result<PendingJournal, RecoveryError> {
         return Err(RecoveryError::JournalVersionUnsupported {
             path: path.to_path_buf(),
             version: journal.journal_version,
+        });
+    }
+    if journal.entries.len() > MAX_JOURNAL_ENTRIES {
+        return Err(RecoveryError::MalformedJournal {
+            path: path.to_path_buf(),
+            reason: format!(
+                "journal records {} entries, above the {MAX_JOURNAL_ENTRIES} entry limit",
+                journal.entries.len()
+            ),
         });
     }
     Ok(journal)
@@ -1482,14 +1989,15 @@ mod startup_recovery_tests {
     use time::OffsetDateTime;
 
     use super::{
-        JOURNAL_VERSION, JournalEntry, PendingJournal, RecoveryCallbacks, read_journal,
-        recover_journals, write_journal,
+        JOURNAL_VERSION, JournalEntry, PendingJournal, RecoveryCallbacks, RecoveryPolicy,
+        read_journal, recover_journals, write_journal,
     };
 
     #[derive(Default)]
     struct Callbacks {
         before: BTreeMap<usize, Vec<u8>>,
         finished: Vec<(String, bool, bool)>,
+        in_flight: Vec<String>,
     }
 
     impl RecoveryCallbacks for Callbacks {
@@ -1511,6 +2019,10 @@ mod startup_recovery_tests {
             self.finished
                 .push((operation_id.to_owned(), succeeded, manual_review));
             Ok(())
+        }
+
+        fn operation_in_flight(&mut self, operation_id: &str) -> Result<bool, String> {
+            Ok(self.in_flight.iter().any(|known| known == operation_id))
         }
     }
 
@@ -1564,9 +2076,17 @@ mod startup_recovery_tests {
             completed_ops,
             created_dirs: Vec::new(),
             committed: false,
+            authorized_roots: None,
+            backup_root: None,
         };
         write_journal(journal_dir, &journal).expect("write journal");
         journal
+    }
+
+    /// Policy for a store this app owns: the store root authorized and the store's own backup
+    /// directory configured, which is what the startup caller supplies.
+    fn policy_for(root: &Path) -> RecoveryPolicy {
+        RecoveryPolicy::new(root, [root.to_path_buf()], [root.join("backups")])
     }
 
     #[test]
@@ -1593,7 +2113,8 @@ mod startup_recovery_tests {
         callbacks.before.insert(0, b"before one".to_vec());
         callbacks.before.insert(1, b"before two".to_vec());
 
-        let report = recover_journals(&journal_dir, &root, &mut callbacks).expect("recover");
+        let report =
+            recover_journals(&journal_dir, &policy_for(&root), &mut callbacks).expect("recover");
         assert_eq!(report.rolled_back, vec![journal_path.clone()]);
         assert!(report.manual_review.is_empty());
         assert_eq!(
@@ -1606,7 +2127,8 @@ mod startup_recovery_tests {
         );
         assert!(!journal_path.exists());
 
-        let repeated = recover_journals(&journal_dir, &root, &mut callbacks).expect("repeat");
+        let repeated =
+            recover_journals(&journal_dir, &policy_for(&root), &mut callbacks).expect("repeat");
         assert!(repeated.rolled_back.is_empty());
         assert_eq!(
             fs::read(root.join("done.txt")).expect("read again"),
@@ -1635,8 +2157,8 @@ mod startup_recovery_tests {
         journal.committed = true;
         let path = write_journal(&journal_dir, &journal).expect("write committed journal");
 
-        let report =
-            recover_journals(&journal_dir, &root, &mut Callbacks::default()).expect("recover");
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
+            .expect("recover");
         assert_eq!(report.committed_cleaned, vec![path.clone()]);
         assert!(report.rolled_back.is_empty());
         assert_eq!(
@@ -1669,7 +2191,8 @@ mod startup_recovery_tests {
         callbacks.before.insert(0, b"before one".to_vec());
         callbacks.before.insert(1, b"before two".to_vec());
 
-        let report = recover_journals(&journal_dir, &root, &mut callbacks).expect("recover");
+        let report =
+            recover_journals(&journal_dir, &policy_for(&root), &mut callbacks).expect("recover");
         assert_eq!(report.manual_review.len(), 1);
         assert_eq!(report.manual_review[0].journal_path, path);
         assert!(path.exists());
@@ -1697,12 +2220,18 @@ mod startup_recovery_tests {
             completed_ops: Vec::new(),
             created_dirs: Vec::new(),
             committed: false,
+            authorized_roots: None,
+            backup_root: None,
         };
         journal.journal_version = 1;
         let path = write_journal(&journal_dir, &journal).expect("write legacy journal");
 
-        let report = recover_journals(&journal_dir, sandbox.path(), &mut Callbacks::default())
-            .expect("recover");
+        let report = recover_journals(
+            &journal_dir,
+            &policy_for(sandbox.path()),
+            &mut Callbacks::default(),
+        )
+        .expect("recover");
         assert_eq!(report.legacy, vec![path.clone()]);
         assert_eq!(read_journal(&path).expect("read legacy"), journal);
         assert!(path.exists());
@@ -1745,13 +2274,15 @@ mod startup_recovery_tests {
             completed_ops: vec![0],
             created_dirs: Vec::new(),
             committed: false,
+            authorized_roots: None,
+            backup_root: None,
         };
         write_journal(&journal_dir, &journal).expect("write in-flight journal");
 
         let injector = Arc::new(TestInjector::new());
         injector.arm(FaultPoint::ChangeSetOperation, Fault::Fail(libc::EIO));
         let failed = with_injector(injector, || {
-            recover_journals(&journal_dir, &root, &mut Callbacks::default())
+            recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
         });
         assert!(failed.is_err());
         assert!(destination.exists(), "failed recovery preserves copy tree");
@@ -1760,7 +2291,7 @@ mod startup_recovery_tests {
             "failed recovery preserves journal for retry"
         );
 
-        let report = recover_journals(&journal_dir, &root, &mut Callbacks::default())
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
             .expect("recovery retry");
 
         assert_eq!(report.rolled_back.len(), 1);
@@ -1807,10 +2338,12 @@ mod startup_recovery_tests {
             completed_ops: vec![0],
             created_dirs: Vec::new(),
             committed: false,
+            authorized_roots: None,
+            backup_root: None,
         };
         let journal_path = write_journal(&journal_dir, &journal).expect("write journal");
 
-        let report = recover_journals(&journal_dir, &root, &mut Callbacks::default())
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
             .expect("recover edited copy");
 
         assert_eq!(report.manual_review.len(), 1);
@@ -1821,27 +2354,46 @@ mod startup_recovery_tests {
         );
     }
     #[test]
-    fn directory_delete_recovery_renames_verified_tree_backup_back() {
+    fn sibling_delete_recovery_restores_each_indexed_tree_backup() {
         let sandbox = tempfile::tempdir().expect("sandbox");
         let root = sandbox.path().join("store");
         let journal_dir = root.join(".state/journal");
-        let destination = root.join("native");
-        fs::create_dir_all(destination.join("nested")).expect("source tree");
-        fs::write(destination.join("nested/item.txt"), b"original tree").expect("source content");
-        let before_hash = super::tree_hash(&destination).expect("tree hash");
-        let backup = root.join("backups/op-dir/scope/native/op-dir-delete.deleted");
-        fs::create_dir_all(backup.parent().expect("backup parent")).expect("backup directory");
-        fs::rename(&destination, &backup)
-            .expect("simulate completed delete before journal progress");
+        let names = ["first", "second", "third"];
+        let mut entries = Vec::new();
+        let mut operations = Vec::new();
+        let mut backups = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            let destination = root.join("native").join(name);
+            fs::create_dir_all(destination.join("nested")).expect("source tree");
+            fs::write(
+                destination.join("nested/item.txt"),
+                format!("original tree {name}"),
+            )
+            .expect("source content");
+            let before_hash = super::tree_hash(&destination).expect("tree hash");
+            let backup = root.join(format!(
+                "backups/op-dir-delete/scope/native/op-dir-delete-{index}.deleted"
+            ));
+            fs::create_dir_all(backup.parent().expect("backup parent")).expect("backup directory");
+            fs::rename(&destination, &backup).expect("simulate completed delete");
+            entries.push(JournalEntry {
+                path: destination,
+                before_hash: Some(before_hash.clone()),
+                after_hash: String::new(),
+            });
+            operations.push(FileOp::Delete {
+                path: PathBuf::from("native").join(name),
+                expected: ModelExpectedState::Hash {
+                    hash: ContentHash::parse(&before_hash).expect("valid tree hash"),
+                },
+            });
+            backups.push(backup);
+        }
         let journal = PendingJournal {
             journal_version: JOURNAL_VERSION,
             operation_id: "op-dir-delete".to_owned(),
             started_at: OffsetDateTime::now_utc(),
-            entries: vec![JournalEntry {
-                path: destination.clone(),
-                before_hash: Some(before_hash.clone()),
-                after_hash: String::new(),
-            }],
+            entries,
             temp_files: Vec::new(),
             change_set: Some(ChangeSet {
                 id: "set-dir-delete".to_owned(),
@@ -1849,11 +2401,133 @@ mod startup_recovery_tests {
                 operation_kind: at_model::OperationKind::parse("delete").expect("known kind"),
                 scope: None,
                 project_id: None,
-                summary: "directory delete recovery".to_owned(),
+                summary: "sibling directory delete recovery".to_owned(),
+                ops: operations,
+                created_at_unix_seconds: 0,
+            }),
+            completed_ops: (0..names.len()).collect(),
+            created_dirs: Vec::new(),
+            committed: false,
+            authorized_roots: None,
+            backup_root: None,
+        };
+        write_journal(&journal_dir, &journal).expect("write pending journal");
+
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
+            .expect("recover sibling deletes");
+
+        assert!(report.manual_review.is_empty(), "{report:?}");
+        for (name, backup) in names.iter().zip(&backups) {
+            let destination = root.join("native").join(name);
+            assert_eq!(
+                fs::read(destination.join("nested/item.txt")).expect("restored file"),
+                format!("original tree {name}").as_bytes()
+            );
+            assert!(!backup.exists());
+        }
+    }
+
+    #[test]
+    fn forged_journal_entry_outside_authorized_roots_is_refused_and_writes_nothing() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox.path().join("store");
+        let journal_dir = sandbox.path().join("journal");
+        let authorized_dir = sandbox.path().join("authorized");
+        let outside_dir = sandbox.path().join("outside");
+        fs::create_dir_all(&root).expect("store");
+        fs::create_dir_all(&authorized_dir).expect("authorized");
+        fs::create_dir_all(&outside_dir).expect("outside");
+
+        let outside_file = outside_dir.join("pwned.txt");
+        let forged_op = FileOp::Write {
+            path: outside_file.clone(),
+            bytes: b"forged content".to_vec(),
+            expected: ModelExpectedState::Absent,
+            follow_symlink: false,
+            backup: false,
+        };
+
+        let journal = PendingJournal {
+            journal_version: JOURNAL_VERSION,
+            operation_id: "op-forged".to_owned(),
+            started_at: OffsetDateTime::now_utc(),
+            entries: vec![JournalEntry {
+                path: outside_file.clone(),
+                before_hash: None,
+                after_hash: crate::sha256_hex(b"forged content"),
+            }],
+            temp_files: Vec::new(),
+            change_set: Some(ChangeSet {
+                id: "set-forged".to_owned(),
+                preview_id: "preview-forged".to_owned(),
+                operation_kind: at_model::OperationKind::parse("edit_skill").expect("kind"),
+                scope: None,
+                project_id: None,
+                summary: "forged test".to_owned(),
+                ops: vec![forged_op],
+                created_at_unix_seconds: 0,
+            }),
+            completed_ops: vec![0],
+            created_dirs: Vec::new(),
+            committed: false,
+            authorized_roots: Some(vec![authorized_dir.clone()]),
+            backup_root: None,
+        };
+
+        let path = write_journal(&journal_dir, &journal).expect("write forged journal");
+        let mut callbacks = Callbacks::default();
+        // The journal claims its own root; the caller authorized a different one, so the
+        // destination is refused however the journal describes itself.
+        let policy = RecoveryPolicy::new(
+            &root,
+            [root.clone(), authorized_dir.clone()],
+            [root.join("backups")],
+        );
+        let report = recover_journals(&journal_dir, &policy, &mut callbacks).expect("recover");
+        assert_eq!(report.manual_review.len(), 1);
+        assert_eq!(report.manual_review[0].journal_path, path);
+        assert!(
+            report.manual_review[0]
+                .reason
+                .contains("outside authorized roots")
+        );
+        assert!(
+            !outside_file.exists(),
+            "nothing must be written outside authorized roots"
+        );
+    }
+
+    /// A journal from a cloned repository: `.agentuna/.state/journal/*.journal` travels through
+    /// Git, so the file is attacker-authored data. Its own `authorized_roots` are self-attested
+    /// and prove nothing; only the caller's roots may authorize anything.
+    fn forged_delete_journal(
+        journal_dir: &Path,
+        backups: &Path,
+        target: &Path,
+        payload: &[u8],
+        authorized_roots: Option<Vec<PathBuf>>,
+    ) -> PendingJournal {
+        let journal = PendingJournal {
+            journal_version: JOURNAL_VERSION,
+            operation_id: "forged-delete".to_owned(),
+            started_at: OffsetDateTime::now_utc(),
+            entries: vec![JournalEntry {
+                path: target.to_path_buf(),
+                before_hash: Some(crate::sha256_hex(payload)),
+                after_hash: String::new(),
+            }],
+            temp_files: Vec::new(),
+            change_set: Some(ChangeSet {
+                id: "set-forged-delete".to_owned(),
+                preview_id: "preview-forged-delete".to_owned(),
+                operation_kind: at_model::OperationKind::parse("edit_skill").expect("known kind"),
+                scope: None,
+                project_id: None,
+                summary: "forged delete".to_owned(),
                 ops: vec![FileOp::Delete {
-                    path: PathBuf::from("native"),
+                    path: target.to_path_buf(),
                     expected: ModelExpectedState::Hash {
-                        hash: ContentHash::parse(&before_hash).expect("valid tree hash"),
+                        hash: ContentHash::parse(&crate::sha256_hex(payload)).expect("valid hash"),
                     },
                 }],
                 created_at_unix_seconds: 0,
@@ -1861,17 +2535,216 @@ mod startup_recovery_tests {
             completed_ops: vec![0],
             created_dirs: Vec::new(),
             committed: false,
+            authorized_roots,
+            backup_root: Some(backups.to_path_buf()),
         };
-        write_journal(&journal_dir, &journal).expect("write pending journal");
+        write_journal(journal_dir, &journal).expect("write forged journal");
+        journal
+    }
 
-        let report = recover_journals(&journal_dir, &root, &mut Callbacks::default())
-            .expect("recover directory delete");
+    #[test]
+    fn forged_journal_without_self_attested_roots_cannot_write_outside_the_store() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let repo = sandbox.path().join("cloned-repo");
+        let root = repo.join(at_store::paths::STORE_DIR_NAME);
+        let journal_dir = root.join(".state").join("journal");
+        let launch_agents = sandbox.path().join("LaunchAgents");
+        let backups = repo.join("attacker-backups");
+        fs::create_dir_all(&journal_dir).expect("journal dir");
+        fs::create_dir_all(&launch_agents).expect("launch agents");
+        fs::create_dir_all(&backups).expect("attacker backups");
+        let payload = b"<?xml version=\"1.0\"?><plist><dict/></plist>";
+        let target = launch_agents.join("com.attacker.evil.plist");
+        fs::write(backups.join("forged-delete-0.deleted"), payload).expect("attacker blob");
 
-        assert!(report.manual_review.is_empty(), "{report:?}");
-        assert_eq!(
-            fs::read(destination.join("nested/item.txt")).expect("restored file"),
-            b"original tree"
+        forged_delete_journal(&journal_dir, &backups, &target, payload, None);
+
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
+            .expect("recovery runs");
+        assert!(
+            !target.exists(),
+            "a journal from a cloned repository must never write outside caller roots"
         );
-        assert!(!backup.exists());
+        assert_eq!(report.manual_review.len(), 1, "{report:?}");
+        assert!(report.manual_review[0].journal_path.exists());
+    }
+
+    #[test]
+    fn forged_journal_self_attested_root_slash_is_ignored() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let repo = sandbox.path().join("cloned-repo");
+        let root = repo.join(at_store::paths::STORE_DIR_NAME);
+        let journal_dir = root.join(".state").join("journal");
+        let launch_agents = sandbox.path().join("LaunchAgents");
+        let backups = repo.join("attacker-backups");
+        fs::create_dir_all(&journal_dir).expect("journal dir");
+        fs::create_dir_all(&launch_agents).expect("launch agents");
+        fs::create_dir_all(&backups).expect("attacker backups");
+        let payload = b"<?xml version=\"1.0\"?><plist><dict/></plist>";
+        let target = launch_agents.join("com.attacker.evil.plist");
+        fs::write(backups.join("forged-delete-0.deleted"), payload).expect("attacker blob");
+
+        forged_delete_journal(
+            &journal_dir,
+            &backups,
+            &target,
+            payload,
+            Some(vec![PathBuf::from("/")]),
+        );
+
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
+            .expect("recovery runs");
+        assert!(
+            !target.exists(),
+            "a self-attested `/` root must not authorize an attacker destination"
+        );
+        assert_eq!(report.manual_review.len(), 1, "{report:?}");
+    }
+
+    #[test]
+    fn symlinked_journal_file_is_refused_before_it_is_executed() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox.path().join("store");
+        let journal_dir = sandbox.path().join("journal");
+        fs::create_dir_all(&root).expect("store");
+        fs::create_dir_all(&journal_dir).expect("journal dir");
+        fs::write(root.join("config.txt"), b"after").expect("target");
+        let mut journal = write_journal_for(
+            &root,
+            &journal_dir,
+            "op-symlink",
+            &[("config.txt", b"before", b"after")],
+            vec![0],
+        );
+        journal.operation_id = "op-symlink".to_owned();
+        let payload = sandbox.path().join("attacker.journal");
+        fs::write(
+            &payload,
+            serde_json::to_vec_pretty(&journal).expect("encode"),
+        )
+        .expect("payload");
+        let link = journal_dir.join("op-symlink.journal");
+        fs::remove_file(&link).expect("remove real journal");
+        symlink(&payload, &link).expect("symlinked journal");
+
+        let mut callbacks = Callbacks::default();
+        callbacks.before.insert(0, b"before".to_vec());
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut callbacks)
+            .expect("recovery runs");
+
+        assert_eq!(
+            fs::read(root.join("config.txt")).expect("read target"),
+            b"after",
+            "a symlinked journal must never be executed"
+        );
+        assert_eq!(report.manual_review.len(), 1, "{report:?}");
+        assert!(link.exists(), "the symlinked journal is left for a human");
+    }
+
+    #[test]
+    fn project_store_journal_needs_an_operation_the_app_recorded() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox
+            .path()
+            .join("cloned-repo")
+            .join(at_store::paths::STORE_DIR_NAME);
+        let journal_dir = root.join(".state").join("journal");
+        fs::create_dir_all(&journal_dir).expect("journal dir");
+        fs::write(root.join("config.txt"), b"after").expect("target");
+        write_journal_for(
+            &root,
+            &journal_dir,
+            "op-project",
+            &[("config.txt", b"before", b"after")],
+            vec![0],
+        );
+        let policy = RecoveryPolicy::new(&root, [root.clone()], [root.join("backups")])
+            .requiring_recorded_operation();
+        let mut callbacks = Callbacks::default();
+        callbacks.before.insert(0, b"before".to_vec());
+
+        let report = recover_journals(&journal_dir, &policy, &mut callbacks).expect("recover");
+        assert_eq!(
+            fs::read(root.join("config.txt")).expect("read target"),
+            b"after",
+            "a project store journal is only replayed for an operation this app recorded"
+        );
+        assert_eq!(report.manual_review.len(), 1, "{report:?}");
+        assert!(
+            callbacks.finished.is_empty(),
+            "an unrecorded operation id must not reach the operation history"
+        );
+
+        // The same journal is ordinary debris once the operation is on record.
+        callbacks.in_flight.push("op-project".to_owned());
+        let report = recover_journals(&journal_dir, &policy, &mut callbacks).expect("recover");
+        assert_eq!(report.rolled_back.len(), 1, "{report:?}");
+        assert_eq!(
+            fs::read(root.join("config.txt")).expect("read restored"),
+            b"before"
+        );
+        assert_eq!(
+            callbacks.finished,
+            [("op-project".to_owned(), false, false)]
+        );
+    }
+
+    #[test]
+    fn symlinked_delete_blob_is_never_renamed_into_place() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let root = sandbox.path().join("store");
+        let journal_dir = root.join(".state").join("journal");
+        let backups = root.join("backups");
+        fs::create_dir_all(&journal_dir).expect("journal dir");
+        fs::create_dir_all(&backups).expect("backups");
+        let payload = b"<?xml version=\"1.0\"?><plist/>";
+        let source = sandbox.path().join("attacker.plist");
+        fs::write(&source, payload).expect("payload");
+        symlink(&source, backups.join("forged-delete-0.deleted")).expect("symlinked blob");
+        let target = root.join("native").join("skill");
+        let journal = PendingJournal {
+            journal_version: JOURNAL_VERSION,
+            operation_id: "forged-delete".to_owned(),
+            started_at: OffsetDateTime::now_utc(),
+            entries: vec![JournalEntry {
+                path: target.clone(),
+                before_hash: Some(crate::sha256_hex(payload)),
+                after_hash: String::new(),
+            }],
+            temp_files: Vec::new(),
+            change_set: Some(ChangeSet {
+                id: "set-forged-delete".to_owned(),
+                preview_id: "preview-forged-delete".to_owned(),
+                operation_kind: at_model::OperationKind::parse("delete").expect("known kind"),
+                scope: None,
+                project_id: None,
+                summary: "symlinked blob".to_owned(),
+                ops: vec![FileOp::Delete {
+                    path: target.clone(),
+                    expected: ModelExpectedState::Hash {
+                        hash: ContentHash::parse(&crate::sha256_hex(payload)).expect("valid hash"),
+                    },
+                }],
+                created_at_unix_seconds: 0,
+            }),
+            completed_ops: vec![0],
+            created_dirs: Vec::new(),
+            committed: false,
+            authorized_roots: None,
+            backup_root: Some(backups),
+        };
+        write_journal(&journal_dir, &journal).expect("write journal");
+
+        let report = recover_journals(&journal_dir, &policy_for(&root), &mut Callbacks::default())
+            .expect("recovery runs");
+        assert!(
+            !target.exists(),
+            "a symbolic link is never restored as if it were the saved original"
+        );
+        assert_eq!(report.manual_review.len(), 1, "{report:?}");
     }
 }

@@ -249,12 +249,8 @@ fn agent_card(
         .map_err(|_| CommandError::internal("could not compute agent health"))?;
     let deployments = at_db::deployments::list_deployments_for_agent(connection, &agent.id)
         .map_err(|_| CommandError::internal("could not read agent deployments"))?;
-    // A copy deployment while the agent is configured for links is the recorded symlink fallback.
-    let wants_links = settings.link_mode(&agent.id) == at_model::LinkMode::Link;
-    let copy_fallback = wants_links
-        && deployments
-            .iter()
-            .any(|cell| cell.mode.as_deref() == Some("copy"));
+    // A copy deployment while the agent is configured for links is the recorded symlink fallback;
+    // the engine owns that derivation so the CLI and the card cannot disagree.
     let linked_deployments = i32::try_from(
         deployments
             .iter()
@@ -262,8 +258,9 @@ fn agent_card(
             .count(),
     )
     .unwrap_or(i32::MAX);
-    let line = at_engine::health::line_with_connection(connection, &agent.id, home, copy_fallback)
+    let line = at_engine::health::line_with_connection(connection, &agent.id, home)
         .map_err(|_| CommandError::internal("could not compute agent health"))?;
+    let copy_fallback = line.copy_fallback;
     let mode = settings.link_mode(&agent.id);
     Ok(AgentCardView {
         id: agent.id.to_string(),
@@ -342,8 +339,18 @@ pub async fn agents_rescan(state: State<'_, AppState>) -> Result<Vec<AgentCardVi
         variables: Default::default(),
     };
     let registry = std::sync::Arc::new(at_adapters::adapter::AgentAdapterRegistry::register());
+    let refresh_paths = paths.clone();
     tokio::task::spawn_blocking(move || {
-        super::detection::rescan(&registry, &environment, &database)
+        let rescan = super::detection::rescan(&registry, &environment, &database);
+        // A rescan is the user asking for the truth about agent folders, so the native rows the
+        // MCP and Skills screens render are rewritten in the same pass instead of waiting for
+        // the next startup rebuild.
+        if rescan.is_ok()
+            && let Ok(database) = database.lock()
+        {
+            super::native_scan::refresh_native_findings(&refresh_paths, database.connection());
+        }
+        rescan
     })
     .await
     .map_err(|_| CommandError::internal("agent detection worker stopped unexpectedly"))?
@@ -777,11 +784,22 @@ pub fn instruction_save(
     state: State<'_, AppState>,
     request: InstructionSaveRequest,
 ) -> Result<InstructionSaveOutcome, CommandError> {
+    instruction_save_inner(&state, request)
+}
+
+/// Body of [`instruction_save`] over injected state, callable from tests.
+///
+/// # Errors
+/// See [`instruction_save`].
+pub(crate) fn instruction_save_inner(
+    state: &AppState,
+    request: InstructionSaveRequest,
+) -> Result<InstructionSaveOutcome, CommandError> {
     let item_id = request
         .item_id
         .parse::<at_model::ItemId>()
         .map_err(|_| CommandError::invalid_argument("item_id", "invalid rule identifier"))?;
-    let project = project_path(&state, request.project_id.as_deref())?;
+    let project = project_path(state, request.project_id.as_deref())?;
     let paths = state
         .paths()
         .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
@@ -946,4 +964,145 @@ pub fn preset_member_candidates(
                 .collect()
         })
         .map_err(|_| CommandError::internal("could not load preset member candidates"))
+}
+
+#[cfg(test)]
+mod instruction_drift_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use at_db::deployments::DeploymentSpec;
+    use at_model::{AgentId, ItemId, ItemState, Scope};
+    use at_store::paths::{AppPaths, PathEnvironment};
+
+    use super::*;
+    use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
+    use crate::app::drift_testkit::{assert_external_edit_detected, assert_no_drift};
+
+    const ORIGINAL: &str = "hand\n<!-- agentuna:begin -->\nold body\n<!-- agentuna:end -->\ntail\n";
+    const EDITED: &str = "hand\n<!-- agentuna:begin -->\nnew body\n<!-- agentuna:end -->\ntail\n";
+    const EXTERNAL: &str =
+        "hand\n<!-- agentuna:begin -->\nexternal body\n<!-- agentuna:end -->\ntail\n";
+
+    struct NullSink;
+
+    impl EventSink for NullSink {
+        fn emit(&self, _event: JobEvent) {}
+    }
+
+    /// One sandboxed home with a managed rule file, its index row and a deployment row.
+    struct RuleSandbox {
+        _home: at_fs::testkit::TestHome,
+        state: AppState,
+        path: PathBuf,
+        item_id: ItemId,
+        expected_hash: String,
+    }
+
+    impl RuleSandbox {
+        fn new() -> Self {
+            let home = at_fs::testkit::TestHome::new().expect("test home");
+            let paths =
+                AppPaths::resolve(&PathEnvironment::default().with_home(home.home().to_path_buf()))
+                    .expect("app paths");
+            let database_path = home.home().join("agentuna").join("index.db");
+            std::fs::create_dir_all(database_path.parent().expect("db parent"))
+                .expect("database directory");
+            std::fs::create_dir_all(paths.support_dir()).expect("support directory");
+            std::fs::create_dir_all(paths.backup_dir()).expect("backup directory");
+            let database = at_db::Database::open_file(&database_path).expect("database");
+
+            let path = home.home().join(".claude/CLAUDE.md");
+            std::fs::create_dir_all(path.parent().expect("rule directory"))
+                .expect("rule directory");
+            std::fs::write(&path, ORIGINAL).expect("rule file");
+            let expected_hash = at_fs::sha256_hex(ORIGINAL.as_bytes());
+
+            let item_id = ItemId::new();
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO items (id, kind, scope, slug, name, source_path, managed) \
+                     VALUES (?1, 'rule', 'user', 'claude', 'CLAUDE.md', ?2, 1)",
+                    rusqlite::params![item_id.to_string(), path.to_string_lossy()],
+                )
+                .expect("rule item");
+            let target = path.to_string_lossy().into_owned();
+            let spec = DeploymentSpec::applied(
+                &item_id,
+                &AgentId::ClaudeCode,
+                Scope::User,
+                ItemState::Linked,
+                Some("native"),
+                Some(&target),
+                at_db::deployments::DeploymentHashes::in_sync(&expected_hash),
+            );
+            at_db::deployments::upsert_deployment(database.connection(), &spec)
+                .expect("deployment row");
+
+            let state = AppState::new(
+                Arc::new(JobBridge::new(
+                    Arc::new(NullSink),
+                    Arc::new(TracingOperationsLog),
+                )),
+                None,
+            )
+            .with_database(database)
+            .with_paths(paths);
+
+            Self {
+                _home: home,
+                state,
+                path,
+                item_id,
+                expected_hash,
+            }
+        }
+
+        fn save_request(&self) -> InstructionSaveRequest {
+            InstructionSaveRequest {
+                item_id: self.item_id.to_string(),
+                path: self.path.display().to_string(),
+                scope: Scope::User.to_string(),
+                expected_hash: self.expected_hash.clone(),
+                content: EDITED.to_owned(),
+                project_id: None,
+                force: false,
+            }
+        }
+
+        fn latest_operation_id(&self) -> String {
+            let database = self.state.database().expect("database");
+            database
+                .connection()
+                .query_row(
+                    "SELECT id FROM operations ORDER BY rowid DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("operation row")
+        }
+    }
+
+    #[test]
+    fn saving_a_rule_file_refreshes_its_drift_baseline() {
+        let sandbox = RuleSandbox::new();
+        assert_no_drift(&sandbox.state, "before instruction_save");
+        let outcome =
+            instruction_save_inner(&sandbox.state, sandbox.save_request()).expect("rule save");
+        assert_eq!(outcome.status, "saved", "{outcome:?}");
+        assert_no_drift(&sandbox.state, "after instruction_save");
+        assert_external_edit_detected(&sandbox.state, &sandbox.path, EXTERNAL.as_bytes());
+    }
+
+    #[test]
+    fn undoing_a_rule_save_refreshes_the_restored_baseline() {
+        let sandbox = RuleSandbox::new();
+        instruction_save_inner(&sandbox.state, sandbox.save_request()).expect("rule save");
+        let operation_id = sandbox.latest_operation_id();
+        crate::app::overwrite::operation_undo_inner(&sandbox.state, &operation_id, false)
+            .expect("undo");
+        assert_no_drift(&sandbox.state, "after undoing the rule save");
+        assert_external_edit_detected(&sandbox.state, &sandbox.path, EXTERNAL.as_bytes());
+    }
 }

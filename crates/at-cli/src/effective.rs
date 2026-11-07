@@ -2,15 +2,18 @@
 
 use std::str::FromStr;
 
-use at_engine::effective::{AgentLoads, EffectiveQuery, query};
-use at_engine::loader::load_scope_snapshots;
-use at_model::{AgentId, ItemKind};
+use at_adapters::adapter::AgentAdapterRegistry;
+use at_db::ReadOnlyDatabase;
+use at_engine::effective::{AgentLoads, EffectiveQuery, EffectiveQueryView, query};
+use at_engine::loader::{AgentObservation, agent_loads, load_scope_snapshots, observe_agents};
+use at_engine::locks::{LockStore, MemoryLockStore};
+use at_model::{AgentId, ItemKind, Scope, ScopeSnapshot};
 use clap::{Arg, ArgMatches, Command};
 use serde_json::json;
 
 use crate::error::{CliError, ErrorCode};
 use crate::globals::GlobalArgs;
-use crate::output::CommandOutput;
+use crate::output::{CommandOutput, Warning};
 use crate::registry::CommandGroup;
 use crate::runtime::{CliAccess, resolve_paths};
 
@@ -26,6 +29,12 @@ impl CommandGroup for EffectiveGroup {
         root.subcommand(
             Command::new("effective")
                 .about("Show effective configuration at a scope")
+                .long_about(
+                    "Show the items that resolve at a scope, joined with per-agent load \
+                     observations. Without --scope the resolved project's scope answers; on a \
+                     machine with no project it falls back to user. The chosen scope is \
+                     reported in `data.scope` and, in human mode, as a warning line.",
+                )
                 .arg(
                     Arg::new("agent")
                         .long("agent")
@@ -63,6 +72,10 @@ impl CommandGroup for EffectiveGroup {
         globals: &GlobalArgs,
         matches: &ArgMatches,
     ) -> Result<CommandOutput, CliError> {
+        if globals.read_only && matches!(matches.subcommand(), Some(("lock" | "unlock", _))) {
+            let access = CliAccess::for_command(globals, true)?;
+            access.ensure_writable()?;
+        }
         if let Some((command, args)) = matches.subcommand() {
             return match command {
                 "lock" => mutate_lock(globals, args, true),
@@ -74,21 +87,19 @@ impl CommandGroup for EffectiveGroup {
                 )),
             };
         }
-        let scope = globals.scope().ok_or_else(|| {
-            CliError::new(
-                ErrorCode::Validation,
-                "effective requires --scope",
-                "choose global, user, project or local",
-            )
-        })?;
         let kind = matches
             .get_one::<String>("kind")
             .map(|kind| match kind.as_str() {
-                "mcp" | "mcp_server" => ItemKind::McpServer,
-                "skill" => ItemKind::Skill,
-                "rule" => ItemKind::Rule,
-                _ => unreachable!("clap validates item kind"),
-            });
+                "mcp" | "mcp_server" => Ok(ItemKind::McpServer),
+                "skill" => Ok(ItemKind::Skill),
+                "rule" => Ok(ItemKind::Rule),
+                other => Err(CliError::new(
+                    ErrorCode::Usage,
+                    format!("unknown item kind `{other}`"),
+                    "use --kind skill, mcp or rule",
+                )),
+            })
+            .transpose()?;
         let agent = matches
             .get_one::<String>("agent")
             .map(|value| {
@@ -101,43 +112,167 @@ impl CommandGroup for EffectiveGroup {
                 })
             })
             .transpose()?;
+        crate::runtime::refresh_agent_registry_if_needed(globals)?;
         let paths = resolve_paths(globals)?;
         let _access = CliAccess::read(&paths)?;
+        // `--scope` stays the explicit answer. Without it the resolved project decides,
+        // because that is the context the command was run in, and User is the fallback
+        // for a machine with no project above the working directory. The chosen scope is
+        // reported in `data.scope` and as a warning line; it is never silent.
+        let (scope, scope_warning) = resolve_scope(globals, &paths);
         let project_root = paths.project_store().and_then(|store| store.parent());
         let loaded = load_scope_snapshots(&paths, project_root).map_err(engine_error)?;
-        // Do not infer that an item is loaded from its presence in a store or deployment row.
-        let agents: Vec<AgentLoads> = Vec::new();
+        // Agent load state comes from adapter discovery plus the indexed deployments and native
+        // items; store presence alone is never treated as loaded.
+        let environment = at_engine::refresh::agent_environment(&paths);
+        let observations = observe_agents(&AgentAdapterRegistry::register(), &environment)
+            .map_err(|error| {
+                CliError::new(
+                    ErrorCode::Conflict,
+                    format!("agent adapters unavailable: {error}"),
+                    "run `agentuna doctor` to check the agent adapters",
+                )
+            })?;
+        let agents = load_agent_loads(&paths, &observations, &loaded.layers, scope)?;
+        let locks = load_locks(&paths)?;
         let result = query(EffectiveQuery {
             scope,
             layers: &loaded.layers,
             agent_filter: agent.as_ref(),
             kind_filter: kind,
             agents: &agents,
-            locks: None,
+            locks: locks.as_ref().map(|store| store as &dyn LockStore),
             tombstones: Some(&loaded.tombstones),
         });
-        let load_diagnostics: Vec<_> = loaded
-            .diagnostics
-            .iter()
-            .map(|diagnostic| {
-                json!({
-                    "scope": diagnostic.scope.to_string(),
-                    "path": diagnostic.path.display().to_string(),
-                    "code": diagnostic.code,
-                    "message": diagnostic.message,
-                })
-            })
-            .collect();
-        let human = format_effective(&result.items, &result.disabled_here);
-        let data = json!({
-            "items": result.items,
-            "disabled_here": result.disabled_here,
-            "diagnostics": result.diagnostics,
-            "load_diagnostics": load_diagnostics,
-        });
-        Ok(CommandOutput::new(data, human))
+        // One struct, one serializer: this is the same `EffectiveQueryView` the Tauri command
+        // returns, so `agentuna effective --json` and the Effective screen render identical JSON.
+        // `with_scope` only adds which scope answered, so a defaulted request stays legible.
+        let view = EffectiveQueryView::new(result, loaded.diagnostics).with_scope(scope);
+        let human = format_effective(&view.items, &view.disabled_here);
+        let data = serde_json::to_value(&view).map_err(|error| {
+            CliError::new(
+                ErrorCode::Internal,
+                format!("cannot serialize effective configuration: {error}"),
+                "this is a bug in agentuna; please report the command you ran",
+            )
+        })?;
+        let warnings = scope_warning.into_iter().collect::<Vec<_>>();
+        Ok(CommandOutput::new(data, human).with_warnings(warnings))
     }
 }
+
+/// The scope a request without `--scope` answers for, plus the warning that says so.
+///
+/// A resolved project is the working context behind the invocation, so Project answers
+/// there; a machine with no project above the working directory falls back to User.
+fn resolve_scope(globals: &GlobalArgs, paths: &at_store::AppPaths) -> (Scope, Option<Warning>) {
+    if let Some(scope) = globals.scope() {
+        return (scope, None);
+    }
+    match paths.project_store().and_then(|store| store.parent()) {
+        Some(project) => (
+            Scope::Project,
+            Some(Warning::new(
+                "scope_defaulted",
+                format!(
+                    "no --scope given; answering for the project scope of {}",
+                    project.display()
+                ),
+            )),
+        ),
+        None => (
+            Scope::User,
+            Some(Warning::new(
+                "scope_defaulted",
+                "no --scope given and no project resolved; answering for the user scope",
+            )),
+        ),
+    }
+}
+/// Reads Global locks from the `locks` table so locked rows carry their id and reason.
+///
+/// A missing index has no locks; the command still answers, and every row is reported unlocked
+/// rather than locked by absence of data.
+fn load_locks(paths: &at_store::paths::AppPaths) -> Result<Option<MemoryLockStore>, CliError> {
+    if !paths.db_path().exists() {
+        return Ok(None);
+    }
+    let database = ReadOnlyDatabase::open(paths.db_path()).map_err(|error| {
+        CliError::new(
+            ErrorCode::Conflict,
+            format!("cannot read the AgenTuna index: {error}"),
+            "run `agentuna doctor` to check the index",
+        )
+    })?;
+    at_engine::locks::load_database_locks(database.connection())
+        .map(Some)
+        .map_err(|error| {
+            CliError::new(
+                ErrorCode::Conflict,
+                format!("cannot read item locks: {error}"),
+                "run `agentuna doctor` to check the index",
+            )
+        })
+}
+
+/// Joins deployments and native discovery for every detected agent with the loaded scopes.
+///
+/// A missing index cannot describe deployments; an in-memory database keeps the same typed
+/// query path and reports every item as not loaded instead of guessing from store presence.
+fn load_agent_loads(
+    paths: &at_store::paths::AppPaths,
+    observations: &[AgentObservation],
+    layers: &[ScopeSnapshot],
+    scope: Scope,
+) -> Result<Vec<AgentLoads>, CliError> {
+    let indexed = if paths.db_path().exists() {
+        Some(ReadOnlyDatabase::open(paths.db_path()).map_err(|error| {
+            CliError::new(
+                ErrorCode::Conflict,
+                format!("cannot read the AgenTuna index: {error}"),
+                "run `agentuna doctor` to check the index",
+            )
+        })?)
+    } else {
+        None
+    };
+    let project_id = indexed.as_ref().and_then(|database| {
+        let store = paths.project_store()?;
+        let project_root = store.parent().unwrap_or(store);
+        at_db::projects::find_project_by_path(database.connection(), project_root)
+            .ok()
+            .flatten()
+            .map(|project| project.id)
+    });
+    let memory;
+    let connection = if let Some(database) = &indexed {
+        database.connection()
+    } else {
+        memory = at_db::Database::open_in_memory().map_err(|error| {
+            CliError::new(
+                ErrorCode::Internal,
+                format!("cannot open an empty agent index: {error}"),
+                "this is a bug in agentuna; please report the command you ran",
+            )
+        })?;
+        memory.connection()
+    };
+    agent_loads(
+        connection,
+        observations,
+        layers,
+        scope,
+        project_id.as_deref(),
+    )
+    .map_err(|error| {
+        CliError::new(
+            ErrorCode::Conflict,
+            format!("cannot read agent deployments: {error}"),
+            "run `agentuna doctor` to check the index",
+        )
+    })
+}
+
 fn mutate_lock(
     globals: &GlobalArgs,
     args: &ArgMatches,

@@ -159,17 +159,19 @@ describe("McpListScreen row actions", () => {
     expect(confirm.disabled).toBe(false);
   });
 
-  test("a locked row shows the locked toast and leaves the toggle unchanged", async () => {
+  test("a locked row shows a disabled switch naming the lock reason and writes nothing", async () => {
     ipc.reply = (command) =>
       Promise.resolve(
         command === "mcp_server_list"
-          ? list({ servers: [row({ locked: true, lock_reason: "Approved version" })] })
+          ? list({ servers: [row({ locked: true, lock_scope: "global", lock_reason: "Approved version" })] })
           : undefined,
       );
     renderScreen();
-    const toggle = await screen.findByRole("button", { name: "claude_code: linked" });
+    const toggle = await screen.findByRole("switch", { name: "Claude Code: Locked" });
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
-    expect(toggle.getAttribute("title")).toBe("Approved version");
+    const cell = toggle.closest('[role="group"]');
+    expect(cell?.getAttribute("title")).toContain("Approved version");
+    expect(cell?.getAttribute("title")).toContain("Global");
     expect(ipc.calls.filter((call) => call.command === "mcp_server_disable")).toHaveLength(0);
   });
 
@@ -205,7 +207,7 @@ describe("McpListScreen row actions", () => {
     expect(await screen.findByText("lock denied")).toBeTruthy();
     // No refresh: the rendered model is exactly the pre-failure row.
     expect(ipc.calls.filter((call) => call.command === "mcp_server_list")).toHaveLength(1);
-    expect(screen.getByText("health: ok")).toBeTruthy();
+    expect(screen.getByText("Healthy")).toBeTruthy();
   });
 
   test("Escape closes the lock dialog without writing", async () => {
@@ -217,5 +219,198 @@ describe("McpListScreen row actions", () => {
     await userEvent.setup().keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(ipc.calls.some((call) => call.command === "effective_lock")).toBe(false);
+  });
+});
+
+describe("McpListScreen per-agent switches and health (design 06-mcp-servers)", () => {
+  test("renders an OMP switch and enables the server through the reviewed plan", async () => {
+    const server = row({
+      agents: [
+        { agent: "claude_code", state: "linked", config_path: "/sandbox/home/.claude.json", enabled: true },
+        { agent: "omp", state: "off", config_path: null, enabled: false },
+      ],
+    });
+    ipc.reply = (command) => {
+      if (command === "mcp_server_list") return Promise.resolve(list({ servers: [server] }));
+      if (command === "mcp_server_enable") return Promise.resolve(preview(1));
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    const toggle = await screen.findByRole("switch", { name: "omp: Off" });
+    await userEvent.setup().click(toggle);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Enable Server for omp\?/)).toBeTruthy();
+    await waitFor(() =>
+      expect(ipc.calls).toContainEqual({
+        command: "mcp_server_enable",
+        args: {
+          request: {
+            item_id: "itm_server",
+            scope: "global",
+            project_id: "prj_visual_fixture",
+            agent: "omp",
+            in_repo: false,
+            apply: false,
+            preview_id: null,
+          },
+        },
+      }),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Enable" }));
+    await waitFor(() =>
+      expect(ipc.calls).toContainEqual({
+        command: "mcp_server_enable",
+        args: {
+          request: {
+            item_id: "itm_server",
+            scope: "global",
+            project_id: "prj_visual_fixture",
+            agent: "omp",
+            in_repo: false,
+            apply: true,
+            preview_id: "preview_1",
+          },
+        },
+      }),
+    );
+    expect(await screen.findByText("Enabled Server for omp")).toBeTruthy();
+  });
+
+  test("an uninstalled agent column renders a disabled switch with the reason", async () => {
+    ipc.reply = (command) => {
+      if (command === "mcp_server_list") return Promise.resolve(list());
+      if (command === "agents_list") {
+        return Promise.resolve([
+          { id: "cursor", name: "Cursor", presence: "not_installed", installed: false },
+        ]);
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    const toggle = await screen.findByRole("switch", { name: "Cursor: Off" });
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    expect(toggle.closest('[role="group"]')?.getAttribute("title")).toContain("not installed");
+    expect(ipc.calls.filter((call) => call.command === "mcp_server_enable")).toHaveLength(0);
+  });
+
+  test("native rows and health states are words, not colour alone", async () => {
+    const nativeServer = row({
+      id: "",
+      name: "context7",
+      native: true,
+      source_path: "/sandbox/home/.codex/config.toml",
+      health: "unknown",
+      agents: [
+        {
+          agent: "codex",
+          state: "native",
+          config_path: "/sandbox/home/.codex/config.toml",
+          enabled: true,
+        },
+      ],
+    });
+    ipc.reply = (command) => {
+      if (command === "mcp_server_list") {
+        return Promise.resolve(
+          list({ servers: [nativeServer, row({ id: "itm_failing", name: "github", health: "failed" })] }),
+        );
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    expect(await screen.findByText("native · not in AgenTuna")).toBeTruthy();
+    expect(await screen.findByText("Not tested")).toBeTruthy();
+    expect((await screen.findAllByText("Failing")).length).toBeGreaterThan(0);
+    const nativeCell = screen
+      .getAllByRole("group", { name: "Codex" })
+      .find((cell) => cell.getAttribute("data-state") === "native");
+    expect(nativeCell).toBeDefined();
+    expect(nativeCell?.getAttribute("title")).toContain("/sandbox/home/.codex/config.toml");
+    expect(nativeCell ? within(nativeCell).queryByRole("switch") : null).toBeNull();
+  });
+
+  test("the count line and the banner count the same native rows the table renders", async () => {
+    const nativeRows = [
+      row({ id: "", name: "context7", native: true, source_path: "/sandbox/home/.claude.json" }),
+      row({ id: "", name: "alpha", native: true, source_path: "/sandbox/home/.codex/config.toml" }),
+    ];
+    ipc.reply = (command) => {
+      if (command === "mcp_server_list") {
+        return Promise.resolve(list({ servers: [...nativeRows, row({ id: "itm_managed", name: "managed" })] }));
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    expect(
+      await screen.findByText("3 servers, 1 managed by AgenTuna, 2 live only in agent config files"),
+    ).toBeTruthy();
+    const banner = screen.getByRole("region", { name: "Unmanaged servers banner" });
+    expect(banner.textContent).toContain("2 servers in agent folders are not in AgenTuna");
+    const nativeTags = screen.getAllByText("native · not in AgenTuna");
+    expect(nativeTags).toHaveLength(2);
+  });
+
+  test("Adopt names the server inside a shared configuration document", async () => {
+    ipc.reply = (command) => {
+      if (command === "mcp_server_list") {
+        return Promise.resolve(
+          list({
+            servers: [
+              row({
+                id: "",
+                name: "context7",
+                native: true,
+                source_path: "/sandbox/home/.claude.json",
+              }),
+            ],
+          }),
+        );
+      }
+      if (command === "adopt_preview") {
+        return Promise.resolve({
+          source: "/sandbox/home/.claude.json",
+          store_root: "/sandbox/user-store",
+          store_destination: "/sandbox/user-store/mcp.json",
+          slug: "context7",
+          native_name: "context7",
+          kind: "mcp_server",
+          agents: ["claude_code"],
+          handling: "link",
+          renamed: false,
+          current: "present",
+        });
+      }
+      if (command === "adopt_apply") {
+        return Promise.resolve({
+          summary: "Adopted",
+          operation_id: "op_1",
+          store_destination: "/sandbox/user-store/mcp.json",
+          slug: "context7",
+          handling: "link",
+        });
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Adopt" }));
+    const modal = await screen.findByRole("dialog", { name: /Adopt context7/i });
+    expect(modal).toBeTruthy();
+    const modalAdoptBtn = within(modal).getByRole("button", { name: "Adopt" });
+    fireEvent.click(modalAdoptBtn);
+    await waitFor(() =>
+      expect(ipc.calls.some((call) => call.command === "adopt_apply")).toBe(true),
+    );
+    const preview = ipc.calls.find((call) => call.command === "adopt_preview");
+    expect(preview?.args).toMatchObject({
+      path: "/sandbox/home/.claude.json",
+      name: "context7",
+    });
+    const applied = ipc.calls.find((call) => call.command === "adopt_apply");
+    expect(applied?.args).toMatchObject({ name: "context7" });
   });
 });

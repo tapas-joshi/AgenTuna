@@ -44,16 +44,35 @@ export function ScopeSwitcher({
   theme = "dark",
 }: ScopeSwitcherProps) {
   const options = SCOPE_OPTIONS.filter((option) => option.value !== "local" || localEnabled);
+  const unavailableScopes = new Set(
+    options
+      .filter(({ value }) =>
+        ((value === "project" || value === "local") && !hasProject) ||
+        (value === "global" && globalLocked),
+      )
+      .map(({ value }) => value),
+  );
+  const tabStop = options.find((option) => option.value === scope)?.value ??
+    options.find((option) => !unavailableScopes.has(option.value))?.value;
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
-    let next = index;
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % options.length;
-    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index + options.length - 1) % options.length;
-    else return;
+    const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? -1
+        : 0;
+    if (direction === 0) return;
     event.preventDefault();
-    const target = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button[data-scope]")[next];
-    target?.focus();
-    const selected = options[next];
-    if (target !== undefined && !target.disabled && selected !== undefined) onScopeSelected(selected.value);
+    let next = index;
+    for (let count = 1; count < options.length; count += 1) {
+      next = (next + direction + options.length) % options.length;
+      const candidate = options[next];
+      if (candidate !== undefined && !unavailableScopes.has(candidate.value)) {
+        const target = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button[data-scope]")[next];
+        target?.focus();
+        if (target !== undefined) onScopeSelected(candidate.value);
+        break;
+      }
+    }
   }
 
   return (
@@ -65,8 +84,10 @@ export function ScopeSwitcher({
       className="inline-flex min-w-0 items-center gap-2 rounded-10 border border-border bg-surface p-2"
     >
       {options.map((option, index) => {
-        const disabled = (option.value === "project" || option.value === "local") && !hasProject;
-        const reason = disabled ? "Choose a project first" : undefined;
+        const disabled = unavailableScopes.has(option.value);
+        const reason = (option.value === "project" || option.value === "local") && !hasProject
+          ? "Choose a project first"
+          : undefined;
         const locked = option.value === "global" && globalLocked;
         return (
           <button
@@ -74,21 +95,20 @@ export function ScopeSwitcher({
             type="button"
             role="radio"
             aria-checked={scope === option.value}
-            aria-disabled={disabled || locked || undefined}
+            aria-disabled={disabled || undefined}
             aria-label={option.label}
             aria-describedby={reason ? "scope-project-required" : undefined}
             data-scope={option.value}
             data-state={scope === option.value ? "active" : "normal"}
             data-locked={locked || undefined}
-            disabled={disabled || locked}
-            tabIndex={0}
-            title={reason ?? (locked ? "Global scope is locked" : undefined)}
-            onClick={() => onScopeSelected(option.value)}
+            tabIndex={tabStop === option.value ? 0 : -1}
+            title={reason ?? (locked ? "Global store not available" : undefined)}
+            onClick={() => { if (!disabled) onScopeSelected(option.value); }}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
               "inline-flex h-32 shrink-0 items-center justify-center whitespace-nowrap rounded-6 border px-12 text-13 transition-colors",
               "border-transparent text-text-secondary hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
-              "disabled:cursor-not-allowed disabled:opacity-50",
+              "aria-disabled:cursor-not-allowed aria-disabled:text-text-secondary",
               scope === option.value && "border-border bg-raised font-medium text-text",
               locked && "text-text-secondary",
             )}

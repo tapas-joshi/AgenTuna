@@ -290,3 +290,75 @@ fn drift_event_row_serializes_to_stable_snake_case() {
     assert_eq!(json["path"], "/path");
     assert_eq!(json["resolved_at"], serde_json::Value::Null);
 }
+
+/// Repository roots one workspace level above this crate.
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate directory has a workspace parent")
+        .to_path_buf()
+}
+
+/// Every `.rs` file below `root`, recursively (sorted for a stable failure message).
+fn rust_sources(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, &mut found);
+    found.sort();
+    found
+}
+
+/// TF-021 AC3: `at-db` owns the shared row structs and the deployment matrix only.
+///
+/// The domain list queries named by the story live in the repositories that own them:
+/// TS-001's `list_skills` in `skills_index`, TM-033's `mcp_list_rows` behind the MCP list
+/// projection, TA-006's `at_engine::effective::query` for effective config, and the
+/// app-facing `skills_list` command. `at-db` must not grow a same-named copy of any of them.
+#[test]
+fn domain_list_queries_do_not_live_in_at_db() {
+    let root = workspace_root();
+    let forbidden = ["skills_list", "mcp_list", "effective_rows"];
+    let mut offenders = Vec::new();
+    for path in rust_sources(&root.join("at-db").join("src")) {
+        let source = std::fs::read_to_string(&path).expect("at-db source is UTF-8");
+        for name in forbidden {
+            // Only a definition counts: `fn <name>(` or `fn <name><…>`.
+            if source.contains(&format!("fn {name}(")) || source.contains(&format!("fn {name}<")) {
+                offenders.push(format!("{} defines fn {name}", path.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "domain list queries belong to their repositories, not at-db: {offenders:#?}"
+    );
+
+    let owners = [
+        ("at-db/src/skills_index.rs", "fn list_skills("),
+        ("at-db/src/mcp_index.rs", "fn mcp_list_rows("),
+        ("at-engine/src/effective.rs", "fn query("),
+        ("at-app/src/app/skills_list.rs", "fn skills_list("),
+    ];
+    for (relative, symbol) in owners {
+        let path = root.join(relative);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        assert!(
+            source.contains(symbol),
+            "{} must own {symbol}",
+            path.display()
+        );
+    }
+}

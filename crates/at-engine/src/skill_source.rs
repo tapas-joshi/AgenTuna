@@ -800,30 +800,6 @@ mod tests {
         assert!(after.update_available);
         assert_eq!(log.entries().len(), 0);
     }
-    #[derive(Default)]
-    struct UpdateRecorder;
-
-    impl at_fs::changeset::OperationRecorder for UpdateRecorder {
-        fn begin(&mut self, _: &at_model::ChangeSet) -> Result<String, String> {
-            Ok("update-test-op".to_owned())
-        }
-
-        fn file_completed(
-            &mut self,
-            _: &str,
-            _: &Path,
-            _: Option<&str>,
-            _: Option<&str>,
-            _: Option<&Path>,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn finish(&mut self, _: &str, _: bool, _: bool) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn clean_update_is_reviewed_then_applied_with_backup_and_source_commit_bump() {
         let temp = tempfile::tempdir().expect("fixture");
@@ -883,7 +859,7 @@ mod tests {
 
         let backups = temp.path().join("backups");
         std::fs::create_dir(&backups).expect("backup directory");
-        let mut recorder = UpdateRecorder;
+        let mut recorder = at_fs::changeset::DbOperationRecorder::new(database.connection(), 30);
         let mut context = at_fs::changeset::ApplyContext {
             store_root: store.root(),
             backup_folder: &backups,
@@ -902,6 +878,18 @@ mod tests {
         assert!(!after.local_modified);
         assert_ne!(after.content_hash.as_deref(), Some(local_hash.as_str()));
         assert_eq!(after.id, source_id);
+        assert_eq!(
+            database
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM operations WHERE kind = 'update' AND status = 'succeeded'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("successful update operation"),
+            1,
+            "history records the reviewed update as an update operation"
+        );
         assert_eq!(
             plan_skill_update(
                 database.connection(),

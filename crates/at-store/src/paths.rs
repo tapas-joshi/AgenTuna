@@ -3,12 +3,19 @@
 //! This module is the only place that turns the process environment into paths. Everything
 //! else receives an [`AppPaths`]; nothing else may read `HOME`, call `dirs::home_dir` or build
 //! a store path itself. Tests inject [`PathEnvironment`] and never touch the developer's home.
+//!
+//! [`AppPaths::resolve`] selects the host platform and delegates the layout to
+//! [`crate::platform_roots`]; [`AppPaths::resolve_for`] takes the platform and an environment
+//! lookup explicitly so a Linux or Windows layout can be asserted from any host.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use directories::{BaseDirs, ProjectDirs};
+use directories::BaseDirs;
+
+use crate::pathkey::PortablePlatform;
+use crate::platform_roots::{PlatformRootError, join_child, resolve_platform_roots};
 
 /// Directory name of the per-user and per-project stores (`.agentuna`).
 pub const STORE_DIR_NAME: &str = ".agentuna";
@@ -109,6 +116,10 @@ pub enum PathError {
         #[source]
         source: io::Error,
     },
+    /// A platform-specific root could not be resolved (missing `%APPDATA%`, a relative XDG
+    /// value, ...). A missing home is reported as [`PathError::HomeUnavailable`] instead.
+    #[error(transparent)]
+    PlatformRoot(#[from] PlatformRootError),
 }
 
 /// Explicit path overrides, normally read from the process environment.
@@ -230,6 +241,7 @@ impl PathEnvironment {
 pub struct AppPaths {
     home: Option<PathBuf>,
     support_dir: PathBuf,
+    local_state_dir: PathBuf,
     db_path: PathBuf,
     log_dir: PathBuf,
     backup_dir: PathBuf,
@@ -242,37 +254,64 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// Resolves every root.
+    /// Resolves every root for the host platform.
     ///
     /// The Global store starts from [`DEFAULT_GLOBAL_STORE`] or `AGENTUNA_GLOBAL_STORE`; a
     /// settings override is applied later with [`Self::apply_settings_global_store`] because
     /// settings only become readable once the database is open.
     ///
+    /// The per-platform layout lives in [`crate::platform_roots`]; this method only selects the
+    /// host platform and the process environment.
+    ///
     /// # Errors
     /// [`PathError::HomeUnavailable`] when a root needs `$HOME` and neither an injected home nor
     /// a covering override exists; [`PathError::ProjectRootMissing`] or
     /// [`PathError::ProjectRootNotDirectory`] when a supplied project root is invalid;
-    /// [`PathError::ProjectRootRequired`] when a project store is overridden without one.
+    /// [`PathError::ProjectRootRequired`] when a project store is overridden without one;
+    /// [`PathError::PlatformRoot`] when a required platform variable is missing or malformed.
     pub fn resolve(env: &PathEnvironment) -> Result<Self, PathError> {
-        let home = env.home.resolve();
+        Self::resolve_for(PortablePlatform::current(), env, |name| {
+            std::env::var_os(name)
+        })
+    }
 
-        let support_dir = match &env.overrides.home {
-            Some(dir) => dir.clone(),
-            None => match (&env.home, &home) {
-                (HomeSource::Injected(injected), _) => support_dir_for_home(injected),
-                (_, Some(home)) => {
-                    project_dirs_support_dir().unwrap_or_else(|| support_dir_for_home(home))
+    /// Resolves every root using `platform`'s rules, reading root variables through `lookup`.
+    ///
+    /// Production goes through [`Self::resolve`]; tests and the portability checks call this
+    /// with an injected home and root values so a Linux or Windows layout can be asserted from
+    /// any host without touching the developer's environment.
+    ///
+    /// # Errors
+    /// As [`Self::resolve`].
+    pub fn resolve_for(
+        platform: PortablePlatform,
+        env: &PathEnvironment,
+        mut lookup: impl FnMut(&str) -> Option<OsString>,
+    ) -> Result<Self, PathError> {
+        let mut home = env.home.resolve();
+
+        let (support_dir, local_state_dir, cache_dir) = match &env.overrides.home {
+            Some(dir) => (dir.clone(), dir.clone(), join_child(dir, CACHE_DIR_NAME)),
+            None => {
+                let roots = resolve_platform_roots(platform, home.as_deref(), &mut lookup)
+                    .map_err(|source| match source {
+                        PlatformRootError::HomeUnavailable => PathError::HomeUnavailable,
+                        other => PathError::PlatformRoot(other),
+                    })?;
+                if home.is_none() {
+                    // Windows resolves `%USERPROFILE%` inside the platform module.
+                    home = Some(roots.home.clone());
                 }
-                (_, None) => return Err(PathError::HomeUnavailable),
-            },
+                (roots.support_dir, roots.local_state_dir, roots.cache_dir)
+            }
         };
 
         let user_store = match &env.overrides.user_store {
             Some(dir) => dir.clone(),
-            None => home
-                .as_ref()
-                .ok_or(PathError::HomeUnavailable)?
-                .join(STORE_DIR_NAME),
+            None => join_child(
+                home.as_ref().ok_or(PathError::HomeUnavailable)?,
+                STORE_DIR_NAME,
+            ),
         };
 
         let project_store = match (&env.project_root, &env.overrides.project_store) {
@@ -281,7 +320,7 @@ impl AppPaths {
                 Some(
                     override_path
                         .clone()
-                        .unwrap_or_else(|| root.join(STORE_DIR_NAME)),
+                        .unwrap_or_else(|| join_child(root, STORE_DIR_NAME)),
                 )
             }
             (None, Some(dir)) => {
@@ -300,10 +339,11 @@ impl AppPaths {
 
         Ok(Self {
             home,
-            db_path: support_dir.join(DB_FILE_NAME),
-            log_dir: support_dir.join(LOG_DIR_NAME),
-            backup_dir: support_dir.join(BACKUP_DIR_NAME),
-            cache_dir: support_dir.join(CACHE_DIR_NAME),
+            db_path: join_child(&support_dir, DB_FILE_NAME),
+            log_dir: join_child(&support_dir, LOG_DIR_NAME),
+            backup_dir: join_child(&support_dir, BACKUP_DIR_NAME),
+            cache_dir,
+            local_state_dir,
             support_dir,
             user_store,
             project_store,
@@ -321,24 +361,18 @@ impl AppPaths {
 
     /// Returns equivalent resolved paths with `project_root` selected.
     ///
-    /// Existing User and Global overrides are preserved. Project paths are resolved through
-    /// the same central path policy as [`Self::resolve`].
+    /// Every other root is kept exactly as resolved, including an injected XDG or `%APPDATA%`
+    /// lookup, so switching projects never re-reads the environment. An existing project store
+    /// override is not carried over: the selected project's store is `<project>/.agentuna`.
     ///
     /// # Errors
-    /// Returns [`PathError`] when the home or selected project root is unavailable.
+    /// [`PathError::ProjectRootMissing`] or [`PathError::ProjectRootNotDirectory`] when
+    /// `project_root` is not an existing directory.
     pub fn for_project(&self, project_root: &Path) -> Result<Self, PathError> {
-        let home = self
-            .home
-            .clone()
-            .map_or(HomeSource::Unavailable, HomeSource::Injected);
-        Self::resolve(&PathEnvironment {
-            home,
-            overrides: PathOverrides {
-                user_store: Some(self.user_store.clone()),
-                global_store: Some(self.global_store.clone()),
-                ..PathOverrides::default()
-            },
-            project_root: Some(project_root.to_path_buf()),
+        check_project_root(project_root)?;
+        Ok(Self {
+            project_store: Some(join_child(project_root, STORE_DIR_NAME)),
+            ..self.clone()
         })
     }
 
@@ -346,6 +380,13 @@ impl AppPaths {
     #[must_use]
     pub fn support_dir(&self) -> &Path {
         &self.support_dir
+    }
+
+    /// Local state directory (`<support>` on macOS; `$XDG_DATA_HOME/agentuna` on Linux;
+    /// `%LOCALAPPDATA%\AgenTuna` on Windows).
+    #[must_use]
+    pub fn local_state_dir(&self) -> &Path {
+        &self.local_state_dir
     }
 
     /// SQLite index path (`<support>/agentuna.db`).
@@ -439,6 +480,7 @@ impl AppPaths {
     /// [`PathError::CreateDir`] with the failing path.
     pub fn create_dirs(&self) -> Result<(), PathError> {
         create_dir(&self.support_dir, 0o700)?;
+        create_dir(&self.local_state_dir, 0o700)?;
         create_dir(&self.log_dir, 0o700)?;
         create_dir(&self.backup_dir, 0o700)?;
         create_dir(&self.cache_dir, 0o700)?;
@@ -455,37 +497,6 @@ fn process_home() -> Option<PathBuf> {
     BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
 }
 
-/// The per-user support directory from `ProjectDirs` (`Application Support/AgenTuna` on macOS).
-fn project_dirs_support_dir() -> Option<PathBuf> {
-    ProjectDirs::from("", "", APP_DIR_NAME).map(|dirs| dirs.data_dir().to_path_buf())
-}
-
-/// The support directory for an explicitly injected home, following the same layout
-/// `directories` uses on this platform.
-fn support_dir_for_home(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library")
-            .join("Application Support")
-            .join(APP_DIR_NAME)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".local").join("share").join(APP_DIR_NAME)
-    }
-    #[cfg(windows)]
-    {
-        home.join("AppData")
-            .join("Roaming")
-            .join(APP_DIR_NAME)
-            .join("data")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    {
-        home.join(APP_DIR_NAME)
-    }
-}
-
 fn check_project_root(root: &Path) -> Result<(), PathError> {
     let metadata = std::fs::metadata(root).map_err(|_| PathError::ProjectRootMissing {
         path: root.to_path_buf(),
@@ -499,23 +510,11 @@ fn check_project_root(root: &Path) -> Result<(), PathError> {
 }
 
 fn create_dir(path: &Path, mode: u32) -> Result<(), PathError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true).mode(mode);
-        builder.create(path).map_err(|source| PathError::CreateDir {
-            path: path.to_path_buf(),
-            source,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-        std::fs::create_dir_all(path).map_err(|source| PathError::CreateDir {
-            path: path.to_path_buf(),
-            source,
-        })
-    }
+    at_fs::ensure_dir_with_mode(path, Some(mode)).map_err(|err| PathError::CreateDir {
+        path: path.to_path_buf(),
+        source: match err {
+            at_fs::FsError::Io { source, .. } => source,
+            other => std::io::Error::other(other.to_string()),
+        },
+    })
 }

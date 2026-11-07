@@ -60,6 +60,23 @@ pub fn list_native_skills(
     store_roots: &[PathBuf],
     roots: impl IntoIterator<Item = AgentPathCandidate>,
 ) -> Result<Vec<NativeSkill>, AgentError> {
+    list_native_skills_with_options(agent, env, store_roots, roots, false)
+}
+
+/// Lists skills, optionally keeping links that point into an AgenTuna store.
+///
+/// The migration scan keeps them so it can label them `Managed`; the skills screen omits
+/// them because they are AgenTuna's own deployments, not native content.
+///
+/// # Errors
+/// Returns a typed error for a root that cannot be enumerated.
+pub fn list_native_skills_with_options(
+    agent: &AgentId,
+    env: &AgentEnvironment,
+    store_roots: &[PathBuf],
+    roots: impl IntoIterator<Item = AgentPathCandidate>,
+    include_store_links: bool,
+) -> Result<Vec<NativeSkill>, AgentError> {
     let mut skills = Vec::new();
     for root in roots {
         if root.kind != "skills_dir" {
@@ -135,9 +152,21 @@ pub fn list_native_skills(
                         ));
                         continue;
                     }
+                    Err(error) if is_symlink_loop(&error) => {
+                        let mut row = skill_error(
+                            agent,
+                            root.scope,
+                            path,
+                            NativeSkillState::Broken,
+                            "symbolic link loop",
+                        );
+                        row.target = Some(target_path.clone());
+                        skills.push(row);
+                        continue;
+                    }
                     Err(source) => return Err(AgentError::Io { path, source }),
                 };
-                if is_store_target(&resolved, store_roots) {
+                if is_store_target(&resolved, store_roots) && !include_store_links {
                     continue;
                 }
                 if !is_within_injected_roots(&resolved, env) {
@@ -285,6 +314,16 @@ fn is_store_target(resolved: &Path, store_roots: &[PathBuf]) -> bool {
         .any(|store| resolved.starts_with(store))
 }
 
+#[cfg(unix)]
+fn is_symlink_loop(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn is_symlink_loop(_: &std::io::Error) -> bool {
+    false
+}
+
 fn is_within_injected_roots(path: &Path, env: &AgentEnvironment) -> bool {
     let roots = [Some(env.home.clone()), env.project.clone()];
     roots
@@ -384,6 +423,11 @@ mod tests {
             ["broken", "good", "invalid", "outside"]
         );
         assert_eq!(rows[0].state, NativeSkillState::Broken);
+        assert_eq!(
+            rows[0].error.as_deref(),
+            Some("dangling symbolic link"),
+            "dangling links have a specific diagnostic"
+        );
         assert_eq!(
             rows[0].target.as_ref().map(|target| target.is_absolute()),
             Some(true)

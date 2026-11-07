@@ -13,6 +13,7 @@ compile_error!("at-fs currently supports Unix platforms only");
 
 pub mod atomic;
 pub mod backup;
+pub mod bundle;
 /// Journaled, rollback-capable multi-file changes.
 pub use changeset::{
     ApplyContext, ApplyOutcome, ApplyRoots, ChangeSetApplyError, DbOperationRecorder,
@@ -23,6 +24,7 @@ pub mod changeset;
 pub mod concurrency;
 pub mod deploy;
 pub mod diff;
+mod durability;
 mod error;
 /// Test-only fault injection. Compiled only with the `faults` or `testkit` cargo feature, or in test builds.
 #[cfg(any(test, feature = "testkit", feature = "faults"))]
@@ -61,7 +63,7 @@ pub use error::FsError;
 pub use guard::{
     Classification, DeploymentLookup, MoveAsideOutcome, OverwriteGuard, OwnershipContext,
     OwnershipGuard, Remedy, TargetKind, classify_target, create_parents_if_target_absent,
-    move_aside,
+    ensure_dir, ensure_dir_with_mode, move_aside, set_directory_mode, set_permissions,
 };
 pub use hash::sha256_hex;
 pub use platform::{

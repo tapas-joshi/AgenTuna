@@ -702,3 +702,95 @@ fn disable_inherited_tombstones_and_safe_writes_e2e() {
         "failed disable write leaves store.json untouched"
     );
 }
+
+#[test]
+fn deleting_the_local_store_reconciles_the_index_on_rescan() {
+    // TA-096 acceptance 5: deleting the Local store restores the pre-local winner and a
+    // rescan leaves no stale derived row pointing at the removed scope.
+    let home = TestHome::new().expect("temp home");
+    let project = home.project("rescan").expect("project fixture");
+    init_repository(project.root());
+
+    let user_root = home.home().join(".agentuna");
+    write_skill(&user_root, "code-review", "code-review", "User copy.");
+    let project_root = project.store();
+    write_skill(&project_root, "code-review", "code-review", "Project copy.");
+
+    let local_root = project_root.join(LOCAL_DIR);
+    let local_layout = StoreLayout::new(Scope::Local, &local_root);
+    at_store::layout::init_store(Scope::Local, local_layout.root()).expect("init local store");
+    write_skill(&local_root, "code-review", "code-review", "Local copy.");
+    let rebuilt = at_store::manifest_rebuild::plan_manifest_rebuild(&local_layout)
+        .expect("plan local manifest");
+    let token = rebuilt.token().clone();
+    at_store::manifest_rebuild::apply_manifest_rebuild(&local_layout, &rebuilt, &token)
+        .expect("write local manifest");
+
+    let support = home.root().join("support");
+    fs::create_dir_all(&support).expect("support dir");
+    let database_path = support.join("agentuna.db");
+    let mut database = at_db::Database::open_file(&database_path).expect("open index");
+    let rebuild_paths =
+        at_db::rebuild::RebuildPaths::new(home.home().to_path_buf(), home.home().join(".agentuna"))
+            .with_project_and_store(project.root().to_path_buf(), project_root.clone());
+    at_db::rebuild::rebuild(database.connection_mut(), &rebuild_paths, None).expect("first rescan");
+
+    let local_items: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM items WHERE scope = 'local' AND kind = 'skill'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count local items");
+    assert_eq!(local_items, 1, "the first rescan indexes the Local skill");
+
+    fs::remove_dir_all(&local_root).expect("delete the local store");
+    at_db::rebuild::rebuild(database.connection_mut(), &rebuild_paths, None)
+        .expect("second rescan");
+
+    let local_items: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM items WHERE scope = 'local'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count local items after removal");
+    assert_eq!(
+        local_items, 0,
+        "no stale Local item row survives the rescan"
+    );
+    let local_deployments: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM deployments WHERE scope = 'local'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count local deployments");
+    assert_eq!(
+        local_deployments, 0,
+        "no stale Local deployment row survives the rescan"
+    );
+
+    let scope = local_scope(home.home(), project.root());
+    let layers = [
+        layer(Scope::User, load_skills(&user_root, Scope::User)),
+        layer(Scope::Project, load_skills(&project_root, Scope::Project)),
+    ];
+    let outcome = resolve_with_local(&layers, &local_layer(&scope));
+    assert_eq!(
+        outcome.resolved.items[0].scope,
+        Scope::Project,
+        "the pre-local winner is effective again"
+    );
+    assert!(
+        outcome
+            .resolved
+            .items
+            .iter()
+            .all(|item| !item.definition.path.starts_with(&local_root)),
+        "no winner references the removed Local store"
+    );
+}

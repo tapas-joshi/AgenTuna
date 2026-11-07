@@ -45,6 +45,7 @@ pub struct EffectiveQuery<'a> {
 
 /// One item's effective configuration and per-agent load state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct EffectiveItem {
     /// Stable logical identity.
     #[ts(type = "string")]
@@ -72,6 +73,7 @@ pub struct EffectiveItem {
 
 /// One agent's effective load state for an item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct EffectiveAgentState {
     /// Agent identity.
     #[ts(type = "string")]
@@ -85,6 +87,7 @@ pub struct EffectiveAgentState {
 
 /// Lock metadata shown with an effective item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct EffectiveLock {
     /// Opaque lock row identity.
     pub id: String,
@@ -94,6 +97,7 @@ pub struct EffectiveLock {
 
 /// A disabled item entry and the tombstone's known provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct EffectiveDisabled {
     /// Disabled logical identity.
     #[ts(type = "string")]
@@ -132,6 +136,7 @@ pub struct EffectiveConfig {
 
 /// Resolution warning retained in the effective-config payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct EffectiveDiagnostic {
     /// A stable diagnostic kind.
     pub kind: String,
@@ -140,6 +145,56 @@ pub struct EffectiveDiagnostic {
     pub scope: Option<Scope>,
     /// Redacted source error text when provided by the resolver.
     pub message: String,
+}
+
+/// The one serialized shape of an effective-config query result.
+///
+/// The Tauri command and `agentuna effective --json` both return exactly this
+/// struct through the same `serde` implementation, so the CLI output and the
+/// object the UI renders cannot drift apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct EffectiveQueryView {
+    /// Resolved effective items, sorted by kind then display name.
+    pub items: Vec<EffectiveItem>,
+    /// Items disabled here, sorted by kind, name, scope and agent.
+    pub disabled_here: Vec<EffectiveDisabled>,
+    /// Non-fatal lock/tombstone resolution warnings.
+    pub diagnostics: Vec<EffectiveDiagnostic>,
+    /// Store-entry diagnostics that did not prevent this query.
+    pub load_diagnostics: Vec<crate::loader::LoadDiagnostic>,
+    /// Scope this view answers for, when the caller reports it.
+    ///
+    /// `agentuna effective` always sets it, so a script can see which scope a request
+    /// that omitted `--scope` resolved to. The app leaves it `None`, so the payload the
+    /// screens consume keeps its shape; the field is additive within schema version 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub scope: Option<Scope>,
+}
+
+impl EffectiveQueryView {
+    /// Wraps a query result together with the loader diagnostics the caller collected.
+    #[must_use]
+    pub fn new(
+        config: EffectiveConfig,
+        load_diagnostics: Vec<crate::loader::LoadDiagnostic>,
+    ) -> Self {
+        Self {
+            items: config.items,
+            disabled_here: config.disabled_here,
+            diagnostics: config.diagnostics,
+            load_diagnostics,
+            scope: None,
+        }
+    }
+
+    /// Records the scope this view answers for.
+    #[must_use]
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
 }
 
 /// Resolves definitions and joins them with the caller's verified per-agent load observations.

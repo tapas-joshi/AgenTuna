@@ -3,7 +3,7 @@
  */
 
 export { AccountMenu } from "./AccountMenu";
-export type { AccountMenuAction } from "./AccountMenu";
+export type { AccountMenuAction, AccountMenuProps } from "./AccountMenu";
 export { Menu, MenuLabel, MenuSeparator } from "./Menu";
 export type { MenuProps } from "./Menu";
 export { MenuItem } from "./MenuItem";

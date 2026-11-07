@@ -9,6 +9,10 @@ export type OverwriteMoveAsideView = {
  */
 original: string, 
 /**
- * New path containing the preserved original bytes.
+ * New path containing the preserved original bytes under `<support>/.moved-aside/`.
  */
-moved_to: string, };
+moved_to: string, 
+/**
+ * `operations` row that records the move and holds its inverse mapping.
+ */
+operation_id: string, };

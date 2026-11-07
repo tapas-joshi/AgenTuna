@@ -269,6 +269,86 @@ pub fn duplicate_item(
     Ok(())
 }
 
+/// Specification for an item recorded directly from a store manifest.
+#[derive(Clone, Copy, Debug)]
+pub struct ManifestItemSpec<'a> {
+    /// Item identifier from the manifest.
+    pub id: ItemId,
+    /// Kind of item (skill, rule, MCP server).
+    pub kind: ItemKind,
+    /// Target scope.
+    pub scope: Scope,
+    /// Optional owning project id.
+    pub project_id: Option<&'a str>,
+    /// Slug within scope/project.
+    pub slug: &'a str,
+    /// Display name.
+    pub name: &'a str,
+    /// Path relative to store or workspace root.
+    pub source_path: &'a str,
+    /// SHA-256 hash of canonical content.
+    pub content_hash: &'a str,
+}
+
+/// Synchronizes a manifest item into the `items` repository.
+///
+/// If an item already exists with matching `(kind, scope, project_id, slug)` identity,
+/// its `name`, `source_path`, `content_hash`, `state` ('present'), and `managed` (1)
+/// fields are updated, and the existing `ItemId` is returned.
+///
+/// Otherwise, the item is inserted using `spec.id` (updating on id conflict) and
+/// `spec.id` is returned.
+///
+/// # Errors
+/// Returns [`DbError`] when validation or execution fails.
+pub fn sync_manifest_item(
+    connection: &Connection,
+    spec: &ManifestItemSpec<'_>,
+) -> Result<ItemId, DbError> {
+    validate_scope_project(spec.scope, spec.project_id)?;
+    if let Some(existing) = item_id_by_identity(
+        connection,
+        spec.kind,
+        spec.scope,
+        spec.project_id,
+        spec.slug,
+    )? {
+        connection.execute(
+            "UPDATE items SET name = ?2, source_path = ?3, content_hash = ?4, \
+             state = 'present', managed = 1, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+            params![
+                existing.to_string(),
+                spec.name,
+                spec.source_path,
+                spec.content_hash
+            ],
+        )?;
+        return Ok(existing);
+    }
+    connection.execute(
+        "INSERT INTO items (id, kind, scope, project_id, slug, name, source_path, \
+         content_hash, state, managed) \
+         VALUES (?1, ?8, ?2, ?3, ?4, ?5, ?6, ?7, 'present', 1) \
+         ON CONFLICT(id) DO UPDATE SET scope = excluded.scope, \
+             project_id = excluded.project_id, slug = excluded.slug, name = excluded.name, \
+             source_path = excluded.source_path, content_hash = excluded.content_hash, \
+             state = 'present', managed = 1, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        params![
+            spec.id.to_string(),
+            spec.scope.wire_name(),
+            spec.project_id,
+            spec.slug,
+            spec.name,
+            spec.source_path,
+            spec.content_hash,
+            spec.kind.wire_name(),
+        ],
+    )?;
+    Ok(spec.id)
+}
+
 fn validate_scope_project(scope: Scope, project: Option<&str>) -> Result<(), DbError> {
     if matches!(scope, Scope::Project | Scope::Local) != project.is_some() {
         return Err(DbError::InvalidValue {
@@ -418,4 +498,244 @@ mod tests {
         assert_eq!(item_count, 1);
         transaction.commit().expect("commit adoption");
     }
+
+    #[test]
+    fn sync_manifest_item_inserts_and_updates_by_identity() {
+        use super::{ManifestItemSpec, sync_manifest_item};
+
+        let db = Database::open_in_memory().expect("open database");
+        let connection = db.connection();
+
+        let item_id = ItemId::new();
+        let spec = ManifestItemSpec {
+            id: item_id,
+            kind: ItemKind::Skill,
+            scope: Scope::User,
+            project_id: None,
+            slug: "test-skill",
+            name: "Test Skill",
+            source_path: "skills/test-skill",
+            content_hash: "hash_v1",
+        };
+
+        let returned_id = sync_manifest_item(connection, &spec).expect("insert manifest item");
+        assert_eq!(returned_id, item_id);
+
+        // Re-syncing with a different proposed ID but same identity updates the existing row
+        let new_proposed_id = ItemId::new();
+        let updated_spec = ManifestItemSpec {
+            id: new_proposed_id,
+            kind: ItemKind::Skill,
+            scope: Scope::User,
+            project_id: None,
+            slug: "test-skill",
+            name: "Updated Skill",
+            source_path: "skills/test-skill-new",
+            content_hash: "hash_v2",
+        };
+
+        let existing_id =
+            sync_manifest_item(connection, &updated_spec).expect("update manifest item");
+        assert_eq!(existing_id, item_id);
+
+        let row: (String, String, String) = connection
+            .query_row(
+                "SELECT name, source_path, content_hash FROM items WHERE id = ?1",
+                [item_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read updated item");
+        assert_eq!(row.0, "Updated Skill");
+        assert_eq!(row.1, "skills/test-skill-new");
+        assert_eq!(row.2, "hash_v2");
+    }
+}
+
+/// Snapshot of one `items` row captured before a delete removed it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UndoItemSnapshot {
+    /// Stable item identity.
+    pub id: String,
+    /// Item kind wire name.
+    pub kind: String,
+    /// Scope wire name.
+    pub scope: String,
+    /// Owning project id for Project and Local rows.
+    pub project_id: Option<String>,
+    /// Slug within the scope.
+    pub slug: String,
+    /// Display name.
+    pub name: String,
+    /// Canonical store or rule path.
+    pub source_path: Option<String>,
+    /// Link target for a linked rule.
+    pub link_target: Option<String>,
+    /// Canonical content hash.
+    pub content_hash: Option<String>,
+    /// Projection state.
+    pub state: Option<String>,
+    /// Whether AgenTuna owns the item.
+    pub managed: i64,
+    /// Source row reference.
+    pub source_id: Option<String>,
+    /// Default enabled flag.
+    pub enabled_default: Option<i64>,
+    /// Adapter tags JSON.
+    pub tags_json: Option<String>,
+}
+
+/// Reads one item row for undo metadata.
+///
+/// # Errors
+/// Returns the database failure when the row cannot be read.
+pub fn undo_snapshot(
+    connection: &Connection,
+    item_id: &ItemId,
+) -> Result<Option<UndoItemSnapshot>, DbError> {
+    Ok(connection
+        .query_row(
+            "SELECT id, kind, scope, project_id, slug, name, source_path, link_target, \
+             content_hash, state, managed, source_id, enabled_default, tags_json \
+             FROM items WHERE id = ?1",
+            [item_id.to_string()],
+            |row| {
+                Ok(UndoItemSnapshot {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    scope: row.get(2)?,
+                    project_id: row.get(3)?,
+                    slug: row.get(4)?,
+                    name: row.get(5)?,
+                    source_path: row.get(6)?,
+                    link_target: row.get(7)?,
+                    content_hash: row.get(8)?,
+                    state: row.get(9)?,
+                    managed: row.get(10)?,
+                    source_id: row.get(11)?,
+                    enabled_default: row.get(12)?,
+                    tags_json: row.get(13)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Restores one captured item row, replacing any current row with the same id.
+///
+/// The caller restores the owning deployment rows separately.
+///
+/// # Errors
+/// Returns the database failure when the row cannot be written.
+pub fn restore_undo_snapshot(
+    connection: &Connection,
+    snapshot: &UndoItemSnapshot,
+) -> Result<(), DbError> {
+    let source_exists = match snapshot.source_id.as_deref() {
+        Some(source_id) => connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sources WHERE id = ?1)",
+            [source_id],
+            |row| row.get::<_, bool>(0),
+        )?,
+        None => false,
+    };
+    let source_id = snapshot.source_id.as_deref().filter(|_| source_exists);
+    connection.execute("DELETE FROM items WHERE id = ?1", [snapshot.id.as_str()])?;
+    connection.execute(
+        "INSERT INTO items (id, kind, scope, project_id, slug, name, source_path, \
+         link_target, content_hash, state, managed, source_id, enabled_default, tags_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            snapshot.id,
+            snapshot.kind,
+            snapshot.scope,
+            snapshot.project_id,
+            snapshot.slug,
+            snapshot.name,
+            snapshot.source_path,
+            snapshot.link_target,
+            snapshot.content_hash,
+            snapshot.state,
+            snapshot.managed,
+            source_id,
+            snapshot.enabled_default,
+            snapshot.tags_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Lists the ids of managed skills and MCP servers in one scope.
+///
+/// # Errors
+/// Returns the database failure when the query fails.
+pub fn managed_ids_for_scope(
+    connection: &Connection,
+    scope: Scope,
+    project_id: Option<&str>,
+) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT id FROM items WHERE kind IN ('skill', 'mcp_server') AND scope = ?1 \
+         AND COALESCE(project_id, '') = COALESCE(?2, '')",
+    )?;
+    let rows = statement.query_map(params![scope.wire_name(), project_id], |row| {
+        row.get::<_, String>(0)
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Reads one item's display name.
+///
+/// # Errors
+/// Returns the database failure when the row cannot be read.
+pub fn name_for_id(connection: &Connection, id: &str) -> Result<Option<String>, DbError> {
+    Ok(connection
+        .query_row("SELECT name FROM items WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?)
+}
+
+/// Records a restored rule file's hash on its item row.
+///
+/// # Errors
+/// Returns the database failure when the update fails.
+pub fn update_content_hash_for_source(
+    connection: &Connection,
+    source_path: &str,
+    hash: &str,
+) -> Result<usize, DbError> {
+    Ok(connection.execute(
+        "UPDATE items SET content_hash = ?2, state = 'present' \
+         WHERE kind = 'rule' AND source_path = ?1",
+        params![source_path, hash],
+    )?)
+}
+
+/// Records a saved rule file's hash on its item row by identity.
+///
+/// # Errors
+/// Returns the database failure when the update fails.
+pub fn update_content_hash_for_id(
+    connection: &Connection,
+    item_id: &ItemId,
+    hash: &str,
+) -> Result<usize, DbError> {
+    Ok(connection.execute(
+        "UPDATE items SET content_hash = ?2, state = 'present' WHERE id = ?1",
+        params![item_id.to_string(), hash],
+    )?)
+}
+
+/// Removes a rule row whose file an undo deleted.
+///
+/// # Errors
+/// Returns the database failure when the delete fails.
+pub fn delete_rules_for_source(
+    connection: &Connection,
+    source_path: &str,
+) -> Result<usize, DbError> {
+    Ok(connection.execute(
+        "DELETE FROM items WHERE kind = 'rule' AND source_path = ?1",
+        [source_path],
+    )?)
 }

@@ -14,6 +14,10 @@ wizard: AddSkillWizard,
  */
 project_id: string | null, 
 /**
+ * Import-session identity required by Git, folder and ZIP sources.
+ */
+import_id: string | null, 
+/**
  * Whether the user explicitly requested Git staging.
  */
 stage_requested: boolean, };

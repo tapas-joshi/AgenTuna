@@ -8,3 +8,4 @@ export type {
 } from "./markdown-editor";
 export { MarkdownPreview } from "./markdown-preview";
 export type { MarkdownPreviewProps } from "./markdown-preview";
+export { isSafeExternalUrl, openExternalLink } from "./external-link";

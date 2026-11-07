@@ -1,17 +1,19 @@
 //! Read-only loading of canonical scope stores into engine query snapshots.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::local_scope::{LocalScope, LocalScopeStatus};
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment, DetectionState, NativeItem};
-use at_model::{Definition, ItemKind, Scope, ScopeSnapshot};
+use at_model::{Definition, ItemKind, ItemState, Scope, ScopeSnapshot};
 use at_store::layout::StoreLayout;
 use at_store::local_store::LocalStorePaths;
 use at_store::manifest::{ManifestError, StoreManifest, resolve_item_path};
 use at_store::mcp_store::McpStore;
 use at_store::paths::AppPaths;
 use at_store::skill::read_skill_doc;
+use rusqlite::Connection;
 
 use crate::tombstones::ManifestTombstones;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use ts_rs::TS;
 
 /// Diagnostic from a store entry that could not be represented as a definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct LoadDiagnostic {
     /// Scope whose input was skipped.
     #[ts(type = "string")]
@@ -331,6 +334,55 @@ pub fn observe_agents(
         });
     }
     Ok(observations)
+}
+
+/// Joins adapter observations, indexed deployments and native discovery into per-agent loads.
+///
+/// This is the one composition shared by the Tauri effective command and `agentuna effective`:
+/// an agent loads an item when a deployment for the winning definition exists at or below the
+/// queried scope, or when the adapter reports a native item with the same kind and normalized
+/// name. Store presence alone never counts as loaded.
+///
+/// # Errors
+/// Returns a typed database error when the deployment index cannot be read.
+pub fn agent_loads(
+    connection: &Connection,
+    observations: &[AgentObservation],
+    layers: &[ScopeSnapshot],
+    scope: Scope,
+    project_id: Option<&str>,
+) -> Result<Vec<crate::effective::AgentLoads>, at_db::DbError> {
+    let mut agents = Vec::with_capacity(observations.len());
+    for observation in observations {
+        let deployments =
+            at_db::deployments::list_deployments_for_agent(connection, &observation.agent)?;
+        let mut loaded = BTreeMap::new();
+        for definition in layers.iter().flat_map(|layer| &layer.definitions) {
+            let deployment = deployments
+                .iter()
+                .filter(|row| Some(row.item_id) == definition.item_id)
+                .filter(|row| row.scope.precedence() <= scope.precedence())
+                .filter(|row| match row.scope {
+                    Scope::Global | Scope::User => row.project_id.is_none(),
+                    Scope::Project | Scope::Local => row.project_id.as_deref() == project_id,
+                })
+                .max_by_key(|row| row.scope.precedence());
+            if let Some(deployment) = deployment {
+                loaded.insert(definition.logical_id(), deployment.state);
+            } else if observation.native.iter().any(|native| {
+                native.kind == definition.kind
+                    && at_model::normalized_name(&native.name) == definition.normalized_name()
+            }) {
+                loaded.insert(definition.logical_id(), ItemState::Native);
+            }
+        }
+        agents.push(crate::effective::AgentLoads {
+            agent: observation.agent.clone(),
+            installed: observation.installed,
+            loaded,
+        });
+    }
+    Ok(agents)
 }
 
 #[cfg(test)]

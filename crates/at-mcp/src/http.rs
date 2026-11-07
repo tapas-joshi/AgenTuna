@@ -320,7 +320,10 @@ impl HttpClient {
             let manager = self.build_auth_manager(server, profile).await?;
             let auth_client = AuthClient::new(reqwest::Client::new(), manager);
             let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-            let handshake = serve_client_with_ct(client_config, transport, cancel.clone());
+            // rmcp's `RunningService` holds a `DropGuard` on this token and cancels it when
+            // the service ends; hand it a child so ending one check never cancels the
+            // caller's app-lifetime token.
+            let handshake = serve_client_with_ct(client_config, transport, cancel.child_token());
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(HttpError::cancelled()),
@@ -333,7 +336,10 @@ impl HttpClient {
         } else {
             let transport =
                 StreamableHttpClientTransport::with_client(reqwest::Client::new(), config);
-            let handshake = serve_client_with_ct(client_config, transport, cancel.clone());
+            // rmcp's `RunningService` holds a `DropGuard` on this token and cancels it when
+            // the service ends; hand it a child so ending one check never cancels the
+            // caller's app-lifetime token.
+            let handshake = serve_client_with_ct(client_config, transport, cancel.child_token());
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(HttpError::cancelled()),

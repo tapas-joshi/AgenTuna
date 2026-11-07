@@ -32,6 +32,30 @@ pub enum PortablePlatform {
 }
 
 impl PortablePlatform {
+    /// The platform this binary runs on.
+    ///
+    /// Used to select the path rules in production. Tests that verify another platform's rules
+    /// pass that platform explicitly instead of relying on the host.
+    #[must_use]
+    pub const fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::MacOs
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(windows)]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            Self::Other
+        }
+    }
+
     /// Whether path comparison folds case on this platform.
     #[must_use]
     pub const fn is_case_insensitive(self) -> bool {

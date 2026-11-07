@@ -1,0 +1,154 @@
+//! TF-043: Move aside is reversible through the move journal, byte for byte.
+//!
+//! The sandbox registers a fake Claude Code skills folder in the index, moves an unmanaged
+//! skill out of it and undoes the move. Nothing here touches a real agent folder.
+
+mod support;
+
+use std::fs;
+use std::path::Path;
+
+use at_db::agents::{AgentPathFormat, AgentPathKind, AgentPathSpec};
+use at_model::{AgentId, Scope};
+use support::{Sandbox, TestResult};
+
+#[test]
+fn moving_aside_and_undoing_restores_the_original_path_and_hash() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::ClaudeCode)?;
+    let skills_dir = sandbox.home.join(".claude/skills");
+    fs::create_dir_all(&skills_dir)?;
+    at_db::agents::upsert_agent_path(
+        database.connection(),
+        &AgentPathSpec {
+            agent: &AgentId::ClaudeCode,
+            scope: Scope::User,
+            kind: AgentPathKind::SkillsDir,
+            path: &skills_dir,
+            format: Some(AgentPathFormat::Dir),
+            is_primary: true,
+            exists: true,
+        },
+    )?;
+
+    let target = skills_dir.join("hand-written");
+    fs::create_dir_all(&target)?;
+    fs::write(target.join("SKILL.md"), b"---\nname: hand-written\n---\n")?;
+    let before_hash = at_fs::sha256_hex(&fs::read(target.join("SKILL.md"))?);
+
+    let state = sandbox.state()?;
+    let moved = at_app::app::overwrite::overwrite_move_aside_inner(
+        &state,
+        target.to_str().expect("utf-8 target"),
+    )?;
+    assert!(!target.exists(), "Move aside removes the original path");
+    assert_eq!(moved.original, target.display().to_string());
+    let stored = Path::new(&moved.moved_to).join("SKILL.md");
+    assert!(stored.exists(), "the whole tree is preserved under support");
+    assert_eq!(at_fs::sha256_hex(&fs::read(&stored)?), before_hash);
+
+    let undone = at_app::app::overwrite::overwrite_undo_move_inner(&state, &moved.operation_id)?;
+    assert_eq!(undone.original, target.display().to_string());
+    assert_eq!(undone.moved_back_from, moved.moved_to);
+    assert_eq!(
+        at_fs::sha256_hex(&fs::read(target.join("SKILL.md"))?),
+        before_hash,
+        "Undo restores the original path and hash"
+    );
+    assert!(!Path::new(&moved.moved_to).exists());
+
+    let database = sandbox.database()?;
+    let detail = at_db::ops::operation_detail(database.connection(), &moved.operation_id)?
+        .expect("the move is in the operations log");
+    assert_eq!(
+        detail.operation.status,
+        Some(at_db::ops::OperationStatus::Undone)
+    );
+
+    let repeat = at_app::app::overwrite::overwrite_undo_move_inner(&state, &moved.operation_id);
+    assert!(repeat.is_err(), "an undone move cannot be undone twice");
+    Ok(())
+}
+
+#[test]
+fn undo_refuses_to_clobber_a_new_item_at_the_original_path() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::ClaudeCode)?;
+    let skills_dir = sandbox.home.join(".claude/skills");
+    fs::create_dir_all(&skills_dir)?;
+    at_db::agents::upsert_agent_path(
+        database.connection(),
+        &AgentPathSpec {
+            agent: &AgentId::ClaudeCode,
+            scope: Scope::User,
+            kind: AgentPathKind::SkillsDir,
+            path: &skills_dir,
+            format: Some(AgentPathFormat::Dir),
+            is_primary: true,
+            exists: true,
+        },
+    )?;
+    let target = skills_dir.join("unmanaged");
+    fs::create_dir_all(&target)?;
+    fs::write(target.join("SKILL.md"), b"original\n")?;
+
+    let state = sandbox.state()?;
+    let moved = at_app::app::overwrite::overwrite_move_aside_inner(
+        &state,
+        target.to_str().expect("utf-8 target"),
+    )?;
+    fs::create_dir_all(&target)?;
+    fs::write(target.join("SKILL.md"), b"newer external write\n")?;
+
+    let undo = at_app::app::overwrite::overwrite_undo_move_inner(&state, &moved.operation_id);
+    assert!(undo.is_err(), "a newer external item is never clobbered");
+    assert_eq!(
+        fs::read(target.join("SKILL.md"))?,
+        b"newer external write\n"
+    );
+    assert_eq!(
+        fs::read(Path::new(&moved.moved_to).join("SKILL.md"))?,
+        b"original\n",
+        "the moved-aside copy is still preserved"
+    );
+    Ok(())
+}
+
+#[test]
+fn adopt_authorized_roots_authorizes_backup_dir_outside_home() -> TestResult<()> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("fake_home");
+    let support = temp.path().join("isolated_support");
+    let user_store = temp.path().join("isolated_user_store");
+    let global_store = temp.path().join("isolated_global");
+    fs::create_dir_all(&home)?;
+    fs::create_dir_all(&support)?;
+    fs::create_dir_all(&user_store)?;
+    fs::create_dir_all(&global_store)?;
+
+    let paths = at_store::paths::AppPaths::resolve(&at_store::paths::PathEnvironment {
+        home: at_store::paths::HomeSource::Injected(home),
+        overrides: at_store::paths::PathOverrides {
+            home: Some(support.clone()),
+            user_store: Some(user_store),
+            global_store: Some(global_store),
+            project_store: None,
+        },
+        project_root: None,
+    })?;
+
+    let roots = at_app::app::overwrite::adopt_authorized_roots(&paths)?;
+    let canonical_backup = fs::canonicalize(paths.backup_dir())?;
+    assert!(
+        roots
+            .roots()
+            .iter()
+            .any(|r| canonical_backup.starts_with(r)),
+        "backup_dir outside home must be included in authorized roots: roots={:?}, backup_dir={:?}",
+        roots.roots(),
+        canonical_backup
+    );
+    Ok(())
+}

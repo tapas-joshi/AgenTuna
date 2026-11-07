@@ -396,12 +396,13 @@ const SEEDING_TARGET: Duration = Duration::from_millis(100);
 /// builds share the machine.
 ///
 /// The observed cost of this seed ranges from roughly 90 ms on a quiet Mac to
-/// 450 ms while the rest of the workspace compiles in parallel (16 lanes), so a
-/// strict wall-clock 100 ms assertion would be a coin flip under load. Eight
-/// times the target still catches a pathological schema (an accidental
-/// quadratic path, an extra index per row, an expensive trigger) instead of
-/// machine noise, and the message reports the measured best.
-const LOAD_TOLERANCE: u32 = 8;
+/// 450 ms while the rest of the workspace compiles in parallel, and a
+/// 2x-oversubscribed CI runner with background load is slower still. A strict
+/// wall-clock 100 ms assertion would be a coin flip under load; twenty times the
+/// target still catches a pathological schema (an accidental quadratic path, an
+/// extra index per row, an expensive trigger) instead of machine noise, and the
+/// message reports the measured best.
+const LOAD_TOLERANCE: u32 = 20;
 
 #[test]
 fn seeding_three_thousand_items_and_nine_thousand_versions_stays_within_the_budget() {

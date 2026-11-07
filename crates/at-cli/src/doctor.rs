@@ -38,6 +38,12 @@ pub enum Severity {
     Warn,
     /// The check found something that blocks normal operation.
     Error,
+    /// The subsystem the check inspects is owned by the desktop app and does not exist in
+    /// this CLI process, so the check neither passed nor failed.
+    ///
+    /// `doctor` never degrades its overall status because of a not-applicable check: the
+    /// CLI cannot fix a GUI subsystem, and a warning would be noise on every clean run.
+    NotApplicable,
 }
 
 impl Severity {
@@ -48,6 +54,18 @@ impl Severity {
             Self::Ok => "ok",
             Self::Warn => "warn",
             Self::Error => "error",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+
+    /// The label the narrow human column uses.
+    #[must_use]
+    pub const fn compact(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Error => "error",
+            Self::NotApplicable => "n/a",
         }
     }
 }
@@ -105,6 +123,16 @@ impl Finding {
         fix: impl Into<String>,
     ) -> Self {
         Self::new(check, code, Severity::Error, message, fix)
+    }
+
+    /// A check the CLI cannot run because the desktop app owns the subsystem.
+    fn not_applicable(
+        check: &'static str,
+        code: &'static str,
+        message: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
+        Self::new(check, code, Severity::NotApplicable, message, fix)
     }
 
     fn to_json(&self) -> Value {
@@ -241,6 +269,9 @@ pub struct Options<'a> {
     pub agent_paths: Capability<Vec<PathBuf>>,
     /// Probes for capabilities at-cli does not link.
     pub probes: &'a dyn Probes,
+    /// Whether the caller is the desktop app, which owns the watcher, the credential store
+    /// and agent-folder checks. The CLI reports those checks as `not_applicable`.
+    pub desktop: bool,
 }
 
 impl Default for Options<'_> {
@@ -252,6 +283,7 @@ impl Default for Options<'_> {
                 reason: "no agent path source is wired into this build yet".to_owned(),
             },
             probes: &SYSTEM_PROBES,
+            desktop: false,
         }
     }
 }
@@ -292,7 +324,18 @@ impl<'a> Options<'a> {
             dry_run: self.dry_run,
             agent_paths: self.agent_paths,
             probes,
+            desktop: self.desktop,
         }
+    }
+
+    /// Marks the caller as the desktop app, which links the GUI-owned subsystems.
+    ///
+    /// A GUI-owned check that its probe cannot run then reports a warning, because the app
+    /// could have performed it; the CLI reports `not_applicable` instead.
+    #[must_use]
+    pub fn with_desktop(mut self, desktop: bool) -> Self {
+        self.desktop = desktop;
+        self
     }
 }
 
@@ -328,6 +371,15 @@ impl Report {
             .count()
     }
 
+    /// How many checks the CLI could not run because the desktop app owns the subsystem.
+    #[must_use]
+    pub fn not_applicable_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::NotApplicable)
+            .count()
+    }
+
     /// How many findings passed.
     #[must_use]
     pub fn ok_count(&self) -> usize {
@@ -347,6 +399,7 @@ impl Report {
                 "ok": self.ok_count(),
                 "warnings": self.warn_count(),
                 "errors": self.error_count(),
+                "not_applicable": self.not_applicable_count(),
             },
         })
     }
@@ -367,21 +420,22 @@ impl Report {
         use std::fmt::Write as _;
 
         let mut text = format!(
-            "doctor: {} ok, {} warning(s), {} error(s)\n",
+            "doctor: {} ok, {} warning(s), {} error(s), {} not applicable\n",
             self.ok_count(),
             self.warn_count(),
-            self.error_count()
+            self.error_count(),
+            self.not_applicable_count()
         );
         for finding in &self.findings {
             let _ = writeln!(
                 text,
                 "{:<5} {:<11} {:<26} {}",
-                finding.severity.as_str(),
+                finding.severity.compact(),
                 finding.check,
                 finding.code,
                 finding.message
             );
-            if finding.severity != Severity::Ok {
+            if matches!(finding.severity, Severity::Warn | Severity::Error) {
                 let _ = writeln!(text, "{:<5} {:<11} {:<26} fix: {}", "", "", "", finding.fix);
             }
         }
@@ -414,10 +468,10 @@ pub fn inspect(paths: &AppPaths, options: &Options<'_>) -> Report {
 
     check_store_paths(paths, &mut repair, &mut findings);
     check_database(paths, &mut repair, &mut findings);
-    check_agent_paths(&options.agent_paths, &mut findings);
-    check_keychain(options.probes, &mut findings);
+    check_agent_paths(&options.agent_paths, options.desktop, &mut findings);
+    check_keychain(options.probes, options.desktop, &mut findings);
     check_disk_space(paths, options.probes, &mut findings);
-    check_watcher(options.probes, &mut findings);
+    check_watcher(options.probes, options.desktop, &mut findings);
     check_version(&mut findings);
 
     Report {
@@ -897,16 +951,29 @@ fn rebuild_index(db_path: &Path, failure: Finding, repair: &mut Repair, out: &mu
     }
 }
 
-fn check_agent_paths(agent_paths: &Capability<Vec<PathBuf>>, out: &mut Vec<Finding>) {
+fn check_agent_paths(
+    agent_paths: &Capability<Vec<PathBuf>>,
+    desktop: bool,
+    out: &mut Vec<Finding>,
+) {
     let roots = match agent_paths {
         Capability::Ready(roots) => roots,
         Capability::Unavailable { reason } => {
-            out.push(Finding::warn(
-                "agent_paths",
-                "agent_paths_unavailable",
-                format!("agent folder readability cannot be checked: {reason}"),
-                "connect an agent in the app so its configuration folder can be checked",
-            ));
+            out.push(if desktop {
+                Finding::warn(
+                    "agent_paths",
+                    "agent_paths_unavailable",
+                    format!("agent folder readability cannot be checked: {reason}"),
+                    "connect an agent in the app so its configuration folder can be checked",
+                )
+            } else {
+                Finding::not_applicable(
+                    "agent_paths",
+                    "agent_paths_not_applicable",
+                    format!("agent folder checks run in the desktop app: {reason}"),
+                    "run the app's environment check to inspect agent folders",
+                )
+            });
             return;
         }
     };
@@ -974,19 +1041,28 @@ fn inspect_agent_root(root: &Path) -> Finding {
     }
 }
 
-fn check_keychain(probes: &dyn Probes, out: &mut Vec<Finding>) {
+fn check_keychain(probes: &dyn Probes, desktop: bool, out: &mut Vec<Finding>) {
     match probes.keychain() {
         Capability::Ready(()) => out.push(Finding::ok(
             "keychain",
             "keychain_ok",
             "the OS credential store is reachable",
         )),
-        Capability::Unavailable { reason } => out.push(Finding::warn(
-            "keychain",
-            "keychain_unavailable",
-            format!("Keychain access cannot be checked: {reason}"),
-            "run the desktop app, which links the credential store, to check Keychain access",
-        )),
+        Capability::Unavailable { reason } => out.push(if desktop {
+            Finding::warn(
+                "keychain",
+                "keychain_unavailable",
+                format!("Keychain access cannot be checked: {reason}"),
+                "run the desktop app, which links the credential store, to check Keychain access",
+            )
+        } else {
+            Finding::not_applicable(
+                "keychain",
+                "keychain_not_applicable",
+                format!("Keychain access is checked by the desktop app: {reason}"),
+                "run the app's environment check to verify Keychain access",
+            )
+        }),
     }
 }
 
@@ -1029,19 +1105,28 @@ fn check_disk_space(paths: &AppPaths, probes: &dyn Probes, out: &mut Vec<Finding
     }
 }
 
-fn check_watcher(probes: &dyn Probes, out: &mut Vec<Finding>) {
+fn check_watcher(probes: &dyn Probes, desktop: bool, out: &mut Vec<Finding>) {
     match probes.watcher() {
         Capability::Ready(()) => out.push(Finding::ok(
             "watcher",
             "watcher_ok",
             "the file watcher starts and observes the store",
         )),
-        Capability::Unavailable { reason } => out.push(Finding::warn(
-            "watcher",
-            "watcher_unavailable",
-            format!("the file watcher cannot be started: {reason}"),
-            "run the desktop app, which owns the watcher, to check drift detection",
-        )),
+        Capability::Unavailable { reason } => out.push(if desktop {
+            Finding::warn(
+                "watcher",
+                "watcher_unavailable",
+                format!("the file watcher cannot be started: {reason}"),
+                "run the desktop app, which owns the watcher, to check drift detection",
+            )
+        } else {
+            Finding::not_applicable(
+                "watcher",
+                "watcher_not_applicable",
+                format!("the file watcher is owned by the desktop app: {reason}"),
+                "run the app's environment check to verify drift detection",
+            )
+        }),
     }
 }
 

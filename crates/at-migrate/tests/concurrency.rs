@@ -91,6 +91,7 @@ fn a_source_changed_between_plan_and_apply_aborts_before_any_backup() -> Result<
         items: vec![item],
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let conflicts = detect_conflicts(&scan);
     let selected = BTreeSet::from([native.clone()]);
@@ -119,6 +120,7 @@ fn a_source_changed_between_plan_and_apply_aborts_before_any_backup() -> Result<
         backup_root: &backups,
         authorized_roots: &roots,
         database: &mut database,
+        project_id: None,
     };
     let error = apply_plan(&plan, &mut context).expect_err("stale source refuses");
     assert!(

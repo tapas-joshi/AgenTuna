@@ -678,50 +678,6 @@ fn link_mode_of(mode: &str) -> Option<LinkMode> {
     }
 }
 
-/// One `items` row from a result that starts at column `offset`.
-///
-/// Used when a query joins `deployments` and `items`; the deployment columns
-/// occupy `0..=15`, so the item columns start at `ITEM_COLUMN_OFFSET`.
-pub(crate) fn item_from_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<ItemRow> {
-    Ok(ItemRow {
-        id: row.get::<_, String>(offset)?.parse().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                offset,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
-        })?,
-        kind: row.get::<_, String>(offset + 1)?.parse().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                offset + 1,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
-        })?,
-        scope: row.get::<_, String>(offset + 2)?.parse().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                offset + 2,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
-        })?,
-        project_id: row.get(offset + 3)?,
-        slug: row.get(offset + 4)?,
-        name: row.get(offset + 5)?,
-        source_path: row.get(offset + 6)?,
-        link_target: row.get(offset + 7)?,
-        content_hash: row.get(offset + 8)?,
-        state: row.get(offset + 9)?,
-        managed: row.get::<_, i64>(offset + 10)? != 0,
-        source_id: row.get(offset + 11)?,
-        enabled_default: row.get::<_, Option<i64>>(offset + 12)?.map(|v| v != 0),
-        tags_json: row.get(offset + 13)?,
-        created_at: row.get(offset + 14)?,
-        updated_at: row.get(offset + 15)?,
-        last_scanned_at: row.get(offset + 16)?,
-    })
-}
-
 /// Map one `items` row.
 pub(crate) fn item_from_row(row: &Row<'_>) -> rusqlite::Result<ItemRow> {
     Ok(ItemRow {

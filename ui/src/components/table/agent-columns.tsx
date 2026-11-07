@@ -10,8 +10,8 @@ import { AgentCell } from "./agent-cell";
 import type { DataTableFeatures } from "./features";
 import type { AgentCellState, AgentDescriptor } from "./types";
 
-/** Default width of one agent column, in pixels. */
-export const AGENT_COLUMN_WIDTH = 96;
+/** Default width of one agent column, in pixels. Wide enough for `shared with <agent>`. */
+export const AGENT_COLUMN_WIDTH = 112;
 
 /** Options accepted by {@link agentColumns}. */
 export interface AgentColumnOptions<TData extends RowData> {

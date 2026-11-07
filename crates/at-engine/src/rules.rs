@@ -68,6 +68,12 @@ pub enum RuleRenderError {
     /// ChangeSet construction failed.
     #[error(transparent)]
     ChangeSet(#[from] at_model::ChangeSetError),
+    /// A rule file is not valid UTF-8; it is never rewritten lossily.
+    #[error("rule file at {path} is not valid UTF-8")]
+    Parse {
+        /// File that could not be decoded.
+        path: PathBuf,
+    },
 }
 
 /// Plans both native rule targets from one source without performing filesystem writes.
@@ -77,7 +83,9 @@ pub enum RuleRenderError {
 ///
 /// # Errors
 /// Returns [`RuleRenderError::ManagedBlock`] when either existing file requires adoption or
-/// has malformed markers, and [`RuleRenderError::ChangeSet`] for invalid operations.
+/// has malformed markers, [`RuleRenderError::Parse`] when a target or the rendered block is not
+/// valid UTF-8 (such a file is never rewritten lossily), and [`RuleRenderError::ChangeSet`] for
+/// invalid operations.
 pub fn plan_rule_render(
     source: &[u8],
     targets: [RuleRenderTarget; 2],
@@ -95,6 +103,11 @@ pub fn plan_rule_render(
             }
             .into());
         }
+        if let Some(existing) = target.existing.as_deref() {
+            std::str::from_utf8(existing).map_err(|_| RuleRenderError::Parse {
+                path: target.path.clone(),
+            })?;
+        }
         let bytes = render_managed_block(&target.path, target.existing.as_deref(), source)?;
         let before = target.existing.as_deref().unwrap_or_default();
         if target.existing.as_deref() == Some(bytes.as_slice()) {
@@ -104,12 +117,15 @@ pub fn plan_rule_render(
             Some(existing) => at_model::ExpectedState::hash(at_fs::sha256_hex(existing))?,
             None => at_model::ExpectedState::absent(),
         };
-        let diff = TextDiff::from_lines(
-            String::from_utf8_lossy(before),
-            String::from_utf8_lossy(&bytes),
-        )
-        .unified_diff()
-        .to_string();
+        let before_text = std::str::from_utf8(before).map_err(|_| RuleRenderError::Parse {
+            path: target.path.clone(),
+        })?;
+        let after_text = std::str::from_utf8(&bytes).map_err(|_| RuleRenderError::Parse {
+            path: target.path.clone(),
+        })?;
+        let diff = TextDiff::from_lines(before_text, after_text)
+            .unified_diff()
+            .to_string();
         diffs.push(RuleRenderDiff {
             path: target.path.clone(),
             text: diff,
@@ -499,8 +515,10 @@ fn read_rule(path: &Path) -> io::Result<(Vec<u8>, Option<SystemTime>, Option<Pat
 }
 
 fn contains_managed_marker(bytes: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(bytes);
-    text.contains("<!-- agentuna:begin -->") && text.contains("<!-- agentuna:end -->")
+    // Markers are ASCII; invalid UTF-8 is never decoded lossily just to look for them.
+    std::str::from_utf8(bytes).is_ok_and(|text| {
+        text.contains("<!-- agentuna:begin -->") && text.contains("<!-- agentuna:end -->")
+    })
 }
 
 fn record_io(
@@ -537,9 +555,11 @@ mod tests {
         let original =
             b"top\r\n<!-- agentuna:begin -->\r\nold\r\n<!-- agentuna:end -->\r\nbottom\r\n";
         let rendered = render_managed_block(path, Some(original), b"new rule").expect("render");
-        assert!(rendered.starts_with(
-            b"top\r\n<!-- agentuna:begin -->\nnew rule\n<!-- agentuna:end -->\r\nbottom\r\n"
-        ));
+        // The block body uses the file's own CRLF ending; the bytes around it are unchanged.
+        assert_eq!(
+            rendered,
+            b"top\r\n<!-- agentuna:begin -->\r\nnew rule\r\n<!-- agentuna:end -->\r\nbottom\r\n"
+        );
         assert_eq!(
             render_managed_block(path, Some(b"user authored\n"), b"new"),
             Err(ManagedBlockError::AdoptRequired {
@@ -739,5 +759,91 @@ mod tests {
         assert!(scan.diagnostics.iter().any(
             |d| matches!(d, RuleDiagnostic::BrokenSymlink { path } if path.ends_with("CLAUDE.md"))
         ));
+    }
+
+    #[test]
+    fn lowercase_on_disk_claude_md_is_discovered_and_composed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("claude.md");
+        fs::write(&path, "# lowercase instructions\n").expect("write fixture");
+        let registry = AgentAdapterRegistry::register();
+        let env = AgentEnvironment {
+            home: root.path().join("home"),
+            project: Some(root.path().to_path_buf()),
+            variables: BTreeMap::new(),
+        };
+        let scan = scan(&registry, &env, &[AgentId::ClaudeCode], &[Scope::Project]);
+        assert_eq!(
+            scan.sources.len(),
+            1,
+            "{:?}",
+            scan.sources.iter().map(|s| &s.path).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            scan.sources[0].path, path,
+            "the candidate spelling is replaced by the actual on-disk name"
+        );
+        assert_eq!(
+            scan.sources[0]
+                .path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("claude.md")
+        );
+        assert_eq!(
+            scan.sources[0].sha256,
+            at_fs::sha256_hex(b"# lowercase instructions\n")
+        );
+
+        // Composition matches the filename without regard to case, so the lowercase file
+        // reaches Claude Code's instruction chain.
+        let (composed, diagnostics) = compose(&AgentId::ClaudeCode, Scope::Project, &scan);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(composed.len(), 1);
+        assert_eq!(composed[0].source.path, path);
+        assert_eq!(composed[0].source.scope, Scope::Project);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_rule_is_reported_while_other_rules_are_still_returned() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let denied = root.path().join("CLAUDE.md");
+        let readable = root.path().join("CLAUDE.local.md");
+        fs::write(&denied, "# unreadable\n").expect("write denied fixture");
+        fs::write(&readable, "# readable\n").expect("write readable fixture");
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        if fs::read(&denied).is_ok() {
+            // The test process bypasses permission bits (root in a container): the
+            // PermissionDenied branch is unreachable for it, not silently passing.
+            return;
+        }
+
+        let registry = AgentAdapterRegistry::register();
+        let env = AgentEnvironment {
+            home: root.path().join("home"),
+            project: Some(root.path().to_path_buf()),
+            variables: BTreeMap::new(),
+        };
+        let scan = scan(&registry, &env, &[AgentId::ClaudeCode], &[Scope::Project]);
+        assert!(
+            scan.sources.iter().any(|source| source.path == readable),
+            "readable rules are still returned: {:?}",
+            scan.sources.iter().map(|s| &s.path).collect::<Vec<_>>()
+        );
+        assert!(
+            scan.sources.iter().all(|source| source.path != denied),
+            "an unreadable file never becomes a RuleSource"
+        );
+        assert!(
+            scan.diagnostics.iter().any(|diagnostic| matches!(
+                diagnostic,
+                RuleDiagnostic::PermissionDenied { path } if *path == denied
+            )),
+            "the unreadable path is reported: {:?}",
+            scan.diagnostics
+        );
     }
 }

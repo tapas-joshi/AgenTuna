@@ -26,6 +26,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use at_fs::{BackupPolicy, ExpectedState, FsError, WriteOutcome, WriteRequest, apply, sha256_hex};
+use at_model::AgentId;
 use at_model::mcp::{EnvValue, McpTransport};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
@@ -179,6 +180,18 @@ impl CodexServerEntry {
         if self.cwd.as_ref().is_some_and(|cwd| cwd.to_str().is_none()) {
             return Err(CodexError::NonUtf8Path { id: id.into() });
         }
+        if let Some(env) = &self.env {
+            for value in env.values() {
+                if let EnvValue::Secret(secret) = value
+                    && !crate::secret_launch::verifies_var_expansion(&AgentId::Codex)
+                {
+                    return Err(CodexError::UnverifiedSecretExpansion {
+                        id: id.to_owned(),
+                        variable: secret.env_name.clone(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -274,8 +287,22 @@ pub enum CodexError {
         limit: u64,
     },
     /// The document is not valid TOML.
-    #[error("invalid TOML: {0}")]
-    InvalidToml(#[from] toml_edit::TomlError),
+    ///
+    /// Only the position and the parser's static description are reported. `toml_edit`'s own
+    /// rendering quotes the offending source line, which may contain a token or any other
+    /// value that must never reach a log or an error surface.
+    #[error("invalid TOML at line {line}, column {column}: {message}")]
+    InvalidToml {
+        /// One-based line of the offending byte.
+        line: usize,
+        /// One-based column of the offending byte.
+        column: usize,
+        /// Parser description without source text.
+        message: String,
+    },
+    /// The file starts with a UTF-8 byte-order mark, which TOML does not permit.
+    #[error("Codex config starts with a UTF-8 byte-order mark (BOM), which TOML does not permit")]
+    ByteOrderMark,
     /// `mcp_servers` exists but is not a table.
     #[error("`mcp_servers` must be a table, found {found}")]
     RootNotTable {
@@ -336,6 +363,16 @@ pub enum CodexError {
         /// Server id.
         id: String,
     },
+    /// A secret reference cannot be emitted because Codex does not verify `${VAR}` expansion.
+    #[error(
+        "mcp server `{id}`: secret variable `{variable}` cannot be rendered as ${{VAR}}; Codex does not verify ${{VAR}} expansion (use env_vars instead)"
+    )]
+    UnverifiedSecretExpansion {
+        /// Server id.
+        id: String,
+        /// Variable name.
+        variable: String,
+    },
     /// The guarded write was refused.
     #[error(transparent)]
     Write(#[from] FsError),
@@ -352,6 +389,36 @@ pub struct CodexConfigFile {
     expected: ExpectedState,
     dirty: bool,
     newline: Newline,
+    /// Comment lines that were attached to the first table and are not theirs: removing that
+    /// table must not take a file header with it. Prepended when the document is rendered.
+    leading_comments: String,
+}
+
+/// Parses TOML, reporting only the position and the parser's static description.
+///
+/// `toml_edit`'s `Display` renders a snippet of the offending source line. A config line may
+/// carry a token, so that rendering never reaches a typed error, a log or the CLI.
+fn parse_toml(text: &str) -> Result<DocumentMut, CodexError> {
+    text.parse::<DocumentMut>()
+        .map_err(|error| invalid_toml(text, &error))
+}
+
+/// Converts a parser failure into a source-free [`CodexError::InvalidToml`].
+fn invalid_toml(text: &str, error: &toml_edit::TomlError) -> CodexError {
+    let start = error.span().map_or(0, |span| span.start).min(text.len());
+    let before = &text.as_bytes()[..start];
+    let line = 1 + before.iter().filter(|byte| **byte == b'\n').count();
+    let column = start
+        - before
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1)
+        + 1;
+    CodexError::InvalidToml {
+        line,
+        column,
+        message: error.message().to_owned(),
+    }
 }
 
 /// Line ending of a config document.
@@ -381,10 +448,13 @@ impl Newline {
     }
 
     /// Parses `text`, normalising CRLF first when the document uses it.
-    fn parse(self, text: &str) -> Result<DocumentMut, toml_edit::TomlError> {
+    fn parse(self, text: &str) -> Result<DocumentMut, CodexError> {
         match self {
-            Self::Lf => text.parse::<DocumentMut>(),
-            Self::Crlf => text.replace("\r\n", "\n").parse::<DocumentMut>(),
+            Self::Lf => parse_toml(text),
+            Self::Crlf => {
+                let normalized = text.replace("\r\n", "\n");
+                parse_toml(&normalized)
+            }
         }
     }
 
@@ -412,6 +482,7 @@ impl CodexConfigFile {
             expected: ExpectedState::Absent,
             dirty: false,
             newline: Newline::Lf,
+            leading_comments: String::new(),
         }
     }
 
@@ -422,14 +493,19 @@ impl CodexConfigFile {
     /// [`Self::save_expecting`] with the hash the caller knows.
     ///
     /// # Errors
+    /// [`CodexError::ByteOrderMark`] for a BOM-prefixed document and
     /// [`CodexError::InvalidToml`] when the text is not valid TOML.
     pub fn parse(text: &str) -> Result<Self, CodexError> {
+        if text.starts_with('\u{feff}') {
+            return Err(CodexError::ByteOrderMark);
+        }
         let newline = Newline::of(text);
         Ok(Self {
             doc: newline.parse(text)?,
             expected: ExpectedState::Absent,
             dirty: false,
             newline,
+            leading_comments: String::new(),
         })
     }
 
@@ -439,8 +515,8 @@ impl CodexConfigFile {
     /// be absent, so the first save creates it.
     ///
     /// # Errors
-    /// [`CodexError::Read`], [`CodexError::TooLarge`], [`CodexError::NotUtf8`] or
-    /// [`CodexError::InvalidToml`].
+    /// [`CodexError::Read`], [`CodexError::TooLarge`], [`CodexError::NotUtf8`],
+    /// [`CodexError::ByteOrderMark`] or [`CodexError::InvalidToml`].
     pub fn load(path: &Path) -> Result<Self, CodexError> {
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
@@ -466,19 +542,28 @@ impl CodexConfigFile {
         let text = core::str::from_utf8(&bytes).map_err(|_| CodexError::NotUtf8 {
             path: path.to_path_buf(),
         })?;
+        if text.starts_with('\u{feff}') {
+            return Err(CodexError::ByteOrderMark);
+        }
         let newline = Newline::of(text);
         Ok(Self {
             doc: newline.parse(text)?,
             expected: ExpectedState::Hash(sha256_hex(&bytes)),
             dirty: false,
             newline,
+            leading_comments: String::new(),
         })
     }
 
     /// The current document text. Equal to the source bytes while no edit was applied.
     #[must_use]
     pub fn text(&self) -> String {
-        self.newline.rendered(self.doc.to_string())
+        let rendered = self.newline.rendered(self.doc.to_string());
+        if self.leading_comments.is_empty() {
+            rendered
+        } else {
+            format!("{}{rendered}", self.leading_comments)
+        }
     }
 
     /// What the next [`Self::save`] requires the file to look like.
@@ -597,13 +682,30 @@ impl CodexConfigFile {
     /// [`CodexError::EmptyServerId`].
     pub fn remove_server(&mut self, id: &str) -> Result<bool, CodexError> {
         validate_id(id)?;
+        let rendered = self.doc.to_string();
         let Some(root) = self.existing_root_mut()? else {
             return Ok(false);
         };
-        if find_table(root, id)?.is_none() {
+        let Some(table) = find_table(root, id)? else {
             return Ok(false);
-        }
+        };
+        // A comment block above the first table is a file header, not part of that table:
+        // removing the first server must not take the header with it.
+        let prefix = table
+            .decor()
+            .prefix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default();
+        let header = if rendered.starts_with(prefix) && prefix.contains('#') {
+            comment_lines(prefix)
+        } else {
+            String::new()
+        };
         let removed = remove_key(root, id);
+        if removed && !header.is_empty() {
+            // A previous removal may already have preserved a header; keep both in file order.
+            self.leading_comments.push_str(&header);
+        }
         if removed {
             self.dirty = true;
         }
@@ -717,6 +819,17 @@ impl CodexConfigFile {
             }),
         }
     }
+}
+
+/// The comment lines of `text`, with their own line endings and trailing spaces.
+fn comment_lines(text: &str) -> String {
+    let mut comments = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with('#') {
+            comments.push_str(line);
+        }
+    }
+    comments
 }
 
 /// Rejects ids that TOML or Codex cannot carry.
@@ -1050,7 +1163,19 @@ fn fill_table(table: &mut Table, entry: &CodexServerEntry, id: &str) -> Result<(
     if let Some(env) = &entry.env {
         let mut inline = InlineTable::new();
         for (name, value) in env {
-            inline.insert(name.as_str(), Value::from(env_text(value)));
+            let text = match value {
+                EnvValue::Literal(text) => text.clone(),
+                EnvValue::Secret(secret) => {
+                    if !crate::secret_launch::verifies_var_expansion(&AgentId::Codex) {
+                        return Err(CodexError::UnverifiedSecretExpansion {
+                            id: id.to_owned(),
+                            variable: secret.env_name.clone(),
+                        });
+                    }
+                    format!("${{{}}}", secret.env_name)
+                }
+            };
+            inline.insert(name.as_str(), Value::from(text));
         }
         table.insert("env", Item::Value(Value::InlineTable(inline)));
     }

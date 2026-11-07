@@ -98,6 +98,10 @@ pub struct SkillDoc {
     pub frontmatter_span: ByteSpan,
     /// Byte range of the markdown body, starting after the closing `---` line.
     pub body_span: ByteSpan,
+    /// Byte range of the whole `name` entry: from the first byte of the key to the end of its
+    /// value, excluding the line break that ends it. This is the location a trace reports for a
+    /// store skill.
+    pub name_span: ByteSpan,
     /// Byte range of the description value as written: from the byte after the `:` to the end of
     /// the scalar (block-scalar headers and indentation included, the final line break excluded).
     /// Rewriting exactly this range changes only the description.

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
@@ -6,6 +6,11 @@ import { SkillDetailScreen } from "./SkillDetailScreen";
 
 const ipc = vi.hoisted(() => ({ calls: [] as { command: string; args: unknown }[], reply: (_command: string): Promise<unknown> => Promise.resolve(undefined) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, args?: unknown) => { ipc.calls.push({ command, args }); return ipc.reply(command); } }));
+vi.mock("../../components/editor", () => ({
+  MarkdownEditor: ({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) => (
+    <textarea aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} />
+  ),
+}));
 const appState = createAppState();
 appState.openItem("itm_fake", { kind: "skill", scope: "user", project_id: null });
 const detail = {
@@ -119,5 +124,110 @@ describe("SkillDetailScreen", () => {
       request: { item_id: "itm_fake", scope: "user", agent_id: "codex", enabled: false, project_id: null },
     });
     expect(ipc.calls.find((call) => call.command === "skill_agent_apply")?.args).toEqual({ previewId: "preview_skill_agent" });
+  });
+});
+
+describe("SkillDetailScreen residuals (TS-030)", () => {
+  test("per-agent toggles mirror the DB deployment state and apply a reviewed plan", async () => {
+    const deployments = [
+      { agent_id: "codex", agent_name: "Codex", state: "linked", mode: "symlink", target_path: ".agents/skills/review-checklist" },
+      { agent_id: "omp", agent_name: "omp", state: "off", mode: "symlink", target_path: null },
+    ];
+    ipc.reply = (command) => Promise.resolve(
+      command === "skill_detail_load" ? { ...detail, deployments } :
+      command === "skill_agent_preview" ? { preview_id: "pv_agent", enabled: false, mode: "symlink", paths: [], coupled_agents: [], warnings: [], no_op: false } :
+      command === "skill_agent_apply" ? { operation_id: "op_agent", changed: 1 } :
+      undefined,
+    );
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+
+    const codex = await screen.findByRole("switch", { name: "Codex enabled" });
+    expect(codex.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("switch", { name: "omp enabled" }).getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(codex);
+
+    await waitFor(() => {
+      expect(ipc.calls).toContainEqual({
+        command: "skill_agent_preview",
+        args: {
+          request: {
+            item_id: "itm_fake",
+            scope: "user",
+            agent_id: "codex",
+            enabled: false,
+            project_id: null,
+          },
+        },
+      });
+    });
+    expect(ipc.calls).toContainEqual({ command: "skill_agent_apply", args: { previewId: "pv_agent" } });
+  });
+
+  test("shadowed detail offers compare and keep-copy actions with both scopes", async () => {
+    ipc.reply = (command) => Promise.resolve(
+      command === "skill_detail_load" ? detail :
+      command === "skill_keep_copy_preview" ? { preview_id: "pv_keep", files: ["SKILL.md"], diff: "-old\n+new", identical: false } :
+      command === "skill_keep_copy_apply" ? { operation_id: "op_keep", files_changed: 1 } :
+      undefined,
+    );
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+
+    expect(await screen.findByText(/Effective winner: project/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Compare copies" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep user copy only" }));
+
+    await waitFor(() => {
+      expect(ipc.calls).toContainEqual({
+        command: "skill_keep_copy_preview",
+        args: { request: { item_id: "itm_fake", keep_scope: "user", drop_scope: "project" } },
+      });
+    });
+    expect(ipc.calls).toContainEqual({ command: "skill_keep_copy_apply", args: { previewId: "pv_keep" } });
+  });
+
+  test("not-found detail offers both Back to Skills and a refresh", async () => {
+    let loads = 0;
+    ipc.reply = (command) => {
+      if (command === "skill_detail_load") {
+        loads += 1;
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(undefined);
+    };
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+
+    expect(await screen.findByText("Skill no longer found")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to Skills" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(loads).toBeGreaterThanOrEqual(2));
+  });
+
+  test("an external refresh is blocked by unsaved editor content until it is discarded", async () => {
+    let loads = 0;
+    ipc.reply = (command) => {
+      if (command === "skill_detail_load") {
+        loads += 1;
+        return Promise.resolve(detail);
+      }
+      return Promise.resolve(undefined);
+    };
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+    await screen.findAllByText("Review checklist");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const editor = await screen.findByRole("textbox", { name: "Edit Review checklist SKILL.md" });
+    fireEvent.change(editor, { target: { value: "# Unsaved draft" } });
+    const loadsBeforeRefresh = loads;
+
+    act(() => appState.requestExternalReload());
+    expect(await screen.findByText(/External changes were detected, but the editor has unsaved content/)).toBeTruthy();
+    expect(loads).toBe(loadsBeforeRefresh);
+    expect(appState.getSnapshot().route).not.toBe("skills");
+    expect((editor as HTMLTextAreaElement).value).toBe("# Unsaved draft");
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard edits and refresh" }));
+    await waitFor(() => expect(loads).toBeGreaterThan(loadsBeforeRefresh));
+    expect(screen.queryByRole("textbox", { name: "Edit Review checklist SKILL.md" })).toBeNull();
   });
 });

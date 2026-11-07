@@ -2,6 +2,8 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use at_model::network::{NetworkAction, NetworkEventLog, NetworkPolicy, NetworkTrigger};
 use time::OffsetDateTime;
@@ -49,6 +51,9 @@ pub enum ImportCloneError {
     /// Git requested authentication, but this flow never prompts or accesses a keychain.
     #[error("AuthRequired: repository requires credentials; no credentials were requested")]
     AuthRequired,
+    /// The clone was cancelled by the user.
+    #[error("Git skill import was cancelled")]
+    Cancelled,
     /// The central policy denied the network action.
     #[error(transparent)]
     Policy(#[from] RemoteError),
@@ -168,6 +173,22 @@ pub fn clone_for_import_with_process(
     let runner = ProcessRemoteGitRunner::default();
     clone_for_import(url, reference, cache_dir, policy, log, &runner)
 }
+/// Uses the application runner and terminates the child process when cancelled.
+///
+/// # Errors
+/// Returns [`ImportCloneError`] for the same failures as
+/// [`clone_for_import_with_process`], or [`ImportCloneError::Cancelled`].
+pub fn clone_for_import_with_process_and_cancel(
+    url: &str,
+    reference: Option<&str>,
+    cache_dir: &Path,
+    policy: &NetworkPolicy,
+    log: &mut NetworkEventLog,
+    cancelled: Arc<AtomicBool>,
+) -> Result<ImportedRepository, ImportCloneError> {
+    let runner = ProcessRemoteGitRunner::default().with_cancel(cancelled);
+    clone_for_import(url, reference, cache_dir, policy, log, &runner)
+}
 
 fn validate_import_url(url: &str) -> Result<(), ImportCloneError> {
     if url.is_empty() || url.starts_with('-') || url.contains(['\0', '\n', '\r']) {
@@ -180,24 +201,48 @@ fn validate_import_url(url: &str) -> Result<(), ImportCloneError> {
     if !allowed {
         return Err(ImportCloneError::InvalidUrl);
     }
-    if let Some(authority) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("ssh://"))
-    {
-        let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
-        if let Some((userinfo, _)) = authority.rsplit_once('@')
-            && (url.starts_with("https://") || userinfo.contains(':'))
-        {
-            return Err(ImportCloneError::InvalidUrl);
-        }
+    if url_has_credentials(url) {
+        return Err(ImportCloneError::InvalidUrl);
     }
     Ok(())
 }
 
+/// Whether `url` carries userinfo (`user@`, `user:password@` or a token) in its authority.
+///
+/// Credentials embedded in a URL would be persisted in the store manifest and the `sources`
+/// table, so every import entry point refuses them. The scp-like `git@host:path` form carries a
+/// user name only and cannot express a password, so it is not treated as a credential.
+#[must_use]
+pub fn url_has_credentials(url: &str) -> bool {
+    let authority = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("ssh://"))
+        .or_else(|| url.strip_prefix("file://"))
+        .and_then(|rest| rest.split(['/', '?', '#']).next());
+    authority.is_some_and(|authority| authority.contains('@'))
+}
+
+/// Removes any userinfo from a URL so credentials are never stored or logged.
+#[must_use]
+pub fn strip_url_credentials(url: &str) -> String {
+    for scheme in ["https://", "ssh://", "file://"] {
+        if let Some(rest) = url.strip_prefix(scheme) {
+            let boundary = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let (authority, tail) = rest.split_at(boundary);
+            return authority.rsplit_once('@').map_or_else(
+                || url.to_owned(),
+                |(_, host)| format!("{scheme}{host}{tail}"),
+            );
+        }
+    }
+    url.to_owned()
+}
+
 fn classify_remote_error(error: RemoteError) -> ImportCloneError {
-    match &error {
+    match error {
         RemoteError::AuthRejected => ImportCloneError::AuthRequired,
-        _ => ImportCloneError::Policy(error),
+        RemoteError::Process(crate::policy::GitError::Cancelled) => ImportCloneError::Cancelled,
+        other => ImportCloneError::Policy(other),
     }
 }
 
@@ -369,5 +414,40 @@ mod tests {
         assert!(message.ends_with("failure at end"));
         assert!(message.chars().count() <= IMPORT_GIT_DIAGNOSTIC_TAIL_CHARS);
         assert!(std::fs::read_dir(&cache).expect("cache").next().is_none());
+    }
+
+    #[test]
+    fn import_urls_with_embedded_credentials_are_rejected() {
+        for url in [
+            "https://user:pass@example.invalid/repo.git",
+            "https://token@example.invalid/repo.git",
+            "ssh://git@example.invalid/repo.git",
+            "file://user:pass@example.invalid/repo.git",
+        ] {
+            assert!(
+                matches!(validate_import_url(url), Err(ImportCloneError::InvalidUrl)),
+                "{url} must be refused"
+            );
+        }
+        assert!(validate_import_url("https://example.invalid/repo.git").is_ok());
+        assert!(validate_import_url("ssh://example.invalid/repo.git").is_ok());
+        assert!(validate_import_url("git@example.invalid:org/repo.git").is_ok());
+        assert!(validate_import_url("file:///sandbox/repo.git").is_ok());
+    }
+
+    #[test]
+    fn stored_urls_strip_embedded_credentials() {
+        assert_eq!(
+            strip_url_credentials("https://user:pass@example.invalid/repo.git"),
+            "https://example.invalid/repo.git"
+        );
+        assert_eq!(
+            strip_url_credentials("https://token@example.invalid/repo.git"),
+            "https://example.invalid/repo.git"
+        );
+        assert_eq!(
+            strip_url_credentials("https://example.invalid/repo.git"),
+            "https://example.invalid/repo.git"
+        );
     }
 }

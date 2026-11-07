@@ -1,0 +1,52 @@
+{
+  "agent": "custom:matrix",
+  "agents": [
+    {
+      "custom": true,
+      "name": "matrix"
+    }
+  ],
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "analyze"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "analyze",
+        "path": "<home>/.agentuna/skills/analyze/SKILL.md",
+        "scope": "user",
+        "trace": [
+          {
+            "outcome": "winner",
+            "scope": "user"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "skill-custom-user-only",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "Analysis skill.",
+          "slug": "analyze"
+        }
+      ]
+    }
+  ],
+  "title": "A custom agent resolves a User skill when no nearer copy exists"
+}

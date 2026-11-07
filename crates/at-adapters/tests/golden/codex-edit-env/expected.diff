@@ -1,0 +1,11 @@
+--- fixture
++++ output
+@@ -20,7 +20,7 @@
+ [mcp_servers.node_repl]
+ command = "npx"
+ args = ["-y", "@modelcontextprotocol/server-everything"]
+-env = { NODE_REPL_MODE = "sandbox" }
++env = { NODE_REPL_DEBUG = "1", NODE_REPL_MODE = "sandbox" }
+ env_vars = ["NODE_REPL_TOKEN"]
+ enabled = true
+ startup_timeout_sec = 20

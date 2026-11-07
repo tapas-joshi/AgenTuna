@@ -4,17 +4,20 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use at_fs::{BackupPolicy, ExpectedState};
-use at_model::{AgentId, EnvValue, ItemKind, ItemState, McpServerDef, McpTransport, Scope};
+use at_engine::mcp_plan::{
+    McpCopyResolution, McpIntent, McpItemAction, McpItemPlan, McpItemPlanRequest, McpPlanRequest,
+};
+use at_engine::skill_cli::{ManifestItemInput, sync_manifest_item};
+use at_model::{AgentId, EnvValue, ItemId, ItemKind, ItemState, McpServerDef, McpTransport, Scope};
 use at_store::layout::{Slug, StoreLayout};
 use at_store::manifest::StoreManifest;
-use at_store::mcp_store::{LoadedMcpStore, McpStore};
+use at_store::mcp_store::McpStore;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 
 use crate::error::{CliError, ErrorCode};
 use crate::globals::{GlobalArgs, ScopeArg};
-use crate::output::CommandOutput;
+use crate::output::{CommandOutput, Warning};
 use crate::registry::CommandGroup;
 
 /// The command group for MCP server configuration and secret references.
@@ -91,6 +94,24 @@ impl CommandGroup for McpGroup {
                             .value_name("AGENT"),
                     ),
             )
+            .subcommand(
+                Command::new("copy")
+                    .about("Copy a server definition into another scope")
+                    .arg(Arg::new("name").required(true).value_name("NAME"))
+                    .arg(
+                        Arg::new("to")
+                            .long("to")
+                            .required(true)
+                            .value_name("SCOPE")
+                            .value_parser(clap::value_parser!(ScopeArg)),
+                    )
+                    .arg(
+                        Arg::new("on_collision")
+                            .long("on-collision")
+                            .value_name("ACTION")
+                            .value_parser(["replace", "rename"]),
+                    ),
+            )
             .subcommand(secret);
         root.subcommand(mcp)
     }
@@ -117,6 +138,7 @@ impl CommandGroup for McpGroup {
             "test" => test_server(globals, required(args, "id")?),
             "enable" => set_agent_enabled(globals, args, true),
             "disable" => set_agent_enabled(globals, args, false),
+            "copy" => copy_server(globals, args),
             _ => Err(CliError::new(
                 ErrorCode::Usage,
                 "unsupported MCP command",
@@ -147,6 +169,7 @@ fn dispatch_secret(globals: &GlobalArgs, matches: &ArgMatches) -> Result<Command
 }
 
 fn list_servers(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
+    crate::runtime::refresh_agent_registry_if_needed(globals)?;
     let _access = crate::runtime::CliAccess::for_command(globals, false)?;
     let (scope, layout) = scope_layout(globals)?;
     let loaded = McpStore::load(&layout).map_err(store_error)?;
@@ -162,26 +185,58 @@ fn list_servers(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
     // Without an index (a fresh sandbox) fall back to the canonical store so a script still
     // sees the definitions it can act on; `indexed: false` says the states are unknown.
     let manifest = StoreManifest::load(&layout).map_err(store_error)?;
+    let mut stale_rows = 0usize;
     let servers = if indexed {
         rows.iter()
-            .map(|row| {
-                let item = row.item_id.and_then(|id| manifest.manifest.item(id));
-                let slug = item.map(|item| item.slug.as_str().to_owned());
-                let transport = slug
-                    .as_deref()
-                    .and_then(|slug| loaded.store.get(slug))
-                    .map_or("unknown", |definition| definition.transport.kind());
-                json!({
+            .filter_map(|row| {
+                if row.native_only {
+                    return Some(json!({
+                        "id": row.display_name,
+                        "item_id": null,
+                        "scope": row.scope.wire_name(),
+                        "name": row.display_name,
+                        "transport": row
+                            .transport_subtitle
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        "native": true,
+                        "locked": row.locked_by.is_some(),
+                        "agent_state": agent_state(row),
+                        "health": row.latest_health.as_deref().unwrap_or("unknown"),
+                    }));
+                }
+                // The manifest owns the slug for an indexed row; a row written before its
+                // manifest record still resolves through the canonical entry the store holds.
+                let slug = row
+                    .item_id
+                    .and_then(|id| manifest.manifest.item(id))
+                    .map(|item| item.slug.as_str().to_owned())
+                    .or_else(|| {
+                        loaded
+                            .store
+                            .servers
+                            .keys()
+                            .find(|slug| slug.eq_ignore_ascii_case(&row.display_name))
+                            .cloned()
+                    });
+                let Some(definition) = slug.as_deref().and_then(|slug| loaded.store.get(slug))
+                else {
+                    // The canonical store is the source of truth: a row without a definition
+                    // there is a stale index entry, not a server the user can act on.
+                    stale_rows += 1;
+                    return None;
+                };
+                Some(json!({
                     "id": slug,
                     "item_id": row.item_id.map(|id| id.to_string()),
                     "scope": row.scope.wire_name(),
                     "name": row.display_name,
-                    "transport": transport,
+                    "transport": definition.transport.kind(),
                     "native": row.native_only,
                     "locked": row.locked_by.is_some(),
                     "agent_state": agent_state(row),
                     "health": row.latest_health.as_deref().unwrap_or("unknown"),
-                })
+                }))
             })
             .collect::<Vec<_>>()
     } else {
@@ -205,6 +260,15 @@ fn list_servers(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
             .collect::<Vec<_>>()
     };
     let count = servers.len();
+    let mut warnings = Vec::new();
+    if stale_rows > 0 {
+        warnings.push(Warning::new(
+            "mcp_index_stale",
+            format!(
+                "{stale_rows} indexed MCP row(s) have no item record in store.json; run `agentuna doctor` to repair the index"
+            ),
+        ));
+    }
     let human = if indexed {
         format!("{count} MCP server(s) in {} scope\n", scope.wire_name())
     } else {
@@ -216,7 +280,8 @@ fn list_servers(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
     Ok(CommandOutput::new(
         json!({"servers": servers, "count": count, "indexed": indexed}),
         human,
-    ))
+    )
+    .with_warnings(warnings))
 }
 
 /// Per-agent state map for one indexed MCP row.
@@ -321,37 +386,38 @@ fn set_agent_enabled(
         )
     })?;
     let manifest = StoreManifest::load(&layout).map_err(store_error)?;
-    let item_id = manifest
+    let item = manifest
         .manifest
         .item_by_slug(ItemKind::McpServer, &slug)
-        .map(|item| item.id)
+        .cloned()
         .ok_or_else(|| not_found(id))?;
-    let database =
-        at_db::Database::open_file(paths.db_path()).map_err(|error| db_error(error.to_string()))?;
+    let database = open_index_or_create(&paths)?;
     let connection = database.connection();
+    // The manifest owns the stable id. Recording it in the index before planning means the
+    // deployment row the plan writes cannot fail the `items` foreign key after the native file
+    // has already changed.
+    let project_id = crate::skills::project_id_for(&database, &paths, scope)?;
+    let item_id = sync_manifest_item(
+        connection,
+        &ManifestItemInput {
+            scope,
+            project_id: project_id.as_deref(),
+            item: &item,
+        },
+    )
+    .map_err(|error| index_error(error.to_string()))?;
     if let Some(lock) = at_db::locks::locks_for_item(connection, &item_id)
-        .map_err(|error| db_error(error.to_string()))?
+        .map_err(|error| index_error(error.to_string()))?
         .into_iter()
         .next()
     {
         return Err(locked_error(&lock));
     }
-    let installed = at_db::agents::list_agents_on_mac(connection)
-        .map_err(|error| db_error(error.to_string()))?
-        .into_iter()
-        .filter(|agent| agent.presence != at_db::agents::AgentPresence::NotInstalled)
-        .map(|agent| agent.id)
-        .collect::<Vec<_>>();
-    let deployed = at_db::deployments::list_deployments_for_item(connection, &item_id)
-        .map_err(|error| db_error(error.to_string()))?
-        .into_iter()
-        .filter(|cell| cell.scope == scope)
-        .map(|cell| cell.agent_id)
-        .collect::<Vec<_>>();
+    let (installed, deployed) = deployment_context(&database, &item_id, scope)?;
     let planned = at_engine::mcp_plan::plan_item(at_engine::mcp_plan::McpItemPlanRequest {
         paths: &paths,
         scope,
-        project_id: None,
+        project_id: project_id.clone(),
         item_id,
         action: at_engine::mcp_plan::McpItemAction::SetEnabled {
             agent: agent.clone(),
@@ -362,6 +428,12 @@ fn set_agent_enabled(
         locked_reason: None,
     })
     .map_err(plan_error)?;
+    let warnings = planned
+        .plan
+        .warnings
+        .iter()
+        .map(|warning| crate::output::Warning::new("mcp_plan", warning.clone()))
+        .collect::<Vec<_>>();
     if dry_run {
         return Ok(CommandOutput::new(
             json!({
@@ -382,7 +454,8 @@ fn set_agent_enabled(
                 "Would {} {id} for {agent}\n",
                 if enabled { "enable" } else { "disable" }
             ),
-        ));
+        )
+        .with_warnings(warnings));
     }
     let roots = at_fs::ApplyRoots::new(authorized_roots(&paths)).map_err(|_| {
         CliError::new(
@@ -391,7 +464,8 @@ fn set_agent_enabled(
             "check that the home, store and project folders exist",
         )
     })?;
-    let mut recorder = at_fs::DbOperationRecorder::new(connection, 30);
+    let mut recorder =
+        at_fs::DbOperationRecorder::new_with_actor(connection, 30, at_db::ops::OperationActor::Cli);
     let mut context = at_fs::ApplyContext {
         store_root: paths.support_dir(),
         backup_folder: &paths.support_dir().join(at_store::layout::BACKUPS_DIR),
@@ -410,14 +484,40 @@ fn set_agent_enabled(
     } else {
         ItemState::Off
     };
-    let mut spec = at_db::deployments::DeploymentSpec::new(&item_id, &agent, scope, state)
-        .with_mode("native")
-        .with_operation(&outcome.operation_id);
-    if let Some(path) = target_path.as_deref() {
-        spec = spec.with_target_path(path);
+    let layout = StoreLayout::for_scope(&paths, scope).ok();
+    let store_file = layout.as_ref().map(|l| l.mcp_file());
+    let store_hash = store_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| at_fs::sha256_hex(&b));
+    let target_hash = target_path
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| at_fs::sha256_hex(&b));
+    let baseline_hash = target_hash.clone();
+    let hashes = at_db::deployments::DeploymentHashes::new(
+        store_hash.as_deref(),
+        target_hash.as_deref(),
+        baseline_hash.as_deref(),
+    );
+    let mut spec = at_db::deployments::DeploymentSpec::applied(
+        &item_id,
+        &agent,
+        scope,
+        state,
+        Some("native"),
+        target_path.as_deref(),
+        hashes,
+    )
+    .with_operation(&outcome.operation_id);
+    if let Some(project) = project_id.as_deref() {
+        spec = spec.with_project(project);
     }
     at_db::deployments::upsert_deployment(connection, &spec)
-        .map_err(|error| db_error(error.to_string()))?;
+        .map_err(|error| index_error(error.to_string()))?;
+    // The native file now holds what the plan rendered; record its hash so the next drift scan
+    // compares against the file we just wrote instead of the pre-command bytes.
+    sync_native_baselines(&database, &paths, scope, &planned)?;
     Ok(CommandOutput::new(
         json!({
             "id": id,
@@ -432,25 +532,50 @@ fn set_agent_enabled(
             if enabled { "Enabled" } else { "Disabled" },
             outcome.completed
         ),
-    ))
+    )
+    .with_warnings(warnings))
 }
 
 /// Maps a planner refusal onto the published error classes.
 fn plan_error(error: at_engine::mcp_plan::McpPlanError) -> CliError {
     let code = match &error {
-        at_engine::mcp_plan::McpPlanError::Locked(_) => ErrorCode::Locked,
+        at_engine::mcp_plan::McpPlanError::Locked(_)
+        | at_engine::mcp_plan::McpPlanError::PermissionDenied => ErrorCode::Locked,
         at_engine::mcp_plan::McpPlanError::MissingStoreEntry(_)
         | at_engine::mcp_plan::McpPlanError::NotMcpServer(_) => ErrorCode::NotFound,
         at_engine::mcp_plan::McpPlanError::AgentNotInstalled(_) => ErrorCode::NotFound,
-        at_engine::mcp_plan::McpPlanError::CapabilityRefusal { .. }
-        | at_engine::mcp_plan::McpPlanError::UnreadableTarget(_) => ErrorCode::Conflict,
+        at_engine::mcp_plan::McpPlanError::SameScope
+        | at_engine::mcp_plan::McpPlanError::MissingProject { .. }
+        | at_engine::mcp_plan::McpPlanError::DestinationStoreMissing { .. }
+        | at_engine::mcp_plan::McpPlanError::InvalidItem(_) => ErrorCode::Validation,
         _ => ErrorCode::Conflict,
     };
-    CliError::new(
-        code,
-        error.to_string(),
-        "inspect the server definition and retry",
-    )
+    let hint = match &error {
+        at_engine::mcp_plan::McpPlanError::SameScope => {
+            "pick a different destination scope with --to"
+        }
+        at_engine::mcp_plan::McpPlanError::MissingProject { .. }
+        | at_engine::mcp_plan::McpPlanError::DestinationStoreMissing { .. } => {
+            "pass --project with a registered project, or create the destination store first"
+        }
+        at_engine::mcp_plan::McpPlanError::PermissionDenied => {
+            "run the command with the permission the Global store requires"
+        }
+        at_engine::mcp_plan::McpPlanError::Collision { .. } => {
+            "repeat with --on-collision replace or --on-collision rename"
+        }
+        at_engine::mcp_plan::McpPlanError::NoTargetToReplace(_) => {
+            "choose rename instead of replace"
+        }
+        at_engine::mcp_plan::McpPlanError::UnmanagedNative { .. } => {
+            "adopt or move aside the agent's existing entry first"
+        }
+        at_engine::mcp_plan::McpPlanError::NoSupportedAgent { .. } => {
+            "no installed agent can load this definition at the destination scope"
+        }
+        _ => "inspect the server definition and retry",
+    };
+    CliError::new(code, error.to_string(), hint)
 }
 
 /// Maps a ChangeSet application failure onto the published error classes.
@@ -510,13 +635,15 @@ fn mutate_server(
     matches: &ArgMatches,
     mutation: Mutation<'_>,
 ) -> Result<CommandOutput, CliError> {
-    let _access = crate::runtime::CliAccess::for_command(
-        globals,
-        !(globals.dry_run || matches.get_flag("dry_run")),
-    )?;
+    let dry_run = globals.dry_run || matches.get_flag("dry_run");
+    let access = crate::runtime::CliAccess::for_command(globals, !dry_run)?;
+    if !dry_run {
+        access.ensure_writable()?;
+    }
+    let paths = access.paths().clone();
     let (scope, layout) = scope_layout(globals)?;
     let (slug, definition) = read_definition()?;
-    let mut loaded = McpStore::load(&layout).map_err(store_error)?;
+    let loaded = McpStore::load(&layout).map_err(store_error)?;
     match mutation {
         Mutation::Add => {
             if loaded.store.servers.contains_key(&slug) {
@@ -540,17 +667,83 @@ fn mutate_server(
             }
         }
     }
-    let dry_run = globals.dry_run || matches.get_flag("dry_run");
+    // The canonical store change is planned by the same engine path the MCP screen uses: the
+    // reviewed ChangeSet carries `mcp.json` and the `store.json` record that owns its identity.
+    let registry = at_adapters::adapter::AgentAdapterRegistry::register();
+    let environment = at_engine::refresh::agent_environment(&paths);
+    let intent = match mutation {
+        Mutation::Add => McpIntent::Add {
+            slug: slug.clone(),
+            definition: definition.clone(),
+        },
+        Mutation::Edit(_) => McpIntent::Edit {
+            slug: slug.clone(),
+            definition: definition.clone(),
+        },
+    };
+    let planned = at_engine::mcp_plan::plan(McpPlanRequest {
+        registry: &registry,
+        env: &environment,
+        intent: &intent,
+        targets: &[],
+        definition: &definition,
+        scope,
+        project_id: None,
+        locked_reason: None,
+        store_layout: Some(&layout),
+        target_store_layout: None,
+    })
+    .map_err(plan_error)?;
+    let mut change_set = planned.store.ok_or_else(|| {
+        CliError::new(
+            ErrorCode::Internal,
+            "the MCP plan carries no canonical store change",
+            "this is a bug in agentuna; please report the command you ran",
+        )
+    })?;
+    // The first server in a scope creates the store in the same reviewed ChangeSet. A dry run
+    // lists the creation, the real run journals it, and the Global scope still refuses without
+    // its explicit write consent.
+    let store_init = at_store::store_init::plan_store_init(&layout, &mut change_set)
+        .map_err(crate::error::store_init_error)?;
+    let files = change_set
+        .ops
+        .iter()
+        .filter_map(|op| op.destination())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let created_store = store_init
+        .as_ref()
+        .map(|init| init.root.display().to_string());
     if dry_run {
         return Ok(CommandOutput::new(
-            json!({"id":slug,"scope":scope.wire_name(),"dry_run":true}),
-            format!("Would save MCP server {slug}\n"),
+            json!({
+                "id": slug,
+                "scope": scope.wire_name(),
+                "dry_run": true,
+                "create_store": created_store,
+                "files": files,
+            }),
+            match &created_store {
+                Some(path) => format!(
+                    "Would create the {} store at {path} and save MCP server {slug}\n",
+                    scope.wire_name()
+                ),
+                None => format!("Would save MCP server {slug}\n"),
+            },
         ));
     }
-    loaded.store.set(slug.clone(), definition);
-    save_store(&layout, &loaded)?;
+    let database = open_index_or_create(&paths)?;
+    let outcome = apply_change_set(&paths, &database, &change_set)?;
+    let item = index_manifest_item(&paths, &layout, scope, ItemKind::McpServer, &slug)?;
     Ok(CommandOutput::new(
-        json!({"id":slug,"scope":scope.wire_name()}),
+        json!({
+            "id": slug,
+            "scope": scope.wire_name(),
+            "item_id": item.to_string(),
+            "operation_id": outcome.operation_id,
+            "files_changed": outcome.completed,
+        }),
         format!("Saved MCP server {slug}\n"),
     ))
 }
@@ -560,34 +753,495 @@ fn remove_server(
     matches: &ArgMatches,
     id: &str,
 ) -> Result<CommandOutput, CliError> {
-    let _access = crate::runtime::CliAccess::for_command(
-        globals,
-        !(globals.dry_run || matches.get_flag("dry_run")),
-    )?;
+    let dry_run = globals.dry_run || matches.get_flag("dry_run");
+    let access = crate::runtime::CliAccess::for_command(globals, !dry_run)?;
+    if !dry_run {
+        access.ensure_writable()?;
+    }
+    let paths = access.paths().clone();
     let (scope, layout) = scope_layout(globals)?;
-    let mut loaded = McpStore::load(&layout).map_err(store_error)?;
-    if !loaded.store.servers.contains_key(id) {
+    let loaded = McpStore::load(&layout).map_err(store_error)?;
+    let slug = parse_slug(id)?;
+    if loaded.store.get(slug.as_str()).is_none() {
         return Err(not_found(id));
     }
-    if globals.dry_run || matches.get_flag("dry_run") {
-        return Ok(CommandOutput::new(
-            json!({"id":id,"scope":scope.wire_name(),"dry_run":true}),
-            format!("Would remove MCP server {id}\n"),
-        ));
-    }
-    if !matches.get_flag("force") && !globals.yes {
+    if !dry_run && !matches.get_flag("force") && !globals.yes {
         return Err(CliError::new(
             ErrorCode::ConfirmationRequired,
             "removing an MCP server requires --force or --yes",
             "review the server and retry with --force",
         ));
     }
-    loaded.store.remove(id);
-    save_store(&layout, &loaded)?;
+    let manifest = StoreManifest::load(&layout).map_err(store_error)?;
+    let item = manifest
+        .manifest
+        .item_by_slug(ItemKind::McpServer, &slug)
+        .ok_or_else(|| not_found(id))?;
+    let database = open_index_or_create(&paths)?;
+    let connection = database.connection();
+    // Make the index agree with the manifest before the plan reads deployments; otherwise the
+    // native removal is planned against identities the store no longer owns.
+    let project_id = crate::skills::project_id_for(&database, &paths, scope)?;
+    let item_id = sync_manifest_item(
+        connection,
+        &ManifestItemInput {
+            scope,
+            project_id: project_id.as_deref(),
+            item,
+        },
+    )
+    .map_err(|error| index_error(error.to_string()))?;
+    let (installed, deployed) = deployment_context(&database, &item_id, scope)?;
+    let planned = at_engine::mcp_plan::plan_item(McpItemPlanRequest {
+        paths: &paths,
+        scope,
+        project_id,
+        item_id,
+        action: McpItemAction::Delete,
+        installed: &installed,
+        deployed: &deployed,
+        locked_reason: None,
+    })
+    .map_err(plan_error)?;
+    let files = planned
+        .plan
+        .apply_order()
+        .flat_map(|set| set.ops.iter())
+        .filter_map(|op| op.destination())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if dry_run {
+        return Ok(CommandOutput::new(
+            json!({"id":id,"scope":scope.wire_name(),"dry_run":true,"files":files}),
+            format!("Would remove MCP server {id}\n"),
+        ));
+    }
+    let roots = apply_roots(&paths)?;
+    let mut recorder =
+        at_fs::DbOperationRecorder::new_with_actor(connection, 30, at_db::ops::OperationActor::Cli);
+    let mut context = at_fs::ApplyContext {
+        store_root: paths.support_dir(),
+        backup_folder: paths.backup_dir(),
+        recorder: &mut recorder,
+    };
+    let outcome = at_engine::mcp_plan::apply_item_plan(&planned, &mut context, &roots)
+        .map_err(apply_error)?;
+    sync_native_baselines(&database, &paths, scope, &planned)?;
+    // The canonical item is gone, so its index row and its deployments go with it; deployments
+    // have `ON DELETE CASCADE`, and a surviving row is what made `mcp list` show a removed
+    // server as `transport: unknown`.
+    at_db::items::delete_item(connection, &item_id)
+        .map_err(|error| index_error(error.to_string()))?;
     Ok(CommandOutput::new(
-        json!({"id":id,"scope":scope.wire_name(),"removed":true}),
+        json!({
+            "id": id,
+            "scope": scope.wire_name(),
+            "removed": true,
+            "operation_id": outcome.operation_id,
+            "files_changed": outcome.completed,
+        }),
         format!("Removed MCP server {id}\n"),
     ))
+}
+
+/// Copies one canonical server definition into another scope as a new item.
+///
+/// The copy is planned through the same engine path the Effective screen uses, so the reviewed
+/// file list, the per-agent refusals and the destination item identity are the same values the
+/// GUI dialog shows.
+fn copy_server(globals: &GlobalArgs, matches: &ArgMatches) -> Result<CommandOutput, CliError> {
+    let dry_run = globals.dry_run;
+    let access = crate::runtime::CliAccess::for_command(globals, !dry_run)?;
+    if !dry_run {
+        access.ensure_writable()?;
+    }
+    let paths = access.paths().clone();
+    let id = required(matches, "name")?;
+    let target_scope: Scope = matches
+        .get_one::<ScopeArg>("to")
+        .copied()
+        .map(Scope::from)
+        .ok_or_else(|| {
+            CliError::new(
+                ErrorCode::Usage,
+                "missing --to",
+                "pass --to global, user, project or local",
+            )
+        })?;
+    if !dry_run && !globals.yes {
+        return Err(CliError::new(
+            ErrorCode::ConfirmationRequired,
+            format!(
+                "copying {id} into {} scope requires --yes",
+                target_scope.wire_name()
+            ),
+            "review the plan with --dry-run, then repeat with --yes",
+        ));
+    }
+    let (scope, layout) = scope_layout(globals)?;
+    let slug = parse_slug(id)?;
+    let loaded = McpStore::load(&layout).map_err(store_error)?;
+    if loaded.store.get(slug.as_str()).is_none() {
+        return Err(not_found(id));
+    }
+    let manifest = StoreManifest::load(&layout).map_err(store_error)?;
+    let item = manifest
+        .manifest
+        .item_by_slug(ItemKind::McpServer, &slug)
+        .ok_or_else(|| not_found(id))?;
+    let database = open_index_or_create(&paths)?;
+    let connection = database.connection();
+    // The manifest owns the stable id. Recording it before planning means the deployment rows
+    // the copy writes cannot fail the `items` foreign key after the native files changed.
+    let project_id = crate::skills::project_id_for(&database, &paths, scope)?;
+    let item_id = sync_manifest_item(
+        connection,
+        &ManifestItemInput {
+            scope,
+            project_id: project_id.as_deref(),
+            item,
+        },
+    )
+    .map_err(|error| index_error(error.to_string()))?;
+    if let Some(lock) = at_db::locks::locks_for_item(connection, &item_id)
+        .map_err(|error| index_error(error.to_string()))?
+        .into_iter()
+        .next()
+    {
+        return Err(locked_error(&lock));
+    }
+    let (installed, _deployed) = deployment_context(&database, &item_id, scope)?;
+    let target_project_id = if matches!(target_scope, Scope::Project | Scope::Local) {
+        crate::skills::project_id_for(&database, &paths, target_scope)?
+    } else {
+        None
+    };
+    let on_collision = match matches
+        .get_one::<String>("on_collision")
+        .map(String::as_str)
+    {
+        None => None,
+        Some("replace") => Some(McpCopyResolution::Replace),
+        Some("rename") => Some(McpCopyResolution::Rename(unique_copy_slug(
+            &paths,
+            target_scope,
+            &slug,
+        )?)),
+        Some(other) => {
+            return Err(CliError::new(
+                ErrorCode::Usage,
+                format!("unsupported --on-collision value `{other}`"),
+                "use `replace` or `rename`",
+            ));
+        }
+    };
+    let planned = at_engine::mcp_plan::plan_item(McpItemPlanRequest {
+        paths: &paths,
+        scope,
+        project_id,
+        item_id,
+        action: McpItemAction::CopyToScope {
+            target_scope,
+            project_id: target_project_id.clone(),
+            on_collision,
+        },
+        installed: &installed,
+        deployed: &[],
+        locked_reason: None,
+    })
+    .map_err(plan_error)?;
+    let copy = planned.copy.clone().ok_or_else(|| {
+        CliError::new(
+            ErrorCode::Internal,
+            "the copy plan carries no destination identity",
+            "this is a bug in agentuna; please report the command you ran",
+        )
+    })?;
+    let warnings = planned
+        .plan
+        .warnings
+        .iter()
+        .map(|warning| Warning::new("mcp_plan", warning.clone()))
+        .chain(
+            copy.refused_agents
+                .iter()
+                .map(|refusal| Warning::new("mcp_refused_agent", refusal.reason.clone())),
+        )
+        .collect::<Vec<_>>();
+    let files = planned
+        .plan
+        .apply_order()
+        .flat_map(|set| set.ops.iter())
+        .filter_map(|op| op.destination())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if dry_run {
+        return Ok(CommandOutput::new(
+            json!({
+                "id": id,
+                "scope": scope.wire_name(),
+                "target_scope": target_scope.wire_name(),
+                "target_slug": copy.target_slug,
+                "target_item_id": copy.target_item_id.to_string(),
+                "replaces_existing": copy.replaced,
+                "dry_run": true,
+                "files": files,
+                "agents": copy.agents.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "refused_agents": copy
+                    .refused_agents
+                    .iter()
+                    .map(|refusal| json!({"agent": refusal.agent.to_string(), "reason": refusal.reason}))
+                    .collect::<Vec<_>>(),
+            }),
+            format!(
+                "Would copy {id} into {} scope as {}\n",
+                target_scope.wire_name(),
+                copy.target_slug
+            ),
+        )
+        .with_warnings(warnings));
+    }
+    let merged = planned.plan.merged().map_err(|error| {
+        CliError::new(
+            ErrorCode::Internal,
+            format!("the copy plan is invalid: {error}"),
+            "this is a bug in agentuna; please report the command you ran",
+        )
+    })?;
+    let outcome = apply_change_set(&paths, &database, &merged)?;
+    let target_layout = StoreLayout::for_scope(&paths, target_scope).map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            "the destination scope has no store",
+            "select a valid project for project or local scope",
+        )
+    })?;
+    let target_item_id = index_manifest_item(
+        &paths,
+        &target_layout,
+        target_scope,
+        ItemKind::McpServer,
+        &copy.target_slug,
+    )?;
+    // The native documents now hold what the plan rendered; record their hashes so the next
+    // drift scan compares against the file this command wrote.
+    let store_file = target_layout.mcp_file();
+    let store_hash = std::fs::read(&store_file)
+        .ok()
+        .map(|bytes| at_fs::sha256_hex(&bytes));
+    let native_paths = planned
+        .plan
+        .native
+        .as_ref()
+        .map(|set| {
+            set.ops
+                .iter()
+                .filter_map(|op| op.destination().map(std::path::Path::to_path_buf))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (agent, path) in copy.agents.iter().zip(native_paths.iter()) {
+        let target_hash = std::fs::read(path)
+            .ok()
+            .map(|bytes| at_fs::sha256_hex(&bytes));
+        let hashes = at_db::deployments::DeploymentHashes::new(
+            store_hash.as_deref(),
+            target_hash.as_deref(),
+            target_hash.as_deref(),
+        );
+        let path_text = path.to_string_lossy().into_owned();
+        let mut spec = at_db::deployments::DeploymentSpec::applied(
+            &target_item_id,
+            agent,
+            target_scope,
+            ItemState::Linked,
+            Some("native"),
+            Some(&path_text),
+            hashes,
+        )
+        .with_operation(&outcome.operation_id);
+        if let Some(project) = target_project_id.as_deref() {
+            spec = spec.with_project(project);
+        }
+        at_db::deployments::upsert_deployment(connection, &spec)
+            .map_err(|error| index_error(error.to_string()))?;
+    }
+    for path in &native_paths {
+        at_engine::drift::sync_file_baseline(connection, target_scope, path, &store_file)
+            .map_err(|error| index_error(error.to_string()))?;
+    }
+    Ok(CommandOutput::new(
+        json!({
+            "id": id,
+            "scope": scope.wire_name(),
+            "target_scope": target_scope.wire_name(),
+            "target_slug": copy.target_slug,
+            "target_item_id": target_item_id.to_string(),
+            "replaces_existing": copy.replaced,
+            "agents": copy.agents.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "refused_agents": copy
+                .refused_agents
+                .iter()
+                .map(|refusal| json!({"agent": refusal.agent.to_string(), "reason": refusal.reason}))
+                .collect::<Vec<_>>(),
+            "operation_id": outcome.operation_id,
+            "files_changed": outcome.completed,
+        }),
+        format!(
+            "Copied {id} into {} scope as {}: {} file(s) changed\n",
+            target_scope.wire_name(),
+            copy.target_slug,
+            outcome.completed
+        ),
+    )
+    .with_warnings(warnings))
+}
+
+/// A lowercase slug the destination store does not use yet.
+fn unique_copy_slug(
+    paths: &at_store::paths::AppPaths,
+    target_scope: Scope,
+    slug: &Slug,
+) -> Result<String, CliError> {
+    let layout = StoreLayout::for_scope(paths, target_scope).map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            "the destination scope has no store",
+            "create the destination store first, then retry",
+        )
+    })?;
+    let store = McpStore::load(&layout).map_err(store_error)?;
+    let unique = at_store::layout::unique_slug(slug.as_str(), |candidate| {
+        store.store.get(candidate).is_some()
+    })
+    .map_err(|error| {
+        CliError::new(
+            ErrorCode::Conflict,
+            format!("cannot derive a free copy name: {error}"),
+            "rename the server first, or pass --on-collision replace",
+        )
+    })?;
+    Ok(unique.as_str().to_owned())
+}
+
+/// Opens (and on first use creates) the writable index a mutating command needs.
+fn open_index_or_create(paths: &at_store::paths::AppPaths) -> Result<at_db::Database, CliError> {
+    at_db::Database::open_file(paths.db_path()).map_err(|error| index_error(error.to_string()))
+}
+
+/// Applies one reviewed ChangeSet under the exclusive access the caller already holds.
+fn apply_change_set(
+    paths: &at_store::paths::AppPaths,
+    database: &at_db::Database,
+    set: &at_model::ChangeSet,
+) -> Result<at_fs::ApplyOutcome, CliError> {
+    let roots = apply_roots(paths)?;
+    let mut recorder = at_fs::DbOperationRecorder::new_with_actor(
+        database.connection(),
+        30,
+        at_db::ops::OperationActor::Cli,
+    );
+    let mut context = at_fs::ApplyContext {
+        store_root: paths.support_dir(),
+        backup_folder: paths.backup_dir(),
+        recorder: &mut recorder,
+    };
+    at_fs::apply_with_roots(set, &mut context, &roots).map_err(apply_error)
+}
+
+fn apply_roots(paths: &at_store::paths::AppPaths) -> Result<at_fs::ApplyRoots, CliError> {
+    at_fs::ApplyRoots::new(authorized_roots(paths)).map_err(|_| {
+        CliError::new(
+            ErrorCode::Conflict,
+            "authorized configuration roots are unavailable",
+            "check that the home, store and project folders exist",
+        )
+    })
+}
+
+/// Records the manifest identity of `slug` in the index and returns it.
+fn index_manifest_item(
+    paths: &at_store::paths::AppPaths,
+    layout: &StoreLayout,
+    scope: Scope,
+    kind: ItemKind,
+    slug: &str,
+) -> Result<ItemId, CliError> {
+    let slug = parse_slug(slug)?;
+    let manifest = StoreManifest::load(layout).map_err(store_error)?;
+    let item = manifest
+        .manifest
+        .item_by_slug(kind, &slug)
+        .ok_or_else(|| {
+            CliError::new(
+                ErrorCode::Conflict,
+                "the saved server has no record in store.json",
+                "run `agentuna doctor` to rebuild the store manifest",
+            )
+        })?
+        .clone();
+    let database = open_index_or_create(paths)?;
+    let project_id = crate::skills::project_id_for(&database, paths, scope)?;
+    sync_manifest_item(
+        database.connection(),
+        &ManifestItemInput {
+            scope,
+            project_id: project_id.as_deref(),
+            item: &item,
+        },
+    )
+    .map_err(|error| index_error(error.to_string()))
+}
+
+/// Records the observed hashes for every native file one MCP plan wrote.
+fn sync_native_baselines(
+    database: &at_db::Database,
+    paths: &at_store::paths::AppPaths,
+    scope: Scope,
+    planned: &McpItemPlan,
+) -> Result<(), CliError> {
+    let layout = StoreLayout::for_scope(paths, scope).map_err(|_| {
+        CliError::new(
+            ErrorCode::Validation,
+            "the selected scope has no store",
+            "select a valid project for project or local scope",
+        )
+    })?;
+    let store_file = layout.mcp_file();
+    let native_paths = planned
+        .plan
+        .native
+        .iter()
+        .flat_map(|set| set.ops.iter())
+        .filter_map(|op| op.destination())
+        .collect::<Vec<_>>();
+    for path in native_paths {
+        at_engine::drift::sync_file_baseline(database.connection(), scope, path, &store_file)
+            .map_err(|error| index_error(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Installed agents and the agents with a deployment for `item_id` in `scope`.
+fn deployment_context(
+    database: &at_db::Database,
+    item_id: &ItemId,
+    scope: Scope,
+) -> Result<(Vec<AgentId>, Vec<AgentId>), CliError> {
+    let connection = database.connection();
+    let installed = at_db::agents::list_agents_on_mac(connection)
+        .map_err(|error| index_error(error.to_string()))?
+        .into_iter()
+        .filter(|agent| agent.presence != at_db::agents::AgentPresence::NotInstalled)
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let deployed = at_db::deployments::list_deployments_for_item(connection, item_id)
+        .map_err(|error| index_error(error.to_string()))?
+        .into_iter()
+        .filter(|cell| cell.scope == scope)
+        .map(|cell| cell.agent_id)
+        .collect::<Vec<_>>();
+    Ok((installed, deployed))
 }
 
 fn secret_list(globals: &GlobalArgs) -> Result<CommandOutput, CliError> {
@@ -771,13 +1425,7 @@ fn read_definition() -> Result<(String, McpServerDef), CliError> {
             )
         })?
         .to_owned();
-    if !valid_slug(&slug) {
-        return Err(CliError::new(
-            ErrorCode::Validation,
-            "server id must be a lowercase slug",
-            "use lowercase letters, numbers, and single hyphens",
-        ));
-    }
+    parse_slug(&slug)?;
     let definition: McpServerDef =
         serde_json::from_value(value.get("definition").cloned().ok_or_else(|| {
             CliError::new(
@@ -834,19 +1482,6 @@ fn looks_like_credential(value: &str) -> bool {
         .any(|prefix| value.starts_with(prefix))
 }
 
-fn save_store(layout: &StoreLayout, loaded: &LoadedMcpStore) -> Result<(), CliError> {
-    let expected = if loaded.absent {
-        ExpectedState::Absent
-    } else {
-        ExpectedState::Hash(loaded.hash.to_string())
-    };
-    loaded
-        .store
-        .save(layout, expected, BackupPolicy::None)
-        .map_err(store_error)?;
-    Ok(())
-}
-
 fn scope_layout(globals: &GlobalArgs) -> Result<(Scope, StoreLayout), CliError> {
     let scope: Scope = globals.scope.unwrap_or(ScopeArg::User).into();
     let paths = crate::runtime::resolve_paths(globals)?;
@@ -872,15 +1507,19 @@ fn required<'a>(matches: &'a ArgMatches, key: &str) -> Result<&'a str, CliError>
             )
         })
 }
-fn valid_slug(slug: &str) -> bool {
-    !slug.is_empty()
-        && slug.len() <= 64
-        && slug
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !slug.starts_with('-')
-        && !slug.ends_with('-')
-        && !slug.contains("--")
+/// Validates an MCP id with the store's own slug rules.
+///
+/// The store owns the canonical id form (`at-store`'s `Slug`: lowercase, digits, `-`, `_` and
+/// `.`), and a migration imports native names such as `claude_alpha` unchanged. A stricter
+/// CLI-only rule made exactly those imported servers impossible to edit.
+fn parse_slug(id: &str) -> Result<Slug, CliError> {
+    Slug::parse(id).map_err(|error| {
+        CliError::new(
+            ErrorCode::Validation,
+            format!("invalid MCP server id `{id}`: {error}"),
+            "use lowercase letters, numbers, `-`, `_` or `.`, not starting with `-` or `.`",
+        )
+    })
 }
 fn valid_secret_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 255 && !name.chars().any(char::is_control)
@@ -924,5 +1563,14 @@ fn db_error(message: String) -> CliError {
         ErrorCode::Conflict,
         format!("secret inventory is unavailable: {message}"),
         "initialize or repair the AgenTuna database",
+    )
+}
+
+/// Maps an index read or write failure for MCP state (never a secret inventory).
+fn index_error(message: String) -> CliError {
+    CliError::new(
+        ErrorCode::Conflict,
+        format!("the MCP index is unavailable: {message}"),
+        "run `agentuna doctor` to initialize or repair the index",
     )
 }

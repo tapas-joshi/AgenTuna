@@ -626,6 +626,13 @@ mod tests {
     fn the_system_connector_reaches_a_loopback_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("local address").port();
+        // Accept while the probe connects. The probe closes its socket as soon as it returns,
+        // and a connection the client closes before `accept` can be dropped from the queue, so
+        // a blocking accept has to be waiting when the handshake completes.
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = accepted_tx.send(listener.accept().is_ok());
+        });
 
         let policy = NetworkPolicy::default();
         let server = http_server(&format!("http://127.0.0.1:{port}/mcp"));
@@ -642,13 +649,11 @@ mod tests {
         let mut log = NetworkEventLog::new();
         probe_endpoint(&authorized, NOW, &mut log, &SystemTcpConnector).expect("loopback connects");
 
-        listener
-            .set_nonblocking(true)
-            .expect("non-blocking listener");
-        let accepted = listener.accept();
         assert!(
-            accepted.is_ok(),
-            "the permitted probe must actually reach the listener: {accepted:?}"
+            accepted_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the permitted probe must actually reach the listener"),
+            "the permitted probe must actually reach the listener"
         );
         assert_eq!(log.len(), 1);
     }

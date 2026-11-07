@@ -44,6 +44,19 @@ pub enum SourceKind {
     Zip,
 }
 
+/// How selected skills are brought into the destination library.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+#[non_exhaustive]
+pub enum LibraryTransferMode {
+    /// Copy each source package into the destination library.
+    #[default]
+    Copy,
+    /// Link each destination entry to its source package.
+    Link,
+}
+
 /// The current source-specific details.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -52,8 +65,10 @@ pub struct SourceDetails {
     pub repo_url: String,
     /// Optional Git branch, tag or commit.
     pub repo_reference: String,
-    /// Selected library skill identifier.
-    pub library_selection: Option<String>,
+    /// Selected library skill identifiers, which may span multiple sources.
+    pub library_selections: Vec<String>,
+    /// Whether library packages are copied or linked into the destination.
+    pub library_mode: LibraryTransferMode,
     /// Marketplace skill identifier.
     pub marketplace_id: String,
     /// Folder path selected by the user.
@@ -64,13 +79,12 @@ pub struct SourceDetails {
     pub description: String,
     /// Selected template identifier for a new skill.
     pub template: Option<String>,
-    /// Selected imported repository skill identifier.
-    /// Selected folder skill candidate relative to the imported directory.
-    pub folder_selection: Option<String>,
-    /// Selected ZIP skill candidate relative to the extracted archive.
-    pub zip_selection: Option<String>,
-    /// Selected imported repository skill identifier.
-    pub fetched_repo_selection: Option<String>,
+    /// Selected folder skill candidates relative to the imported directory.
+    pub folder_selections: Vec<String>,
+    /// Selected ZIP skill candidates relative to the extracted archive.
+    pub zip_selections: Vec<String>,
+    /// Selected imported repository skill identifiers.
+    pub fetched_repo_selections: Vec<String>,
 }
 
 /// Current complete wizard draft.
@@ -127,8 +141,8 @@ pub enum WizardEvent {
     FetchSource,
     /// Provider reports that source candidates are available.
     SourceFetched {
-        /// Candidate identifier returned by the injected source provider.
-        selection: Option<String>,
+        /// Candidate identifiers returned by the injected source provider.
+        selections: Vec<String>,
     },
     /// Advance only when the current step validates.
     Next,
@@ -247,8 +261,8 @@ impl AddSkillWizard {
                     Vec::new()
                 }
             }),
-            WizardEvent::SourceFetched { selection } => {
-                self.details.fetched_repo_selection = selection;
+            WizardEvent::SourceFetched { selections } => {
+                self.details.fetched_repo_selections = selections;
                 Vec::new()
             }
             WizardEvent::Next => {
@@ -307,10 +321,10 @@ impl AddSkillWizard {
                     .as_ref()
                     .ok_or(WizardValidationError::SourceRequired)?;
                 validate_details(source, &self.details)?;
-                if !self.name.trim().is_empty() {
-                    Ok(())
-                } else {
+                if requires_user_name(source) && self.name.trim().is_empty() {
                     Err(WizardValidationError::NameRequired)
+                } else {
+                    Ok(())
                 }
             }
             WizardStep::ScopeAgents => {
@@ -323,7 +337,12 @@ impl AddSkillWizard {
                 Ok(())
             }
             WizardStep::Review => {
-                if self.name.trim().is_empty() {
+                let source = self
+                    .source
+                    .as_ref()
+                    .ok_or(WizardValidationError::SourceRequired)?;
+                validate_details(source, &self.details)?;
+                if requires_user_name(source) && self.name.trim().is_empty() {
                     return Err(WizardValidationError::NameRequired);
                 }
                 if self.scope.as_deref().is_none_or(str::is_empty) {
@@ -350,16 +369,9 @@ fn validate_details(
             .as_ref()
             .is_some_and(|value| !value.trim().is_empty()),
         SourceKind::Git => {
-            valid_repository_url(&details.repo_url)
-                && details
-                    .fetched_repo_selection
-                    .as_ref()
-                    .is_some_and(|value| !value.trim().is_empty())
+            valid_repository_url(&details.repo_url) && !details.fetched_repo_selections.is_empty()
         }
-        SourceKind::Library => details
-            .library_selection
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty()),
+        SourceKind::Library => !details.library_selections.is_empty(),
         SourceKind::Marketplace => {
             details.marketplace_id.contains('/')
                 && details
@@ -367,8 +379,12 @@ fn validate_details(
                     .split('/')
                     .all(|part| !part.is_empty())
         }
-        SourceKind::Folder => !details.folder_path.trim().is_empty(),
-        SourceKind::Zip => !details.zip_path.trim().is_empty(),
+        SourceKind::Folder => {
+            !details.folder_path.trim().is_empty() && !details.folder_selections.is_empty()
+        }
+        SourceKind::Zip => {
+            !details.zip_path.trim().is_empty() && !details.zip_selections.is_empty()
+        }
     };
     if complete {
         Ok(())
@@ -377,11 +393,16 @@ fn validate_details(
     }
 }
 
+fn requires_user_name(source: &SourceKind) -> bool {
+    matches!(source, SourceKind::New | SourceKind::Marketplace)
+}
+
 fn valid_repository_url(value: &str) -> bool {
     let value = value.trim();
     (value.starts_with("https://") || value.starts_with("ssh://") || value.starts_with("git@"))
         && value.len() > 8
         && !value.chars().any(char::is_whitespace)
+        && !at_git::import::url_has_credentials(value)
 }
 
 #[cfg(test)]
@@ -393,9 +414,25 @@ mod tests {
         wizard.dispatch(WizardEvent::SetName("Example Skill".to_owned()));
         wizard.dispatch(WizardEvent::SetDetails(Box::new(SourceDetails {
             repo_url: "https://example.invalid/skills.git".to_owned(),
-            fetched_repo_selection: Some("repo/skill".to_owned()),
+            fetched_repo_selections: vec!["repo/skill".to_owned()],
             ..SourceDetails::default()
         })));
+    }
+
+    #[test]
+    fn repository_urls_with_embedded_credentials_are_rejected() {
+        assert!(!valid_repository_url(
+            "https://user:secret@example.invalid/skills.git"
+        ));
+        assert!(!valid_repository_url(
+            "https://token@example.invalid/skills.git"
+        ));
+        assert!(!valid_repository_url(
+            "ssh://git@example.invalid/skills.git"
+        ));
+        assert!(valid_repository_url("https://example.invalid/skills.git"));
+        assert!(valid_repository_url("ssh://example.invalid/skills.git"));
+        assert!(valid_repository_url("git@example.invalid:org/skills.git"));
     }
 
     #[test]
@@ -419,10 +456,7 @@ mod tests {
         wizard.dispatch(WizardEvent::Back);
         assert_eq!(wizard.step, WizardStep::Details);
         assert_eq!(wizard.name, "Example Skill");
-        assert_eq!(
-            wizard.details.fetched_repo_selection.as_deref(),
-            Some("repo/skill")
-        );
+        assert_eq!(wizard.details.fetched_repo_selections, ["repo/skill"]);
         assert_eq!(wizard.agents, ["codex"]);
     }
 
@@ -472,6 +506,176 @@ mod tests {
     }
 
     #[test]
+    fn review_back_to_details_then_forward_retains_the_draft() {
+        let mut wizard = AddSkillWizard::default();
+        wizard.dispatch(WizardEvent::SelectSource(SourceKind::Git));
+        wizard.dispatch(WizardEvent::SetName("Example Skill".to_owned()));
+        wizard.dispatch(WizardEvent::SetDetails(Box::new(SourceDetails {
+            repo_url: "https://example.invalid/skills.git".to_owned(),
+            template: Some("basic".to_owned()),
+            fetched_repo_selections: vec!["repo/skill".to_owned()],
+            ..SourceDetails::default()
+        })));
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::Details);
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::ScopeAgents);
+        wizard.dispatch(WizardEvent::SetScope("user".to_owned()));
+        wizard.dispatch(WizardEvent::SetAgents(vec![
+            "codex".to_owned(),
+            "omp".to_owned(),
+        ]));
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::Review);
+
+        // Back from Review through Scope & agents to Details, then forward again.
+        wizard.dispatch(WizardEvent::Back);
+        assert_eq!(wizard.step, WizardStep::ScopeAgents);
+        wizard.dispatch(WizardEvent::Back);
+        assert_eq!(wizard.step, WizardStep::Details);
+        assert_eq!(wizard.name, "Example Skill");
+        assert_eq!(wizard.details.template.as_deref(), Some("basic"));
+        assert_eq!(wizard.details.fetched_repo_selections, ["repo/skill"]);
+        assert_eq!(wizard.agents, ["codex", "omp"]);
+        assert_eq!(wizard.scope.as_deref(), Some("user"));
+
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::ScopeAgents);
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::Review);
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ReadyToImport]
+        );
+        assert_eq!(wizard.step, WizardStep::Review, "Done requires success");
+        wizard.dispatch(WizardEvent::ImportCompleted);
+        assert_eq!(wizard.step, WizardStep::Done);
+        assert!(wizard.completed);
+    }
+
+    fn assert_caller_only(effects: &[WizardEffect]) {
+        // Every returned effect is a request the caller performs: the machine
+        // itself has no file or network handle and performs no IO.
+        for effect in effects {
+            match effect {
+                WizardEffect::FetchSource { .. }
+                | WizardEffect::DiscardDraft
+                | WizardEffect::ConfirmDiscard
+                | WizardEffect::ReadyToImport
+                | WizardEffect::ValidationFailed { .. } => {}
+            }
+        }
+    }
+
+    #[test]
+    fn every_transition_is_gated_and_returns_only_caller_effects() {
+        let mut wizard = AddSkillWizard::default();
+        assert_eq!(wizard.step, WizardStep::Source);
+        assert!(!wizard.is_dirty());
+        assert_caller_only(&wizard.dispatch(WizardEvent::Cancel));
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Cancel),
+            [WizardEffect::DiscardDraft]
+        );
+        assert!(wizard.dispatch(WizardEvent::Back).is_empty());
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ValidationFailed {
+                issue: WizardValidationError::SourceRequired,
+            }]
+        );
+        assert_eq!(wizard.step, WizardStep::Source);
+
+        wizard.dispatch(WizardEvent::SelectSource(SourceKind::New));
+        assert_eq!(wizard.details, SourceDetails::default());
+        assert!(
+            wizard.dispatch(WizardEvent::FetchSource).is_empty(),
+            "a template source has no provider to fetch"
+        );
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Cancel),
+            [WizardEffect::ConfirmDiscard]
+        );
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::Details);
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ValidationFailed {
+                issue: WizardValidationError::DetailsRequired,
+            }]
+        );
+        assert_eq!(wizard.step, WizardStep::Details);
+
+        wizard.dispatch(WizardEvent::SetDetails(Box::new(SourceDetails {
+            template: Some("basic".to_owned()),
+            ..SourceDetails::default()
+        })));
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ValidationFailed {
+                issue: WizardValidationError::NameRequired,
+            }],
+            "a template skill needs a user-visible name"
+        );
+        wizard.dispatch(WizardEvent::SetName("Templated Skill".to_owned()));
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::ScopeAgents);
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ValidationFailed {
+                issue: WizardValidationError::ScopeRequired,
+            }]
+        );
+        wizard.dispatch(WizardEvent::SetScope("user".to_owned()));
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ValidationFailed {
+                issue: WizardValidationError::AgentRequired,
+            }]
+        );
+        wizard.dispatch(WizardEvent::SetAgents(vec!["codex".to_owned()]));
+        assert!(wizard.dispatch(WizardEvent::Next).is_empty());
+        assert_eq!(wizard.step, WizardStep::Review);
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Next),
+            [WizardEffect::ReadyToImport]
+        );
+        wizard.dispatch(WizardEvent::ImportCompleted);
+        assert_eq!(wizard.step, WizardStep::Done);
+        assert_eq!(
+            wizard.dispatch(WizardEvent::Cancel),
+            [WizardEffect::ConfirmDiscard]
+        );
+        assert_eq!(
+            wizard.dispatch(WizardEvent::ConfirmDiscard),
+            [WizardEffect::DiscardDraft]
+        );
+
+        let mut git = AddSkillWizard::default();
+        git.dispatch(WizardEvent::SelectSource(SourceKind::Git));
+        let details = SourceDetails {
+            repo_url: "https://example.invalid/skills.git".to_owned(),
+            ..SourceDetails::default()
+        };
+        git.dispatch(WizardEvent::SetDetails(Box::new(details.clone())));
+        let effects = git.dispatch(WizardEvent::FetchSource);
+        assert_caller_only(&effects);
+        assert_eq!(
+            effects,
+            [WizardEffect::FetchSource {
+                source: SourceKind::Git,
+                details: Box::new(details),
+            }]
+        );
+        git.dispatch(WizardEvent::SourceFetched {
+            selections: vec!["repo/skill".to_owned()],
+        });
+        assert_eq!(git.details.fetched_repo_selections, ["repo/skill"]);
+        git.dispatch(WizardEvent::ImportCompleted);
+        assert_eq!(git.step, WizardStep::Source, "only Review completes");
+    }
+
+    #[test]
     fn source_details_have_independent_validation() {
         for (source, details, valid) in [
             (
@@ -486,7 +690,7 @@ mod tests {
                 SourceKind::Git,
                 SourceDetails {
                     repo_url: "https://host/repo".into(),
-                    fetched_repo_selection: Some("s".into()),
+                    fetched_repo_selections: vec!["s".into()],
                     ..Default::default()
                 },
                 true,
@@ -494,7 +698,7 @@ mod tests {
             (
                 SourceKind::Library,
                 SourceDetails {
-                    library_selection: Some("s".into()),
+                    library_selections: vec!["s".into()],
                     ..Default::default()
                 },
                 true,
@@ -511,6 +715,7 @@ mod tests {
                 SourceKind::Folder,
                 SourceDetails {
                     folder_path: "/folder".into(),
+                    folder_selections: vec!["s".into()],
                     ..Default::default()
                 },
                 true,
@@ -519,6 +724,7 @@ mod tests {
                 SourceKind::Zip,
                 SourceDetails {
                     zip_path: "/skill.zip".into(),
+                    zip_selections: vec!["s".into()],
                     ..Default::default()
                 },
                 true,

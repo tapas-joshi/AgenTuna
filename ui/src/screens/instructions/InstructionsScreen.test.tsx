@@ -186,3 +186,31 @@ describe("InstructionsScreen", () => {
     expect((await screen.findAllByText(/created/)).length).toBeGreaterThan(0);
   });
 });
+  test("external watcher events protect dirty edits until Reload is confirmed or Keep mine is chosen", async () => {
+    let diskFile = file;
+    ipc.reply = (command) => Promise.resolve(command === "instructions_list" ? [diskFile] : undefined);
+    appState.setEditorBuffer("overview", { route: "overview", value: file.content, savedValue: file.content });
+    renderScreen();
+    const editor = await screen.findByRole("textbox", { name: "Instruction content" });
+    await userEvent.click(editor);
+    await userEvent.type(editor, " Mine");
+    await waitFor(() => expect(appState.getSnapshot().editors[appState.getSnapshot().route]?.value).toContain("Mine"));
+    diskFile = { ...file, content: "# External version\n", hash: "d".repeat(64) };
+
+    fireEvent(window, new CustomEvent("agentuna:external-refresh", {
+      detail: { paths: [file.path], full_rescan: false },
+    }));
+    const bannerText = await screen.findByText("Changed outside AgenTuna.");
+    const banner = bannerText.closest('[role="alert"]') as HTMLElement;
+    expect(banner.textContent).toContain("Changed outside AgenTuna.");
+    fireEvent.click(within(banner).getByRole("button", { name: "Keep mine" }));
+    await waitFor(() => expect(appState.getSnapshot().externalChanges[appState.getSnapshot().route]?.kept).toBe(true));
+    expect(editor.textContent).toContain("Mine");
+
+    fireEvent.click(within(banner).getByRole("button", { name: "Reload" }));
+    const confirmation = await screen.findByRole("dialog", { name: "Reload external changes?" });
+    expect(confirmation.textContent).toContain("replaces your unsaved edits");
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Reload file" }));
+    await waitFor(() => expect(editor.textContent).toContain("External version"));
+    expect(appState.getSnapshot().externalChanges[appState.getSnapshot().route]).toBeUndefined();
+  });

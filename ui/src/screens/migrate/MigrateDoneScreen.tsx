@@ -4,9 +4,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../../components/button";
 import type { MigrateApplyResultView } from "../../generated/MigrateApplyResultView";
 import type { OperationUndoCheckView } from "../../generated/OperationUndoCheckView";
-import type { OperationUndoView } from "../../generated/OperationUndoView";
 import { Modal } from "../../overlays/dialogs/Modal";
 import { useToast } from "../../overlays/toasts";
+import { showMigrationCompleteToast, showMigrationRolledBackToast, showUndoBlockedToast, showUndoCompleteToast } from "../../overlays/toasts/catalogue";
+import { describeCause, failureFromCommandError } from "./applyJob";
+
+/** Human label of one receiving scope. */
+const SCOPE_LABEL: Readonly<Record<string, { readonly label: string }>> = {
+  global: { label: "Global" },
+  user: { label: "User" },
+  project: { label: "Project" },
+  local: { label: "Local" },
+};
 
 export interface MigrateDoneScreenProps {
   readonly result: MigrateApplyResultView | null;
@@ -30,6 +39,7 @@ export function MigrateDoneScreen({
 }: MigrateDoneScreenProps): JSX.Element {
   const toast = useToast();
   const [readiness, setReadiness] = useState<OperationUndoCheckView | null>(null);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
   const [undoModalOpen, setUndoModalOpen] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
   const [undoError, setUndoError] = useState<string | null>(null);
@@ -39,15 +49,25 @@ export function MigrateDoneScreen({
   useEffect(() => {
     if (!result?.operation_id) return;
     invoke<OperationUndoCheckView>("operation_undo_check", {
-      operation_id: result.operation_id,
+      operationId: result.operation_id,
     })
       .then((view) => {
         setReadiness(view);
+        setReadinessError(null);
       })
-      .catch(() => {
-        // Readiness check failed or operation not found
+      .catch((cause: unknown) => {
+        // Keep the button usable: the modal shows the backend's reason if it re-checks.
+        setReadinessError(describeCause(cause));
       });
   }, [result?.operation_id]);
+
+  useEffect(() => {
+    if (result !== null) {
+      showMigrationCompleteToast(toast, Number(result.counts.items), () => setUndoModalOpen(true));
+    } else if (failedStep) {
+      showMigrationRolledBackToast(toast, failedStep, failureCause ?? undefined);
+    }
+  }, [result?.operation_id, failedStep, failureCause, toast]);
 
   async function openUndoModal() {
     setUndoError(null);
@@ -55,14 +75,19 @@ export function MigrateDoneScreen({
     if (result?.operation_id) {
       try {
         const view = await invoke<OperationUndoCheckView>("operation_undo_check", {
-          operation_id: result.operation_id,
+          operationId: result.operation_id,
         });
         setReadiness(view);
+        setReadinessError(null);
         if (view.conflicted_paths.length > 0) {
           setBlockedPaths(view.conflicted_paths);
+          showUndoBlockedToast(toast, view.conflicted_paths.join("\n"), () => {
+            setBlockedPaths(view.conflicted_paths);
+            setUndoModalOpen(true);
+          });
         }
-      } catch {
-        // ignore
+      } catch (cause: unknown) {
+        setReadinessError(describeCause(cause));
       }
     }
     setUndoModalOpen(true);
@@ -72,24 +97,30 @@ export function MigrateDoneScreen({
     setUndoBusy(true);
     setUndoError(null);
     try {
-      const outcome = await invoke<OperationUndoView>("operation_undo", {
-        operation_id: result.operation_id,
+      await invoke("operation_undo", {
+        operationId: result.operation_id,
         force,
       });
-      toast.success(outcome.summary || "Migration was undone.");
+      showUndoCompleteToast(toast);
       setUndone(true);
       setUndoModalOpen(false);
       setBlockedPaths([]);
     } catch (err: unknown) {
-      const msg = String(err);
-      setUndoError(msg);
-      if (readiness && readiness.conflicted_paths.length > 0) {
-        setBlockedPaths(readiness.conflicted_paths);
-      } else {
-        const lines = msg.split("\n").filter((l) => l.trim().startsWith("/") || l.trim().startsWith("."));
-        if (lines.length > 0) {
-          setBlockedPaths(lines);
-        }
+      // A command rejects with the serialized error value, not an `Error`: read its message
+      // and remedy instead of rendering `[object Object]` over the backend's explanation.
+      const failure = failureFromCommandError(err);
+      setUndoError(describeCause(err));
+      const conflictPaths = readiness?.conflicted_paths ?? [];
+      const lines = failure.message
+        .split("\n")
+        .filter((line) => line.trim().startsWith("/") || line.trim().startsWith("."));
+      const changedPaths = conflictPaths.length > 0 ? [...conflictPaths] : lines;
+      if (changedPaths.length > 0) {
+        setBlockedPaths(changedPaths);
+        showUndoBlockedToast(toast, describeCause(err), () => {
+          setBlockedPaths(changedPaths);
+          setUndoModalOpen(true);
+        });
       }
     } finally {
       setUndoBusy(false);
@@ -109,7 +140,7 @@ export function MigrateDoneScreen({
   const isRolledBack = result === null && Boolean(failedStep);
 
   return (
-    <main
+    <section
       aria-label="Migration summary"
       className="mx-auto flex min-h-full max-w-[800px] flex-col items-center justify-center gap-24 p-24"
     >
@@ -162,12 +193,16 @@ export function MigrateDoneScreen({
             className="flex w-full flex-col gap-12 rounded-12 border border-border bg-raised p-20"
           >
             <ul className="m-0 flex list-none flex-col gap-8 p-0 text-13 text-text">
-              <li className="flex items-center gap-8">
-                <span className="text-success">✓</span>
-                <span>
-                  {result.counts.items} items copied into store ({result.scope} scope)
-                </span>
-              </li>
+              {result.scopes.map((entry) => (
+                <li key={entry.scope} className="flex items-center gap-8">
+                  <span className="text-success">✓</span>
+                  <span>
+                    {entry.counts.items} item{entry.counts.items === 1 ? "" : "s"} copied into the{" "}
+                    {(SCOPE_LABEL[entry.scope] ?? { label: entry.scope }).label} store (
+                    {entry.store_path})
+                  </span>
+                </li>
+              ))}
               <li className="flex items-center gap-8">
                 <span className="text-success">✓</span>
                 <span>{result.counts.links_written} skill folders replaced by links</span>
@@ -189,6 +224,22 @@ export function MigrateDoneScreen({
                   <span>{result.counts.files_left_in_place} files left in place and watched</span>
                 </li>
               )}
+              {result.warnings.map((warning) => (
+                <li key={`${warning.kind}:${warning.path}`} className="flex items-start gap-8">
+                  <span className="text-warning">!</span>
+                  <span>
+                    {warning.kind === "copy_fallback"
+                      ? `${warning.path} was written as a copy (${warning.observed_mode}) instead of a link`
+                      : `${warning.kind} at ${warning.path}`}
+                  </span>
+                </li>
+              ))}
+              <li className="flex items-center gap-8">
+                <span className="text-text-muted">•</span>
+                <span className="font-mono text-12 text-text-secondary">
+                  operation {result.operation_id}
+                </span>
+              </li>
             </ul>
           </section>
 
@@ -283,14 +334,21 @@ export function MigrateDoneScreen({
                 <span className="font-mono">{result?.backup_dir}</span>.
               </p>
             )}
-            {undoError && blockedPaths.length === 0 && (
+            {/* The backend's explanation and remedy stay visible even when it also named
+                the paths it refused, so a blocked undo never hides why it was blocked. */}
+            {undoError && (
               <p role="alert" className="m-0 text-12 text-danger">
                 {undoError}
+              </p>
+            )}
+            {readinessError !== null && undoError === null && blockedPaths.length === 0 && (
+              <p role="alert" className="m-0 text-12 text-danger">
+                {readinessError}
               </p>
             )}
           </div>
         </Modal>
       )}
-    </main>
+    </section>
   );
 }

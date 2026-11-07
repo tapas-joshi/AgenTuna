@@ -1,5 +1,8 @@
 //! Signed update transport, staging and downgrade policy.
 
+pub mod commands;
+pub mod install;
+
 use std::path::{Path, PathBuf};
 
 use at_model::network::{NetworkAction, NetworkEvent, NetworkTrigger};
@@ -14,6 +17,15 @@ use super::network::{NetworkState, UpdateGateError};
 
 /// Production Ed25519 public key, stored separately from the application source.
 const UPDATE_PUBLIC_KEY_HEX: &str = include_str!("../../updater-pubkey.txt");
+
+/// Release manifest endpoint compiled into the binary.
+///
+/// A release build sets `AGENTUNA_UPDATE_MANIFEST_URL`; a development build without it reports
+/// that no update source is configured instead of contacting a guessed host.
+#[must_use]
+pub fn manifest_url() -> Option<&'static str> {
+    option_env!("AGENTUNA_UPDATE_MANIFEST_URL").filter(|url| !url.trim().is_empty())
+}
 
 /// A fully parsed update manifest whose signature has been verified.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,0 +1,21 @@
+--- fixture
++++ output
+@@ -14,18 +14,6 @@
+       "enabled": true,
+       "timeout": 20000,
+       "instructions": false
+-    },
+-    "remote-tool": {
+-      "type": "http",
+-      "url": "https://mcp.example.test/mcp",
+-      "headers": {
+-        "Authorization": "${REMOTE_TOKEN}"
+-      },
+-      "enabled": false,
+-      "auth": {
+-        "type": "apikey",
+-        "credentialId": "cred_123"
+-      }
+     }
+   },
+   "disabledServers": [

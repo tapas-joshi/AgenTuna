@@ -428,3 +428,58 @@ fn every_source_kind_wire_name_round_trips() {
     assert_eq!(AutoUpdate::from_i64(2), Some(AutoUpdate::Inherit));
     assert_eq!(AutoUpdate::from_i64(3), None);
 }
+
+#[test]
+fn per_skill_auto_update_tri_state_survives_a_database_reopen() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("index.sqlite");
+    let rows = {
+        let mut database = Database::open_file(&path).expect("file database");
+        let mut rows = Vec::new();
+        for (index, mode) in [AutoUpdate::Off, AutoUpdate::Inherit, AutoUpdate::On]
+            .into_iter()
+            .enumerate()
+        {
+            let id = item_id();
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO items (id, kind, scope, slug, name) \
+                     VALUES (?1, 'skill', 'user', ?2, ?2)",
+                    params![id.to_string(), format!("mode-{index}")],
+                )
+                .expect("item inserts");
+            let source = upsert_source(
+                database.connection_mut(),
+                &git_spec(&id, "https://example.test/skills", "aaa111"),
+            )
+            .expect("source row");
+            set_auto_update(database.connection(), &source, mode).expect("set override");
+            rows.push((id, source, mode));
+        }
+        rows
+    };
+
+    let reopened = Database::open_file(&path).expect("reopen database");
+    for (item, source, mode) in rows {
+        let row = get_source(reopened.connection(), &source)
+            .expect("read source")
+            .expect("source survives reopen");
+        assert_eq!(
+            row.auto_update,
+            Some(mode),
+            "stored tri-state survives restart"
+        );
+        // `auto_update_skills` defaults to off, so only an explicit On is effective.
+        assert_eq!(
+            effective_auto_update(reopened.connection(), &item).expect("effective mode"),
+            mode == AutoUpdate::On
+        );
+    }
+    assert!(
+        !settings::load(reopened.connection())
+            .expect("settings")
+            .auto_update_skills,
+        "the global default stays off"
+    );
+}

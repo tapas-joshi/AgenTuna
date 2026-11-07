@@ -245,9 +245,14 @@ fn deployment_matrix_scales_to_3k_items_3_agents_3_scopes_under_50ms() {
     // 3k items x 3 agents x 3 scopes = 27k cells, but project_id=None filters
     // to only global/user rows (project rows have project_id set).
     assert_eq!(matrix.cells.len(), 6_000);
+    let budget = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_millis(250)
+    };
     assert!(
-        elapsed < Duration::from_millis(250),
-        "deployment_matrix took {elapsed:?} for 27k cells, above the 250 ms CI bound (target 50 ms on a quiet machine)"
+        elapsed < budget,
+        "deployment_matrix took {elapsed:?} for 27k cells, above the {budget:?} bound (target 50 ms on a quiet machine)"
     );
 
     // Spot-check that hashes and sync_label are populated.

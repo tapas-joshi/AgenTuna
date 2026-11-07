@@ -286,7 +286,7 @@ fn the_exit_code_table_is_unique_and_ordered() {
 
 #[test]
 fn error_codes_are_frozen() {
-    let frozen: [(ErrorCode, &str, i32); 15] = [
+    let frozen: [(ErrorCode, &str, i32); 19] = [
         (ErrorCode::Usage, "usage", exit_code::USAGE),
         (ErrorCode::Validation, "validation", exit_code::VALIDATION),
         (ErrorCode::NotFound, "not_found", exit_code::NOT_FOUND),
@@ -324,6 +324,22 @@ fn error_codes_are_frozen() {
             ErrorCode::PartialFailure,
             "partial_failure",
             exit_code::PARTIAL,
+        ),
+        (
+            ErrorCode::DriftChangedAgain,
+            "drift_changed_again",
+            exit_code::CONFLICT,
+        ),
+        (
+            ErrorCode::TargetChanged,
+            "target_changed",
+            exit_code::CONFLICT,
+        ),
+        (ErrorCode::Offline, "offline", exit_code::NETWORK_REQUIRED),
+        (
+            ErrorCode::AuthFailed,
+            "auth_failed",
+            exit_code::NETWORK_REQUIRED,
         ),
         (ErrorCode::Internal, "internal", exit_code::INTERNAL),
     ];

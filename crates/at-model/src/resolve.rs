@@ -12,16 +12,20 @@ use crate::{ItemId, ItemKind, Scope};
 
 /// Normalizes a display name so the same item compares equal across scopes.
 ///
-/// Surrounding whitespace is trimmed, the result is lowercased and brought to
-/// Unicode NFC. `" Code-Review "`, `"code-review"` and a decomposed
-/// `"code-revi\u{0301}ew"` therefore compare equal to their canonical forms.
+/// Surrounding whitespace is trimmed, the result is lowercased, brought to
+/// Unicode NFC and stripped of trailing periods. `" Code-Review "`,
+/// `"code-review"` and `"code-review."` therefore compare equal, as do a
+/// composed name and its decomposed equivalent.
 ///
 /// Only the comparison form is returned; [`Definition::name`] keeps the spelling
 /// that was authored so the UI can display it.
 #[must_use]
 pub fn normalized_name(raw: &str) -> String {
-    let lowered = raw.trim().to_lowercase();
-    lowered.as_str().nfc().collect()
+    let mut normalized: String = raw.trim().to_lowercase().nfc().collect();
+    while normalized.ends_with('.') {
+        normalized.pop();
+    }
+    normalized
 }
 
 /// One item definition found in one scope layer.

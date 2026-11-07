@@ -951,8 +951,8 @@ fn every_scope_matrix_case_matches_its_checked_in_expectation() {
     let started = Instant::now();
     let cases = discover_cases(&fixtures_dir()).expect("scope matrix fixtures are valid");
     assert!(
-        cases.len() >= 25,
-        "the matrix must keep at least 25 cases; found {}",
+        cases.len() >= 40,
+        "the matrix must keep at least 40 cases; found {}",
         cases.len()
     );
     let mut ids = BTreeSet::new();
@@ -979,9 +979,45 @@ fn every_scope_matrix_case_matches_its_checked_in_expectation() {
         );
     }
     let elapsed = started.elapsed();
+    // The matrix parses every fixture case; a loaded runner (and a debug build) takes far
+    // longer than a quiet machine, so only a pathological slowdown should fail here.
+    let budget = if cfg!(debug_assertions) {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(5)
+    };
     assert!(
-        elapsed < Duration::from_secs(5),
-        "the matrix took {elapsed:?}; the budget is 5s"
+        elapsed < budget,
+        "the matrix took {elapsed:?}; the budget is {budget:?}"
+    );
+}
+
+#[test]
+fn removing_a_project_tombstone_restores_the_inherited_snapshot_byte_for_byte() {
+    let cases = discover_cases(&fixtures_dir()).expect("fixtures");
+    let tombstoned = cases
+        .iter()
+        .find(|loaded| loaded.case.id == "tombstone-disables-inherited-skill")
+        .expect("tombstone fixture");
+    let baseline = load_named_case(&cases, "tombstone-restored-inherited-skill");
+
+    let mut document: Value =
+        serde_json::from_slice(&fs::read(&tombstoned.path).expect("read tombstone fixture"))
+            .expect("tombstone fixture is valid JSON");
+    document["tombstones"] = json!([]);
+    let restored_case: Case = serde_json::from_value(document).expect("restored case is valid");
+    let restored_snapshot = expected_json(&run_case(&restored_case));
+    let restored_bytes = serde_json::to_vec(&restored_snapshot).expect("serialize restored result");
+    let baseline_bytes =
+        serde_json::to_vec(&baseline.expect).expect("serialize checked-in baseline snapshot");
+
+    assert_eq!(
+        restored_snapshot["items"][0]["scope"], "user",
+        "removing the tombstone restores the inherited User winner"
+    );
+    assert_eq!(
+        restored_bytes, baseline_bytes,
+        "the restored resolution is byte-for-byte identical to its pre-tombstone snapshot"
     );
 }
 
@@ -1132,6 +1168,14 @@ fn a_new_case_file_is_discovered_and_an_invalid_file_names_its_path() {
 #[ignore = "rewrites checked-in expectations; run manually after reviewing a behaviour change"]
 fn regenerate() {
     for loaded in discover_cases(&fixtures_dir()).expect("fixtures") {
+        if !loaded
+            .case
+            .expect
+            .as_object()
+            .is_some_and(|expectation| expectation.is_empty())
+        {
+            continue;
+        }
         let run = run_case(&loaded.case);
         let actual = expected_json(&run);
         let text = fs::read_to_string(&loaded.path).expect("read case");

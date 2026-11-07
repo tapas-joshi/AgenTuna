@@ -1,17 +1,21 @@
 //! Behaviour of the leftovers an interrupted write leaves: detection, classification, repair.
 
 use std::fs::{self, File};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime};
 
 use at_fs::FsError;
 use at_fs::backup::BackupMeta;
 use at_fs::recovery::{
-    EntryState, JOURNAL_VERSION, JournalEntry, PendingJournal, RecoveryError, RestoreRequest,
-    assess_entry, assess_journal, discard_pending, journal_file_name, journal_operation_id,
-    purge_expired_journals, read_journal, restore_file, scan_journals, scan_temp_files,
-    sweep_stale_temp_files, temp_target_name, write_journal,
+    EntryState, JOURNAL_VERSION, JournalEntry, PendingJournal, RecoveryCallbacks, RecoveryError,
+    RecoveryPolicy, RestoreRequest, assess_entry, assess_journal, discard_pending,
+    journal_file_name, journal_operation_id, purge_expired_journals, read_journal,
+    recover_journals, restore_file, scan_journals, scan_temp_files, sweep_stale_temp_files,
+    temp_target_name, write_journal,
 };
+use at_model::{ChangeSet, ExpectedState, FileOp, OperationKind, Scope};
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 
@@ -32,6 +36,8 @@ fn journal(operation_id: &str, entries: Vec<JournalEntry>) -> PendingJournal {
         completed_ops: Vec::new(),
         created_dirs: Vec::new(),
         committed: false,
+        authorized_roots: None,
+        backup_root: None,
     }
 }
 
@@ -354,4 +360,148 @@ fn scan_of_a_missing_directory_is_empty() {
     let sandbox = tempfile::tempdir().unwrap();
     let missing: PathBuf = sandbox.path().join("nope");
     assert!(scan_journals(&missing).unwrap().is_empty());
+}
+
+/// Operation recorder that supplies a fixed id; the crash happens before it sees a file.
+struct CrashRecorder {
+    operation_id: String,
+}
+
+impl at_fs::OperationRecorder for CrashRecorder {
+    fn begin(&mut self, _: &ChangeSet) -> Result<String, String> {
+        Ok(self.operation_id.clone())
+    }
+
+    fn file_completed(
+        &mut self,
+        _: &str,
+        _: &Path,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&Path>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn finish(&mut self, _: &str, _: bool, _: bool) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Panics where a process dies: right after a delete moved its original into the backup folder.
+struct CrashAfterDeleteRename;
+
+impl at_fs::failpoint::FailInjector for CrashAfterDeleteRename {
+    fn fault(
+        &self,
+        point: at_fs::failpoint::FaultPoint,
+        _: &Path,
+    ) -> Option<at_fs::failpoint::Fault> {
+        if point == at_fs::failpoint::FaultPoint::DeleteBackupRename {
+            panic!("simulated crash after the delete rename");
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+struct RecoveryLog {
+    finished: Vec<(String, bool, bool)>,
+}
+
+impl RecoveryCallbacks for RecoveryLog {
+    fn before_bytes(
+        &mut self,
+        _: &PendingJournal,
+        _: usize,
+        _: &JournalEntry,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+
+    fn finish(
+        &mut self,
+        operation_id: &str,
+        succeeded: bool,
+        manual_review: bool,
+    ) -> Result<(), String> {
+        self.finished
+            .push((operation_id.to_owned(), succeeded, manual_review));
+        Ok(())
+    }
+}
+
+/// Crashes a delete between the rename into the configured backup root and the operation
+/// history record, then recovers the original from a fresh process.
+fn recover_delete_after_rename_crash(backup_root_relative: &Path) {
+    let sandbox = TempDir::new().unwrap();
+    let store = sandbox.path().join("store");
+    let backup_root = sandbox.path().join("support").join(backup_root_relative);
+    let folder = store.join("skills/review");
+    fs::create_dir_all(&folder).unwrap();
+    let skill = b"---\nname: review\n---\ncanonical bytes\n";
+    fs::write(folder.join("SKILL.md"), skill).unwrap();
+    let before = at_fs::hash_node(&folder).unwrap().expect("folder hash");
+    let operation_id = "01JAZZZZZZZZZZZZZZZZZZZZZZ";
+    let set = ChangeSet {
+        id: "cs-crash".to_owned(),
+        preview_id: "preview".to_owned(),
+        operation_kind: OperationKind::parse("delete").unwrap(),
+        scope: Some(Scope::Project),
+        project_id: None,
+        summary: "delete review".to_owned(),
+        ops: vec![FileOp::Delete {
+            path: PathBuf::from("skills/review"),
+            expected: ExpectedState::hash(before).unwrap(),
+        }],
+        created_at_unix_seconds: 0,
+    };
+    let mut recorder = CrashRecorder {
+        operation_id: operation_id.to_owned(),
+    };
+    let mut context = at_fs::ApplyContext {
+        store_root: &store,
+        backup_folder: &backup_root,
+        recorder: &mut recorder,
+    };
+
+    let crashed = catch_unwind(AssertUnwindSafe(|| {
+        at_fs::failpoint::with_injector(Arc::new(CrashAfterDeleteRename), || {
+            at_fs::apply_changeset(&set, &mut context)
+        })
+    }));
+    assert!(crashed.is_err(), "the injector must simulate the crash");
+    assert!(
+        !folder.exists(),
+        "the delete moved the folder into the backup root"
+    );
+    let journal_dir = store.join(".state/journal");
+    assert_eq!(scan_journals(&journal_dir).unwrap().len(), 1);
+
+    let mut callbacks = RecoveryLog::default();
+    let policy = RecoveryPolicy::new(&store, [store.clone()], [backup_root.clone()]);
+    let report = recover_journals(&journal_dir, &policy, &mut callbacks).expect("recovery runs");
+
+    assert!(
+        report.manual_review.is_empty(),
+        "a backup under the configured root is found: {:?}",
+        report.manual_review
+    );
+    assert_eq!(report.rolled_back.len(), 1);
+    assert_eq!(
+        callbacks.finished,
+        [(operation_id.to_owned(), false, false)]
+    );
+    assert_eq!(fs::read(folder.join("SKILL.md")).unwrap(), skill);
+    assert!(scan_journals(&journal_dir).unwrap().is_empty());
+}
+
+#[test]
+fn delete_backup_under_a_migration_backup_root_is_recovered_after_a_rename_crash() {
+    recover_delete_after_rename_crash(Path::new("backups/migration"));
+}
+
+#[test]
+fn delete_backup_under_the_drift_backup_root_is_recovered_after_a_rename_crash() {
+    recover_delete_after_rename_crash(Path::new("backups"));
 }

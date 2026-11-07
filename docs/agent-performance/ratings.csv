@@ -92,3 +92,64 @@ W13Stabilize,B,TS-014/TC-030/TC-035/TC-013 done and verified; 3 failing tests le
 W13MigrateScreens-2,A,TC-023/024/025 done with e2e test and Playwright; verified
 W13Lists-2,A,TS-028/TM-020/TM-021/TS-001/TM-033 done with Playwright
 W13Dialogs-2,B,TA-057/059/055/TS-010/038 done; left stale Playwright specs and missing mock commands; TA-060 partial; TS-033-037/041/044 not started (quota stop)
+WeirdTermite,Q,cancelled by the lead (reasoning level change); no edits
+CloseBooby,Q,cancelled by the lead (reasoning level change); no edits
+IrrelevantFlyingfish,Q,cancelled by the lead (reasoning level change); no edits
+EagerConstrictor,Q,cancelled by the lead (reasoning level change); no edits
+MarkedKite,D,haiku 100K context: 2h on drift tests+CLI with no CLI code; replaced; its drift tests were good
+SheerHyena,B,TA-060/TS-033/034/035 built but first report unverified; second push verified all
+LaneSkillsCli,A,TS-041/TS-044 done; two engine bugs found and fixed
+LaneSyncRemoteCli,A,TC-031 sync/remote groups done and tested
+LaneDriftCli,A,TC-036 crash recovery + drift/backups CLI done
+LaneSkillsUi,B,TS-029/037 needed a second push to mount and verify
+LaneDriftUi,B,TC-026/029 TS-036 needed a second push; very slow
+LaneMcpForm,A,TM-023/024/026/004 done and tested
+LaneSmoke,A,found 4 real defects incl. undo backup collision
+LaneRegistry,A,root-caused empty agents/mcp/effective and fixed through one shared path
+LaneAudit,A,evidence table per story plus fixes
+LaneShell,B,three stories not implemented on first report; finished after push
+LaneTestMatrix,A,10 test stories done
+LaneMigrateGaps,A,TC-007/008/021/037 done after a verification push
+LaneStabilize,B,see W13Stabilize
+LaneTreeGreen,A,all non-visual gates green
+LaneVisualTriage,A,146/146 twice
+LaneA11yUi,D,stalled; left blank baseline; replaced
+LaneA11yFix,A,fixed real a11y defects; specs green
+LaneDesignAudit,A,design gap list with evidence
+LaneDesignFix2,A,4.5/5 design items; MCP copy gap named
+LaneUpdater2,A,TF-032 offline seams and queue done
+LaneFuzzEdits,A,6 real editor defects found by generative tests
+LaneMcpScope,A,MCP copy-to-scope across engine/app/CLI/UI
+LaneCmdAudit,A,2 critical dead/unregistered commands found and fixed
+LaneCmdFollow,A,offline switch deep-link mocks done
+LaneBundleFix,A,self-contained bundle; undo defects
+LaneMigrateUiFix,A,root cause camelCase args across commands
+LaneSeqTests,B,5 properties + 8 defects; speed and 2 properties needed follow-up
+LaneSeqSpeed,A,272s to ~32s
+LaneMoveFix,A,move relink bug fixed
+LaneUndoFix,A,directory undo collision fixed
+LaneMigrateScope,A,per-item scope plans
+LaneBugReview,A,3 real file-safety bugs found
+LaneBugReview2,A,found a critical recovery security bug
+LaneRecoverySec,A,critical recovery fix with forged-journal tests
+LaneFsFix,A,symlink preflight/backup root/recorder fixes
+LaneFlake,B,fixes held; could not finish runs while tree changed
+LaneFlake2,A,3 real failures fixed; contention runs green
+LaneCliMatrix,A,348 invocation contract matrix
+LaneCliUx,A,7 first-run CLI gaps
+LaneAxRun5,A,real-app flows incl. round trips with hashes
+LaneAxForms,B,found 2 defects; fixes done by another lane
+LaneAppDefects,A,both defects fixed and real-app verified
+LaneStoryAuditA,A,honest audit found 6 over-claims
+LaneStoryAuditB,B,over-claim list partly wrong (TC-025)
+LaneAuditC1,A,audit
+LaneAuditC2,A,audit
+LaneAuditC3,A,audit
+LaneAuditC4,B,audit found no over-claims
+LaneGapsRust,A,11 audit gaps closed
+LaneGapsUi,A,4 UI gaps closed
+LaneGaps2Rust,A,3 over-claims closed
+LaneGaps2Ui,A,5 UI gaps closed
+LaneGaps3Rust,A,6 gaps closed
+LaneGaps3Ui,A,4 gaps closed
+LaneFirstRunStore,B,core good; UI/CLI/tests needed a second push

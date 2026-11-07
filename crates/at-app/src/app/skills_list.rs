@@ -61,12 +61,26 @@ pub struct SkillRowView {
     pub native: bool,
     /// Source path of a native-only discovery.
     pub native_path: Option<String>,
-    /// Whether the source advertises an update (TS-040 renders the badge).
+    /// Whether the source advertises an update the user has not ignored (TS-040 renders the badge).
     pub update_available: bool,
+    /// Live source kind (`git`, `marketplace`, `library`, `folder`) when the row was imported.
+    pub source: Option<String>,
+    /// Commit the package was installed from, when the source records one.
+    pub source_commit_sha: Option<String>,
+    /// Upstream commit resolved by the last check, when known.
+    pub source_remote_sha: Option<String>,
+    /// Time the upstream source was last checked, when known.
+    pub source_last_checked_at: Option<String>,
     /// Last update timestamp of the canonical row or native scan.
     pub updated_at: String,
     /// One cell per detected agent.
     pub agents: Vec<SkillAgentCellView>,
+    /// Whether a lock blocks changes to this skill.
+    pub locked: bool,
+    /// Scope that holds the lock.
+    pub lock_scope: Option<String>,
+    /// Lock reason, shown as the STATUS column tooltip.
+    pub lock_reason: Option<String>,
 }
 
 /// The skills list projection behind the Skills screen.
@@ -124,6 +138,14 @@ pub fn skills_list(
     state: State<'_, AppState>,
     request: SkillsListRequest,
 ) -> Result<SkillsListView, CommandError> {
+    skills_list_inner(&state, &request)
+}
+
+/// Reads the skills list projection for an injected app state.
+pub(crate) fn skills_list_inner(
+    state: &AppState,
+    request: &SkillsListRequest,
+) -> Result<SkillsListView, CommandError> {
     let scope = parse_scope_arg(&request.scope)?;
     let database = state.database().map_err(CommandError::unavailable)?;
     let project = super::mcp_servers::project_of(&database, request.project_id.as_deref())?;
@@ -152,8 +174,18 @@ pub fn skills_list(
         })
         .collect::<Vec<_>>();
     let mut view_rows = Vec::with_capacity(rows.len());
+    let locks = at_db::locks::list_locks(database.connection())
+        .map_err(|error| CommandError::internal(format!("cannot read locks: {error}")))?;
+    let lock_by_item = locks
+        .iter()
+        .map(|lock| (lock.item_id.to_string(), lock))
+        .collect::<std::collections::HashMap<_, _>>();
     for row in rows {
         let native = row.item_id.is_none();
+        let lock = row
+            .item_id
+            .as_ref()
+            .and_then(|item_id| lock_by_item.get(&item_id.to_string()).copied());
         let mut cells = Vec::with_capacity(row.deployed.len());
         let deployments = match &row.item_id {
             Some(item_id) => {
@@ -183,6 +215,14 @@ pub fn skills_list(
             });
         }
         cells.sort_by(|left, right| left.agent.cmp(&right.agent));
+        let source = match &row.item_id {
+            Some(item_id) => {
+                at_db::sources::source_for(database.connection(), item_id).map_err(|error| {
+                    CommandError::internal(format!("cannot read skill source: {error}"))
+                })?
+            }
+            None => None,
+        };
         view_rows.push(SkillRowView {
             item_id: row
                 .item_id
@@ -196,14 +236,25 @@ pub fn skills_list(
             native,
             native_path: row.native_path,
             update_available: row.update_available,
+            source: source
+                .as_ref()
+                .map(|source| format!("{:?}", source.kind).to_lowercase()),
+            source_commit_sha: source.as_ref().and_then(|source| source.commit_sha.clone()),
+            source_remote_sha: source.as_ref().and_then(|source| source.remote_sha.clone()),
+            source_last_checked_at: source
+                .as_ref()
+                .and_then(|source| source.last_checked_at.clone()),
             updated_at: row.updated_at,
             agents: cells,
+            locked: lock.is_some(),
+            lock_scope: lock.map(|lock| lock.scope.wire_name().to_owned()),
+            lock_reason: lock.and_then(|lock| lock.reason.clone()),
         });
     }
     Ok(SkillsListView {
         rows: view_rows,
         agents: columns,
-        project_id: request.project_id,
+        project_id: request.project_id.clone(),
         project_name: project.map(|project| project.name),
     })
 }

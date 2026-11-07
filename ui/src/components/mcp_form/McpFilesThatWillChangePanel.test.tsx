@@ -11,6 +11,9 @@ const preview: McpChangeSetPreviewView = {
     { agent: "Claude Code", scope: "user", path: "~/.claude.json", additions: 4n, deletions: 2n, diff: "--- a/claude.json\n+++ b/claude.json\n@@ -1 +1 @@\n-old\n+new", selected: true, cannot_write_reason: null },
     { agent: "Codex", scope: "user", path: "~/.codex/config.toml", additions: 0n, deletions: 0n, diff: "", selected: true, cannot_write_reason: "Permission denied" },
   ],
+  unsupported_fields: [],
+  warnings: [],
+  store_init: null,
 };
 
 describe("McpFilesThatWillChangePanel", () => {
@@ -32,5 +35,26 @@ describe("McpFilesThatWillChangePanel", () => {
     expect(screen.getAllByText("+4 −2")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Show diff for Claude Code" }));
     expect(screen.getByText("new")).toBeTruthy();
+  });
+
+  it("lists planner warnings such as a refused secret reference", () => {
+    render(<McpFilesThatWillChangePanel
+      preview={{ ...preview, warnings: ["omp: refused secret `TOKEN` for field `TOKEN`; export TOKEN=$(security find-generic-password -s 'dev.agentuna.mcp' -a 'account' -w)"] }}
+      onAgentSelectedChange={() => undefined}
+    />);
+    const warnings = screen.getByRole("list", { name: "Planner warnings" }).textContent ?? "";
+    expect(warnings).toContain("refused secret `TOKEN`");
+    expect(warnings).toContain("export TOKEN=$(security find-generic-password");
+  });
+
+  it("shows the reviewed store creation before the item files", () => {
+    render(<McpFilesThatWillChangePanel
+      preview={{ ...preview, files: [preview.files[0]!], store_init: { path: "/sandbox/user/.agentuna", files_created: 6n, foreign: [] } }}
+      onAgentSelectedChange={() => undefined}
+    />);
+    const line = screen.getByLabelText("Store creation").textContent ?? "";
+    expect(line).toContain("Create store at");
+    expect(line).toContain("/sandbox/user/.agentuna");
+    expect(line).toContain("6 new entries");
   });
 });

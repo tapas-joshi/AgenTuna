@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Merged into the bundle's Info.plist by Tauri (bundle.macOS.infoPlist). -->
+    <!-- Lets macOS hand agentuna://item/<id> links to the running app as
+         RunEvent::Opened; crates/at-app/src/app/deep_link.rs validates and forwards them. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.agentuna.app</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>agentuna</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -110,6 +110,22 @@ pub struct AgentCapabilities {
     pub supports_rules: bool,
 }
 
+/// Whether a write to this agent's native configuration document may follow a final symlink.
+///
+/// Dotfile managers commonly symlink Claude Code's `~/.claude.json` to a managed dotfiles
+/// repository. The agent reads the link, so updating the resolved target (and keeping the link)
+/// is what the user sees in the running agent; hashing the link text instead would misread an
+/// untouched file as edited. Every other agent keeps the safe default that refuses a symlinked
+/// destination unless an adapter opts in with evidence.
+///
+/// Following is not unrestricted: at-fs validates that the resolved target stays inside the
+/// operation's authorized roots, and an operation that does not allow following refuses the
+/// link with [`at_fs::FsError::SymlinkRefused`] before any write.
+#[must_use]
+pub fn follows_native_config_symlink(agent: &AgentId) -> bool {
+    matches!(agent, AgentId::ClaudeCode)
+}
+
 /// A native item found by an adapter's bounded, read-only enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeItem {
@@ -302,6 +318,30 @@ pub trait AgentAdapter: Send + Sync {
         )
     }
 
+    /// Lists native skill folders including links into an AgenTuna store.
+    ///
+    /// The migration scan uses this to label store deployments as Managed; the skills list
+    /// uses [`Self::list_native_skills`], which omits them.
+    ///
+    /// # Errors
+    /// Returns [`AgentError::Permission`] or [`AgentError::Io`] when a candidate root cannot
+    /// be inspected.
+    fn list_native_skills_including_managed(
+        &self,
+        env: &AgentEnvironment,
+        store_roots: &[PathBuf],
+    ) -> Result<Vec<crate::native_skills::NativeSkill>, AgentError> {
+        crate::native_skills::list_native_skills_with_options(
+            &self.id(),
+            env,
+            store_roots,
+            self.paths(ItemKind::Skill, Scope::User, env)
+                .into_iter()
+                .chain(self.paths(ItemKind::Skill, Scope::Project, env)),
+            true,
+        )
+    }
+
     /// Plans Claude project-settings MCP enablement as a ChangeSet.
     ///
     /// Non-Claude adapters return `Unsupported`; no filesystem operation is performed here.
@@ -339,6 +379,9 @@ pub trait AgentAdapter: Send + Sync {
             project: Some(project.to_path_buf()),
             variables: BTreeMap::new(),
         };
+        // The caller gates this materialization on the agent's installation and management
+        // state: a Local deployment targets the project, which exists regardless of the
+        // agent's user-scope install, so detection cannot decide it here.
         let target = self.skill_target(Scope::Local, &env, slug)?;
         plan_local_skill_change(
             &self.id(),
@@ -376,14 +419,12 @@ pub trait AgentAdapter: Send + Sync {
         env: &AgentEnvironment,
     ) -> Result<Vec<at_model::FileOp>, AgentError> {
         let candidates = self.paths(kind, scope, env);
-        if kind == ItemKind::Skill && self.detect(env).state == DetectionState::NotInstalled {
+        // Creating an agent's directory tree would make a missing agent look configured, so a
+        // NotInstalled agent gets zero operations for every kind (TA-028 AC2).
+        if self.detect(env).state == DetectionState::NotInstalled {
             return Err(AgentError::NotInstalled {
                 agent: self.id(),
-                path: candidates
-                    .iter()
-                    .find(|candidate| candidate.kind == "skills_dir")
-                    .map(|candidate| candidate.path.clone())
-                    .unwrap_or_else(|| env.home.clone()),
+                path: missing_installation_path(self, env),
             });
         }
         if candidates.is_empty() {
@@ -486,95 +527,15 @@ pub trait AgentAdapter: Send + Sync {
         scope: Scope,
         env: &AgentEnvironment,
     ) -> Result<AgentIoDocument, AgentError> {
-        if kind == ItemKind::McpServer {
-            return Err(AgentError::Delegate {
-                source: AgentDelegateFailure::new("no TM MCP delegate registered"),
-            });
-        }
-        if kind == ItemKind::Skill {
-            let id = self.id();
-            let items = list_native_items(&id, Some(scope), |item_kind, item_scope| {
-                self.paths(item_kind, item_scope, env)
-            })?
-            .into_iter()
-            .filter(|item| item.kind == ItemKind::Skill)
-            .map(|item| {
-                serde_json::json!({
-                    "name": item.name,
-                    "path": item.path,
-                    "scope": format!("{:?}", item.scope),
-                })
-            })
-            .collect::<Vec<_>>();
-            let path = self
-                .paths(kind, scope, env)
-                .into_iter()
-                .find(|candidate| candidate.primary)
-                .map(|candidate| candidate.path)
-                .ok_or_else(|| AgentError::Unsupported {
-                    agent: self.id(),
-                    kind: kind.to_string(),
-                })?;
-            let content = serde_json::to_vec(&items).map_err(|error| AgentError::Io {
-                path: path.clone(),
-                source: std::io::Error::other(error),
-            })?;
-            return Ok(AgentIoDocument { path, content });
-        }
-        let candidates = self.paths(kind, scope, env);
-        let mut rule_items = Vec::new();
-        let mut entries_seen = 0;
-        let agent = self.id();
-        for candidate in &candidates {
-            scan_rule_candidate(candidate, scope, &agent, &mut entries_seen, &mut rule_items)?;
-        }
-        let path = rule_items
-            .first()
-            .map(|item| item.path.clone())
-            .or_else(|| {
-                candidates
-                    .into_iter()
-                    .find(|candidate| candidate.primary)
-                    .map(|candidate| candidate.path)
-            })
-            .ok_or_else(|| AgentError::Unsupported {
-                agent: agent.clone(),
-                kind: kind.to_string(),
-            })?;
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => {}
-            Ok(_) => {
-                return Err(AgentError::Unsupported {
-                    agent,
-                    kind: format!("non-regular rule path {}", path.display()),
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(AgentError::NotInstalled { agent, path });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err(AgentError::Permission { path });
-            }
-            Err(source) => return Err(AgentError::Io { path, source }),
-        }
-        let content = std::fs::read(&path).map_err(|source| {
-            if source.kind() == std::io::ErrorKind::PermissionDenied {
-                AgentError::Permission { path: path.clone() }
-            } else {
-                AgentError::Io {
-                    path: path.clone(),
-                    source,
-                }
-            }
-        })?;
-        Ok(AgentIoDocument { path, content })
+        read_io_default(self, kind, scope, env)
     }
 
     /// Renders deployment bytes; rule files are wrapped in an AgenTuna-managed block.
     ///
     /// # Errors
-    /// Returns [`AgentError::Delegate`] for MCP rendering and a typed adapter error when a
-    /// managed rule block cannot be rendered.
+    /// Returns [`AgentError::Delegate`] for MCP rendering, [`AgentError::Parse`] when an existing
+    /// rule file is not valid UTF-8 (it is refused instead of being rewritten lossily), and a
+    /// typed adapter error when a managed rule block cannot be rendered.
     fn render_io(&self, deployment: &AgentDeployment) -> Result<Vec<u8>, AgentError> {
         if deployment.kind == ItemKind::McpServer {
             return Err(AgentError::Delegate {
@@ -584,6 +545,11 @@ pub trait AgentAdapter: Send + Sync {
         if deployment.kind == ItemKind::Rule {
             let existing = match std::fs::symlink_metadata(&deployment.path) {
                 Ok(metadata) if metadata.file_type().is_file() => {
+                    if metadata.permissions().readonly() {
+                        return Err(AgentError::Permission {
+                            path: deployment.path.clone(),
+                        });
+                    }
                     Some(std::fs::read(&deployment.path).map_err(|source| {
                         if source.kind() == std::io::ErrorKind::PermissionDenied {
                             AgentError::Permission {
@@ -616,6 +582,16 @@ pub trait AgentAdapter: Send + Sync {
                     });
                 }
             };
+            if let Some(existing) = existing.as_deref()
+                && let Err(error) = std::str::from_utf8(existing)
+            {
+                let (line, col) = utf8_line_col(existing, error.valid_up_to());
+                return Err(AgentError::Parse {
+                    path: deployment.path.clone(),
+                    line,
+                    col,
+                });
+            }
             return Ok(at_fs::managed_block::render_managed_block(
                 &deployment.path,
                 existing.as_deref(),
@@ -923,6 +899,22 @@ fn scan_rule_candidate(
     Ok(())
 }
 
+/// The path that best explains a [`AgentError::NotInstalled`] refusal.
+///
+/// Detection keys on the agent's user-scope skills root, so that is the most useful path to
+/// report; when an adapter declares none, the injected home is the closest honest answer.
+fn missing_installation_path<A: AgentAdapter + ?Sized>(
+    adapter: &A,
+    env: &AgentEnvironment,
+) -> PathBuf {
+    adapter
+        .paths(ItemKind::Skill, Scope::User, env)
+        .into_iter()
+        .find(|candidate| candidate.kind == "skills_dir")
+        .map(|candidate| candidate.path)
+        .unwrap_or_else(|| env.home.clone())
+}
+
 /// MCP-specific adapter surface supplied by the TM slice.
 pub trait McpAdapterDelegate: Send + Sync {
     /// Reads and parses the selected native MCP document.
@@ -1167,6 +1159,17 @@ impl AgentAdapterRegistry {
     }
 }
 
+/// One-based line and column of the first invalid UTF-8 byte.
+fn utf8_line_col(bytes: &[u8], offset: usize) -> (usize, usize) {
+    let prefix = &bytes[..offset.min(bytes.len())];
+    let line = 1 + prefix.iter().filter(|byte| **byte == b'\n').count();
+    let line_start = prefix
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    (line, offset - line_start + 1)
+}
+
 fn plan_local_skill_change(
     agent: &AgentId,
     project: &Path,
@@ -1404,6 +1407,100 @@ impl AgentAdapter for BuiltinAdapter {
     ) -> Vec<AgentPathCandidate> {
         builtin_paths(&self.id, kind, scope, env)
     }
+}
+
+/// Shared [`AgentAdapter::read_io`] implementation for skills and rules.
+///
+/// The folder-defined custom agent overrides MCP and its rule path but keeps this listing
+/// for skills, so the native-item scan lives in exactly one place.
+pub(crate) fn read_io_default<A: AgentAdapter + ?Sized>(
+    adapter: &A,
+    kind: ItemKind,
+    scope: Scope,
+    env: &AgentEnvironment,
+) -> Result<AgentIoDocument, AgentError> {
+    if kind == ItemKind::McpServer {
+        return Err(AgentError::Delegate {
+            source: AgentDelegateFailure::new("no TM MCP delegate registered"),
+        });
+    }
+    if kind == ItemKind::Skill {
+        let id = adapter.id();
+        let items = list_native_items(&id, Some(scope), |item_kind, item_scope| {
+            adapter.paths(item_kind, item_scope, env)
+        })?
+        .into_iter()
+        .filter(|item| item.kind == ItemKind::Skill)
+        .map(|item| {
+            serde_json::json!({
+                "name": item.name,
+                "path": item.path,
+                "scope": format!("{:?}", item.scope),
+            })
+        })
+        .collect::<Vec<_>>();
+        let path = adapter
+            .paths(kind, scope, env)
+            .into_iter()
+            .find(|candidate| candidate.primary)
+            .map(|candidate| candidate.path)
+            .ok_or_else(|| AgentError::Unsupported {
+                agent: adapter.id(),
+                kind: kind.to_string(),
+            })?;
+        let content = serde_json::to_vec(&items).map_err(|error| AgentError::Io {
+            path: path.clone(),
+            source: std::io::Error::other(error),
+        })?;
+        return Ok(AgentIoDocument { path, content });
+    }
+    let candidates = adapter.paths(kind, scope, env);
+    let mut rule_items = Vec::new();
+    let mut entries_seen = 0;
+    let agent = adapter.id();
+    for candidate in &candidates {
+        scan_rule_candidate(candidate, scope, &agent, &mut entries_seen, &mut rule_items)?;
+    }
+    let path = rule_items
+        .first()
+        .map(|item| item.path.clone())
+        .or_else(|| {
+            candidates
+                .into_iter()
+                .find(|candidate| candidate.primary)
+                .map(|candidate| candidate.path)
+        })
+        .ok_or_else(|| AgentError::Unsupported {
+            agent: agent.clone(),
+            kind: kind.to_string(),
+        })?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(AgentError::Unsupported {
+                agent,
+                kind: format!("non-regular rule path {}", path.display()),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AgentError::NotInstalled { agent, path });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(AgentError::Permission { path });
+        }
+        Err(source) => return Err(AgentError::Io { path, source }),
+    }
+    let content = std::fs::read(&path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::PermissionDenied {
+            AgentError::Permission { path: path.clone() }
+        } else {
+            AgentError::Io {
+                path: path.clone(),
+                source,
+            }
+        }
+    })?;
+    Ok(AgentIoDocument { path, content })
 }
 
 struct GenericCustomAdapter;

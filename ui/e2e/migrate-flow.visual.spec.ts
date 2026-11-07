@@ -2,6 +2,7 @@ import { expect, test } from "./support/tauri-mock";
 import type { Page } from "@playwright/test";
 
 async function openMigration(page: Page) {
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
   await page.keyboard.press("Meta+k");
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await palette.getByRole("combobox", { name: "Search commands" }).fill("Import native items");
@@ -46,7 +47,7 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
 
   // 5. Done step
   await expect(page.getByRole("heading", { name: /3 items now live in AgenTuna/ })).toBeVisible();
-  await expect(page.getByText(/3 items copied into store/)).toBeVisible();
+  await expect(page.getByText(/3 items copied into the Project store/)).toBeVisible();
   const undoBtn = page.getByRole("button", { name: /Undo migration/ });
   await expect(undoBtn).toBeVisible();
   await expect(page).toHaveScreenshot("migrate-done-success.png", { animations: "disabled", caret: "hide" });

@@ -85,6 +85,12 @@ export function ProjectPicker({ open, projects, currentProjectId = null, loading
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const fallbackTriggerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open) {
+      fallbackTriggerRef.current = document.querySelector<HTMLElement>('[data-slot="shell-project-picker"]');
+    }
+  }, [open]);
   const filtered = useMemo(() => filterProjects(projects, query), [projects, query]);
   const virtualizer = useVirtualizer({ count: filtered.length, getScrollElement: () => listRef.current, estimateSize: () => 72, overscan: 6 });
   const virtualItems = virtualizer.getVirtualItems();
@@ -94,7 +100,7 @@ export function ProjectPicker({ open, projects, currentProjectId = null, loading
   }, [active, filtered.length, open, virtualizer]);
   if (!open) return null;
   const choose = (project: ProjectPickerProject) => { onSelect(project); onClose(); };
-  return <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} title="Switch project" description="Search and select a registered project." size="lg" className="at-project-picker">
+  return <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} fallbackFocusRef={fallbackTriggerRef} title="Switch project" description="Search and select a registered project." size="lg" className="at-project-picker">
     <div className="flex min-h-0 flex-col gap-12">
       <div className="flex h-[44px] items-center gap-8 rounded-8 border border-border bg-surface px-12 focus-within:ring-2 focus-within:ring-accent">
         <SearchIcon />
@@ -124,6 +130,9 @@ export function ProjectPicker({ open, projects, currentProjectId = null, loading
         </>}
       </div>
       <div className="flex justify-between border-t border-border pt-12"><Button variant="secondary" onClick={onAddFolder}>Add project folder</Button><Button variant="secondary" onClick={onScan} disabled={scanning}>Scan ~/Projects</Button></div>
+      <p className="m-0 border-t border-border pt-8 text-11 text-muted">
+        Type to filter · <kbd className="font-mono">Enter</kbd> to open · <kbd className="font-mono">Esc</kbd> to close
+      </p>
     </div>
   </Modal>;
 }

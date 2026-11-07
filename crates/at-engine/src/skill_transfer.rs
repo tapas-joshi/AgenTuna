@@ -64,6 +64,10 @@ pub struct SkillTransferPlan {
     pub target_item_id: ItemId,
     /// Source identity used for DB re-homing or duplicate creation.
     pub source_item_id: ItemId,
+    /// Existing managed item replaced at the target scope, when Replace was chosen.
+    ///
+    /// Apply removes this row so the promoted identity is unique at the target scope.
+    pub replaced_item_id: Option<ItemId>,
     /// Source scope copy remains after apply.
     pub keeps_source: bool,
     /// Source scope of the canonical item before apply.
@@ -72,10 +76,52 @@ pub struct SkillTransferPlan {
     pub target_slug: Slug,
     /// Native deployment rows observed during planning.
     pub deployments: Vec<DeploymentCell>,
+    /// Every enabled agent's native link, resolved to its target scope path.
+    ///
+    /// Apply writes one deployment row per entry and marks the detached source rows off, so the
+    /// index describes exactly the paths the plan materialises.
+    pub native_deployments: Vec<PlannedNativeDeployment>,
     /// Target store identity for apply-time DB updates.
     pub target_store_root: PathBuf,
     /// Target project identity for Project and Local items.
     pub target_project_id: Option<String>,
+}
+
+/// One enabled agent whose native skill link must follow the item into the target scope.
+///
+/// The caller resolves `target_root` from the agent adapter, because the native skills directory
+/// differs per agent and per scope (for example Codex and omp share `<project>/.agents/skills`
+/// while Claude Code reads `<project>/.claude/skills`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTransferTarget {
+    /// Agent whose source-scope deployment moves.
+    pub agent: at_model::AgentId,
+    /// Absolute native skill path recorded by the source-scope deployment row.
+    pub source_path: PathBuf,
+    /// Native skills directory the agent reads in the target scope.
+    pub target_root: PathBuf,
+    /// Materialisation recorded by the source deployment.
+    pub mode: LinkMode,
+    /// Whether the target filesystem supports symlinks.
+    pub link_supported: bool,
+}
+
+/// One resolved native deployment: where the source link is now and where the target scope needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedNativeDeployment {
+    /// Agent whose deployment moves.
+    pub agent: at_model::AgentId,
+    /// Absolute native skill path recorded by the source-scope deployment row.
+    pub source_path: PathBuf,
+    /// Absolute native skill path in the target scope.
+    pub target_path: PathBuf,
+    /// Materialisation to write (already downgraded to copy when links are unsupported).
+    pub mode: LinkMode,
+    /// Whether the source entry moves into the operation backups.
+    ///
+    /// A move always detaches it. A promote keeps the source package but still has to detach the
+    /// link when both scopes map to the same native directory: one path cannot serve two stores.
+    pub detached: bool,
 }
 
 /// Failure while preparing a skill transfer plan.
@@ -191,6 +237,11 @@ pub struct SkillTransferRequest<'a> {
     pub connection: &'a rusqlite::Connection,
     /// Owning project id when the target is Project or Local scope.
     pub target_project_id: Option<String>,
+    /// Native link destinations for every agent enabled at the source scope.
+    ///
+    /// A move must remove the source-scope links and deploy the item where the agents read it in
+    /// the target scope; an empty list means no agent is enabled and nothing native is planned.
+    pub native_targets: &'a [NativeTransferTarget],
 }
 
 /// Preflights package state and returns a content-bound ChangeSet without writing files.
@@ -217,6 +268,7 @@ pub fn plan_skill_transfer(
         resolution,
         connection,
         target_project_id,
+        native_targets,
     } = request;
     let deployments = at_db::deployments::list_deployments_for_item(connection, &item_id)?;
     if (target_manifest.scope() == Scope::Global || source_manifest.scope() == Scope::Global)
@@ -303,6 +355,7 @@ pub fn plan_skill_transfer(
     } else if matches!(resolution, Some(ClashResolution::Replace)) {
         return Err(SkillTransferError::NoTargetToReplace);
     }
+    let replaced_item_id = target_item.as_ref().map(|item| item.id);
     let target_relative = StorePath::parse(&format!("skills/{target_slug}"))?;
     let mut source_next = source_manifest.clone();
     let mut target_next = target_manifest.clone();
@@ -395,6 +448,38 @@ pub fn plan_skill_transfer(
             backup: true,
         });
     }
+    let is_duplicate = operation == "edit_skill";
+    let native_deployments = if is_duplicate {
+        Vec::new()
+    } else {
+        resolve_native_deployments(NativeDeploymentRequest {
+            targets: native_targets,
+            deployments: &deployments,
+            source_scope: source_store.scope(),
+            target_slug: &target_slug,
+            keeps_source,
+        })?
+    };
+    // Removing the source-scope link belongs to the canonical move, not to the install phase:
+    // undoing one operation then restores the source package and its link together, so no
+    // intermediate state leaves a link pointing at a package that does not exist yet.
+    let mut detached_sources = std::collections::BTreeSet::new();
+    for deployment in &native_deployments {
+        if !deployment.detached || !detached_sources.insert(deployment.source_path.clone()) {
+            continue;
+        }
+        let expected =
+            ExpectedState::hash(node_hash(&deployment.source_path).map_err(|source| {
+                SkillTransferError::TargetFilesystem {
+                    path: deployment.source_path.clone(),
+                    source,
+                }
+            })?)?;
+        ops.push(FileOp::Delete {
+            path: deployment.source_path.clone(),
+            expected,
+        });
+    }
     let operation_id = format!("op_{}", uuid::Uuid::now_v7());
     let preview_id = format!("preview_{}", uuid::Uuid::now_v7());
     let now = std::time::SystemTime::now()
@@ -406,22 +491,25 @@ pub fn plan_skill_transfer(
         operation_kind: OperationKind::parse(operation)?,
         scope: Some(target_store.scope()),
         project_id: target_project_id.clone(),
-        summary: format!("{operation} {} to {}", source_item.slug, target_slug),
+        summary: format!(
+            "{operation} {}: {} -> {}",
+            source_item.slug,
+            source_path.display(),
+            target_path.display()
+        ),
         ops,
         created_at_unix_seconds: now,
     };
     change_set.validate()?;
-    let is_duplicate = operation == "edit_skill";
     let deployment_change_set = if is_duplicate {
         None
     } else {
-        plan_deployment_relink(DeploymentRelinkRequest {
-            deployments: &deployments,
-            source_scope: source_store.scope(),
+        plan_native_deployment_change_set(DeploymentRelinkRequest {
+            deployments: &native_deployments,
             target_scope: target_store.scope(),
             item_id,
             canonical_target: &target_path,
-            target_store,
+            target_store_root: target_store.root(),
             target_project_id: target_project_id.as_deref(),
             operation_id: &operation_id,
             preview_id: &preview_id,
@@ -433,50 +521,39 @@ pub fn plan_skill_transfer(
         deployment_change_set,
         target_item_id,
         source_item_id: item_id,
+        replaced_item_id,
         keeps_source,
         source_scope: source_store.scope(),
         target_slug,
         deployments,
+        native_deployments,
         target_store_root: target_store.root().to_path_buf(),
         target_project_id,
     })
 }
 
-struct DeploymentRelinkRequest<'a> {
+struct NativeDeploymentRequest<'a> {
+    targets: &'a [NativeTransferTarget],
     deployments: &'a [DeploymentCell],
     source_scope: Scope,
-    target_scope: Scope,
-    item_id: ItemId,
-    canonical_target: &'a Path,
-    target_store: &'a StoreLayout,
-    target_project_id: Option<&'a str>,
-    operation_id: &'a str,
-    preview_id: &'a str,
-    now: u64,
+    target_slug: &'a Slug,
+    keeps_source: bool,
 }
 
-fn plan_deployment_relink(
-    request: DeploymentRelinkRequest<'_>,
-) -> Result<Option<ChangeSet>, SkillTransferError> {
-    let DeploymentRelinkRequest {
-        deployments,
-        source_scope,
-        target_scope,
-        item_id,
-        canonical_target,
-        target_store,
-        target_project_id,
-        operation_id,
-        preview_id,
-        now,
-    } = request;
-    let mut seen_targets = std::collections::BTreeSet::new();
-    let mut ops = Vec::new();
-    for cell in deployments
+/// Pairs every enabled source-scope deployment with the native path the target scope needs.
+///
+/// A linked source row without a caller-supplied target root cannot be moved safely: dropping it
+/// would leave the agent reading a store the item no longer occupies, so planning refuses instead.
+fn resolve_native_deployments(
+    request: NativeDeploymentRequest<'_>,
+) -> Result<Vec<PlannedNativeDeployment>, SkillTransferError> {
+    let mut planned = Vec::new();
+    for cell in request
+        .deployments
         .iter()
-        .filter(|cell| cell.scope == source_scope && cell.state == ItemState::Linked)
+        .filter(|cell| cell.scope == request.source_scope && cell.state == ItemState::Linked)
     {
-        let target = cell
+        let source_path = cell
             .target_path
             .as_deref()
             .map(PathBuf::from)
@@ -484,55 +561,92 @@ fn plan_deployment_relink(
             .ok_or_else(|| SkillTransferError::DeploymentUnavailable {
                 agent: cell.agent_id.clone(),
             })?;
-        if !seen_targets.insert(target.clone()) {
-            continue;
-        }
-        let backup_name =
-            target
-                .file_name()
-                .ok_or_else(|| SkillTransferError::DeploymentUnavailable {
-                    agent: cell.agent_id.clone(),
-                })?;
-        let backup = target_store
-            .backups_dir()
-            .join(operation_id)
-            .join("native")
-            .join(cell.agent_id.to_string())
-            .join(backup_name);
-        let expected = ExpectedState::hash(node_hash(&target).map_err(|source| {
-            SkillTransferError::TargetFilesystem {
-                path: target.clone(),
-                source,
-            }
-        })?)?;
-        ops.push(FileOp::Move {
-            from: target.clone(),
-            to: backup,
-            expected,
-        });
-        let mode = cell
-            .link_mode
+        let target = request
+            .targets
+            .iter()
+            .find(|target| target.agent == cell.agent_id && target.source_path == source_path)
             .ok_or_else(|| SkillTransferError::DeploymentUnavailable {
                 agent: cell.agent_id.clone(),
             })?;
+        if !target.target_root.is_absolute() {
+            return Err(SkillTransferError::DeploymentUnavailable {
+                agent: cell.agent_id.clone(),
+            });
+        }
+        let target_path = target.target_root.join(request.target_slug.as_str());
+        let mode = match target.mode {
+            LinkMode::Link if !target.link_supported => LinkMode::Copy,
+            mode => mode,
+        };
+        planned.push(PlannedNativeDeployment {
+            agent: cell.agent_id.clone(),
+            detached: !request.keeps_source || target_path == source_path,
+            source_path,
+            target_path,
+            mode,
+        });
+    }
+    Ok(planned)
+}
+
+struct DeploymentRelinkRequest<'a> {
+    deployments: &'a [PlannedNativeDeployment],
+    target_scope: Scope,
+    item_id: ItemId,
+    canonical_target: &'a Path,
+    target_store_root: &'a Path,
+    target_project_id: Option<&'a str>,
+    operation_id: &'a str,
+    preview_id: &'a str,
+    now: u64,
+}
+
+/// Plans the native install phase: materialise the item where the target scope's agents read it.
+///
+/// The source-scope entries are detached by the canonical ChangeSet, so this set only creates
+/// target-scope entries. Entries that share a native path (Codex and omp on `.agents/skills`)
+/// produce one operation, not one per agent.
+fn plan_native_deployment_change_set(
+    request: DeploymentRelinkRequest<'_>,
+) -> Result<Option<ChangeSet>, SkillTransferError> {
+    let DeploymentRelinkRequest {
+        deployments,
+        target_scope,
+        item_id,
+        canonical_target,
+        target_store_root,
+        target_project_id,
+        operation_id,
+        preview_id,
+        now,
+    } = request;
+    let mut seen_targets = std::collections::BTreeSet::new();
+    let mut ops = Vec::new();
+    for deployment in deployments {
+        if !seen_targets.insert(deployment.target_path.clone()) {
+            continue;
+        }
         let plan = crate::deploy::plan(crate::deploy::PlanRequest {
             item_id,
             scope: target_scope,
-            agent: cell.agent_id.clone(),
-            store_root: target_store.root().to_path_buf(),
+            agent: deployment.agent.clone(),
+            store_root: target_store_root.to_path_buf(),
             source: canonical_target.to_path_buf(),
-            destination: target,
-            mode,
+            destination: deployment.target_path.clone(),
+            mode: deployment.mode,
             link_supported: true,
             managed: true,
-            destination_managed: true,
+            // The only destination AgenTuna may already own here is the source link this plan
+            // detaches first; every other existing path is a conflict the deploy planner reports.
+            destination_managed: deployment.detached
+                && deployment.target_path == deployment.source_path,
             shared_agents: Vec::new(),
             project_id: target_project_id.map(str::to_owned),
-            summary: format!("Relink skill for {}", cell.agent_id),
+            summary: format!("Relink skill for {}", deployment.agent),
         })?;
         let Some(native_set) = plan.change_set else {
             return Err(SkillTransferError::DeploymentUnavailable {
-                agent: cell.agent_id.clone(),
+                agent: deployment.agent.clone(),
             });
         };
         ops.extend(native_set.ops);
@@ -594,87 +708,78 @@ pub fn apply_skill_transfer(
             })?;
     let mut handles = vec![canonical_handle];
     let mut deployment_ids = Vec::new();
+    let mut install_operation = None;
     if let Some(deployment_set) = &plan.deployment_change_set {
-        let (detach_ops, install_ops): (Vec<_>, Vec<_>) = deployment_set
-            .ops
-            .iter()
-            .cloned()
-            .partition(|op| matches!(op, FileOp::Move { .. }));
-        if !detach_ops.is_empty() {
-            let detach = phase_set(deployment_set, "-detach", detach_ops)?;
-            match at_fs::apply_with_roots_reversible(&detach, context, roots) {
-                Ok(outcome) => {
-                    deployment_ids.push(outcome.operation_id);
-                    if let Some(handle) = outcome.rollback_handle {
-                        handles.push(handle);
-                    }
-                }
-                Err(error) => {
-                    return Err(SkillTransferError::PhaseTwo {
-                        cause: error.to_string(),
-                        rollback: rollback_handles(handles),
-                    });
+        match at_fs::apply_with_roots_reversible(deployment_set, context, roots) {
+            Ok(outcome) => {
+                install_operation = Some(outcome.operation_id.clone());
+                deployment_ids.push(outcome.operation_id);
+                if let Some(handle) = outcome.rollback_handle {
+                    handles.push(handle);
                 }
             }
-        }
-        if !install_ops.is_empty() {
-            let install = phase_set(deployment_set, "-install", install_ops)?;
-            match at_fs::apply_with_roots_reversible(&install, context, roots) {
-                Ok(outcome) => {
-                    deployment_ids.push(outcome.operation_id);
-                    if let Some(handle) = outcome.rollback_handle {
-                        handles.push(handle);
-                    }
-                }
-                Err(error) => {
-                    return Err(SkillTransferError::PhaseTwo {
-                        cause: error.to_string(),
-                        rollback: rollback_handles(handles),
-                    });
-                }
+            Err(error) => {
+                return Err(SkillTransferError::PhaseTwo {
+                    cause: error.to_string(),
+                    rollback: rollback_handles(handles, context.recorder),
+                });
             }
         }
     }
     let target_scope = plan.change_set.scope.unwrap_or(plan.source_scope);
+    let canonical_package = plan
+        .target_store_root
+        .join("skills")
+        .join(plan.target_slug.as_str());
+    let store_hash = SkillPackage::read(&canonical_package)?.hash.to_string();
     connection
         .execute_batch("SAVEPOINT skill_transfer_db")
         .map_err(at_db::DbError::Sqlite)?;
-    let database_update =
-        (|| -> Result<(), at_db::DbError> {
-            if plan.target_item_id == plan.source_item_id {
-                at_db::items::rehome_item(
-                    connection,
-                    &plan.source_item_id,
-                    target_scope,
-                    plan.target_slug.as_str(),
-                    &format!("skills/{}", plan.target_slug),
-                    plan.target_project_id.as_deref(),
-                )?;
-            } else {
-                at_db::items::duplicate_item(
-                    connection,
-                    &plan.source_item_id,
-                    &plan.target_item_id,
-                    plan.target_slug.as_str(),
-                    &format!("skills/{}", plan.target_slug),
-                    target_scope,
-                    plan.target_project_id.as_deref(),
-                )?;
+    let database_update = (|| -> Result<(), at_db::DbError> {
+        if plan.target_item_id == plan.source_item_id {
+            if let Some(replaced) = plan.replaced_item_id {
+                // Replace reuses the target path and treats the promoted identity as the
+                // surviving item, so the overwritten copy's row must go before the unique
+                // `(kind, scope, project, slug)` check runs. Its deployments, versions and
+                // source rows cascade with it.
+                at_db::items::delete_item(connection, &replaced)?;
             }
-            if plan.target_item_id == plan.source_item_id {
-                for cell in plan.deployments.iter().filter(|cell| {
-                    cell.scope == plan.source_scope && cell.state == ItemState::Linked
-                }) {
-                    update_deployment_scope(connection, plan, cell, &canonical.operation_id)?;
-                }
-            }
-            Ok(())
-        })();
+            at_db::items::rehome_item(
+                connection,
+                &plan.source_item_id,
+                target_scope,
+                plan.target_slug.as_str(),
+                &format!("skills/{}", plan.target_slug),
+                plan.target_project_id.as_deref(),
+            )?;
+        } else {
+            at_db::items::duplicate_item(
+                connection,
+                &plan.source_item_id,
+                &plan.target_item_id,
+                plan.target_slug.as_str(),
+                &format!("skills/{}", plan.target_slug),
+                target_scope,
+                plan.target_project_id.as_deref(),
+            )?;
+        }
+        if plan.target_item_id == plan.source_item_id {
+            update_deployment_rows(
+                connection,
+                plan,
+                target_scope,
+                &store_hash,
+                install_operation.as_deref(),
+                &canonical.operation_id,
+            )?;
+        }
+        Ok(())
+    })();
     if let Err(error) = database_update {
         let rollback_error = connection
             .execute_batch("ROLLBACK TO skill_transfer_db; RELEASE skill_transfer_db")
             .err();
-        let files = rollback_handles(handles);
+        let files = rollback_handles(handles, context.recorder);
         return Err(SkillTransferError::Rehome {
             cause: match rollback_error {
                 Some(rollback_error) => {
@@ -697,23 +802,13 @@ pub fn apply_skill_transfer(
     })
 }
 
-fn phase_set(
-    source: &ChangeSet,
-    suffix: &str,
-    ops: Vec<FileOp>,
-) -> Result<ChangeSet, SkillTransferError> {
-    let mut set = source.clone();
-    set.id.push_str(suffix);
-    set.ops = ops;
-    set.summary = format!("{}{suffix}", source.summary);
-    set.validate()?;
-    Ok(set)
-}
-
-fn rollback_handles(handles: Vec<at_fs::RollbackHandle>) -> String {
+fn rollback_handles(
+    handles: Vec<at_fs::RollbackHandle>,
+    recorder: &mut dyn at_fs::OperationRecorder,
+) -> String {
     let mut errors = Vec::new();
     for handle in handles.into_iter().rev() {
-        if let Err(error) = at_fs::rollback_committed(handle) {
+        if let Err(error) = at_fs::rollback_committed(handle, recorder) {
             errors.push(error.to_string());
         }
     }
@@ -724,62 +819,107 @@ fn rollback_handles(handles: Vec<at_fs::RollbackHandle>) -> String {
     }
 }
 
-fn update_deployment_scope(
+/// Rewrites the deployment index entries the applied transfer now describes.
+///
+/// A detached source row stays as an `off` tombstone owned by the canonical operation, which is
+/// the one that removed the source link, so undoing it flips the row back to `linked`. One
+/// `linked` row per enabled agent then names the target-scope native path, and
+/// `sync_written_target` records the bytes actually materialised there — a shared root (Codex
+/// and omp on `.agents/skills`) keeps one consistent hash per path.
+///
+/// Bulk transfers apply every phase as one operation and pass that id for both slots.
+///
+/// # Errors
+/// Returns the database failure when a row cannot be written or the materialised target cannot
+/// be hashed.
+pub fn update_deployment_rows(
     connection: &rusqlite::Connection,
     plan: &SkillTransferPlan,
-    cell: &DeploymentCell,
-    operation_id: &str,
+    target_scope: Scope,
+    store_hash: &str,
+    install_operation: Option<&str>,
+    canonical_operation: &str,
 ) -> Result<(), at_db::DbError> {
-    let old_project = cell.project_id.as_deref();
-    let off = at_db::deployments::DeploymentSpec::new(
-        &plan.target_item_id,
-        &cell.agent_id,
-        plan.source_scope,
-        ItemState::Off,
-    )
-    .with_mode("none")
-    .with_operation(operation_id);
-    let off = if let Some(project) = old_project {
-        off.with_project(project)
-    } else {
-        off
-    };
-    at_db::deployments::upsert_deployment(connection, &off)?;
-    let mode = match cell.link_mode {
-        Some(LinkMode::Link) => "symlink",
-        Some(LinkMode::Copy) => "copy",
-        None => "none",
-    };
-    let mut target = at_db::deployments::DeploymentSpec::new(
-        &plan.target_item_id,
-        &cell.agent_id,
-        plan.change_set.scope.unwrap_or(plan.source_scope),
-        ItemState::Linked,
-    )
-    .with_mode(mode)
-    .with_hashes(
-        cell.store_hash.as_deref(),
-        cell.target_hash.as_deref(),
-        cell.baseline_hash.as_deref(),
-    )
-    .with_operation(operation_id);
-    if let Some(path) = cell.target_path.as_deref() {
-        target = target.with_target_path(path);
+    for cell in plan
+        .deployments
+        .iter()
+        .filter(|cell| cell.scope == plan.source_scope && cell.state == ItemState::Linked)
+    {
+        let Some(source_text) = cell.target_path.as_deref() else {
+            continue;
+        };
+        let detached = plan.native_deployments.iter().any(|deployment| {
+            deployment.detached && deployment.source_path.to_string_lossy() == source_text
+        });
+        if !detached {
+            continue;
+        }
+        let item_id = plan.target_item_id;
+        let agent = cell.agent_id.clone();
+        let hashes =
+            at_db::deployments::DeploymentHashes::new(cell.store_hash.as_deref(), None, None);
+        let mut off = at_db::deployments::DeploymentSpec::applied(
+            &item_id,
+            &agent,
+            plan.source_scope,
+            ItemState::Off,
+            Some("none"),
+            Some(source_text),
+            hashes,
+        )
+        .with_operation(canonical_operation);
+        if let Some(project) = cell.project_id.as_deref() {
+            off = off.with_project(project);
+        }
+        at_db::deployments::upsert_deployment(connection, &off)?;
     }
-    let link = (mode == "symlink").then(|| {
-        plan.target_store_root
-            .join("skills")
-            .join(plan.target_slug.as_str())
-            .to_string_lossy()
-            .into_owned()
-    });
-    if let Some(link) = link.as_deref() {
-        target = target.with_link_target(link);
+    let canonical_package = plan
+        .target_store_root
+        .join("skills")
+        .join(plan.target_slug.as_str());
+    let link_target = canonical_package.to_string_lossy().into_owned();
+    for deployment in &plan.native_deployments {
+        let item_id = plan.target_item_id;
+        let agent = deployment.agent.clone();
+        let target_text = deployment.target_path.to_string_lossy().into_owned();
+        let mode = match deployment.mode {
+            LinkMode::Link => "symlink",
+            LinkMode::Copy => "copy",
+        };
+        let hashes = at_db::deployments::DeploymentHashes::new(
+            Some(store_hash),
+            Some(store_hash),
+            Some(store_hash),
+        );
+        let mut target = at_db::deployments::DeploymentSpec::applied(
+            &item_id,
+            &agent,
+            target_scope,
+            ItemState::Linked,
+            Some(mode),
+            Some(&target_text),
+            hashes,
+        )
+        .with_operation(install_operation.unwrap_or(canonical_operation));
+        if deployment.mode == LinkMode::Link {
+            target = target.with_link_target(&link_target);
+        }
+        if let Some(project) = plan.target_project_id.as_deref() {
+            target = target.with_project(project);
+        }
+        at_db::deployments::upsert_deployment(connection, &target)?;
+        crate::drift::sync_written_target(
+            connection,
+            Some(target_scope),
+            &deployment.target_path,
+            Some(&canonical_package),
+        )
+        .map_err(|error| at_db::DbError::InvalidValue {
+            field: "deployments.baseline_hash",
+            reason: error.to_string(),
+        })?;
     }
-    if let Some(project) = plan.target_project_id.as_deref() {
-        target = target.with_project(project);
-    }
-    at_db::deployments::upsert_deployment(connection, &target)
+    Ok(())
 }
 /// Computes the filesystem ChangeSet node digest used for directory preconditions.
 ///
@@ -920,6 +1060,7 @@ mod tests {
             resolution,
             connection: fixture.database.connection(),
             target_project_id: None,
+            native_targets: &[],
         }
     }
 
@@ -1080,5 +1221,108 @@ mod tests {
             .expect("read moved item");
         assert_eq!(scope, Scope::User.wire_name());
         assert_eq!(slug, fixture.slug.as_str());
+    }
+
+    #[test]
+    fn database_failure_rolls_back_every_phase_and_closes_the_operations() {
+        let fixture = fixture(Scope::Project, Scope::User, false);
+        let plan = plan_skill_transfer(request(&fixture, SkillTransfer::Move, None, false))
+            .expect("move plan");
+        fs::create_dir_all(fixture.target_store.root()).expect("target store directory");
+        fs::write(fixture.source_store.manifest_path(), &fixture.source_bytes)
+            .expect("persist source manifest");
+        fs::write(fixture.target_store.manifest_path(), &fixture.target_bytes)
+            .expect("persist target manifest");
+        let backup = fixture.target_store.backups_dir();
+        fs::create_dir_all(&backup).expect("backup directory");
+        fixture
+            .database
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_item_update BEFORE UPDATE ON items \
+                 BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;",
+            )
+            .expect("refusing trigger");
+        let mut recorder = at_fs::DbOperationRecorder::new(fixture.database.connection(), 30);
+        let mut context = at_fs::ApplyContext {
+            store_root: fixture.target_store.root(),
+            backup_folder: &backup,
+            recorder: &mut recorder,
+        };
+        let roots =
+            at_fs::ApplyRoots::new([fixture._temp.path().to_path_buf()]).expect("authorized root");
+
+        let error =
+            apply_skill_transfer(fixture.database.connection(), &plan, &mut context, &roots)
+                .expect_err("the database update fails");
+
+        assert!(
+            matches!(&error, SkillTransferError::Rehome { rollback, .. } if rollback == "complete"),
+            "{error:?}"
+        );
+        assert!(
+            fixture
+                .source_store
+                .skill_dir(&fixture.slug)
+                .join("SKILL.md")
+                .exists(),
+            "the moved canonical folder is restored"
+        );
+        assert!(
+            !fixture.target_store.skill_dir(&fixture.slug).exists(),
+            "the destination copy is removed"
+        );
+        let operations: Vec<(String, Option<String>, Option<String>)> = {
+            let mut statement = fixture
+                .database
+                .connection()
+                .prepare("SELECT id, status, error_kind FROM operations ORDER BY id")
+                .expect("operations statement");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("operations")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("operations")
+        };
+        assert!(!operations.is_empty(), "the applied phases are recorded");
+        for (id, status, error_kind) in &operations {
+            assert_eq!(status.as_deref(), Some("failed"), "operation {id}");
+            assert_eq!(error_kind.as_deref(), Some("rolled_back"), "operation {id}");
+        }
+        let rows: Vec<(Option<String>, Option<String>)> = {
+            let mut statement = fixture
+                .database
+                .connection()
+                .prepare("SELECT before_hash, after_hash FROM operation_files")
+                .expect("file rows statement");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("file rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("file rows")
+        };
+        assert!(!rows.is_empty(), "the phases recorded the files they wrote");
+        for (before, after) in rows {
+            assert_eq!(before, after, "each row describes the restored state");
+        }
+        for (id, _, _) in operations {
+            let undo = at_migrate::undo::undo_operation(
+                at_migrate::undo::UndoOperationRequest {
+                    connection: fixture.database.connection(),
+                    store_root: fixture.target_store.root(),
+                    backup_root: &backup,
+                    authorized_roots: &roots,
+                    actor: at_db::ops::OperationActor::Ui,
+                    force: false,
+                },
+                &id,
+            )
+            .expect("undo runs");
+            assert_eq!(
+                undo,
+                at_migrate::undo::UndoOutcome::NotUndoable,
+                "undo refuses rolled-back operation {id}"
+            );
+        }
     }
 }

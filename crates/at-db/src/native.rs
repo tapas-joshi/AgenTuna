@@ -21,6 +21,34 @@ use ulid::Ulid;
 
 use crate::DbError;
 
+/// Separator between an agent configuration document and the entry key inside it.
+///
+/// An MCP configuration holds several servers in one document while `native_items.path` is
+/// unique, so a native MCP row stores `<document>#<entry key>`: the document is the file the
+/// agent loads, the fragment names the entry inside it. The split uses the rightmost separator,
+/// so a document path that itself contains one stays readable; discovery refuses an entry key
+/// containing it, which keeps the split unambiguous.
+pub const MCP_ENTRY_SEPARATOR: char = '#';
+
+/// The native-row path of one MCP entry inside `document`.
+#[must_use]
+pub fn mcp_entry_path(document: &str, name: &str) -> String {
+    let mut path = String::with_capacity(document.len() + 1 + name.len());
+    path.push_str(document);
+    path.push(MCP_ENTRY_SEPARATOR);
+    path.push_str(name);
+    path
+}
+
+/// Splits a native MCP row path into its document and entry key.
+///
+/// Returns `None` for a path without the separator: that is a row recorded for a whole document
+/// (an adoption or an older scan) rather than one MCP entry.
+#[must_use]
+pub fn split_mcp_entry_path(path: &str) -> Option<(&str, &str)> {
+    path.rsplit_once(MCP_ENTRY_SEPARATOR)
+}
+
 /// How a native row's lifecycle stands.
 ///
 /// The wire names match the `status` CHECK constraint in migration v5.

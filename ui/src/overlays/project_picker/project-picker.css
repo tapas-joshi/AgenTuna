@@ -1,6 +1,6 @@
 .at-project-picker {
   inline-size: min(920px, calc(100vw - 32px));
-  block-size: min(960px, calc(100vh - 32px));
+  max-block-size: min(720px, calc(100vh - 32px));
 }
 
 .at-project-picker .at-modal__header {
@@ -15,12 +15,13 @@
 }
 
 .at-project-picker .at-modal__body > div {
-  block-size: 100%;
-  gap: 12px;
+  max-block-size: min(720px, calc(100vh - 32px));
+  min-block-size: 0;
   padding: 24px;
 }
 
 .at-project-picker [role="listbox"] {
-  max-block-size: none;
-  flex: 1;
+  max-block-size: min(420px, calc(100vh - 300px));
+  min-block-size: min(160px, calc(100vh - 340px));
+  flex: 0 1 auto;
 }

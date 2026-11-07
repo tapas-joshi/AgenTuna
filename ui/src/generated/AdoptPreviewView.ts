@@ -17,6 +17,10 @@ store_root: string,
  */
 store_destination: string, 
 /**
+ * Backup directory where originals are stored before writes.
+ */
+backup_dir: string, 
+/**
  * Chosen store slug.
  */
 slug: string, 

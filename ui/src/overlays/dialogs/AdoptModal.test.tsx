@@ -28,6 +28,7 @@ describe("AdoptModal", () => {
           source: "/home/.agents/skills/release-notes",
           store_root: "/home/.agentuna",
           store_destination: "/home/.agentuna/skills/release-notes",
+          backup_dir: "/home/.agentuna/backups",
           slug: "release-notes",
           native_name: "release-notes",
           kind: "skill",
@@ -59,6 +60,7 @@ describe("AdoptModal", () => {
 
     expect(await screen.findByText("Adopt release-notes")).toBeTruthy();
     expect(screen.getByText("/home/.agentuna/skills/release-notes")).toBeTruthy();
+    expect(screen.getByText("/home/.agentuna/backups")).toBeTruthy();
     expect(screen.getAllByText(/codex \+ omp/).length).toBeGreaterThanOrEqual(1);
 
     await user.click(screen.getByRole("button", { name: "Adopt" }));

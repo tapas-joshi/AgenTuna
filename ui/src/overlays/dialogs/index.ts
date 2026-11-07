@@ -11,6 +11,8 @@ export { OverwriteRefusalDialog } from "./OverwriteRefusalDialog";
 export type { OverwriteRemedyResult, RefusedOverwriteDetails } from "./OverwriteRefusalDialog";
 export { AdoptModal } from "./AdoptModal";
 export type { AdoptModalProps } from "./AdoptModal";
+export { SkillActionDialogs } from "./SkillActionDialogs";
+export type { SkillActionDialogRequest, SkillActionDialogsProps } from "./SkillActionDialogs";
 export { ModalHost, useModals } from "./ModalHost";
 export type { ModalHostProps } from "./ModalHost";
 export { createModalQueue } from "./modal-queue";

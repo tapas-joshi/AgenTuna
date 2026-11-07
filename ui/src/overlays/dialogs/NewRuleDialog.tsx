@@ -45,6 +45,8 @@ export interface NewRuleDialogProps {
   readonly open: boolean;
   /** Active project id, when one is selected. */
   readonly project: string | null;
+  /** Active scope selected by the Add menu. */
+  readonly initialScope?: RuleScope;
   /** Called after a close with nothing written. */
   readonly onClose: () => void;
   /** Called with the created absolute path after a successful create. */
@@ -55,10 +57,10 @@ export interface NewRuleDialogProps {
  * Renders the new rule file dialog. All command failures surface inline or as a
  * warning toast; Escape and Cancel write nothing.
  */
-export function NewRuleDialog({ open, project, onClose, onCreated }: NewRuleDialogProps) {
+export function NewRuleDialog({ open, project, initialScope, onClose, onCreated }: NewRuleDialogProps) {
   const toast = useToast();
   const [fileType, setFileType] = useState<RuleFileName>("CLAUDE.md");
-  const [scope, setScope] = useState<RuleScope>(project === null ? "user" : "project");
+  const [scope, setScope] = useState<RuleScope>(initialScope ?? (project === null ? "user" : "project"));
   const [options, setOptions] = useState<InstructionCreateOptions | null>(null);
   const [preview, setPreview] = useState<InstructionCreatePreview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -68,7 +70,7 @@ export function NewRuleDialog({ open, project, onClose, onCreated }: NewRuleDial
 
   useEffect(() => {
     if (!open) return;
-    setScope(project === null ? "user" : "project");
+    setScope(initialScope ?? (project === null ? "user" : "project"));
     setError(null);
     let cancelled = false;
     invoke<InstructionCreateOptions>("instruction_create_options", {
@@ -83,7 +85,7 @@ export function NewRuleDialog({ open, project, onClose, onCreated }: NewRuleDial
     return () => {
       cancelled = true;
     };
-  }, [open, project]);
+  }, [open, project, initialScope]);
 
   useEffect(() => {
     if (!open) return;

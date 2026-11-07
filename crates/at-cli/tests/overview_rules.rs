@@ -169,7 +169,7 @@ fn rules_save_refuses_an_external_edit_and_leaves_the_file_untouched() {
     // concurrent-external-write case the review check must catch. Startup time varies on a
     // loaded machine, so retry with a fresh file rather than guessing one sleep.
     let mut last = None;
-    for _ in 0..3 {
+    for attempt in 0..4_u64 {
         fs::write(&agents, b"# Original\n").expect("reset AGENTS.md");
         let mut child = Command::new(env!("CARGO_BIN_EXE_agentuna"))
             .args([
@@ -184,12 +184,13 @@ fn rules_save_refuses_an_external_edit_and_leaves_the_file_untouched() {
             ])
             .env("NO_COLOR", "1")
             .envs(sandbox.vars())
+            .current_dir(sandbox.cwd())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn agentuna");
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(2 + attempt));
         fs::write(&agents, b"# External edit\n").expect("external edit");
         if let Some(mut pipe) = child.stdin.take() {
             pipe.write_all(b"# Editor buffer\n").expect("write stdin");
@@ -307,7 +308,10 @@ fn rules_new_refuses_to_overwrite_an_existing_agents_file() {
         ],
     );
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
-    assert_eq!(bytes(&fresh.join("AGENTS.md")), b"# AGENTS.md\n");
+    assert_eq!(
+        bytes(&fresh.join("AGENTS.md")),
+        b"<!-- agentuna:begin -->\n# AGENTS.md\n<!-- agentuna:end -->\n"
+    );
 }
 
 #[test]

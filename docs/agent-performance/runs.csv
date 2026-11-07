@@ -9,17 +9,103 @@ AppShellRust,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/d
 BoardSetup,1-3,devin,swe-2-flash,devin/swe-2-flash,max,178.0,85,79,1106839,21604,1.0701,,,
 CliContract,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,26.7,119,141,281585,130716,0.1909,,,
 CliTree,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.7,51,60,157374,72985,0.0852,,,
+CloseBooby,1-3,anthropic,claude-sonnet-5-5,anthropic/claude-sonnet-5-5,low,7.7,13,18,26,3523,0.4658,,Q,cancelled by the lead (reasoning level change); no edits
 DbFoundation,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,13.6,33,42,117687,49423,0.0556,,,
 DbOps,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,24.4,80,95,240479,124118,0.1471,,,
 DbSchemaB,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,24.5,113,112,213020,92456,0.1298,,,
 DbSchemas,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.7,69,102,215650,95087,0.1175,,,
 DbSettingsRepos,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.3,95,127,241314,110628,0.147,,,
+EagerConstrictor,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,low,7.6,16,15,44908,669,0.0094,,Q,cancelled by the lead (reasoning level change); no edits
 EngineLocalTemplates,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,22.2,123,127,244431,96349,0.157,,,
 EngineLocksStates,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.6,72,90,158173,70185,0.0908,,,
 EngineTests,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.2,87,105,245938,97713,0.1377,,,
 FsLinkPrimitive,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.6,48,66,160712,71819,0.0833,,,
 FsLinkStrategy,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.0,113,146,265076,121425,0.1763,,,
 FsWatchHarness,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,28.4,113,132,312354,152199,0.1995,,,
+IrrelevantFlyingfish,1-3,anthropic,claude-haiku-5-5,anthropic/claude-haiku-5-5,low,7.6,1,0,0,0,0.0,,Q,cancelled by the lead (reasoning level change); no edits
+LaneA11yFix,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,37.4,222,221,859540,71749,3.6126,,A,fixed real a11y defects; specs green
+LaneA11yUi,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,118.2,365,428,955093,221443,0.6967,,D,stalled; left blank baseline; replaced
+LaneAppBaselines,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,35.6,207,291,393135,125649,0.2836,,,
+LaneAppBuild,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,22.4,76,75,222232,21125,0.6653,,,
+LaneAppDefects,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,59.9,179,205,323296,101261,0.218,,A,both defects fixed and real-app verified
+LaneAppFlows,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,50.4,298,356,410221,143901,0.3644,,,
+LaneArchFix,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,38.3,284,283,1156646,117984,6.5873,,,
+LaneAudit,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,31.3,213,276,372379,102722,0.2594,,A,evidence table per story plus fixes
+LaneAuditC1,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.0,60,108,169271,50120,0.0739,,A,audit
+LaneAuditC2,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,19.9,115,114,376824,55499,1.4795,,A,audit
+LaneAuditC3,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.5,80,138,194160,49253,0.0837,,A,audit
+LaneAuditC4,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,26.8,206,205,836041,68825,3.1655,,B,audit found no over-claims
+LaneAxFinish,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,84.6,226,259,340948,116921,0.2437,,,
+LaneAxForms,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,38.7,230,229,1185230,76846,3.7919,,B,found 2 defects; fixes done by another lane
+LaneAxRun5,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,53.7,228,227,943126,78215,3.9672,,A,real-app flows incl. round trips with hashes
+LaneAxSmoke,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,57.9,358,355,1009771,134270,7.8077,yes,,
+LaneBugReview,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,18.4,105,144,236123,49953,0.1087,,A,3 real file-safety bugs found
+LaneBugReview2,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,14.6,84,112,177898,39723,0.0786,,A,found a critical recovery security bug
+LaneBundleFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,79.3,188,216,282578,106009,0.196,,A,self-contained bundle; undo defects
+LaneCiVisual,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,17.5,77,96,147041,64165,0.0828,,,
+LaneCliContract,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,71.9,294,345,539840,135976,0.5031,,,
+LaneCliMatrix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,39.4,176,237,345302,141916,0.2406,,A,348 invocation contract matrix
+LaneCliUx,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,34.0,162,252,343222,112267,0.2217,,A,7 first-run CLI gaps
+LaneCmdAudit,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,17.7,61,91,142611,50867,0.0685,,A,2 critical dead/unregistered commands found and fixed
+LaneCmdFollow,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,31.3,154,241,273437,88047,0.1638,,A,offline switch deep-link mocks done
+LaneDesignAudit,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,16.2,82,81,231838,25860,0.7243,,A,design gap list with evidence
+LaneDesignFix,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,10.0,38,37,106911,14641,0.2747,yes,,
+LaneDesignFix2,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,30.9,208,252,342774,104518,0.2515,,A,4.5/5 design items; MCP copy gap named
+LaneDriftCli,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,26.1,153,176,257845,79381,0.1562,,A,TC-036 crash recovery + drift/backups CLI done
+LaneDriftUi,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,179.2,717,867,1744083,372529,1.3149,,B,TC-026/029 TS-036 needed a second push; very slow
+LaneFirstRunStore,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,46.6,366,382,476704,145811,0.4826,,B,core good; UI/CLI/tests needed a second push
+LaneFlake,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,69.2,159,206,274832,94981,0.1762,,B,fixes held; could not finish runs while tree changed
+LaneFlake2,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,38.6,121,154,204460,64062,0.1138,,A,3 real failures fixed; contention runs green
+LaneFsFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,64.5,206,277,365109,124284,0.2647,,A,symlink preflight/backup root/recorder fixes
+LaneFuzzEdits,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,52.0,162,178,471305,205470,0.3256,,A,6 real editor defects found by generative tests
+LaneGapClose,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,25.3,134,179,287328,88019,0.1661,,,
+LaneGaps2Rust,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,29.4,204,219,360651,114527,0.245,,A,3 over-claims closed
+LaneGaps2Ui,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,21.4,174,173,505186,57116,2.223,,A,5 UI gaps closed
+LaneGaps3Rust,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,32.0,173,215,308402,107662,0.2102,,A,6 gaps closed
+LaneGaps3Ui,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,23.1,137,136,438520,76855,2.0581,,A,4 gaps closed
+LaneGapsRust,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,38.2,203,212,384921,134893,0.2664,,A,11 audit gaps closed
+LaneGapsUi,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,30.5,214,213,965365,68800,3.9143,,A,4 UI gaps closed
+LaneGateFix2,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,11.2,29,43,64405,13308,0.0223,,,
+LaneMcpForm,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,295.4,225,292,624082,125572,0.3063,,A,TM-023/024/026/004 done and tested
+LaneMcpScope,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,37.8,215,229,416499,150666,0.3176,,A,MCP copy-to-scope across engine/app/CLI/UI
+LaneMigrateGaps,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,45.6,267,294,436933,164133,0.3552,,A,TC-007/008/021/037 done after a verification push
+LaneMigrateScope,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,41.7,224,275,394645,143862,0.3023,,A,per-item scope plans
+LaneMigrateUiFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,40.0,212,239,311985,112381,0.2346,,A,root cause camelCase args across commands
+LaneMoveFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,48.7,216,233,848699,146877,0.3698,,A,move relink bug fixed
+LaneNativeScan,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,36.9,205,257,344963,117671,0.2546,,,
+LanePlatformPaths,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,50.6,167,203,292051,96272,0.1939,,,
+LanePlatformRust,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,34.3,205,245,326169,113475,0.2302,,,
+LaneRecoverySec,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,35.8,205,232,341753,120796,0.2612,,A,critical recovery fix with forged-journal tests
+LaneRegistry,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,35.1,177,203,332958,99831,0.2208,,A,root-caused empty agents/mcp/effective and fixed through one shared path
+LaneRemoteRepo,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,79.0,180,231,818280,100580,0.3724,,,
+LaneSafetyFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,35.9,181,273,306080,108339,0.2071,,,
+LaneSafetyReview,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.1,100,119,177502,41195,0.083,,,
+LaneSeqSpeed,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,57.4,154,207,296764,94190,0.1828,,A,272s to ~32s
+LaneSeqTests,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,114.0,380,399,792839,315217,0.8325,,B,5 properties + 8 defects; speed and 2 properties needed follow-up
+LaneShell,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,97.7,453,494,819358,195518,0.7719,,B,three stories not implemented on first report; finished after push
+LaneSkillsCli,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,35.2,223,295,475370,150876,0.3394,,A,TS-041/TS-044 done; two engine bugs found and fixed
+LaneSkillsResidual,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,34.3,213,262,348002,118525,0.2425,,,
+LaneSkillsUi,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,137.1,438,587,1236248,264544,0.8309,,B,TS-029/037 needed a second push to mount and verify
+LaneSmoke,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,58.5,225,270,704770,124635,0.4322,,A,found 4 real defects incl. undo backup collision
+LaneSmoke2,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,60.1,178,197,426472,135401,0.3287,,,
+LaneSmokeFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,82.9,297,305,556597,200689,0.5082,,,
+LaneStoreSetup,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,77.6,234,257,397833,122196,0.3188,,,
+LaneStoryAuditA,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,17.8,78,111,207942,52312,0.0905,,A,honest audit found 6 over-claims
+LaneStoryAuditB,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,22.8,156,155,754650,51903,2.2691,,B,over-claim list partly wrong (TC-025)
+LaneSyncLabels,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,32.4,199,198,669029,86842,3.4229,,,
+LaneSyncRemoteCli,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,36.2,143,206,372718,139071,0.241,,A,TC-031 sync/remote groups done and tested
+LaneTestMatrix,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,73.4,238,344,575556,157616,0.4173,,A,10 test stories done
+LaneTreeGreen,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,44.5,218,217,954673,53261,3.522,,A,all non-visual gates green
+LaneTryGuide,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,17.4,125,124,379008,52626,1.4142,,,
+LaneUiHardening,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,22.2,116,137,165662,55301,0.0938,,,
+LaneUndoFix,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,48.6,108,130,191085,66133,0.1088,,A,directory undo collision fixed
+LaneUpdater,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,7.0,1,0,0,0,0.0,yes,,
+LaneUpdater2,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,59.9,212,279,398828,164070,0.3124,,A,TF-032 offline seams and queue done
+LaneVisualTriage,1-3,google-antigravity,gemini-3.8-flash,google-antigravity/gemini-3.8-flash,high,52.8,189,188,713806,45263,2.6216,,A,146/146 twice
+LaneVisualTriage2,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,41.5,222,240,2991152,110654,0.6222,,,
+LaneVisualTriage3,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,41.0,49,57,81394,22963,0.0339,,,
+LaneVisualTriage4,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,38.9,71,97,162834,44499,0.0684,,,
+MarkedKite,1-3,anthropic,claude-haiku-5-5,anthropic/claude-haiku-5-5,max,184.1,263,835,536,1625379,2.1871,,D,haiku 100K context: 2h on drift tests+CLI with no CLI code; replaced; its drift tests were good
 McpPathResolution,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,14.6,44,64,143948,64184,0.073,,,
 McpSession,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,25.6,87,113,270556,122708,0.1563,,,
 McpValidationSecrets,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,16.9,68,87,171614,75298,0.0941,,,
@@ -32,6 +118,7 @@ ProjectsResearch,1-3,devin,swe-2-flash,devin/swe-2-flash,max,21.0,23,37,160996,4
 QuotaProbe,1-3,zai,glm-5.3-flash,zai/glm-5.3-flash,max,7.0,1,0,0,0,0.0,yes,,
 ScopeResolution,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,15.0,49,64,154817,59015,0.0746,,,
 SecretsKeychain,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,14.1,40,60,136395,56656,0.0654,,,
+SheerHyena,1-3,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,max,122.7,462,558,1148859,258633,0.8062,,B,TA-060/TS-033/034/035 built but first report unverified; second push verified all
 StoreGitScan,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,21.5,88,96,195884,91542,0.1169,,,
 StoreLayout,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,29.2,73,95,172445,72373,0.097,,,
 StoreManifest,1-3,commandcode,deepseek/deepseek-v4.1-flash,commandcode/deepseek/deepseek-v4.1-flash,max,23.0,73,94,256606,111154,0.1433,,,
@@ -136,3 +223,4 @@ W9Migrate,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,52.3,213,
 W9Rules,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,64.1,342,340,379948,69302,0.4831,,B,four stories done after pushes
 W9SkillsIndex,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,64.0,302,309,357953,71085,0.4234,,C,TS-010 left
 W9UiWizardSteps,9,openai-codex,gpt-6-luna,openai-codex/gpt-6-luna,unrecorded,63.5,328,330,357584,64470,0.4835,,C,most steps unfinished
+WeirdTermite,1-3,anthropic,claude-sonnet-5-5,anthropic/claude-sonnet-5-5,low,7.7,11,14,22,3459,0.3846,,Q,cancelled by the lead (reasoning level change); no edits

@@ -326,3 +326,185 @@ fn a_writable_store_needs_no_elevation_for_the_same_write() {
     );
     assert_eq!(fs::read(store.join("config.json")).unwrap(), b"{\"v\":1}");
 }
+
+// =========================================================================
+// TA-080: the DB lock reader, the operations row and the card payload.
+// =========================================================================
+
+use at_app::app::privilege::{
+    DatabaseGlobalLockReader, DatabaseGlobalOperationLog, GlobalLockReader, GlobalLockView,
+    GlobalOperationLog, GlobalStoreView, GlobalWriteOperation,
+};
+use at_db::Database;
+use std::sync::Arc;
+
+fn index_with_lock(sandbox: &Path, reason: &str) -> (Arc<Mutex<Database>>, at_model::ItemId) {
+    let database = Database::open_file(sandbox.join("index.db")).expect("database");
+    let item = at_model::ItemId::new();
+    database
+        .connection()
+        .execute(
+            "INSERT INTO items (id, kind, scope, slug, name, managed) \
+             VALUES (?1, 'mcp_server', 'global', 'github', 'github', 1)",
+            [item.to_string()],
+        )
+        .expect("item row");
+    at_db::locks::upsert_lock(
+        database.connection(),
+        &at_db::locks::LockSpec {
+            item_id: &item,
+            scope: at_model::Scope::Global,
+            reason: Some(reason),
+            locked_by: Some("cli"),
+        },
+    )
+    .expect("lock row");
+    (Arc::new(Mutex::new(database)), item)
+}
+
+#[test]
+fn database_lock_reader_reads_global_locks_from_the_table() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let (database, item) = index_with_lock(sandbox.path(), "Managed by organization policy");
+    let reader = DatabaseGlobalLockReader::new(Arc::clone(&database));
+
+    let locks: Vec<Lock> = reader.global_locks().expect("locks read");
+    assert_eq!(locks.len(), 1);
+    assert_eq!(locks[0].item_id, item);
+    assert_eq!(locks[0].scope, at_model::Scope::Global);
+    assert_eq!(locks[0].reason, "Managed by organization policy");
+    assert_eq!(locks[0].locked_by, "cli");
+}
+
+#[test]
+fn database_lock_reader_reports_an_unreadable_index_instead_of_no_locks() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let database = Database::open_file(sandbox.path().join("index.db")).expect("database");
+    database
+        .connection()
+        .execute("DROP TABLE locks", [])
+        .expect("drop the lock table");
+    let reader = DatabaseGlobalLockReader::new(Arc::new(Mutex::new(database)));
+
+    let error = reader
+        .global_locks()
+        .expect_err("a failed read is an error");
+    assert!(error.message.contains("no such table"), "{}", error.message);
+}
+
+#[test]
+fn database_operation_log_records_a_global_write_row_with_its_files() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let database = Arc::new(Mutex::new(
+        Database::open_file(sandbox.path().join("index.db")).expect("database"),
+    ));
+    let log = DatabaseGlobalOperationLog::new(Arc::clone(&database));
+    let store = sandbox.path().join("global");
+    log.record(&GlobalWriteOperation {
+        root: store.clone(),
+        files: vec![store.join("mcp.json")],
+    })
+    .expect("row written");
+
+    let guard = database.lock().expect("database");
+    let (kind, scope, status, summary): (String, String, String, String) = guard
+        .connection()
+        .query_row(
+            "SELECT kind, scope, status, summary FROM operations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("operation row");
+    assert_eq!(kind, "global_write");
+    assert_eq!(scope, "global");
+    assert_eq!(status, "succeeded");
+    assert_eq!(summary, "Wrote 1 file(s) into the Global store");
+    let (action, path): (String, String) = guard
+        .connection()
+        .query_row("SELECT action, path FROM operation_files", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("file row");
+    assert_eq!(action, "modified");
+    assert_eq!(path, store.join("mcp.json").display().to_string());
+}
+
+#[test]
+fn database_operation_log_records_the_authorization_without_files() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let database = Arc::new(Mutex::new(
+        Database::open_file(sandbox.path().join("index.db")).expect("database"),
+    ));
+    let log = DatabaseGlobalOperationLog::new(Arc::clone(&database));
+    log.record(&GlobalWriteOperation {
+        root: sandbox.path().join("global"),
+        files: Vec::new(),
+    })
+    .expect("row written");
+
+    let guard = database.lock().expect("database");
+    let summary: String = guard
+        .connection()
+        .query_row("SELECT summary FROM operations", [], |row| row.get(0))
+        .expect("operation row");
+    assert_eq!(summary, "Enabled Global writes");
+    let files: i64 = guard
+        .connection()
+        .query_row("SELECT COUNT(*) FROM operation_files", [], |row| row.get(0))
+        .expect("file count");
+    assert_eq!(files, 0, "the authorization writes no item file");
+}
+
+#[test]
+fn enabling_global_writes_records_the_authorization_row() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let store = sandbox.path().join("global");
+    let database = Arc::new(Mutex::new(
+        Database::open_file(sandbox.path().join("index.db")).expect("database"),
+    ));
+    let service = GlobalStoreService::new(
+        paths_with_global(sandbox.path(), store.clone()),
+        Arc::new(RecordingElevator::new(Behaviour::CreateDirectory)),
+    )
+    .with_operation_log(Arc::new(DatabaseGlobalOperationLog::new(Arc::clone(
+        &database,
+    ))));
+
+    service.enable_global_writes().expect("prepare the store");
+    assert_eq!(service.status(), GlobalStoreStatus::Available);
+    let guard = database.lock().expect("database");
+    let (kind, summary): (String, String) = guard
+        .connection()
+        .query_row("SELECT kind, summary FROM operations", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("operation row");
+    assert_eq!(kind, "global_write");
+    assert_eq!(summary, "Enabled Global writes");
+}
+
+#[test]
+fn the_card_payload_names_the_resolved_path_its_source_and_the_locks() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let store = sandbox.path().join("tenant").join("global");
+    let (database, item) = index_with_lock(sandbox.path(), "Managed by organization policy");
+    let service = GlobalStoreService::new(
+        paths_with_global(sandbox.path(), store.clone()),
+        Arc::new(RecordingElevator::new(Behaviour::Cancel)),
+    );
+    let reader = DatabaseGlobalLockReader::new(database);
+    let view = GlobalStoreView::from(service.overview(&reader).expect("overview"));
+
+    assert_eq!(view.path, store.display().to_string());
+    assert_eq!(view.source, "environment", "the override was injected");
+    assert_ne!(view.status, "available", "the directory does not exist yet");
+    assert!(view.needs_elevation);
+    assert_eq!(
+        view.locks,
+        vec![GlobalLockView {
+            item_id: item.to_string(),
+            scope: "global".to_owned(),
+            reason: "Managed by organization policy".to_owned(),
+        }]
+    );
+}

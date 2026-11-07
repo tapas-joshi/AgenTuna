@@ -446,6 +446,20 @@ pub fn ensure_unlocked(store: &dyn LockStore, item_id: ItemId) -> Result<(), Eng
     }
 }
 
+/// Loads every lock from the `locks` table into an in-process store.
+///
+/// The app and the CLI both read locks through this function, so a lock placed by one frontend
+/// is visible to the other and neither can invent a second lock source. The Global store never
+/// holds locks.
+///
+/// # Errors
+/// [`EngineError::LockStore`] when the table cannot be read or a stored row is malformed.
+pub fn load_database_locks(
+    connection: &rusqlite::Connection,
+) -> Result<MemoryLockStore, EngineError> {
+    database_lock_store(connection)
+}
+
 /// Lists every lock with the diagnostics that apply to it, ordered by item id.
 ///
 /// An orphaned lock is reported, never treated as a panic or silently dropped.

@@ -36,7 +36,7 @@ function parseCommandError(cause: unknown): { code: string; message: string } {
 
 export function McpDetailScreen() {
   const snapshot = useAppSnapshot();
-  const { scope, activeProject } = snapshot;
+  const { scope, activeProject, externalRefreshVersion } = snapshot;
   const app = useAppState();
   const toast = useToast();
 
@@ -55,6 +55,13 @@ export function McpDetailScreen() {
   const [expandedTools, setExpandedTools] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
   const [showFixToken, setShowFixToken] = useState(false);
+
+  // "Fix token" from Overview sets a flag before opening this item; consume it once.
+  useEffect(() => {
+    if (app.getSnapshot().screenState["mcp-detail:fix-token"] !== true) return;
+    app.setScreenState("mcp-detail:fix-token", false);
+    setShowFixToken(true);
+  }, [app]);
 
   const load = useCallback(async () => {
     if (!selectedId) {
@@ -77,7 +84,7 @@ export function McpDetailScreen() {
     } finally {
       setLoading(false);
     }
-  }, [selectedId, scope, activeProject]);
+  }, [selectedId, scope, activeProject, externalRefreshVersion]);
 
   useEffect(() => {
     void load();
@@ -435,6 +442,7 @@ export function McpDetailScreen() {
                     return (
                       <div
                         key={index}
+                        role="img"
                         title={tip}
                         aria-label={`Check ${index + 1}: ${slot.status}`}
                         className={`h-16 w-16 rounded-3 ${color}`}
@@ -491,7 +499,7 @@ export function McpDetailScreen() {
                       disabled={isNotInstalled || detail.locked}
                       onClick={() => void handleToggleAgent(agent.id, agent.enabled)}
                       className={`h-20 w-36 rounded-full transition-colors relative ${
-                        agent.enabled ? "bg-accent" : "bg-border"
+                        agent.enabled ? "bg-accent-fill" : "bg-border"
                       } disabled:cursor-not-allowed`}
                     >
                       <span

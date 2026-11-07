@@ -1,10 +1,13 @@
 //! Read-only previews for importing skills from folders and ZIP archives.
 
+use at_model::skill::SkillDoc;
+use at_store::skill_import::{
+    SkillImportError, StagedSkillArchive, stage_skill_archive_with_cancel,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use at_model::skill::SkillDoc;
-use at_store::skill_import::{SkillImportError, StagedSkillArchive, stage_skill_archive};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum depth searched when discovering skills from an untrusted folder.
 pub const IMPORT_FOLDER_MAX_DEPTH: usize = 32;
@@ -37,6 +40,7 @@ impl SkillImportCandidate {
 /// A ZIP preview keeps its extracted temporary directory alive until it is dropped.
 pub struct ZipSkillImport {
     staging: StagedSkillArchive,
+    candidate_root: PathBuf,
     /// Read-only candidates discovered in the staged archive.
     pub candidates: Vec<SkillImportCandidate>,
 }
@@ -46,6 +50,11 @@ impl ZipSkillImport {
     #[must_use]
     pub fn staging_root(&self) -> &Path {
         self.staging.root()
+    }
+    /// Returns the root against which candidate subpaths are relative.
+    #[must_use]
+    pub fn candidate_root(&self) -> &Path {
+        &self.candidate_root
     }
 }
 
@@ -118,21 +127,72 @@ pub fn import_git(
     policy: &at_model::network::NetworkPolicy,
     log: &mut at_model::network::NetworkEventLog,
 ) -> Result<GitSkillImport, at_git::import::ImportCloneError> {
-    let repository =
-        at_git::import::clone_for_import_with_process(url, reference, cache_dir, policy, log)?;
+    import_git_inner(url, reference, cache_dir, policy, log, None, &mut |_| {})
+}
+
+/// Clones and scans a repository while observing cancellation.
+///
+/// # Errors
+/// Returns [`at_git::import::ImportCloneError`] when cloning fails, is cancelled, or the skill
+/// scan is cancelled.
+pub fn import_git_with_cancel(
+    url: &str,
+    reference: Option<&str>,
+    cache_dir: &Path,
+    policy: &at_model::network::NetworkPolicy,
+    log: &mut at_model::network::NetworkEventLog,
+    cancelled: Arc<AtomicBool>,
+    mut progress: impl FnMut(usize),
+) -> Result<GitSkillImport, at_git::import::ImportCloneError> {
+    import_git_inner(
+        url,
+        reference,
+        cache_dir,
+        policy,
+        log,
+        Some(cancelled),
+        &mut progress,
+    )
+}
+
+fn import_git_inner(
+    url: &str,
+    reference: Option<&str>,
+    cache_dir: &Path,
+    policy: &at_model::network::NetworkPolicy,
+    log: &mut at_model::network::NetworkEventLog,
+    cancelled: Option<Arc<AtomicBool>>,
+    progress: &mut dyn FnMut(usize),
+) -> Result<GitSkillImport, at_git::import::ImportCloneError> {
+    let reference = reference.filter(|value| !value.trim().is_empty());
+    let repository = match cancelled.as_ref() {
+        Some(cancelled) => at_git::import::clone_for_import_with_process_and_cancel(
+            url,
+            reference,
+            cache_dir,
+            policy,
+            log,
+            Arc::clone(cancelled),
+        )?,
+        None => {
+            at_git::import::clone_for_import_with_process(url, reference, cache_dir, policy, log)?
+        }
+    };
     let mut candidates = Vec::new();
     walk_git_skills(
         &repository.repository,
         &repository.repository,
         0,
         &mut candidates,
+        cancelled.as_deref(),
+        progress,
     )?;
     candidates.sort_by(|left, right| left.subpath.cmp(&right.subpath));
     let truncated = candidates.len() > IMPORT_FOLDER_MAX_CANDIDATES;
     candidates.truncate(IMPORT_FOLDER_MAX_CANDIDATES);
     Ok(GitSkillImport {
         repository,
-        url: url.to_owned(),
+        url: at_git::import::strip_url_credentials(url),
         git_ref: reference.map(str::to_owned),
         candidates,
         truncated,
@@ -147,7 +207,12 @@ fn walk_git_skills(
     dir: &Path,
     depth: usize,
     out: &mut Vec<SkillImportCandidate>,
+    cancelled: Option<&AtomicBool>,
+    progress: &mut dyn FnMut(usize),
 ) -> Result<(), at_git::import::ImportCloneError> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(at_git::import::ImportCloneError::Cancelled);
+    }
     if depth > 6 || out.len() > 500 {
         return Ok(());
     }
@@ -171,6 +236,7 @@ fn walk_git_skills(
                     error: Some(error.to_string()),
                 },
             });
+            progress(out.len());
             return Ok(());
         }
         Ok(_) => return Ok(()),
@@ -181,6 +247,9 @@ fn walk_git_skills(
         return Ok(());
     };
     for entry in entries {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(at_git::import::ImportCloneError::Cancelled);
+        }
         if out.len() > 500 {
             break;
         }
@@ -196,7 +265,7 @@ fn walk_git_skills(
         if GIT_IMPORT_SKIPPED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()) {
             continue;
         }
-        walk_git_skills(root, &entry.path(), depth + 1, out)?;
+        walk_git_skills(root, &entry.path(), depth + 1, out, cancelled, progress)?;
     }
     Ok(())
 }
@@ -223,10 +292,32 @@ pub enum ImportFolderError {
     /// The selected path is not a directory.
     #[error("import source is not a directory: {0}")]
     NotDirectory(PathBuf),
+    /// The caller cancelled the folder scan.
+    #[error("folder skill import was cancelled")]
+    Cancelled,
 }
 
-/// Inspects one folder and returns candidates, including documents with parse errors.
+/// Scans a folder for skill packages without cancellation or progress reporting.
+///
+/// # Errors
+/// Returns [`ImportFolderError`] when the root cannot be read or is not a directory.
 pub fn import_folder(path: &Path) -> Result<Vec<SkillImportCandidate>, ImportFolderError> {
+    import_folder_with_cancel(path, &AtomicBool::new(false), |_| {})
+}
+
+/// Scans a folder for skill packages while observing cancellation.
+///
+/// # Errors
+/// Returns [`ImportFolderError`] when the root cannot be read, is not a directory, or the scan
+/// is cancelled.
+pub fn import_folder_with_cancel(
+    path: &Path,
+    cancelled: &AtomicBool,
+    mut progress: impl FnMut(usize),
+) -> Result<Vec<SkillImportCandidate>, ImportFolderError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ImportFolderError::Cancelled);
+    }
     let metadata = fs::symlink_metadata(path).map_err(|source| ImportFolderError::ReadDir {
         path: path.to_path_buf(),
         source,
@@ -235,7 +326,7 @@ pub fn import_folder(path: &Path) -> Result<Vec<SkillImportCandidate>, ImportFol
         return Err(ImportFolderError::NotDirectory(path.to_path_buf()));
     }
     let mut found = Vec::new();
-    walk_for_skills(path, path, 0, &mut found)?;
+    walk_for_skills(path, path, 0, &mut found, cancelled, &mut progress)?;
     found.sort_by(|left, right| left.subpath.cmp(&right.subpath));
     found.truncate(IMPORT_FOLDER_MAX_CANDIDATES);
     Ok(found)
@@ -260,14 +351,38 @@ pub fn write_imported_skill(
     loaded.package.write(target, slug, backup_dir, guard)
 }
 
-/// Validates and stages a ZIP, then discovers its skills; the stage lives as long as the result.
+/// Validates and stages a ZIP using the default cancellation and progress callbacks.
+///
+/// # Errors
+/// Returns [`SkillImportError`] when the archive is malformed, unsafe, over limit, unreadable,
+/// or staging fails.
 pub fn import_zip(path: &Path, cache_dir: &Path) -> Result<ZipSkillImport, SkillImportError> {
-    let staging = stage_skill_archive(path, cache_dir)?;
+    import_zip_with_cancel(path, cache_dir, &AtomicBool::new(false), |_, _| {}, |_| {})
+}
+
+/// Validates and stages a ZIP while reporting extraction and scan progress and observing cancel.
+///
+/// # Errors
+/// Returns [`SkillImportError`] when the archive is malformed, unsafe, over limit, unreadable,
+/// or cancelled.
+pub fn import_zip_with_cancel(
+    path: &Path,
+    cache_dir: &Path,
+    cancelled: &AtomicBool,
+    progress: impl FnMut(usize, usize),
+    scan_progress: impl FnMut(usize),
+) -> Result<ZipSkillImport, SkillImportError> {
+    let staging = stage_skill_archive_with_cancel(path, cache_dir, cancelled, progress)?;
     let scan_root = unwrap_single_root(staging.root());
-    let candidates = import_folder(&scan_root)
-        .map_err(|error| SkillImportError::Io(std::io::Error::other(error.to_string())))?;
+    let candidates = import_folder_with_cancel(&scan_root, cancelled, scan_progress).map_err(
+        |error| match error {
+            ImportFolderError::Cancelled => SkillImportError::Cancelled,
+            other => SkillImportError::Io(std::io::Error::other(other.to_string())),
+        },
+    )?;
     Ok(ZipSkillImport {
         staging,
+        candidate_root: scan_root,
         candidates,
     })
 }
@@ -300,7 +415,12 @@ fn walk_for_skills(
     dir: &Path,
     depth: usize,
     out: &mut Vec<SkillImportCandidate>,
+    cancelled: &AtomicBool,
+    progress: &mut dyn FnMut(usize),
 ) -> Result<(), ImportFolderError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ImportFolderError::Cancelled);
+    }
     if depth > IMPORT_FOLDER_MAX_DEPTH || out.len() >= IMPORT_FOLDER_MAX_CANDIDATES {
         return Ok(());
     }
@@ -325,6 +445,7 @@ fn walk_for_skills(
                     error: Some(error.to_string()),
                 },
             });
+            progress(out.len());
             return Ok(());
         }
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -338,6 +459,7 @@ fn walk_for_skills(
                     "SKILL.md is a symlink; imported skill files must be regular files".to_owned(),
                 ),
             });
+            progress(out.len());
             return Ok(());
         }
         Ok(_) => return Ok(()),
@@ -354,6 +476,9 @@ fn walk_for_skills(
         source,
     })?;
     for entry in entries {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(ImportFolderError::Cancelled);
+        }
         if out.len() >= IMPORT_FOLDER_MAX_CANDIDATES {
             break;
         }
@@ -368,7 +493,7 @@ fn walk_for_skills(
                 source,
             })?;
         if kind.is_dir() && !kind.is_symlink() {
-            walk_for_skills(root, &entry.path(), depth + 1, out)?;
+            walk_for_skills(root, &entry.path(), depth + 1, out, cancelled, progress)?;
         }
     }
     Ok(())
@@ -770,6 +895,113 @@ pub fn enumerate_registered_library(
         });
     }
     enumerate_library(&stores, Path::new("")).map_err(LibraryCatalogError::Folder)
+}
+
+/// Failure while resolving or importing a marketplace listing.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MarketplaceImportError {
+    /// The listing id is not the documented `owner/repository/skill` form.
+    #[error("invalid marketplace id `{0}`; use owner/repository/skill")]
+    InvalidId(String),
+    /// The marketplace policy or source validation refused the install.
+    #[error(transparent)]
+    Marketplace(#[from] at_git::marketplace::MarketplaceError),
+    /// The Git clone or skill scan failed.
+    #[error(transparent)]
+    Clone(#[from] at_git::import::ImportCloneError),
+    /// Recording the marketplace provenance failed.
+    #[error(transparent)]
+    Source(#[from] crate::skill_source::SkillSourceError),
+}
+
+/// One marketplace listing resolved to its repository clone.
+pub struct MarketplaceImport {
+    /// Listing id the caller asked for.
+    pub id: String,
+    /// Imported repository with every discovered skill candidate.
+    pub import: GitSkillImport,
+}
+
+/// Splits a marketplace id into the owner, repository and skill names.
+fn marketplace_parts(id: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = id.split('/');
+    let (owner, repository, skill) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    (valid(owner) && valid(repository) && valid(skill)).then_some((owner, repository, skill))
+}
+
+/// Builds the listing a marketplace id denotes, with the repository URL the service documents.
+fn marketplace_listing(
+    id: &str,
+) -> Result<at_git::marketplace::MarketplaceSkill, MarketplaceImportError> {
+    let Some((owner, repository, skill)) = marketplace_parts(id) else {
+        return Err(MarketplaceImportError::InvalidId(id.to_owned()));
+    };
+    Ok(at_git::marketplace::MarketplaceSkill {
+        id: id.to_owned(),
+        name: skill.to_owned(),
+        description: String::new(),
+        author: owner.to_owned(),
+        installs: 0,
+        source_url: format!("https://github.com/{owner}/{repository}"),
+        updated_at: None,
+    })
+}
+
+/// Clones the repository behind a marketplace listing after policy consent.
+///
+/// The listing id is `owner/repository/skill`; the repository is the documented GitHub
+/// source. No marketplace search request is made, so installing a known listing works
+/// offline once Git can reach the repository.
+///
+/// # Errors
+/// Returns a typed invalid-id, policy, clone or scan failure.
+pub fn import_marketplace(
+    id: &str,
+    cache_dir: &Path,
+    policy: &at_model::network::NetworkPolicy,
+    log: &mut at_model::network::NetworkEventLog,
+) -> Result<MarketplaceImport, MarketplaceImportError> {
+    let listing = marketplace_listing(id)?;
+    let url = at_git::marketplace::MarketplaceClient::authorize_install(&listing, policy)?;
+    let import = import_git(url, None, cache_dir, policy, log)?;
+    Ok(MarketplaceImport {
+        id: id.to_owned(),
+        import,
+    })
+}
+
+/// Records marketplace provenance for a package that was already written to the store.
+///
+/// # Errors
+/// Returns a typed invalid-id, policy, source or database failure.
+pub fn record_marketplace_source(
+    connection: &mut rusqlite::Connection,
+    item_id: &at_model::ItemId,
+    id: &str,
+    commit_sha: &str,
+    subpath: &str,
+    content_hash: &str,
+) -> Result<String, MarketplaceImportError> {
+    let listing = marketplace_listing(id)?;
+    Ok(crate::skill_source::record_marketplace_install(
+        connection,
+        item_id,
+        &listing,
+        commit_sha,
+        subpath,
+        content_hash,
+    )?)
 }
 
 #[cfg(test)]
@@ -1288,5 +1520,25 @@ mod tests {
         .expect("preview");
         assert_eq!(import.candidates.len(), 500);
         assert!(import.truncated);
+    }
+
+    #[test]
+    fn credentialed_git_urls_are_refused_before_cloning() {
+        let temp = tempfile::tempdir().expect("temp");
+        let policy = at_model::network::NetworkPolicy::default();
+        let mut log = at_model::network::NetworkEventLog::default();
+        for url in [
+            "https://user:pass@example.invalid/repo.git",
+            "https://token@example.invalid/repo.git",
+            "ssh://git@example.invalid/repo.git",
+        ] {
+            let error = import_git(url, None, temp.path(), &policy, &mut log)
+                .err()
+                .unwrap_or_else(|| panic!("{url} must be refused"));
+            assert!(
+                matches!(error, at_git::import::ImportCloneError::InvalidUrl),
+                "{url}: {error:?}"
+            );
+        }
     }
 }

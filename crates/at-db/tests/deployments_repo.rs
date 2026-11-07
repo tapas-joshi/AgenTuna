@@ -6,7 +6,7 @@ mod common;
 
 use at_db::Database;
 use at_db::deployments::{
-    DeploymentSpec, effective_rows, find_deployment, health_counts, list_deployments_for_agent,
+    DeploymentSpec, find_deployment, health_counts, list_deployments_for_agent,
     list_deployments_for_item, update_project_sync_baseline, upsert_deployment,
 };
 use at_db::locks::{
@@ -111,6 +111,61 @@ fn query_derived_sync_labels_are_refused_before_sqlite_write() {
 }
 
 #[test]
+fn upsert_deployment_rejects_missing_sync_label() {
+    let db = open_with_all();
+    let connection = db.connection();
+    let item = seed_item(
+        connection,
+        "skill-missing-label",
+        ItemKind::Skill,
+        Scope::User,
+    );
+    seed_agent(connection, "claude_code", true);
+    let spec = DeploymentSpec::new(&item, &AgentId::ClaudeCode, Scope::User, ItemState::Linked);
+    let error =
+        upsert_deployment(connection, &spec).expect_err("missing sync_label must be rejected");
+    assert!(matches!(error, at_db::DbError::InvalidValue { field, .. } if field == "sync_label"));
+}
+
+#[test]
+fn deployment_spec_applied_assigns_correct_ta005_sync_label() {
+    use at_db::deployments::DeploymentHashes;
+    let item = ItemId::new();
+    let agent = AgentId::ClaudeCode;
+
+    // Fresh in-sync linked deployment where store == target == baseline
+    let linked = DeploymentSpec::applied(
+        &item,
+        &agent,
+        Scope::User,
+        ItemState::Linked,
+        Some("symlink"),
+        Some("/path"),
+        DeploymentHashes::in_sync("hash1"),
+    );
+    assert_eq!(linked.sync_label, Some(SyncLabel::InSync));
+    assert_eq!(linked.store_hash, Some("hash1"));
+    assert_eq!(linked.target_hash, Some("hash1"));
+    assert_eq!(linked.baseline_hash, Some("hash1"));
+
+    // Fresh deployment assigns InSync
+    let fresh_off = DeploymentSpec::applied(
+        &item,
+        &agent,
+        Scope::Project,
+        ItemState::Off,
+        Some("none"),
+        None,
+        DeploymentHashes::new(Some("store"), None, None),
+    );
+    assert_eq!(fresh_off.sync_label, Some(SyncLabel::InSync));
+
+    // Can be overridden with with_sync_label
+    let project_newer = fresh_off.with_sync_label(SyncLabel::ProjectNewer);
+    assert_eq!(project_newer.sync_label, Some(SyncLabel::ProjectNewer));
+}
+
+#[test]
 fn find_deployment_returns_none_for_missing_cell() {
     let db = open_with_all();
     let connection = db.connection();
@@ -143,19 +198,22 @@ fn health_counts_returns_managed_in_sync_total() {
     .expect("upsert");
     upsert_deployment(
         connection,
-        &DeploymentSpec::new(&item2, &AgentId::ClaudeCode, Scope::User, ItemState::Off),
+        &DeploymentSpec::new(&item2, &AgentId::ClaudeCode, Scope::User, ItemState::Off)
+            .with_sync_label(SyncLabel::InSync),
     )
     .expect("upsert");
     upsert_deployment(
         connection,
-        &DeploymentSpec::new(&item3, &AgentId::ClaudeCode, Scope::User, ItemState::Native),
+        &DeploymentSpec::new(&item3, &AgentId::ClaudeCode, Scope::User, ItemState::Native)
+            .with_sync_label(SyncLabel::InSync),
     )
     .expect("upsert");
 
     // codex: 1 managed, 0 in_sync, 1 total.
     upsert_deployment(
         connection,
-        &DeploymentSpec::new(&item1, &AgentId::Codex, Scope::User, ItemState::Linked),
+        &DeploymentSpec::new(&item1, &AgentId::Codex, Scope::User, ItemState::Linked)
+            .with_sync_label(SyncLabel::ProjectNewer),
     )
     .expect("upsert");
 
@@ -182,76 +240,6 @@ fn health_counts_unknown_agent_returns_zero() {
 }
 
 #[test]
-fn effective_rows_joins_item_and_agent_in_one_statement() {
-    let db = open_with_all();
-    let connection = db.connection();
-
-    let item = seed_item(connection, "skill-f", ItemKind::Skill, Scope::User);
-    seed_agent(connection, "claude_code", true);
-    upsert_deployment(
-        connection,
-        &DeploymentSpec::new(&item, &AgentId::ClaudeCode, Scope::User, ItemState::Linked)
-            .with_sync_label(SyncLabel::InSync),
-    )
-    .expect("upsert");
-
-    let rows = effective_rows(connection, &AgentId::ClaudeCode, Scope::User, None)
-        .expect("effective rows read");
-    assert_eq!(rows.len(), 1);
-    let row = &rows[0];
-    assert_eq!(row.item.id, item);
-    assert_eq!(row.cell.state, ItemState::Linked);
-    assert_eq!(row.agent_display_name.as_deref(), Some("claude_code"));
-}
-
-#[test]
-fn effective_rows_filters_by_scope_and_project() {
-    let db = open_with_all();
-    let connection = db.connection();
-
-    let item_user = seed_item(connection, "skill-g", ItemKind::Skill, Scope::User);
-    let item_project = seed_item(connection, "skill-h", ItemKind::Skill, Scope::Project);
-    seed_agent(connection, "claude_code", true);
-
-    upsert_deployment(
-        connection,
-        &DeploymentSpec::new(
-            &item_user,
-            &AgentId::ClaudeCode,
-            Scope::User,
-            ItemState::Linked,
-        ),
-    )
-    .expect("upsert");
-    upsert_deployment(
-        connection,
-        &DeploymentSpec::new(
-            &item_project,
-            &AgentId::ClaudeCode,
-            Scope::Project,
-            ItemState::Linked,
-        )
-        .with_project("proj_1"),
-    )
-    .expect("upsert");
-
-    let user_rows = effective_rows(connection, &AgentId::ClaudeCode, Scope::User, None)
-        .expect("effective rows read");
-    assert_eq!(user_rows.len(), 1);
-    assert_eq!(user_rows[0].item.id, item_user);
-
-    let project_rows = effective_rows(
-        connection,
-        &AgentId::ClaudeCode,
-        Scope::Project,
-        Some("proj_1"),
-    )
-    .expect("effective rows read");
-    assert_eq!(project_rows.len(), 1);
-    assert_eq!(project_rows[0].item.id, item_project);
-}
-
-#[test]
 fn list_deployments_for_agent_returns_all_scopes() {
     let db = open_with_all();
     let connection = db.connection();
@@ -262,13 +250,15 @@ fn list_deployments_for_agent_returns_all_scopes() {
 
     upsert_deployment(
         connection,
-        &DeploymentSpec::new(&item1, &AgentId::ClaudeCode, Scope::User, ItemState::Linked),
+        &DeploymentSpec::new(&item1, &AgentId::ClaudeCode, Scope::User, ItemState::Linked)
+            .with_sync_label(SyncLabel::InSync),
     )
     .expect("upsert");
     upsert_deployment(
         connection,
         &DeploymentSpec::new(&item2, &AgentId::ClaudeCode, Scope::Project, ItemState::Off)
-            .with_project("proj_1"),
+            .with_project("proj_1")
+            .with_sync_label(SyncLabel::InSync),
     )
     .expect("upsert");
 
@@ -469,7 +459,8 @@ fn project_sync_baseline_updates_only_existing_project_deployments() {
     let project = "project-sync";
     let spec = DeploymentSpec::new(&item, &agent, Scope::Project, ItemState::Linked)
         .with_project(project)
-        .with_hashes(Some("a"), Some("b"), Some("a"));
+        .with_hashes(Some("a"), Some("b"), Some("a"))
+        .with_sync_label(SyncLabel::InSync);
     upsert_deployment(connection, &spec).expect("seed deployment");
 
     assert_eq!(
@@ -489,4 +480,115 @@ fn project_sync_baseline_updates_only_existing_project_deployments() {
         0
     );
     assert!(update_project_sync_baseline(connection, &item, project, "bad").is_err());
+}
+
+#[test]
+fn update_hashes_for_target_path_updates_matching_rows() {
+    use at_db::deployments::update_hashes_for_target_path;
+    use std::path::Path;
+
+    let db = open_with_all();
+    let connection = db.connection();
+    let item = seed_item(connection, "test-target-item", ItemKind::Skill, Scope::User);
+    seed_agent(connection, "claude_code", true);
+
+    let target = Path::new("/test/claude/skills/test-skill");
+    let spec = DeploymentSpec::new(&item, &AgentId::ClaudeCode, Scope::User, ItemState::Linked)
+        .with_target_path(target.to_str().unwrap())
+        .with_hashes(Some("orig_store"), Some("orig_target"), Some("orig_base"))
+        .with_sync_label(SyncLabel::InSync);
+    upsert_deployment(connection, &spec).expect("seed deployment");
+
+    let count = update_hashes_for_target_path(
+        connection,
+        target,
+        Some(Scope::User),
+        "skill",
+        Some("new_store"),
+        "new_target_base",
+    )
+    .expect("update hashes");
+    assert_eq!(count, 1);
+
+    let rows = list_deployments_for_item(connection, &item).expect("query");
+    assert_eq!(rows[0].store_hash.as_deref(), Some("new_store"));
+    assert_eq!(rows[0].target_hash.as_deref(), Some("new_target_base"));
+    assert_eq!(rows[0].baseline_hash.as_deref(), Some("new_target_base"));
+}
+
+#[test]
+fn update_item_baseline_hashes_updates_cell() {
+    use at_db::deployments::update_item_baseline_hashes;
+
+    let db = open_with_all();
+    let connection = db.connection();
+    let item = seed_item(
+        connection,
+        "test-baseline-item",
+        ItemKind::Skill,
+        Scope::Project,
+    );
+    seed_agent(connection, "claude_code", true);
+
+    let spec = DeploymentSpec::new(
+        &item,
+        &AgentId::ClaudeCode,
+        Scope::Project,
+        ItemState::Linked,
+    )
+    .with_project("p1")
+    .with_hashes(Some("s1"), Some("t1"), Some("b1"))
+    .with_sync_label(SyncLabel::InSync);
+    upsert_deployment(connection, &spec).expect("seed deployment");
+
+    let count = update_item_baseline_hashes(
+        connection,
+        &item,
+        "claude_code",
+        Scope::Project,
+        "p1",
+        None, // Keeps existing store_hash via COALESCE
+        "new_target_and_base",
+    )
+    .expect("update");
+    assert_eq!(count, 1);
+
+    let rows = list_deployments_for_item(connection, &item).expect("query");
+    assert_eq!(rows[0].store_hash.as_deref(), Some("s1"));
+    assert_eq!(rows[0].target_hash.as_deref(), Some("new_target_and_base"));
+    assert_eq!(
+        rows[0].baseline_hash.as_deref(),
+        Some("new_target_and_base")
+    );
+}
+
+#[test]
+fn update_drift_hashes_updates_item_agent_scope() {
+    use at_db::deployments::update_drift_hashes;
+
+    let db = open_with_all();
+    let connection = db.connection();
+    let item = seed_item(connection, "test-drift-item", ItemKind::Skill, Scope::User);
+    seed_agent(connection, "claude_code", true);
+
+    let spec = DeploymentSpec::new(&item, &AgentId::ClaudeCode, Scope::User, ItemState::Linked)
+        .with_hashes(Some("s1"), Some("t1"), Some("b1"))
+        .with_sync_label(SyncLabel::InSync);
+    upsert_deployment(connection, &spec).expect("seed deployment");
+
+    let count = update_drift_hashes(
+        connection,
+        &item,
+        &AgentId::ClaudeCode,
+        Scope::User,
+        "s_drift",
+        "tb_drift",
+    )
+    .expect("update drift hashes");
+    assert_eq!(count, 1);
+
+    let rows = list_deployments_for_item(connection, &item).expect("query");
+    assert_eq!(rows[0].store_hash.as_deref(), Some("s_drift"));
+    assert_eq!(rows[0].target_hash.as_deref(), Some("tb_drift"));
+    assert_eq!(rows[0].baseline_hash.as_deref(), Some("tb_drift"));
 }

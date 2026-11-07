@@ -7,7 +7,6 @@ use tauri::State;
 use ts_rs::TS;
 
 use super::commands::{CommandError, CommandErrorCode};
-use super::paths::resolve_process_paths;
 use super::state::AppState;
 
 /// One historical version of a skill.
@@ -208,8 +207,9 @@ pub fn skill_detail_load(
     let mut current_hash = item.content_hash.clone();
     let mut markdown = String::new();
     let mut missing = false;
-    if let Some(path) = item.source_path.as_deref() {
-        match at_store::skill_package::SkillPackage::read(std::path::Path::new(path)) {
+    let resolved_path = resolve_item_path(&item, &state);
+    if let Some(path) = resolved_path.as_deref() {
+        match at_store::skill_package::SkillPackage::read(path) {
             Ok(package) => {
                 if let Some(file) = package.package.get("SKILL.md") {
                     current_hash = Some(package.hash.to_string());
@@ -233,7 +233,9 @@ pub fn skill_detail_load(
         name: item.name,
         slug: item.slug,
         scope: item.scope.to_string(),
-        path: item.source_path,
+        path: resolved_path
+            .map(|p| p.display().to_string())
+            .or(item.source_path),
         markdown,
         description,
         hash: current_hash,
@@ -349,7 +351,7 @@ pub fn skill_version_compare(
         .map_err(|_| CommandError::invalid_argument("version_id", "invalid version identity"))?;
     let database = state.database().map_err(CommandError::unavailable)?;
     let item = skill_item(database.connection(), &id)?;
-    let source = package_path(&item)?;
+    let source = package_path(&item, &state)?;
     let current = at_store::skill_package::SkillPackage::read(&source).map_err(|_| {
         CommandError::new(
             CommandErrorCode::NotFound,
@@ -531,13 +533,13 @@ pub fn skill_compare_copies(
                 "The other skill copy is no longer indexed.",
             )
         })?;
-    let current_path = current_item.source_path.as_deref().ok_or_else(|| {
+    let current_path = resolve_item_path(current_item, &state).ok_or_else(|| {
         CommandError::new(
             CommandErrorCode::NotFound,
             "The skill package is unavailable.",
         )
     })?;
-    let other_path = other_item.source_path.as_deref().ok_or_else(|| {
+    let other_path = resolve_item_path(other_item, &state).ok_or_else(|| {
         CommandError::new(
             CommandErrorCode::NotFound,
             "The other skill package is unavailable.",
@@ -562,12 +564,12 @@ pub fn skill_compare_copies(
         (
             at_engine::skill_shadows::SkillCopyPath {
                 scope: current_scope,
-                path: current_path.into(),
+                path: current_path,
                 deployments: current_deployments,
             },
             at_engine::skill_shadows::SkillCopyPath {
                 scope: other_scope,
-                path: other_path.into(),
+                path: other_path,
                 deployments: other_deployments,
             },
         )
@@ -575,12 +577,12 @@ pub fn skill_compare_copies(
         (
             at_engine::skill_shadows::SkillCopyPath {
                 scope: other_scope,
-                path: other_path.into(),
+                path: other_path,
                 deployments: other_deployments,
             },
             at_engine::skill_shadows::SkillCopyPath {
                 scope: current_scope,
-                path: current_path.into(),
+                path: current_path,
                 deployments: current_deployments,
             },
         )
@@ -677,6 +679,17 @@ pub fn skill_keep_copy_preview(
     state: State<'_, AppState>,
     request: SkillKeepCopyRequest,
 ) -> Result<SkillKeepCopyPreviewView, CommandError> {
+    skill_keep_copy_preview_inner(&state, request)
+}
+
+/// Body of [`skill_keep_copy_preview`] over injected state, callable from tests.
+///
+/// # Errors
+/// See [`skill_keep_copy_preview`].
+pub(crate) fn skill_keep_copy_preview_inner(
+    state: &AppState,
+    request: SkillKeepCopyRequest,
+) -> Result<SkillKeepCopyPreviewView, CommandError> {
     let id = parse_skill_id(&request.item_id)?;
     let keep_scope = request
         .keep_scope
@@ -700,10 +713,9 @@ pub fn skill_keep_copy_preview(
             .flatten()
             .map(|project| std::path::PathBuf::from(project.path))
     });
-    let paths = resolve_process_paths(project_root.as_deref())
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
-    let keep_dir = package_path(&keep_item)?;
-    let drop_dir = package_path(&drop_item)?;
+    let paths = super::paths::resolve_command_paths(state, project_root.as_deref())?;
+    let keep_dir = package_path(&keep_item, state)?;
+    let drop_dir = package_path(&drop_item, state)?;
     let keep = at_store::skill_package::SkillPackage::read(&keep_dir).map_err(|_| {
         CommandError::new(
             CommandErrorCode::NotFound,
@@ -846,10 +858,21 @@ pub fn skill_keep_copy_apply(
     state: State<'_, AppState>,
     preview_id: String,
 ) -> Result<SkillKeepCopyResultView, CommandError> {
+    skill_keep_copy_apply_inner(&state, &preview_id)
+}
+
+/// Body of [`skill_keep_copy_apply`] over injected state, callable from tests.
+///
+/// # Errors
+/// See [`skill_keep_copy_apply`].
+pub(crate) fn skill_keep_copy_apply_inner(
+    state: &AppState,
+    preview_id: &str,
+) -> Result<SkillKeepCopyResultView, CommandError> {
     let cached = KEEP_PLANS
         .lock()
         .map_err(|_| CommandError::internal("keep-copy plan cache is unavailable"))?
-        .remove(&preview_id)
+        .remove(preview_id)
         .ok_or_else(|| {
             CommandError::invalid_argument(
                 "preview_id",
@@ -894,6 +917,19 @@ pub fn skill_keep_copy_apply(
     )
     .map_err(|_| {
         CommandError::internal("the copies were reconciled but history could not be recorded")
+    })?;
+    // The replaced store copy now holds the other copy's bytes; a linked deployment shows that
+    // content, so the drop item's baseline must move with it.
+    at_engine::drift::sync_item_baselines(
+        database.connection(),
+        &cached.drop_item_id,
+        cached.drop_scope,
+        Some(&cached.drop_dir),
+    )
+    .map_err(|error| {
+        CommandError::internal(format!(
+            "skill deployment baselines could not be refreshed: {error}"
+        ))
     })?;
     Ok(SkillKeepCopyResultView {
         operation_id: Some(operation_id),
@@ -983,18 +1019,17 @@ pub async fn skill_reveal(state: State<'_, AppState>, item_id: String) -> Result
         let database = state.database().map_err(CommandError::unavailable)?;
         let items = at_db::shared::items_by_ids(database.connection(), std::slice::from_ref(&id))
             .map_err(|_| CommandError::internal("could not query skill path"))?;
-        items
+        let item = items
             .into_iter()
             .next()
             .filter(|item| item.kind == at_model::ItemKind::Skill)
-            .and_then(|item| item.source_path)
-            .map(std::path::PathBuf::from)
             .ok_or_else(|| {
                 CommandError::new(
                     CommandErrorCode::NotFound,
                     "The skill package path is unavailable.",
                 )
-            })?
+            })?;
+        package_path(&item, &state)?
     };
     tauri::async_runtime::spawn_blocking(move || reveal_skill_path(&path))
         .await
@@ -1140,7 +1175,7 @@ pub fn skill_edit_preview(
             "Only AgenTuna-managed skills can be edited.",
         ));
     }
-    let source = package_path(&item)?;
+    let source = package_path(&item, &state)?;
     let loaded = at_store::skill_package::SkillPackage::read(&source).map_err(|_| {
         CommandError::new(
             CommandErrorCode::NotFound,
@@ -1169,13 +1204,27 @@ pub fn skill_edit_apply(
     expected_hash: String,
     preview_id: String,
 ) -> Result<SkillEditResultView, CommandError> {
+    skill_edit_apply_inner(&state, &item_id, &content, &expected_hash, &preview_id)
+}
+
+/// Body of [`skill_edit_apply`] over injected state, callable from tests.
+///
+/// # Errors
+/// See [`skill_edit_apply`].
+pub(crate) fn skill_edit_apply_inner(
+    state: &AppState,
+    item_id: &str,
+    content: &str,
+    expected_hash: &str,
+    preview_id: &str,
+) -> Result<SkillEditResultView, CommandError> {
     if content.len() > at_store::skill_package::SKILL_PACKAGE_MAX_FILE_BYTES as usize {
         return Err(CommandError::invalid_argument(
             "content",
             "SKILL.md exceeds the 10 MiB limit",
         ));
     }
-    let id = parse_skill_id(&item_id)?;
+    let id = parse_skill_id(item_id)?;
     let database = state.database().map_err(CommandError::unavailable)?;
     let item = skill_item(database.connection(), &id)?;
     if !item.managed {
@@ -1183,7 +1232,7 @@ pub fn skill_edit_apply(
             "Only AgenTuna-managed skills can be edited.",
         ));
     }
-    let source = package_path(&item)?;
+    let source = package_path(&item, state)?;
     let loaded = at_store::skill_package::SkillPackage::read(&source).map_err(|_| {
         CommandError::new(
             CommandErrorCode::NotFound,
@@ -1195,7 +1244,7 @@ pub fn skill_edit_apply(
             "The skill changed after the preview. Reload and review it again.",
         ));
     }
-    if preview_identity(&expected_hash, &content) != preview_id {
+    if preview_identity(expected_hash, content) != preview_id {
         return Err(CommandError::invalid_argument(
             "preview_id",
             "the document differs from the reviewed preview",
@@ -1216,7 +1265,7 @@ pub fn skill_edit_apply(
         .join("SKILL.md");
     let change_set = at_model::ChangeSet {
         id: uuid::Uuid::now_v7().to_string(),
-        preview_id,
+        preview_id: preview_id.to_owned(),
         operation_kind: at_model::change_set::OperationKind::parse("edit_skill")
             .map_err(|_| CommandError::internal("skill edit operation kind is invalid"))?,
         scope: Some(item.scope),
@@ -1224,7 +1273,7 @@ pub fn skill_edit_apply(
         summary: format!("Edited skill {}", item.name),
         ops: vec![at_model::FileOp::Write {
             path: relative.clone(),
-            bytes: content.into_bytes(),
+            bytes: content.as_bytes().to_vec(),
             expected: at_model::ExpectedState::hash(at_fs::sha256_hex(&old.bytes))
                 .map_err(|_| CommandError::internal("skill document hash is invalid"))?,
             follow_symlink: false,
@@ -1257,6 +1306,18 @@ pub fn skill_edit_apply(
     .map_err(|_| {
         CommandError::internal("the skill was saved but its history could not be recorded")
     })?;
+    // A linked deployment reads the store through its link, so the edit changed the native
+    // folder without any command writing it. Refresh the item's rows or the next scan reports
+    // the edit as an external change.
+    let skill_dir = source
+        .parent()
+        .ok_or_else(|| CommandError::internal("skill store path is invalid"))?;
+    at_engine::drift::sync_item_baselines(database.connection(), &id, item.scope, Some(skill_dir))
+        .map_err(|error| {
+            CommandError::internal(format!(
+                "skill deployment baselines could not be refreshed: {error}"
+            ))
+        })?;
     Ok(SkillEditResultView {
         expected_hash: updated.hash.to_string(),
         diff: at_fs::diff::unified(
@@ -1309,16 +1370,32 @@ fn skill_item(
         })
 }
 
-fn package_path(item: &at_db::shared::ItemRow) -> Result<std::path::PathBuf, CommandError> {
-    item.source_path
-        .as_deref()
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            CommandError::new(
-                CommandErrorCode::NotFound,
-                "The skill package path is unavailable.",
-            )
-        })
+fn resolve_item_path(
+    item: &at_db::shared::ItemRow,
+    state: &AppState,
+) -> Option<std::path::PathBuf> {
+    let raw = item.source_path.as_deref()?;
+    let path = std::path::Path::new(raw);
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        let paths = super::paths::resolve_command_paths(state, None).ok()?;
+        at_store::layout::StoreLayout::for_scope(&paths, item.scope)
+            .ok()
+            .map(|layout| layout.root().join(path))
+    }
+}
+
+fn package_path(
+    item: &at_db::shared::ItemRow,
+    state: &AppState,
+) -> Result<std::path::PathBuf, CommandError> {
+    resolve_item_path(item, state).ok_or_else(|| {
+        CommandError::new(
+            CommandErrorCode::NotFound,
+            "The skill package path is unavailable.",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1353,5 +1430,145 @@ mod reveal_item_tests {
         let link = root.join("linked.json");
         std::os::unix::fs::symlink(&outside, &link).expect("symlink");
         assert!(authorized_existing_path(&link, &[root]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod keep_copy_drift_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use at_db::deployments::DeploymentSpec;
+    use at_model::{AgentId, ItemId, ItemState, Scope};
+    use at_store::layout::{Slug, StoreLayout};
+    use at_store::paths::{AppPaths, PathEnvironment};
+
+    use super::*;
+    use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
+    use crate::app::drift_testkit::{assert_external_edit_detected_at, assert_no_drift};
+
+    const KEPT: &str = "---\nname: demo-skill\ndescription: kept\n---\n\nKept body.\n";
+    const REPLACED: &str = "---\nname: demo-skill\ndescription: old\n---\n\nOld body.\n";
+
+    struct NullSink;
+
+    impl EventSink for NullSink {
+        fn emit(&self, _event: JobEvent) {}
+    }
+
+    /// One User copy to keep, one Project copy to replace, and a live link for the replaced copy.
+    struct KeepCopySandbox {
+        _home: at_fs::testkit::TestHome,
+        state: AppState,
+        keep_item: ItemId,
+        target: PathBuf,
+    }
+
+    fn write_package(dir: &std::path::Path, content: &str) {
+        std::fs::create_dir_all(dir).expect("package directory");
+        std::fs::write(dir.join("SKILL.md"), content).expect("package document");
+    }
+
+    impl KeepCopySandbox {
+        fn new() -> Self {
+            let home = at_fs::testkit::TestHome::new().expect("test home");
+            let paths =
+                AppPaths::resolve(&PathEnvironment::default().with_home(home.home().to_path_buf()))
+                    .expect("app paths");
+            std::fs::create_dir_all(paths.support_dir()).expect("support directory");
+            std::fs::create_dir_all(paths.backup_dir()).expect("backup directory");
+            let database = at_db::Database::open_in_memory().expect("database");
+
+            let slug = Slug::parse("demo-skill").expect("slug");
+            let user_store = StoreLayout::for_scope(&paths, Scope::User).expect("user store");
+            let keep_dir = user_store.skill_dir(&slug);
+            write_package(&keep_dir, KEPT);
+            let drop_dir = home.home().join("project-store/skills/demo-skill");
+            write_package(&drop_dir, REPLACED);
+
+            let keep_item = ItemId::new();
+            let drop_item = ItemId::new();
+            for (id, scope, path) in [
+                (&keep_item, "user", &keep_dir),
+                (&drop_item, "project", &drop_dir),
+            ] {
+                database
+                    .connection()
+                    .execute(
+                        "INSERT INTO items (id, kind, scope, slug, name, source_path, managed) \
+                         VALUES (?1, 'skill', ?2, 'demo-skill', 'demo-skill', ?3, 1)",
+                        rusqlite::params![id.to_string(), scope, path.to_string_lossy()],
+                    )
+                    .expect("skill item");
+            }
+
+            let target = home.home().join("project/.claude/skills/demo-skill");
+            std::fs::create_dir_all(target.parent().expect("target parent"))
+                .expect("target parent");
+            std::os::unix::fs::symlink(&drop_dir, &target).expect("deployment link");
+            let hash = at_store::manifest::hash_skill_folder(&drop_dir)
+                .expect("package hash")
+                .to_string();
+            let target_text = target.to_string_lossy().into_owned();
+            let drop_text = drop_dir.to_string_lossy().into_owned();
+            let spec = DeploymentSpec::applied(
+                &drop_item,
+                &AgentId::ClaudeCode,
+                Scope::Project,
+                ItemState::Linked,
+                Some("symlink"),
+                Some(&target_text),
+                at_db::deployments::DeploymentHashes::in_sync(&hash),
+            )
+            .with_link_target(&drop_text);
+            at_db::deployments::upsert_deployment(database.connection(), &spec)
+                .expect("deployment row");
+
+            let state = AppState::new(
+                Arc::new(JobBridge::new(
+                    Arc::new(NullSink),
+                    Arc::new(TracingOperationsLog),
+                )),
+                None,
+            )
+            .with_database(database)
+            .with_paths(paths);
+
+            Self {
+                _home: home,
+                state,
+                keep_item,
+                target,
+            }
+        }
+
+        fn apply(&self) -> SkillKeepCopyResultView {
+            let preview = skill_keep_copy_preview_inner(
+                &self.state,
+                SkillKeepCopyRequest {
+                    item_id: self.keep_item.to_string(),
+                    keep_scope: Scope::User.to_string(),
+                    drop_scope: Scope::Project.to_string(),
+                },
+            )
+            .expect("keep-copy preview");
+            assert!(!preview.identical);
+            skill_keep_copy_apply_inner(&self.state, &preview.preview_id).expect("keep-copy apply")
+        }
+    }
+
+    #[test]
+    fn keeping_one_copy_refreshes_the_replaced_deployment_baseline() {
+        let sandbox = KeepCopySandbox::new();
+        assert_no_drift(&sandbox.state, "before skill_keep_copy_apply");
+        let applied = sandbox.apply();
+        assert!(applied.operation_id.is_some());
+        assert_no_drift(&sandbox.state, "after skill_keep_copy_apply");
+        assert_external_edit_detected_at(
+            &sandbox.state,
+            &sandbox.target.join("SKILL.md"),
+            &sandbox.target,
+            b"---\nname: demo-skill\n---\n\nExternal body.\n",
+        );
     }
 }

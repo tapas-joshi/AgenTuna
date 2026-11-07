@@ -92,13 +92,19 @@ fn io(path: &Path, source: std::io::Error) -> RestoreError {
 }
 
 fn target_path(root: &Path, original: &str) -> Result<PathBuf, RestoreError> {
-    let original = Path::new(original);
-    let relative = if original.is_absolute() {
-        original
-            .strip_prefix(root)
+    // The catalogue records some targets as the caller spelled them (`store.json` under the
+    // resolved root) and others through the canonical root the change-set writer used. On a
+    // machine whose home or temp directory is behind a symlink — `/var` to `/private/var` on
+    // macOS — those two spellings differ, so containment is checked on the normalized form
+    // while the returned path keeps the caller's spelling.
+    let original_path = Path::new(original);
+    let relative = if original_path.is_absolute() {
+        normalize(original_path)
+            .strip_prefix(normalize(root))
             .map_err(|_| RestoreError::OutsideRoot)?
+            .to_path_buf()
     } else {
-        original
+        original_path.to_path_buf()
     };
     if relative
         .components()
@@ -107,6 +113,31 @@ fn target_path(root: &Path, original: &str) -> Result<PathBuf, RestoreError> {
         return Err(RestoreError::OutsideRoot);
     }
     Ok(root.join(relative))
+}
+
+/// Resolves `path` through its deepest existing ancestor.
+///
+/// The leaf may be missing — a restore often recreates a deleted file — so only the longest
+/// existing prefix is canonicalized and the missing tail is re-appended unchanged.
+fn normalize(path: &Path) -> PathBuf {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical) = fs::canonicalize(current) {
+            let mut normalized = canonical;
+            for part in missing.iter().rev() {
+                normalized.push(part);
+            }
+            return normalized;
+        }
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        if let Some(name) = current.file_name() {
+            missing.push(name.to_os_string());
+        }
+        current = parent;
+    }
 }
 
 fn reject_symlink_parents(root: &Path, target: &Path) -> Result<(), RestoreError> {
@@ -428,7 +459,7 @@ fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), RestoreErr
         serde_json::to_vec(journal).map_err(|error| RestoreError::InvalidRow(error.to_string()))?;
     let mut file = fs::File::create(path).map_err(|error| io(path, error))?;
     std::io::Write::write_all(&mut file, &bytes).map_err(|error| io(path, error))?;
-    file.sync_all().map_err(|error| io(path, error))
+    crate::durability::sync_all(&file).map_err(|error| io(path, error))
 }
 
 fn remove_journal(path: &Path) {

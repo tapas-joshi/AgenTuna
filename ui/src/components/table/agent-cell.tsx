@@ -58,7 +58,7 @@ export function AgentCell({ agent, state, onToggle, disabled = false, className 
           label={`${agent.label}: ${STATUS_META[state.kind].label}`}
           labelPlacement="hidden"
           checked={checked}
-          disabled={disabled || readOnly || pending || onToggle === undefined}
+          disabled={disabled || readOnly || pending || onToggle === undefined || Boolean(state.disabledReason)}
           onCheckedChange={(next) => onToggle?.(next)}
         />
         <span data-slot="agent-label" aria-hidden="true" className="text-11 text-text-muted">
@@ -99,7 +99,9 @@ export function AgentCell({ agent, state, onToggle, disabled = false, className 
           {state.path}
         </span>
         {shared ? (
-          <span className="text-11 text-scope-user">shared with {state.sharedWith?.join(" + ")}</span>
+          <span data-slot="agent-shared" className="max-w-full truncate text-11 text-scope-user">
+            shared with {state.sharedWith?.join(" + ")}
+          </span>
         ) : null}
       </span>
     );
@@ -129,7 +131,7 @@ export function AgentCell({ agent, state, onToggle, disabled = false, className 
           ? `Shadowed by ${state.shadowedBy}`
           : state.kind === "none"
             ? "Not present in this agent"
-            : STATUS_META[state.kind].description;
+            : (state.disabledReason ?? STATUS_META[state.kind].description);
 
   return (
     <span

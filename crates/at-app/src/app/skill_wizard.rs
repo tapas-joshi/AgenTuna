@@ -3,9 +3,16 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex, OnceLock},
 };
 
+use super::{
+    bridge::{JobError, JobId, JobSpec, ProgressSender},
+    commands::CommandError,
+    network::NetworkState,
+    paths::resolve_process_paths,
+    state::AppState,
+};
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_engine::{
     skill_templates::{DescriptionIssue, SkillDraft, SkillTemplate, render_preview, slugify},
@@ -18,13 +25,9 @@ use at_model::{
 use at_store::{layout::StoreLayout, skill_package::SkillPackage};
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use ts_rs::TS;
-
-use super::{
-    commands::CommandError, network::NetworkState, paths::resolve_process_paths, state::AppState,
-};
 
 /// Opens the native folder picker used by Local folder skill imports.
 #[tauri::command]
@@ -94,6 +97,66 @@ pub struct SkillImportCandidatesView {
     /// Whether a ZIP validation failure prevented candidate listing.
     pub error: Option<String>,
 }
+/// Local source selected for a background skill import job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+#[non_exhaustive]
+pub enum SkillImportKind {
+    /// Scan a native folder selected by the user.
+    Folder,
+    /// Validate and extract a ZIP selected by the user.
+    Zip,
+}
+
+/// Job handle returned when a skill import starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillImportJobStartView {
+    /// Identifier used to cancel or observe progress for this job.
+    pub job_id: JobId,
+    /// Opaque key used to retrieve and release its candidate session.
+    pub import_id: String,
+}
+
+enum SkillImportSessionSource {
+    Git(at_engine::skill_import::GitSkillImport),
+    Folder(PathBuf),
+    Zip(at_engine::skill_import::ZipSkillImport),
+}
+
+struct SkillImportSession {
+    candidates: SkillImportCandidatesView,
+    source: SkillImportSessionSource,
+    source_candidates: Vec<at_engine::skill_import::SkillImportCandidate>,
+}
+
+impl SkillImportSessionSource {
+    fn candidate_root(&self) -> &Path {
+        match self {
+            Self::Git(imported) => imported.repository_root(),
+            Self::Folder(root) => root,
+            Self::Zip(imported) => imported.candidate_root(),
+        }
+    }
+
+    fn matches_source(&self, source: &SourceKind) -> bool {
+        matches!(
+            (self, source),
+            (Self::Git(_), SourceKind::Git)
+                | (Self::Folder(_), SourceKind::Folder)
+                | (Self::Zip(_), SourceKind::Zip)
+        )
+    }
+}
+
+static SKILL_IMPORT_SESSIONS: LazyLock<Mutex<HashMap<String, SkillImportSession>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn skill_import_sessions() -> &'static Mutex<HashMap<String, SkillImportSession>> {
+    &SKILL_IMPORT_SESSIONS
+}
+
 /// One source store shown by the library import picker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -216,96 +279,317 @@ pub fn skill_library_catalog(
     })
 }
 
-/// Scans a user-selected folder or ZIP without modifying its contents.
-#[tauri::command]
-pub fn skill_import_candidates(
-    path: String,
-    zip: bool,
-    project_id: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<SkillImportCandidatesView, CommandError> {
-    let database = state.database().map_err(CommandError::unavailable)?;
-    let project = project_root(database.connection(), project_id.as_deref(), Scope::Project)?;
-    let paths = resolve_process_paths(project.as_deref())
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
-    let selected = Path::new(path.trim());
-    if selected.as_os_str().is_empty() || !allowed_import_path(selected, &paths, project.as_deref())
-    {
-        return Err(CommandError::invalid_argument(
-            "path",
-            "choose a folder or ZIP under the current home or registered project",
-        ));
-    }
-    let candidates = if zip {
-        let imported = at_engine::skill_import::import_zip(selected, paths.cache_dir())
-            .map_err(|error| CommandError::invalid_argument("path", &error.to_string()))?;
-        imported.candidates
-    } else {
-        at_engine::skill_import::import_folder(selected)
-            .map_err(|error| CommandError::invalid_argument("path", &error.to_string()))?
-    };
-    Ok(SkillImportCandidatesView {
-        candidates: candidates
-            .into_iter()
-            .map(|candidate| SkillImportCandidateView {
-                id: candidate.subpath.to_string_lossy().replace('\\', "/"),
-                name: candidate.name,
-                description: candidate.description,
-                markdown: candidate.doc.map(|doc| doc.raw),
-                error: candidate.error,
-            })
-            .collect(),
-        error: None,
-    })
-}
-
-/// Fetches a Git repository after the user explicitly requests candidate discovery.
-#[tauri::command]
-pub fn skill_import_git_candidates(
-    url: String,
-    reference: Option<String>,
-    network: State<'_, NetworkState>,
-) -> Result<SkillImportCandidatesView, CommandError> {
-    let host = url
-        .strip_prefix("https://")
+/// Host of an HTTPS Git import URL, refusing empty hosts and any embedded credentials.
+///
+/// The UI accepts HTTPS clone URLs only; a `user:password@host` or `token@host` form would be
+/// written to the store manifest and the sources table, so it is refused before network access.
+fn import_git_host(url: &str) -> Result<&str, CommandError> {
+    url.strip_prefix("https://")
         .and_then(|rest| rest.split('/').next())
         .filter(|host| !host.is_empty() && !host.contains('@'))
-        .ok_or_else(|| CommandError::invalid_argument("url", "enter a valid HTTPS Git URL"))?;
+        .ok_or_else(|| CommandError::invalid_argument("url", "enter a valid HTTPS Git URL"))
+}
+
+/// Starts a cancellable Git clone and skill-candidate scan.
+#[tauri::command]
+pub fn skill_import_git_start(
+    state: State<'_, AppState>,
+    network: State<'_, NetworkState>,
+    url: String,
+    reference: Option<String>,
+) -> Result<SkillImportJobStartView, CommandError> {
+    let url = url.trim();
+    if url.is_empty() || url.len() > 2_048 {
+        return Err(CommandError::invalid_argument(
+            "url",
+            "enter an HTTPS repository URL no longer than 2048 bytes",
+        ));
+    }
+    let host = import_git_host(url)?;
+    if reference.as_deref().is_some_and(|value| {
+        value.len() > 512 || value.starts_with('-') || value.contains(['\0', '\n', '\r'])
+    }) {
+        return Err(CommandError::invalid_argument(
+            "reference",
+            "enter a valid Git ref",
+        ));
+    }
     network
         .authorize(NetworkAction::GitClone, host, NetworkTrigger::User)
         .map_err(|_| CommandError::unavailable("Network policy refused this Git source."))?;
     let paths = resolve_process_paths(None)
         .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let cache_dir = paths.cache_dir().to_path_buf();
     let policy = network.policy();
-    let mut log = NetworkEventLog::default();
-    let imported = at_engine::skill_import::import_git(
-        &url,
-        reference
-            .as_deref()
-            .filter(|reference| !reference.trim().is_empty()),
-        paths.cache_dir(),
-        &policy,
-        &mut log,
-    )
-    .map_err(|_| {
-        CommandError::unavailable(
-            "Git source could not be cloned. Check the URL and network policy.",
-        )
-    })?;
-    Ok(SkillImportCandidatesView {
-        candidates: imported
-            .candidates
-            .into_iter()
-            .map(|candidate| SkillImportCandidateView {
-                id: candidate.subpath.to_string_lossy().replace('\\', "/"),
-                name: candidate.name,
-                description: candidate.description,
-                markdown: candidate.doc.map(|doc| doc.raw),
-                error: candidate.error,
+    let worker_network = network.inner().clone();
+    let import_id = uuid::Uuid::now_v7().to_string();
+    let job_import_id = import_id.clone();
+    let url = url.to_owned();
+    let reference = reference.filter(|value| !value.trim().is_empty());
+    let job = JobSpec::new_cancellable(
+        "Import skills from Git",
+        move |progress, cancel| async move {
+            progress.message("Cloning Git repository");
+            let cancellation = cancel.cancellation_flag();
+            let worker_progress = progress.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let mut log = NetworkEventLog::default();
+                let result = at_engine::skill_import::import_git_with_cancel(
+                    &url,
+                    reference.as_deref(),
+                    &cache_dir,
+                    &policy,
+                    &mut log,
+                    cancellation,
+                    |count| worker_progress.message(format!("Found {count} skill candidates")),
+                );
+                (result, log.to_vec())
             })
-            .collect(),
-        error: None,
+            .await
+            .map_err(|_| JobError::Failed {
+                message: "Git import worker stopped unexpectedly.".to_owned(),
+            })?;
+            let (result, events) = worker;
+            for event in events {
+                worker_network.record(event);
+            }
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            let imported = result.map_err(|error| JobError::Failed {
+                message: git_import_error_message(error),
+            })?;
+            let view = SkillImportCandidatesView {
+                candidates: imported
+                    .candidates
+                    .iter()
+                    .map(import_candidate_view)
+                    .collect(),
+                error: None,
+            };
+            let count = view.candidates.len();
+            let source_candidates = imported.candidates.clone();
+            store_skill_import_session(
+                job_import_id,
+                SkillImportSession {
+                    candidates: view,
+                    source: SkillImportSessionSource::Git(imported),
+                    source_candidates,
+                },
+            )?;
+            progress.fraction(1.0, format!("Found {count} skill candidates"));
+            Ok(())
+        },
+    );
+    let handle = state
+        .bridge()
+        .spawn_job(job)
+        .map_err(|_| CommandError::unavailable("the background job service is unavailable"))?;
+    Ok(SkillImportJobStartView {
+        job_id: handle.id().clone(),
+        import_id,
     })
+}
+
+/// Starts a cancellable folder scan or ZIP validation and extraction job.
+#[tauri::command]
+pub fn skill_import_local_start(
+    state: State<'_, AppState>,
+    path: String,
+    kind: SkillImportKind,
+    project_id: Option<String>,
+) -> Result<SkillImportJobStartView, CommandError> {
+    let path = path.trim();
+    if path.is_empty() || path.len() > 4_096 || !Path::new(path).is_absolute() {
+        return Err(CommandError::invalid_argument(
+            "path",
+            "choose an absolute folder or ZIP path no longer than 4096 bytes",
+        ));
+    }
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let project = project_root(database.connection(), project_id.as_deref(), Scope::Project)?;
+    let paths = resolve_process_paths(project.as_deref())
+        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let selected = PathBuf::from(path);
+    if !allowed_import_path(&selected, &paths, project.as_deref()) {
+        return Err(CommandError::invalid_argument(
+            "path",
+            "choose a folder or ZIP under the current home or registered project",
+        ));
+    }
+    let cache_dir = paths.cache_dir().to_path_buf();
+    let import_id = uuid::Uuid::now_v7().to_string();
+    let job_import_id = import_id.clone();
+    let (job_name, start_label) = match kind {
+        SkillImportKind::Folder => ("Scan skill folder", "Scanning selected folder"),
+        SkillImportKind::Zip => ("Import skills from ZIP", "Validating ZIP archive"),
+    };
+    let job = JobSpec::new_cancellable(job_name, move |progress, cancel| async move {
+        progress.message(start_label);
+        let cancellation = cancel.cancellation_flag();
+        let worker_progress = progress.clone();
+        let worker_path = selected;
+        let worker_cache = cache_dir;
+        let worker = tokio::task::spawn_blocking(move || match kind {
+            SkillImportKind::Folder => {
+                let result = at_engine::skill_import::import_folder_with_cancel(
+                    &worker_path,
+                    cancellation.as_ref(),
+                    |count| worker_progress.message(format!("Found {count} skill candidates")),
+                );
+                result
+                    .map(|candidates| {
+                        let view = SkillImportCandidatesView {
+                            candidates: candidates.iter().map(import_candidate_view).collect(),
+                            error: None,
+                        };
+                        (
+                            view,
+                            SkillImportSessionSource::Folder(worker_path),
+                            candidates,
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+            }
+            SkillImportKind::Zip => {
+                let extraction_progress = worker_progress.clone();
+                let scan_progress = worker_progress.clone();
+                let result = at_engine::skill_import::import_zip_with_cancel(
+                    &worker_path,
+                    &worker_cache,
+                    cancellation.as_ref(),
+                    move |completed, total| {
+                        if total > 0 {
+                            extraction_progress.fraction(
+                                completed as f64 / total as f64,
+                                format!("Extracting ZIP archive ({completed}/{total})"),
+                            );
+                        }
+                    },
+                    move |count| {
+                        scan_progress.message(format!("Found {count} skill candidates"));
+                    },
+                );
+                result
+                    .map(|imported| {
+                        let view = SkillImportCandidatesView {
+                            candidates: imported
+                                .candidates
+                                .iter()
+                                .map(import_candidate_view)
+                                .collect(),
+                            error: None,
+                        };
+                        let candidates = imported.candidates.clone();
+                        (view, SkillImportSessionSource::Zip(imported), candidates)
+                    })
+                    .map_err(|error| error.to_string())
+            }
+        })
+        .await
+        .map_err(|_| JobError::Failed {
+            message: "Local skill import worker stopped unexpectedly.".to_owned(),
+        })?;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let (view, source, source_candidates) =
+            worker.map_err(|message| JobError::Failed { message })?;
+        let count = view.candidates.len();
+        store_skill_import_session(
+            job_import_id,
+            SkillImportSession {
+                candidates: view,
+                source,
+                source_candidates,
+            },
+        )?;
+        progress.fraction(1.0, format!("Found {count} skill candidates"));
+        Ok(())
+    });
+    let handle = state
+        .bridge()
+        .spawn_job(job)
+        .map_err(|_| CommandError::unavailable("the background job service is unavailable"))?;
+    Ok(SkillImportJobStartView {
+        job_id: handle.id().clone(),
+        import_id,
+    })
+}
+
+/// Returns candidates from a successfully completed import job.
+#[tauri::command]
+pub fn skill_import_job_result(
+    import_id: String,
+) -> Result<SkillImportCandidatesView, CommandError> {
+    validate_import_id(&import_id)?;
+    skill_import_sessions()
+        .lock()
+        .map_err(|_| CommandError::internal("skill import sessions are unavailable"))?
+        .get(&import_id)
+        .map(|session| session.candidates.clone())
+        .ok_or_else(|| {
+            CommandError::invalid_argument(
+                "import_id",
+                "the import session expired; fetch or scan the source again",
+            )
+        })
+}
+
+/// Releases a completed import session and its temporary clone or extraction directory.
+#[tauri::command]
+pub fn skill_import_release(import_id: String) -> Result<bool, CommandError> {
+    validate_import_id(&import_id)?;
+    Ok(skill_import_sessions()
+        .lock()
+        .map_err(|_| CommandError::internal("skill import sessions are unavailable"))?
+        .remove(&import_id)
+        .is_some())
+}
+
+fn validate_import_id(import_id: &str) -> Result<(), CommandError> {
+    uuid::Uuid::parse_str(import_id).map_err(|_| {
+        CommandError::invalid_argument("import_id", "expected a valid import session id")
+    })?;
+    Ok(())
+}
+
+fn import_candidate_view(
+    candidate: &at_engine::skill_import::SkillImportCandidate,
+) -> SkillImportCandidateView {
+    SkillImportCandidateView {
+        id: candidate.subpath.to_string_lossy().replace('\\', "/"),
+        name: candidate.name.clone(),
+        description: candidate.description.clone(),
+        markdown: candidate.doc.as_ref().map(|doc| doc.raw.clone()),
+        error: candidate.error.clone(),
+    }
+}
+
+fn store_skill_import_session(
+    import_id: String,
+    session: SkillImportSession,
+) -> Result<(), JobError> {
+    let mut sessions = skill_import_sessions()
+        .lock()
+        .map_err(|_| JobError::Failed {
+            message: "Skill import sessions are unavailable.".to_owned(),
+        })?;
+    sessions.insert(import_id, session);
+    Ok(())
+}
+
+fn git_import_error_message(error: at_git::import::ImportCloneError) -> String {
+    match error {
+        at_git::import::ImportCloneError::AuthRequired => String::from(
+            "Authentication is required. Use a public repository URL; AgenTuna does not request credentials here.",
+        ),
+        at_git::import::ImportCloneError::CloneFailed { message } => {
+            format!("Git clone failed: {message}")
+        }
+        at_git::import::ImportCloneError::Cancelled => String::from("Git import was cancelled."),
+        _ => String::from("Git source could not be cloned. Check the URL and network policy."),
+    }
 }
 
 /// One skills.sh marketplace search result.
@@ -450,6 +734,8 @@ pub struct SkillAddPreviewRequest {
     pub wizard: AddSkillWizard,
     /// Registered project identity required for Project and Local scope.
     pub project_id: Option<String>,
+    /// Import-session identity required by Git, folder and ZIP sources.
+    pub import_id: Option<String>,
     /// Whether the user explicitly requested Git staging.
     pub stage_requested: bool,
 }
@@ -464,6 +750,19 @@ pub struct SkillAddFileView {
     pub package_path: String,
     /// Unified text diff for an existing file, when present.
     pub diff: Option<String>,
+}
+/// One selected package and its explicit source-to-destination plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillAddItemView {
+    /// Parsed skill name shown to the user.
+    pub name: String,
+    /// Read-only selected source directory, when the source has one.
+    pub source_path: Option<String>,
+    /// Destination library entry.
+    pub target_path: String,
+    /// `copy` or `link`.
+    pub mode: String,
 }
 
 /// One agent deployment from the reviewed plan.
@@ -484,8 +783,10 @@ pub struct SkillAddDeploymentView {
 pub struct SkillAddPreviewView {
     /// Content-bound identity of the reviewed plan.
     pub preview_id: String,
-    /// Canonical skill package directory.
+    /// Canonical skill package directory, or the shared skills store for a batch.
     pub canonical_dir: String,
+    /// Selected packages and their Copy/Link destinations.
+    pub items: Vec<SkillAddItemView>,
     /// Every actual target path from the planner.
     pub files: Vec<SkillAddFileView>,
     /// Native agent deployments in this plan.
@@ -496,6 +797,8 @@ pub struct SkillAddPreviewView {
     pub stage_requested: bool,
     /// Whether existing content requires explicit user confirmation.
     pub requires_overwrite_confirmation: bool,
+    /// Store creation the same reviewed plan performs first, when the scope has no store yet.
+    pub store_init: Option<super::store_setup::StoreSetupView>,
 }
 
 /// Request to apply exactly one reviewed Add Skill plan.
@@ -512,8 +815,8 @@ pub struct SkillAddApplyRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct SkillAddApplyResultView {
-    /// Display name confirmed by the successful apply result.
-    pub skill_name: String,
+    /// Display names confirmed by the successful apply result.
+    pub skill_names: Vec<String>,
     /// Operation journal identity.
     pub operation_id: String,
     /// Paths reported by the applied plan.
@@ -530,8 +833,327 @@ pub struct SkillAddApplyResultView {
     pub backup_hint: String,
 }
 
+/// Job and one-time result key returned when a reviewed skill plan starts applying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillAddApplyJobStartView {
+    /// Job identifier used to observe apply progress and completion.
+    pub job_id: JobId,
+    /// One-time key used to retrieve the successful apply result.
+    pub result_id: String,
+}
+/// Request for the Scope & agents step's live targets and name-clash results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillScopeOptionsRequest {
+    /// Selected destination scope, if one has been chosen.
+    pub scope: Option<String>,
+    /// Agent identifiers currently selected in the wizard.
+    pub agents: Vec<String>,
+    /// Skill names from the selected source to check for clashes.
+    pub names: Vec<String>,
+    /// Registered project identity for Project and Local scope.
+    pub project_id: Option<String>,
+}
+
+/// One destination scope card in the add-skill wizard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillScopeCardView {
+    /// Scope identifier.
+    pub scope: String,
+    /// Absolute AgenTuna store path, when the scope is available.
+    pub store_path: Option<String>,
+    /// Whether this scope can be selected in the current context.
+    pub available: bool,
+    /// Why this scope is unavailable, if applicable.
+    pub disabled_reason: Option<String>,
+    /// Context note shown on the card.
+    pub note: String,
+    /// Global-lock summary shown on the card, if any.
+    pub lock_note: Option<String>,
+}
+
+/// One selected skill's exact destination for an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillScopeTargetPathView {
+    /// Skill name.
+    pub name: String,
+    /// Absolute native deployment target path.
+    pub path: String,
+}
+
+/// Scope-specific skill target information for one agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillAgentScopeView {
+    /// Stable agent identifier.
+    pub agent: String,
+    /// Display name.
+    pub name: String,
+    /// Whether the agent is detected as installed.
+    pub installed: bool,
+    /// Why this agent cannot be selected, if applicable.
+    pub disabled_reason: Option<String>,
+    /// Absolute skills directory for this scope.
+    pub skills_dir: Option<String>,
+    /// Exact absolute deployment paths for selected skill names.
+    pub targets: Vec<SkillScopeTargetPathView>,
+    /// Other agents coupled through the same skills directory.
+    pub shared_with: Vec<String>,
+}
+
+/// Inline collision and warning results for one selected skill name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillNameClashView {
+    /// Skill name checked.
+    pub name: String,
+    /// Collisions that prevent creating the skill at this scope.
+    pub blocking: Vec<String>,
+    /// Existing copies in other scopes.
+    pub warnings: Vec<String>,
+}
+
+/// Live scope, agent target and clash data for the Scope & agents step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct SkillScopeOptionsView {
+    /// Global, User, Project and Local destination cards.
+    pub scopes: Vec<SkillScopeCardView>,
+    /// Scope-specific paths and installation state for detected agents.
+    pub agents: Vec<SkillAgentScopeView>,
+    /// Name-clash results for the selected destination and agents.
+    pub clashes: Vec<SkillNameClashView>,
+}
+
+/// Resolves scope cards and agent targets, then checks selected names using the engine.
+#[tauri::command]
+pub fn skill_scope_options(
+    state: State<'_, AppState>,
+    request: SkillScopeOptionsRequest,
+) -> Result<SkillScopeOptionsView, CommandError> {
+    use std::str::FromStr;
+
+    if request.names.len() > 100
+        || request.names.iter().any(|name| name.len() > 256)
+        || request.agents.len() > 64
+    {
+        return Err(CommandError::invalid_argument(
+            "request",
+            "the scope request exceeds its supported limits",
+        ));
+    }
+    let selected_scope = request
+        .scope
+        .as_deref()
+        .map(Scope::from_str)
+        .transpose()
+        .map_err(|_| CommandError::invalid_argument("scope", "choose a supported scope"))?;
+    let database = state.database().map_err(CommandError::unavailable)?;
+    let mut paths = state
+        .paths()
+        .cloned()
+        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
+    let selected_project = project_root(
+        database.connection(),
+        request.project_id.as_deref(),
+        Scope::User,
+    )?;
+    if let Some(project) = selected_project.as_deref() {
+        paths = paths.for_project(project).map_err(|_| {
+            CommandError::invalid_argument("project_id", "project path is unavailable")
+        })?;
+    }
+    let settings = at_db::settings::load(database.connection())
+        .map_err(|_| CommandError::internal("could not load store settings"))?;
+    paths.apply_settings_global_store(settings.global_store_path());
+    let global_status = at_fs::privilege::GlobalStoreStatus::probe(paths.global_store());
+    let global_locks = at_db::locks::locks_for_scope(database.connection(), Scope::Global)
+        .map_err(|_| CommandError::internal("could not read Global locks"))?;
+    let mut scopes = Vec::with_capacity(Scope::ALL.len());
+    let mut stores = Vec::with_capacity(Scope::ALL.len());
+    for &scope in Scope::ALL {
+        let layout = StoreLayout::for_scope(&paths, scope).ok();
+        let project_required = matches!(scope, Scope::Project | Scope::Local);
+        let available = match scope {
+            Scope::Global => global_status.is_available(),
+            Scope::Project | Scope::Local => selected_project.is_some(),
+            Scope::User => true,
+        };
+        let disabled_reason = match scope {
+            Scope::Global => global_status.reason().map(str::to_owned),
+            Scope::Project | Scope::Local if selected_project.is_none() => {
+                Some("Choose a project before using this scope.".to_owned())
+            }
+            _ => None,
+        };
+        let note = match scope {
+            Scope::Global => "Machine-wide. Requires administrator access.".to_owned(),
+            Scope::User => "Your account on this Mac; not committed to a repository.".to_owned(),
+            Scope::Project => "Shared with people using this repository.".to_owned(),
+            Scope::Local => "Only you in this repo. Local files are not committed.".to_owned(),
+        };
+        let lock_note = (scope == Scope::Global && !global_locks.is_empty()).then(|| {
+            format!(
+                "{} Global item{} protected by locks.",
+                global_locks.len(),
+                if global_locks.len() == 1 {
+                    " is"
+                } else {
+                    "s are"
+                },
+            )
+        });
+        let store_path = layout
+            .as_ref()
+            .map(|layout| layout.root().display().to_string());
+        if let Some(layout) = layout
+            && (!project_required || selected_project.is_some())
+        {
+            stores.push((scope, layout.root().to_path_buf()));
+        }
+        scopes.push(SkillScopeCardView {
+            scope: scope.wire_name().to_owned(),
+            store_path,
+            available,
+            disabled_reason,
+            note,
+            lock_note,
+        });
+    }
+    let env = AgentEnvironment {
+        home: paths
+            .home_dir()
+            .ok_or_else(|| CommandError::unavailable("home directory is unavailable"))?
+            .to_path_buf(),
+        project: selected_project.clone(),
+        variables: Default::default(),
+    };
+    let registry = AgentAdapterRegistry::register();
+    let cards = super::workflows::agents_list_impl(state.inner())?;
+    let mut agents = Vec::with_capacity(cards.len());
+    for card in cards {
+        let installed = card.installed;
+        let mut skills_dir = None;
+        let mut targets = Vec::new();
+        if let Some(scope) = selected_scope {
+            let id = AgentId::from_str(&card.id)
+                .map_err(|_| CommandError::internal("agent index contains an invalid id"))?;
+            let adapter = registry
+                .get(&id)
+                .map_err(|_| CommandError::internal("agent registry is unavailable"))?
+                .ok_or_else(|| CommandError::internal("agent adapter is unavailable"))?;
+            let target = adapter
+                .paths(ItemKind::Skill, scope, &env)
+                .into_iter()
+                .find(|candidate| candidate.primary)
+                .map(|candidate| candidate.path);
+            if let Some(target_root) = target {
+                skills_dir = Some(target_root.display().to_string());
+                for name in &request.names {
+                    let slug = match slugify(name) {
+                        Ok(slug) => slug,
+                        Err(_) => continue,
+                    };
+                    if let Ok(slug) = at_store::layout::Slug::parse(&slug) {
+                        targets.push(SkillScopeTargetPathView {
+                            name: name.clone(),
+                            path: target_root.join(slug.as_str()).display().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        let disabled_reason = if !installed {
+            Some("This agent is not installed. Set a skills path to include it.".to_owned())
+        } else if selected_scope.is_some() && skills_dir.is_none() {
+            Some("No skills directory is configured for this scope.".to_owned())
+        } else {
+            None
+        };
+        agents.push(SkillAgentScopeView {
+            agent: card.id,
+            name: card.name,
+            installed,
+            disabled_reason,
+            skills_dir,
+            targets,
+            shared_with: Vec::new(),
+        });
+    }
+    let mut shared_dirs = std::collections::HashMap::<String, Vec<usize>>::new();
+    for (index, agent) in agents.iter().enumerate() {
+        if let Some(path) = agent.skills_dir.as_ref() {
+            shared_dirs.entry(path.clone()).or_default().push(index);
+        }
+    }
+    let agent_names = agents
+        .iter()
+        .map(|agent| agent.name.clone())
+        .collect::<Vec<_>>();
+    for indexes in shared_dirs.values().filter(|indexes| indexes.len() > 1) {
+        for index in indexes {
+            if let Some(agent) = agents.get_mut(*index) {
+                agent.shared_with = indexes
+                    .iter()
+                    .filter_map(|other| {
+                        (*other != *index)
+                            .then(|| agent_names.get(*other).cloned())
+                            .flatten()
+                    })
+                    .collect();
+            }
+        }
+    }
+    let mut clashes = Vec::new();
+    if let Some(scope) = selected_scope {
+        let selected_agents = request
+            .agents
+            .iter()
+            .map(|agent| {
+                AgentId::from_str(agent).map_err(|_| {
+                    CommandError::invalid_argument("agents", "contains an unknown agent")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for name in &request.names {
+            let slug = match slugify(name) {
+                Ok(slug) => slug,
+                Err(_) => {
+                    clashes.push(SkillNameClashView {
+                        name: name.clone(),
+                        blocking: vec!["Use a valid skill name before continuing.".to_owned()],
+                        warnings: Vec::new(),
+                    });
+                    continue;
+                }
+            };
+            let report = at_engine::skill_names::check_skill_name_for_agents(
+                database.connection(),
+                &slug,
+                scope,
+                &selected_agents,
+                &stores,
+            )
+            .map_err(|_| CommandError::internal("could not check skill name clashes"))?;
+            clashes.push(SkillNameClashView {
+                name: name.clone(),
+                blocking: report.blocking,
+                warnings: report.warnings,
+            });
+        }
+    }
+    Ok(SkillScopeOptionsView {
+        scopes,
+        agents,
+        clashes,
+    })
+}
+
 struct CachedSkillAddPlan {
-    skill_name: String,
+    skill_names: Vec<String>,
     plan: at_engine::skill_add_plan::SkillAddFilePlan,
     layout_root: PathBuf,
     backup_folder: PathBuf,
@@ -544,11 +1166,29 @@ fn skill_add_cache() -> &'static Mutex<HashMap<String, CachedSkillAddPlan>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn skill_add_results() -> &'static Mutex<HashMap<String, SkillAddApplyResultView>> {
+    static RESULTS: LazyLock<Mutex<HashMap<String, SkillAddApplyResultView>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    &RESULTS
+}
+
 /// Builds and caches a read-only, exact filesystem preview for Add Skill.
 #[tauri::command]
 pub fn skill_add_preview(
     state: State<'_, AppState>,
     network: State<'_, NetworkState>,
+    request: SkillAddPreviewRequest,
+) -> Result<SkillAddPreviewView, CommandError> {
+    skill_add_preview_impl(&state, &network, request)
+}
+
+/// Bridge-facing body of [`skill_add_preview`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`skill_add_preview`].
+pub fn skill_add_preview_impl(
+    state: &AppState,
+    network: &NetworkState,
     request: SkillAddPreviewRequest,
 ) -> Result<SkillAddPreviewView, CommandError> {
     use std::str::FromStr;
@@ -564,8 +1204,8 @@ pub fn skill_add_preview(
         .source
         .as_ref()
         .ok_or_else(|| CommandError::invalid_argument("source", "choose an import source"))?;
-    let name = wizard.name.trim();
-    if name.is_empty() {
+    if matches!(source, SourceKind::New | SourceKind::Marketplace) && wizard.name.trim().is_empty()
+    {
         return Err(CommandError::invalid_argument("name", "enter a skill name"));
     }
     if wizard.agents.is_empty() {
@@ -583,27 +1223,28 @@ pub fn skill_add_preview(
     .map_err(|_| CommandError::invalid_argument("scope", "choose a supported scope"))?;
     let database = state.database().map_err(CommandError::unavailable)?;
     let project_root = project_root(database.connection(), request.project_id.as_deref(), scope)?;
-    let paths = resolve_process_paths(project_root.as_deref())
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
+    let paths = super::paths::resolve_command_paths(state, project_root.as_deref())?;
     let layout = StoreLayout::for_scope(&paths, scope)
         .map_err(|_| CommandError::unavailable("canonical skill store is unavailable"))?;
-    let slug_text = slugify(name)
-        .map_err(|_| CommandError::invalid_argument("name", "use letters or digits in the name"))?;
-    let slug = at_store::layout::Slug::parse(&slug_text).map_err(|_| {
-        CommandError::invalid_argument("name", "the skill name is not a valid slug")
-    })?;
-    let package = resolve_skill_package(
+    let packages = resolve_skill_packages(
         source,
         SkillPackageContext {
-            wizard: &request.wizard,
+            wizard,
             paths: &paths,
             project_root: project_root.as_deref(),
             target_scope: scope,
             target_project_id: request.project_id.as_deref(),
             connection: database.connection(),
-            network: &network,
+            network,
+            import_id: request.import_id.as_deref(),
         },
     )?;
+    if packages.is_empty() {
+        return Err(CommandError::invalid_argument(
+            "selections",
+            "select at least one valid skill",
+        ));
+    }
     let env = AgentEnvironment {
         home: paths
             .home_dir()
@@ -615,7 +1256,7 @@ pub fn skill_add_preview(
     let registry = AgentAdapterRegistry::register();
     let settings = at_db::settings::load(database.connection())
         .map_err(|_| CommandError::internal("could not read deployment settings"))?;
-    let mut deployments = Vec::with_capacity(wizard.agents.len());
+    let mut deployment_roots = Vec::with_capacity(wizard.agents.len());
     let mut roots = vec![env.home.clone()];
     if let Some(root) = project_root
         .as_ref()
@@ -653,18 +1294,12 @@ pub fn skill_add_preview(
         {
             roots.push(existing_authorized_ancestor(&candidate.path)?);
         }
-        let mode = settings.link_mode(&agent);
-        let mode = if mode == at_model::LinkMode::Copy {
+        let mode = if settings.link_mode(&agent) == at_model::LinkMode::Copy {
             at_engine::skill_add_plan::SkillDeploymentMode::Copy
         } else {
             at_engine::skill_add_plan::SkillDeploymentMode::Symlink
         };
-        deployments.push(at_engine::skill_add_plan::SkillDeploymentTarget {
-            agent: agent.to_string(),
-            target: candidate.path.join(slug.as_str()),
-            allowed_root: candidate.path,
-            mode,
-        });
+        deployment_roots.push((agent.to_string(), candidate.path, mode));
     }
     let repository = if scope == Scope::Project {
         project_root.as_deref().and_then(|root| {
@@ -673,25 +1308,94 @@ pub fn skill_add_preview(
     } else {
         None
     };
-    let plan =
-        at_engine::skill_add_plan::plan_skill_add(at_engine::skill_add_plan::SkillAddPlanRequest {
-            layout: &layout,
-            slug: &slug,
-            package: &package,
-            scope,
-            deployments: &deployments,
-            repository: repository.as_ref(),
-            stage_requested: request.stage_requested,
-        })
+    let mut plans = None;
+    let mut items = Vec::with_capacity(packages.len());
+    let mut slugs = std::collections::HashSet::with_capacity(packages.len());
+    for resolved in packages {
+        let slug_text = slugify(&resolved.name).map_err(|_| {
+            CommandError::invalid_argument("name", "use letters or digits in the skill name")
+        })?;
+        let slug = at_store::layout::Slug::parse(&slug_text).map_err(|_| {
+            CommandError::invalid_argument("name", "the skill name is not a valid slug")
+        })?;
+        if !slugs.insert(slug.as_str().to_owned()) {
+            return Err(CommandError::invalid_argument(
+                "selections",
+                "selected skills must have distinct destination names",
+            ));
+        }
+        let canonical_dir = layout.skill_dir(&slug);
+        let deployments = deployment_roots
+            .iter()
+            .map(
+                |(agent, allowed_root, mode)| at_engine::skill_add_plan::SkillDeploymentTarget {
+                    agent: agent.clone(),
+                    target: allowed_root.join(slug.as_str()),
+                    allowed_root: allowed_root.clone(),
+                    mode: *mode,
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut plan = at_engine::skill_add_plan::plan_skill_add(
+            at_engine::skill_add_plan::SkillAddPlanRequest {
+                layout: &layout,
+                slug: &slug,
+                package: &resolved.package,
+                scope,
+                deployments: &deployments,
+                repository: repository.as_ref(),
+                stage_requested: request.stage_requested,
+            },
+        )
         .map_err(|error| CommandError::invalid_argument("plan", &error.to_string()))?;
-    if request.stage_requested && plan.stage.is_none() {
-        return Err(CommandError::invalid_argument(
-            "stage_requested",
-            "Git staging is unavailable for this project",
-        ));
+        if resolved.library_mode == Some(at_engine::skill_wizard::LibraryTransferMode::Link) {
+            let source_path = resolved.source_path.as_deref().ok_or_else(|| {
+                CommandError::internal("the selected library skill has no source path")
+            })?;
+            at_engine::skill_add_plan::convert_to_library_link(&mut plan, source_path).map_err(
+                |error| match error {
+                    at_engine::skill_add_plan::SkillAddPlanError::ReadExisting { .. } => {
+                        CommandError::unavailable("the linked destination could not be inspected")
+                    }
+                    other => CommandError::invalid_argument("library_mode", &other.to_string()),
+                },
+            )?;
+        }
+        if request.stage_requested && plan.stage.is_none() {
+            return Err(CommandError::invalid_argument(
+                "stage_requested",
+                "Git staging is unavailable for this project",
+            ));
+        }
+        items.push(SkillAddItemView {
+            name: resolved.name,
+            source_path: resolved
+                .source_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            target_path: canonical_dir.display().to_string(),
+            mode: if resolved.library_mode
+                == Some(at_engine::skill_wizard::LibraryTransferMode::Link)
+            {
+                "link".to_owned()
+            } else {
+                "copy".to_owned()
+            },
+        });
+        merge_skill_add_plans(&mut plans, plan)?;
     }
+    let mut plan = plans.ok_or_else(|| {
+        CommandError::invalid_argument("selections", "select at least one valid skill")
+    })?;
+    plan.change_set.summary = format!("Add {} skills", items.len());
+    // A scope with no store yet gets its skeleton inside this same reviewed ChangeSet, so the
+    // review shows the store creation and the apply (and undo) covers both in one operation.
+    let store_init = at_store::store_init::plan_store_init(&layout, &mut plan.change_set)
+        .map_err(|error| super::store_setup::store_init_error(&layout, error))?;
+    plan.change_set
+        .validate()
+        .map_err(|error| CommandError::invalid_argument("plan", &error.to_string()))?;
     let preview_id = uuid::Uuid::now_v7().to_string();
-    let mut plan = plan;
     plan.change_set.preview_id.clone_from(&preview_id);
     let files = plan
         .files
@@ -709,8 +1413,14 @@ pub fn skill_add_preview(
     let deployment_views = deployment_views(&plan);
     let stage_available = plan.stage_available;
     let requires_overwrite_confirmation = !plan.overwrites.is_empty();
+    let canonical_dir = if items.len() == 1 {
+        items[0].target_path.clone()
+    } else {
+        layout.root().join("skills").display().to_string()
+    };
+    let skill_names = items.iter().map(|item| item.name.clone()).collect();
     let cache = CachedSkillAddPlan {
-        skill_name: wizard.name.trim().to_owned(),
+        skill_names,
         plan,
         layout_root: layout.root().to_path_buf(),
         backup_folder: paths.support_dir().join(at_store::layout::BACKUPS_DIR),
@@ -723,21 +1433,20 @@ pub fn skill_add_preview(
         .insert(preview_id.clone(), cache);
     Ok(SkillAddPreviewView {
         preview_id,
-        canonical_dir: layout.skill_dir(&slug).display().to_string(),
+        canonical_dir,
+        items,
         files,
         deployments: deployment_views,
         stage_available,
         stage_requested: request.stage_requested,
         requires_overwrite_confirmation,
+        store_init: store_init
+            .as_ref()
+            .map(super::store_setup::StoreSetupView::from_plan),
     })
 }
 
-/// Applies a reviewed Add Skill plan and optionally stages its exact Git path list.
-#[tauri::command]
-pub fn skill_add_apply(
-    state: State<'_, AppState>,
-    request: SkillAddApplyRequest,
-) -> Result<SkillAddApplyResultView, CommandError> {
+fn take_skill_add_plan(request: SkillAddApplyRequest) -> Result<CachedSkillAddPlan, CommandError> {
     let cached = skill_add_cache()
         .lock()
         .map_err(|_| CommandError::internal("skill plan cache is unavailable"))?
@@ -754,6 +1463,14 @@ pub fn skill_add_apply(
             "review and confirm every existing-file change before importing",
         ));
     }
+    Ok(cached)
+}
+
+fn apply_cached_skill_add(
+    state: &AppState,
+    cached: CachedSkillAddPlan,
+    progress: Option<&ProgressSender>,
+) -> Result<SkillAddApplyResultView, CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
     let roots = at_fs::changeset::ApplyRoots::new(cached.apply_roots)
         .map_err(|_| CommandError::unavailable("authorized skill directories are unavailable"))?;
@@ -763,6 +1480,15 @@ pub fn skill_add_apply(
         backup_folder: &cached.backup_folder,
         recorder: &mut recorder,
     };
+    if let Some(progress) = progress {
+        progress.fraction(
+            0.15,
+            format!(
+                "Applying {} reviewed file operations",
+                cached.plan.change_set.ops.len()
+            ),
+        );
+    }
     let outcome = at_fs::changeset::apply_with_roots(&cached.plan.change_set, &mut context, &roots)
         .map_err(|error| match error {
             at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
@@ -775,10 +1501,16 @@ pub fn skill_add_apply(
             other => CommandError::from(other),
         })?;
     state.record_writes(&cached.plan.change_set, &cached.layout_root);
+    if let Some(progress) = progress {
+        progress.fraction(0.8, "Reviewed files applied");
+    }
     let mut staged = false;
     let mut staged_paths = Vec::new();
     let mut stage_error = None;
     if let (Some(stage), Some(repository)) = (&cached.plan.stage, &cached.repository) {
+        if let Some(progress) = progress {
+            progress.fraction(0.9, "Staging reviewed project paths in Git");
+        }
         let runner = at_git::ProcessLocalGitRunner::git();
         let refs = stage.paths.iter().map(String::as_str).collect::<Vec<_>>();
         match at_git::add_paths(&runner, repository, &refs) {
@@ -794,7 +1526,7 @@ pub fn skill_add_apply(
         }
     }
     Ok(SkillAddApplyResultView {
-        skill_name: cached.skill_name,
+        skill_names: cached.skill_names,
         operation_id: outcome.operation_id.clone(),
         paths_written: cached
             .plan
@@ -812,6 +1544,83 @@ pub fn skill_add_apply(
             cached.backup_folder.display()
         ),
     })
+}
+
+/// Applies one reviewed Add Skill plan without a progress job.
+///
+/// The Tauri command wraps the same body in a cancellable job; tests and future automation use
+/// this entry point so they exercise exactly the reviewed files and no second write path.
+///
+/// # Errors
+/// See [`skill_add_apply_start`]; a stale preview, an unconfirmed overwrite or a refused write
+/// is returned as a typed command error.
+pub fn skill_add_apply_inner(
+    state: &AppState,
+    request: SkillAddApplyRequest,
+) -> Result<SkillAddApplyResultView, CommandError> {
+    let cached = take_skill_add_plan(request)?;
+    apply_cached_skill_add(state, cached, None)
+}
+
+/// Starts applying the exact reviewed Add Skill plan as a progress-reporting job.
+#[tauri::command]
+pub fn skill_add_apply_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: SkillAddApplyRequest,
+) -> Result<SkillAddApplyJobStartView, CommandError> {
+    let cached = take_skill_add_plan(request)?;
+    let result_id = uuid::Uuid::now_v7().to_string();
+    let worker_result_id = result_id.clone();
+    let job = JobSpec::new("Create skill", move |progress| {
+        let worker_app = app.clone();
+        async move {
+            progress.message("Starting the reviewed skill apply");
+            let worker_progress = progress.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let state = worker_app.state::<AppState>();
+                apply_cached_skill_add(&state, cached, Some(&worker_progress))
+            })
+            .await
+            .map_err(|_| JobError::Failed {
+                message: "The skill apply worker stopped unexpectedly.".to_owned(),
+            })?
+            .map_err(|error| JobError::Failed {
+                message: error.message,
+            })?;
+            skill_add_results()
+                .lock()
+                .map_err(|_| JobError::Failed {
+                    message: "The skill result cache is unavailable.".to_owned(),
+                })?
+                .insert(worker_result_id, result);
+            progress.fraction(1.0, "Skill creation complete");
+            Ok(())
+        }
+    });
+    let handle = state
+        .bridge()
+        .spawn_job(job)
+        .map_err(|_| CommandError::unavailable("the background job service is unavailable"))?;
+    Ok(SkillAddApplyJobStartView {
+        job_id: handle.id().clone(),
+        result_id,
+    })
+}
+
+/// Consumes the successful result for a completed Add Skill apply job.
+#[tauri::command]
+pub fn skill_add_apply_result(result_id: String) -> Result<SkillAddApplyResultView, CommandError> {
+    skill_add_results()
+        .lock()
+        .map_err(|_| CommandError::internal("skill result cache is unavailable"))?
+        .remove(&result_id)
+        .ok_or_else(|| {
+            CommandError::new(
+                super::commands::CommandErrorCode::NotFound,
+                "the completed skill result is no longer available",
+            )
+        })
 }
 
 fn project_root(
@@ -844,24 +1653,28 @@ struct SkillPackageContext<'a> {
     target_project_id: Option<&'a str>,
     connection: &'a rusqlite::Connection,
     network: &'a NetworkState,
+    import_id: Option<&'a str>,
 }
 
-fn resolve_skill_package(
+struct ResolvedSkillPackage {
+    name: String,
+    package: SkillPackage,
+    source_path: Option<PathBuf>,
+    library_mode: Option<at_engine::skill_wizard::LibraryTransferMode>,
+}
+
+fn resolve_skill_packages(
     source: &SourceKind,
     context: SkillPackageContext<'_>,
-) -> Result<SkillPackage, CommandError> {
-    let SkillPackageContext {
-        wizard,
-        paths,
-        project_root,
-        target_scope,
-        target_project_id,
-        connection,
-        network,
-    } = context;
+) -> Result<Vec<ResolvedSkillPackage>, CommandError> {
     match source {
         SourceKind::New => {
-            let template = wizard.details.template.as_deref().unwrap_or("blank");
+            let template = context
+                .wizard
+                .details
+                .template
+                .as_deref()
+                .unwrap_or("blank");
             let template = SkillTemplate::ALL
                 .into_iter()
                 .find(|candidate| candidate.as_str() == template)
@@ -869,8 +1682,8 @@ fn resolve_skill_package(
                     CommandError::invalid_argument("template", "choose a supported template")
                 })?;
             let rendered = render_preview(&SkillDraft::new(
-                wizard.name.trim(),
-                wizard.details.description.trim(),
+                context.wizard.name.trim(),
+                context.wizard.details.description.trim(),
                 template,
             ));
             let mut package = SkillPackage::new();
@@ -879,251 +1692,18 @@ fn resolve_skill_package(
                 .map_err(|_| {
                     CommandError::invalid_argument("template", "could not build the skill document")
                 })?;
-            Ok(package)
+            Ok(vec![ResolvedSkillPackage {
+                name: context.wizard.name.trim().to_owned(),
+                package,
+                source_path: None,
+                library_mode: None,
+            }])
         }
-        SourceKind::Folder => {
-            let path = Path::new(wizard.details.folder_path.trim());
-            if path.as_os_str().is_empty() || !allowed_import_path(path, paths, project_root) {
-                return Err(CommandError::invalid_argument(
-                    "folder_path",
-                    "choose a folder under the current home or registered project",
-                ));
-            }
-            let candidates = at_engine::skill_import::import_folder(path).map_err(|_| {
-                CommandError::invalid_argument(
-                    "folder_path",
-                    "the selected folder could not be scanned",
-                )
-            })?;
-            let candidate = select_import_candidate(
-                &candidates,
-                wizard.details.folder_selection.as_deref(),
-                "folder_selection",
-            )?;
-            SkillPackage::read(&path.join(&candidate.subpath))
-                .map(|loaded| loaded.package)
-                .map_err(|_| {
-                    CommandError::invalid_argument(
-                        "folder_path",
-                        "the selected folder is not a safe skill package",
-                    )
-                })
+        SourceKind::Library => resolve_library_packages(context),
+        SourceKind::Git | SourceKind::Folder | SourceKind::Zip => {
+            resolve_import_session_packages(source, context)
         }
-        SourceKind::Library => {
-            let id = wizard.details.library_selection.as_deref().ok_or_else(|| {
-                CommandError::invalid_argument("library_selection", "choose a library skill")
-            })?;
-            let (_, candidates) = at_engine::skill_import::enumerate_registered_library(
-                connection,
-                paths.global_store(),
-                paths.user_store(),
-                target_scope,
-                target_project_id,
-                project_root,
-            )
-            .map_err(|_| CommandError::unavailable("the local skill library could not be read"))?;
-            if let Some(candidate) = candidates
-                .iter()
-                .find(|candidate| candidate.path.to_string_lossy() == id)
-            {
-                return SkillPackage::read(&candidate.path)
-                    .map(|loaded| loaded.package)
-                    .map_err(|_| {
-                        CommandError::unavailable(
-                            "the library skill package changed or is unreadable",
-                        )
-                    });
-            }
-            let parsed = id.parse::<at_model::ItemId>().map_err(|_| {
-                CommandError::invalid_argument(
-                    "library_selection",
-                    "the selected skill is no longer available",
-                )
-            })?;
-            let item = at_db::shared::items_by_ids(connection, std::slice::from_ref(&parsed))
-                .map_err(|_| CommandError::internal("could not read the skill library"))?
-                .into_iter()
-                .find(|item| item.kind == ItemKind::Skill)
-                .ok_or_else(|| {
-                    CommandError::invalid_argument(
-                        "library_selection",
-                        "the selected skill is no longer available",
-                    )
-                })?;
-            let path = item.source_path.as_deref().map(Path::new).ok_or_else(|| {
-                CommandError::unavailable("the library skill has no readable package path")
-            })?;
-            SkillPackage::read(path)
-                .map(|loaded| loaded.package)
-                .map_err(|_| {
-                    CommandError::unavailable("the library skill package changed or is unreadable")
-                })
-        }
-        SourceKind::Git => {
-            let url = wizard.details.repo_url.trim();
-            let Some(host) = url
-                .strip_prefix("https://")
-                .and_then(|rest| rest.split('/').next())
-                .filter(|host| !host.is_empty() && !host.contains('@'))
-            else {
-                return Err(CommandError::invalid_argument(
-                    "repo_url",
-                    "enter a valid HTTPS Git URL",
-                ));
-            };
-            network
-                .authorize(NetworkAction::GitClone, host, NetworkTrigger::User)
-                .map_err(|_| {
-                    CommandError::unavailable(
-                        "Network policy refused this Git source. Enable Git access and retry.",
-                    )
-                })?;
-            let policy = network.policy();
-            let mut log = NetworkEventLog::default();
-            let imported = at_engine::skill_import::import_git(
-                url,
-                nonempty(&wizard.details.repo_reference),
-                paths.cache_dir(),
-                &policy,
-                &mut log,
-            )
-            .map_err(|_| {
-                CommandError::unavailable(
-                    "Git source could not be cloned. Check the URL, access and network policy.",
-                )
-            })?;
-            let selection = wizard
-                .details
-                .fetched_repo_selection
-                .as_deref()
-                .ok_or_else(|| {
-                    CommandError::invalid_argument(
-                        "fetched_repo_selection",
-                        "select a skill from the repository",
-                    )
-                })?;
-            let candidate = imported
-                .candidates
-                .iter()
-                .find(|candidate| candidate.subpath == Path::new(selection) && candidate.is_valid())
-                .ok_or_else(|| {
-                    CommandError::invalid_argument(
-                        "fetched_repo_selection",
-                        "the selected repository skill is no longer valid",
-                    )
-                })?;
-            SkillPackage::read(&imported.repository_root().join(&candidate.subpath))
-                .map(|loaded| loaded.package)
-                .map_err(|_| {
-                    CommandError::unavailable(
-                        "the selected Git skill package changed during preview",
-                    )
-                })
-        }
-        SourceKind::Zip => {
-            let path = Path::new(wizard.details.zip_path.trim());
-            if path.as_os_str().is_empty() || !allowed_import_path(path, paths, project_root) {
-                return Err(CommandError::invalid_argument(
-                    "zip_path",
-                    "choose an archive under the current home or registered project",
-                ));
-            }
-            let imported =
-                at_engine::skill_import::import_zip(path, paths.cache_dir()).map_err(|_| {
-                    CommandError::invalid_argument(
-                        "zip_path",
-                        "the ZIP archive is invalid or unsafe",
-                    )
-                })?;
-            let candidate = select_import_candidate(
-                &imported.candidates,
-                wizard.details.zip_selection.as_deref(),
-                "zip_selection",
-            )?;
-            SkillPackage::read(&imported.staging_root().join(&candidate.subpath))
-                .map(|loaded| loaded.package)
-                .map_err(|_| CommandError::unavailable("the extracted skill package is unreadable"))
-        }
-        SourceKind::Marketplace => {
-            let id = wizard.details.marketplace_id.trim();
-            let mut id_parts = id.split('/');
-            let (Some(author), Some(repository), Some(skill_name)) =
-                (id_parts.next(), id_parts.next(), id_parts.next())
-            else {
-                return Err(CommandError::invalid_argument(
-                    "marketplace_id",
-                    "select a valid marketplace listing",
-                ));
-            };
-            if id_parts.next().is_some()
-                || [author, repository, skill_name]
-                    .iter()
-                    .any(|part| part.is_empty())
-            {
-                return Err(CommandError::invalid_argument(
-                    "marketplace_id",
-                    "select a valid marketplace listing",
-                ));
-            }
-            let listing = at_git::marketplace::MarketplaceSkill {
-                id: id.to_owned(),
-                name: wizard.name.clone(),
-                description: String::new(),
-                author: author.to_owned(),
-                installs: 0,
-                source_url: format!("https://github.com/{author}/{repository}"),
-                updated_at: None,
-            };
-            let url = at_git::marketplace::MarketplaceClient::authorize_install(
-                &listing,
-                &network.policy(),
-            )
-            .map_err(|_| {
-                CommandError::unavailable("Network policy refused this marketplace install.")
-            })?;
-            let host = "github.com";
-            network
-                .authorize(NetworkAction::GitClone, host, NetworkTrigger::User)
-                .map_err(|_| {
-                    CommandError::unavailable("Git clone access is disabled by network policy.")
-                })?;
-            let policy = network.policy();
-            let mut log = NetworkEventLog::default();
-            let imported = at_engine::skill_import::import_git(
-                url,
-                None,
-                paths.cache_dir(),
-                &policy,
-                &mut log,
-            )
-            .map_err(|_| {
-                CommandError::unavailable("Marketplace skill source could not be fetched.")
-            })?;
-            let candidate = imported
-                .candidates
-                .iter()
-                .find(|candidate| {
-                    candidate.is_valid()
-                        && (candidate
-                            .name
-                            .as_deref()
-                            .is_some_and(|name| name.eq_ignore_ascii_case(skill_name))
-                            || candidate.subpath.file_name().is_some_and(|name| {
-                                name.to_string_lossy().eq_ignore_ascii_case(skill_name)
-                            }))
-                })
-                .ok_or_else(|| {
-                    CommandError::invalid_argument(
-                        "marketplace_id",
-                        "the selected marketplace skill was not found in its repository",
-                    )
-                })?;
-            SkillPackage::read(&imported.repository_root().join(&candidate.subpath))
-                .map(|loaded| loaded.package)
-                .map_err(|_| {
-                    CommandError::unavailable("the marketplace skill package is unreadable")
-                })
-        }
+        SourceKind::Marketplace => resolve_marketplace_package(context),
         _ => Err(CommandError::invalid_argument(
             "source",
             "choose a supported skill source",
@@ -1131,24 +1711,300 @@ fn resolve_skill_package(
     }
 }
 
-fn select_import_candidate<'a>(
-    candidates: &'a [at_engine::skill_import::SkillImportCandidate],
-    selection: Option<&str>,
-    argument: &str,
-) -> Result<&'a at_engine::skill_import::SkillImportCandidate, CommandError> {
-    let valid = candidates
-        .iter()
-        .filter(|candidate| candidate.is_valid())
-        .collect::<Vec<_>>();
-    let selected = match selection {
-        Some(selection) => valid
-            .into_iter()
-            .find(|candidate| candidate.subpath == Path::new(selection)),
-        None if valid.len() == 1 => valid.first().copied(),
-        None => None,
+fn resolve_library_packages(
+    context: SkillPackageContext<'_>,
+) -> Result<Vec<ResolvedSkillPackage>, CommandError> {
+    let SkillPackageContext {
+        wizard,
+        paths,
+        project_root,
+        target_scope,
+        target_project_id,
+        connection,
+        ..
+    } = context;
+    if wizard.details.library_selections.is_empty() {
+        return Err(CommandError::invalid_argument(
+            "library_selections",
+            "select at least one valid library skill",
+        ));
+    }
+    let (_, candidates) = at_engine::skill_import::enumerate_registered_library(
+        connection,
+        paths.global_store(),
+        paths.user_store(),
+        target_scope,
+        target_project_id,
+        project_root,
+    )
+    .map_err(|_| CommandError::unavailable("the local skill library could not be read"))?;
+    let mode = wizard.details.library_mode;
+    let mut selections =
+        std::collections::HashSet::with_capacity(wizard.details.library_selections.len());
+    let mut packages = Vec::with_capacity(wizard.details.library_selections.len());
+    for id in &wizard.details.library_selections {
+        if !selections.insert(id) {
+            return Err(CommandError::invalid_argument(
+                "library_selections",
+                "a library skill may only be selected once",
+            ));
+        }
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.path.to_string_lossy() == id.as_str())
+            .filter(|candidate| candidate.error.is_none())
+            .ok_or_else(|| {
+                CommandError::invalid_argument(
+                    "library_selections",
+                    "a selected library skill is no longer available",
+                )
+            })?;
+        let name = candidate.name.as_deref().ok_or_else(|| {
+            CommandError::invalid_argument(
+                "library_selections",
+                "a selected library skill is invalid",
+            )
+        })?;
+        let source_root = candidate
+            .source_root
+            .canonicalize()
+            .map_err(|_| CommandError::unavailable("the library source is no longer readable"))?;
+        let source_path = candidate.path.canonicalize().map_err(|_| {
+            CommandError::unavailable("the library skill package is no longer readable")
+        })?;
+        if !source_path.starts_with(&source_root) {
+            return Err(CommandError::invalid_argument(
+                "library_selections",
+                "a library skill resolves outside its registered source",
+            ));
+        }
+        let package = SkillPackage::read(&source_path)
+            .map(|loaded| loaded.package)
+            .map_err(|_| {
+                CommandError::unavailable("the library skill package changed or is unreadable")
+            })?;
+        packages.push(ResolvedSkillPackage {
+            name: name.to_owned(),
+            package,
+            source_path: Some(source_path),
+            library_mode: Some(mode),
+        });
+    }
+    Ok(packages)
+}
+
+fn resolve_import_session_packages(
+    source: &SourceKind,
+    context: SkillPackageContext<'_>,
+) -> Result<Vec<ResolvedSkillPackage>, CommandError> {
+    let wizard = context.wizard;
+    let selections = match source {
+        SourceKind::Git => &wizard.details.fetched_repo_selections,
+        SourceKind::Folder => &wizard.details.folder_selections,
+        SourceKind::Zip => &wizard.details.zip_selections,
+        _ => {
+            return Err(CommandError::invalid_argument(
+                "source",
+                "choose a Git, folder or ZIP import",
+            ));
+        }
     };
-    selected
-        .ok_or_else(|| CommandError::invalid_argument(argument, "choose one valid skill candidate"))
+    if selections.is_empty() {
+        return Err(CommandError::invalid_argument(
+            "selections",
+            "select at least one valid imported skill",
+        ));
+    }
+    let import_id = context.import_id.ok_or_else(|| {
+        CommandError::invalid_argument("import_id", "fetch or scan the source before reviewing")
+    })?;
+    validate_import_id(import_id)?;
+    let sessions = skill_import_sessions()
+        .lock()
+        .map_err(|_| CommandError::internal("skill import sessions are unavailable"))?;
+    let session = sessions.get(import_id).ok_or_else(|| {
+        CommandError::invalid_argument(
+            "import_id",
+            "the import session expired; fetch or scan the source again",
+        )
+    })?;
+    if !session.source.matches_source(source) {
+        return Err(CommandError::invalid_argument(
+            "import_id",
+            "the current import session belongs to another source",
+        ));
+    }
+    let root = session.source.candidate_root();
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| CommandError::unavailable("the imported source is no longer available"))?;
+    let mut unique_selections = std::collections::HashSet::with_capacity(selections.len());
+    let mut packages = Vec::with_capacity(selections.len());
+    for selection in selections {
+        if !unique_selections.insert(selection) {
+            return Err(CommandError::invalid_argument(
+                "selections",
+                "an imported skill may only be selected once",
+            ));
+        }
+        let candidate = session
+            .source_candidates
+            .iter()
+            .find(|candidate| candidate.subpath.to_string_lossy().replace('\\', "/") == *selection)
+            .filter(|candidate| candidate.is_valid())
+            .ok_or_else(|| {
+                CommandError::invalid_argument(
+                    "selections",
+                    "a selected imported skill is no longer valid",
+                )
+            })?;
+        let candidate_dir = root.join(&candidate.subpath);
+        let metadata = std::fs::symlink_metadata(&candidate_dir).map_err(|_| {
+            CommandError::unavailable("the selected imported skill is no longer readable")
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CommandError::invalid_argument(
+                "selections",
+                "the selected imported skill is no longer a regular folder",
+            ));
+        }
+        let source_path = candidate_dir.canonicalize().map_err(|_| {
+            CommandError::unavailable("the selected imported skill is no longer readable")
+        })?;
+        if !source_path.starts_with(&canonical_root) {
+            return Err(CommandError::invalid_argument(
+                "selections",
+                "the selected imported skill resolves outside its source",
+            ));
+        }
+        let name = candidate.name.as_deref().ok_or_else(|| {
+            CommandError::invalid_argument("selections", "a selected imported skill is invalid")
+        })?;
+        let package = SkillPackage::read(&source_path)
+            .map(|loaded| loaded.package)
+            .map_err(|_| {
+                CommandError::unavailable("the selected imported skill package is unreadable")
+            })?;
+        packages.push(ResolvedSkillPackage {
+            name: name.to_owned(),
+            package,
+            source_path: Some(source_path),
+            library_mode: None,
+        });
+    }
+    Ok(packages)
+}
+
+fn resolve_marketplace_package(
+    context: SkillPackageContext<'_>,
+) -> Result<Vec<ResolvedSkillPackage>, CommandError> {
+    let wizard = context.wizard;
+    let id = wizard.details.marketplace_id.trim();
+    let mut id_parts = id.split('/');
+    let (Some(author), Some(repository), Some(skill_name)) =
+        (id_parts.next(), id_parts.next(), id_parts.next())
+    else {
+        return Err(CommandError::invalid_argument(
+            "marketplace_id",
+            "select a valid marketplace listing",
+        ));
+    };
+    if id_parts.next().is_some()
+        || [author, repository, skill_name]
+            .iter()
+            .any(|part| part.is_empty())
+    {
+        return Err(CommandError::invalid_argument(
+            "marketplace_id",
+            "select a valid marketplace listing",
+        ));
+    }
+    let listing = at_git::marketplace::MarketplaceSkill {
+        id: id.to_owned(),
+        name: wizard.name.clone(),
+        description: String::new(),
+        author: author.to_owned(),
+        installs: 0,
+        source_url: format!("https://github.com/{author}/{repository}"),
+        updated_at: None,
+    };
+    let url = at_git::marketplace::MarketplaceClient::authorize_install(
+        &listing,
+        &context.network.policy(),
+    )
+    .map_err(|_| CommandError::unavailable("Network policy refused this marketplace install."))?;
+    context
+        .network
+        .authorize(NetworkAction::GitClone, "github.com", NetworkTrigger::User)
+        .map_err(|_| {
+            CommandError::unavailable("Git clone access is disabled by network policy.")
+        })?;
+    let policy = context.network.policy();
+    let mut log = NetworkEventLog::default();
+    let imported = at_engine::skill_import::import_git(
+        url,
+        None,
+        context.paths.cache_dir(),
+        &policy,
+        &mut log,
+    )
+    .map_err(|_| CommandError::unavailable("Marketplace skill source could not be fetched."))?;
+    let candidate = imported
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.is_valid()
+                && (candidate
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(skill_name))
+                    || candidate.subpath.file_name().is_some_and(|name| {
+                        name.to_string_lossy().eq_ignore_ascii_case(skill_name)
+                    }))
+        })
+        .ok_or_else(|| {
+            CommandError::invalid_argument(
+                "marketplace_id",
+                "the selected marketplace skill was not found in its repository",
+            )
+        })?;
+    let package = SkillPackage::read(&imported.repository_root().join(&candidate.subpath))
+        .map(|loaded| loaded.package)
+        .map_err(|_| CommandError::unavailable("the marketplace skill package is unreadable"))?;
+    Ok(vec![ResolvedSkillPackage {
+        name: wizard.name.trim().to_owned(),
+        package,
+        source_path: None,
+        library_mode: None,
+    }])
+}
+
+fn merge_skill_add_plans(
+    current: &mut Option<at_engine::skill_add_plan::SkillAddFilePlan>,
+    mut next: at_engine::skill_add_plan::SkillAddFilePlan,
+) -> Result<(), CommandError> {
+    let Some(current) = current else {
+        *current = Some(next);
+        return Ok(());
+    };
+    if current.scope != next.scope
+        || current.stage_available != next.stage_available
+        || current.stage.is_some() != next.stage.is_some()
+    {
+        return Err(CommandError::internal(
+            "selected skill plans cannot be combined safely",
+        ));
+    }
+    current.files.append(&mut next.files);
+    current.deployments.append(&mut next.deployments);
+    current.overwrites.append(&mut next.overwrites);
+    current.change_set.ops.append(&mut next.change_set.ops);
+    if let (Some(current_stage), Some(next_stage)) = (&mut current.stage, next.stage) {
+        current_stage.paths.extend(next_stage.paths);
+        current_stage.paths.sort();
+        current_stage.paths.dedup();
+    }
+    Ok(())
 }
 
 fn allowed_import_path(
@@ -1161,11 +2017,6 @@ fn allowed_import_path(
     };
     paths.home_dir().is_some_and(|home| path.starts_with(home))
         || project_root.is_some_and(|project| path.starts_with(project))
-}
-
-fn nonempty(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()).then_some(value)
 }
 
 pub(super) fn existing_authorized_ancestor(path: &Path) -> Result<PathBuf, CommandError> {
@@ -1205,4 +2056,25 @@ fn deployment_views(
             },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod import_git_host_tests {
+    use super::import_git_host;
+
+    #[test]
+    fn embedded_credentials_and_empty_hosts_are_refused() {
+        for url in [
+            "https://user:secret@example.invalid/repo.git",
+            "https://token@example.invalid/repo.git",
+            "https:///repo.git",
+            "ssh://example.invalid/repo.git",
+        ] {
+            assert!(import_git_host(url).is_err(), "{url} must be refused");
+        }
+        assert_eq!(
+            import_git_host("https://example.invalid/repo.git").unwrap_or_default(),
+            "example.invalid"
+        );
+    }
 }

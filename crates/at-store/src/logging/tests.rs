@@ -64,9 +64,20 @@ fn read_logs(dir: &Path) -> String {
     out
 }
 
-fn settle() {
-    // fmt writes synchronously on the calling thread; a short sleep covers writer flush.
-    std::thread::sleep(Duration::from_millis(50));
+/// Reads until `ready` accepts the value, so no assertion depends on a fixed sleep.
+///
+/// The file appender writes synchronously on the calling thread, so the first read normally
+/// carries everything; the bound only covers a file system that is still flushing on a loaded
+/// machine.
+fn settle<T>(read: impl Fn() -> T, ready: impl Fn(&T) -> bool) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let value = read();
+        if ready(&value) || std::time::Instant::now() >= deadline {
+            return value;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]
@@ -123,9 +134,10 @@ fn redaction_masks_known_secret_and_preserves_var_reference() {
             "redaction probe"
         );
     });
-    settle();
-
-    let text = read_logs(&log_dir);
+    let text = settle(
+        || read_logs(&log_dir),
+        |text| text.contains("redaction probe"),
+    );
     assert!(
         !text.contains(secret),
         "secret value leaked into log:\n{text}"
@@ -171,9 +183,10 @@ fn set_level_takes_effect_through_reload_handle() {
             "after-reload error"
         );
     });
-    settle();
-
-    let text = read_logs(&log_dir);
+    let text = settle(
+        || read_logs(&log_dir),
+        |text| text.contains("after-reload error"),
+    );
     assert!(
         text.contains("before-reload info"),
         "info line missing:\n{text}"
@@ -204,9 +217,10 @@ fn rust_log_env_var_makes_set_level_a_no_op() {
             "debug survives settings change"
         );
     });
-    settle();
-
-    let text = read_logs(&log_dir);
+    let text = settle(
+        || read_logs(&log_dir),
+        |text| text.contains("debug survives settings change"),
+    );
     assert!(
         text.contains("debug survives settings change"),
         "RUST_LOG=debug was overridden by set_level:\n{text}"
@@ -295,9 +309,10 @@ fn read_only_log_dir_falls_back_to_stderr_and_still_logs() {
             "stderr fallback probe"
         );
     });
-    settle();
-
-    let text = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+    let text = settle(
+        || String::from_utf8_lossy(&captured.lock().unwrap()).into_owned(),
+        |text| text.contains("stderr fallback probe") || text.contains("AgenTuna started"),
+    );
     assert!(
         text.contains("stderr fallback probe") || text.contains("AgenTuna started"),
         "stderr fallback produced no output:\n{text}"
@@ -319,9 +334,7 @@ fn json_mode_emits_parseable_objects() {
             "json probe"
         );
     });
-    settle();
-
-    let text = read_logs(&log_dir);
+    let text = settle(|| read_logs(&log_dir), |text| text.contains("json probe"));
     let line = text
         .lines()
         .find(|l| l.contains("json probe"))
@@ -350,8 +363,7 @@ fn daily_rollover_uses_injected_clock() {
         *clock.lock().unwrap() = datetime!(2026-11-06 00:01 UTC);
         tracing::info!(target: "at_store::logging::tests::rollover", "day two");
     });
-    settle();
-
+    let _ = settle(|| read_logs(&log_dir), |text| text.contains("day two"));
     let day1_file = log_dir.join("agentuna-2026-11-05.log");
     let day2_file = log_dir.join("agentuna-2026-11-06.log");
     assert!(day1_file.exists(), "day-1 file missing");
@@ -374,8 +386,10 @@ fn rust_log_overrides_settings_level() {
             "debug via rust_log"
         );
     });
-    settle();
-    let text = read_logs(&log_dir);
+    let text = settle(
+        || read_logs(&log_dir),
+        |text| text.contains("debug via rust_log"),
+    );
     assert!(
         text.contains("debug via rust_log"),
         "RUST_LOG=debug ignored:\n{text}"
@@ -395,8 +409,9 @@ fn panic_inside_instrumented_scope_writes_error_with_location() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 
+    let job_id = "job_testpanic0000000000000000000000";
     let result = tracing::dispatcher::with_default(&dispatch, || {
-        let span = crate::logging::job_span("job_testpanic0000000000000000000000", "panic-job");
+        let span = crate::logging::job_span(job_id, "panic-job");
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _entered = span.enter();
             panic!("deliberate test panic");
@@ -404,9 +419,17 @@ fn panic_inside_instrumented_scope_writes_error_with_location() {
     });
     assert!(result.is_err(), "panic was not caught");
     std::panic::set_hook(previous);
-    settle();
-
-    let text = read_logs(&log_dir);
+    // The process keeps running after the caught panic, and its next event is logged.
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::info!(job_id = %job_id, "process continued after the panic");
+    });
+    let text = settle(
+        || read_logs(&log_dir),
+        |text| {
+            (text.contains("A panic occurred") || text.contains("deliberate test panic"))
+                && text.contains("process continued after the panic")
+        },
+    );
     assert!(
         text.contains("A panic occurred") || text.contains("deliberate test panic"),
         "panic ERROR entry missing:\n{text}"
@@ -418,6 +441,25 @@ fn panic_inside_instrumented_scope_writes_error_with_location() {
     assert!(
         text.contains("panic.location") || text.contains("logging/tests.rs"),
         "panic location missing:\n{text}"
+    );
+    assert!(
+        text.contains(job_id),
+        "panic entry must carry the enclosing job span's job id:\n{text}"
+    );
+    let panic_entries = text
+        .lines()
+        .filter(|line| {
+            line.contains("ERROR")
+                && (line.contains("deliberate test panic") || line.contains("A panic occurred"))
+        })
+        .count();
+    assert_eq!(
+        panic_entries, 1,
+        "one ERROR entry per panic, not a cascade:\n{text}"
+    );
+    assert!(
+        text.contains("process continued after the panic"),
+        "the process must keep logging after the panic:\n{text}"
     );
 }
 

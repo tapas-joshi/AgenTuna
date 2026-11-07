@@ -94,6 +94,8 @@ export interface DataTableProps<TData extends RowData> {
   readonly emptyState?: ReactNode;
   /** Row actions slot, for example a {@link RowMenuTrigger}. */
   readonly rowActions?: (row: TData) => ReactNode;
+  /** Lifts a row above virtualized siblings while its action menu is open. */
+  readonly rowActionsOpen?: (row: TData) => boolean;
   /** Tooltip for the whole row, for example the scope that shadows it. */
   readonly rowTooltip?: (row: TData) => string | undefined;
   /** `dimmed` renders shadowed rows at reduced emphasis. */
@@ -147,6 +149,7 @@ export function DataTable<TData extends RowData>({
   emptyAction,
   emptyState,
   rowActions,
+  rowActionsOpen,
   rowTooltip,
   rowTone,
   onRowActivate,
@@ -268,6 +271,7 @@ export function DataTable<TData extends RowData>({
 
   const headerSelection = (
     <div role="columnheader" className="flex items-center justify-center" aria-label="Selection">
+      <span className="sr-only">Selection</span>
       <Checkbox
         aria-label={`Select all ${rows.length} rows`}
         checked={bulkState === "all" ? true : bulkState === "some" ? "indeterminate" : false}
@@ -343,7 +347,9 @@ export function DataTable<TData extends RowData>({
               );
             })}
             {rowActions === undefined ? null : (
-              <div role="columnheader" aria-label="Row actions" className="px-4" />
+              <div role="columnheader" aria-label="Row actions" className="px-4">
+                <span className="sr-only">Row actions</span>
+              </div>
             )}
           </div>
         </div>
@@ -406,6 +412,10 @@ export function DataTable<TData extends RowData>({
                 onDoubleClick={() => onRowActivate?.(row.original)}
                 onFocus={() => setActiveIndex(item.index)}
                 onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+                  const target = event.target;
+                  if (target instanceof Element && target.closest(ROW_INTERACTIVE_SELECTOR) !== null) {
+                    return;
+                  }
                   switch (event.key) {
                     case "ArrowDown":
                       event.preventDefault();
@@ -451,6 +461,7 @@ export function DataTable<TData extends RowData>({
                 style={{
                   gridTemplateColumns: gridTemplate,
                   height: rowHeight,
+                  zIndex: rowActionsOpen?.(row.original) ? 1 : undefined,
                   transform: `translateY(${item.start}px)`,
                 }}
                 className={cn(

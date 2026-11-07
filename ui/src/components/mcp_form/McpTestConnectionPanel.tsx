@@ -32,7 +32,7 @@ export function McpTestConnectionPanel({
   return (
     <section aria-labelledby="mcp-test-heading" className="grid gap-8" data-slot="mcp-test-panel">
       <div className="flex items-center justify-between gap-8">
-        <h3 id="mcp-test-heading" className="text-13 font-semibold text-text">Test connection</h3>
+        <h2 id="mcp-test-heading" className="text-13 font-semibold text-text">Test connection</h2>
         {stale && <span role="status" className="text-11 text-warning">Test result is stale</span>}
       </div>
       {running ? (

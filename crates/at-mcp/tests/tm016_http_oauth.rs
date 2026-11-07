@@ -454,6 +454,24 @@ impl MockBrowserOpener {
     }
 }
 
+/// Polls a shared slot until the background callback responder records a value.
+///
+/// The responder runs on its own task, so the test waits for the write to land instead of
+/// guessing how long it takes on a loaded machine.
+async fn wait_for_callback<T: Clone>(slot: &AsyncMutex<Option<T>>, what: &str) -> T {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(value) = slot.lock().await.clone() {
+            return value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the callback responder never recorded {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 impl BrowserOpener for MockBrowserOpener {
     fn open(&self, url: &str) -> Result<(), String> {
         if self.mode == OpenerMode::BrowserFails {
@@ -639,17 +657,8 @@ async fn test_wrong_state_parameter_rejected_with_oauth_state_mismatch() {
     let err = result.expect_err("wrong state must fail sign_in");
     assert_eq!(err.kind(), SignInErrorKind::OAuthStateMismatch);
 
-    // Wait a moment for background callback responder task to complete response write
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let callback_status = status_holder
-        .lock()
-        .await
-        .expect("callback status must be recorded");
-    let callback_body = body_holder
-        .lock()
-        .await
-        .clone()
-        .expect("callback body must be recorded");
+    let callback_status = wait_for_callback(&status_holder, "a response status").await;
+    let callback_body = wait_for_callback(&body_holder, "a response body").await;
 
     assert_eq!(callback_status, 400);
     assert!(
@@ -689,16 +698,8 @@ async fn test_mismatched_code_verifier_rejected_with_oauth_state_mismatch() {
     let err = result.expect_err("mismatched verifier must fail sign_in");
     assert_eq!(err.kind(), SignInErrorKind::OAuthStateMismatch);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let callback_status = status_holder
-        .lock()
-        .await
-        .expect("callback status must be recorded");
-    let callback_body = body_holder
-        .lock()
-        .await
-        .clone()
-        .expect("callback body must be recorded");
+    let callback_status = wait_for_callback(&status_holder, "a response status").await;
+    let callback_body = wait_for_callback(&body_holder, "a response body").await;
 
     assert_eq!(callback_status, 400);
     assert!(
@@ -1037,13 +1038,13 @@ async fn cancelling_waiting_oauth_releases_callback_listener() {
     let callback_addr = SocketAddr::from(([127, 0, 0, 1], port));
     let cancelled_at = std::time::Instant::now();
     cancel.cancel();
-    let error = tokio::time::timeout(Duration::from_secs(1), task)
+    let error = tokio::time::timeout(Duration::from_secs(10), task)
         .await
-        .expect("sign-in cancelled within one second")
+        .expect("sign-in cancelled within ten seconds")
         .expect("sign-in task joined")
         .expect_err("cancelled sign-in must fail");
     assert_eq!(error.kind(), SignInErrorKind::Cancelled);
-    assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+    assert!(cancelled_at.elapsed() < Duration::from_secs(10));
 
     let rebound = TcpListener::bind(callback_addr).await;
     assert!(

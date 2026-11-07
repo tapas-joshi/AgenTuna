@@ -11,17 +11,23 @@
 //!   reported even when the store is read-only or absent. The Global store is never a lock source.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use at_db::Database;
 use at_fs::privilege::{
     Elevator, EnableError, EnableOutcome, GlobalStore, GlobalStoreStatus, GlobalWriteError,
     StoreOwner, enable_global_writes, platform_elevator,
 };
 use at_fs::{WriteOutcome, WriteRequest};
-use at_model::Lock;
+use at_model::{Lock, Scope};
 use at_store::paths::{AppPaths, GlobalStoreSource};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use ts_rs::TS;
 
 use super::bridge::OperationsLogError;
+use super::commands::CommandError;
+use super::state::AppState;
 
 /// Reads Global locks from the `locks` table.
 ///
@@ -224,7 +230,17 @@ impl GlobalStoreService {
     /// [`EnableError`] when the path is invalid, the prompt is cancelled or denied, elevation is
     /// unsupported, the privileged command fails, or success is not observable afterwards.
     pub fn enable_global_writes(&self) -> Result<EnableOutcome, EnableError> {
-        enable_global_writes(self.path(), StoreOwner::current(), self.elevator.as_ref())
+        let outcome =
+            enable_global_writes(self.path(), StoreOwner::current(), self.elevator.as_ref())?;
+        // The authorization prompt is the audit-worthy event: it changes no item file, so the
+        // row carries no file entries and its absence of files is what the summary reports.
+        if let Err(error) = self.operation_log.record(&GlobalWriteOperation {
+            root: self.path().to_path_buf(),
+            files: Vec::new(),
+        }) {
+            tracing::warn!(%error, "could not record the Global store authorization");
+        }
+        Ok(outcome)
     }
 
     /// Writes inside the Global store after the read-only gate.
@@ -246,4 +262,246 @@ impl GlobalStoreService {
         }
         Ok(outcome)
     }
+}
+
+/// Reads Global locks from the `locks` table through the shared database handle.
+///
+/// TA-080: the Overview card shows exactly the rows the resolver enforces. A store that is
+/// read-only or absent still lists its locks, because locks live in SQLite.
+#[derive(Debug, Clone)]
+pub struct DatabaseGlobalLockReader {
+    database: Arc<Mutex<Database>>,
+}
+
+impl DatabaseGlobalLockReader {
+    /// Wraps the shared index handle.
+    #[must_use]
+    pub fn new(database: Arc<Mutex<Database>>) -> Self {
+        Self { database }
+    }
+}
+
+impl GlobalLockReader for DatabaseGlobalLockReader {
+    fn global_locks(&self) -> Result<Vec<Lock>, LockReadError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| LockReadError::new("lock index is unavailable"))?;
+        let rows = at_db::locks::locks_for_scope(database.connection(), Scope::Global)
+            .map_err(|error| LockReadError::new(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| {
+                let locked_at = OffsetDateTime::parse(
+                    &row.locked_at,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map_err(|error| {
+                    LockReadError::new(format!(
+                        "lock {} has an unreadable timestamp: {error}",
+                        row.id
+                    ))
+                })?;
+                Ok(Lock {
+                    scope: row.scope,
+                    item_id: row.item_id,
+                    reason: row.reason.unwrap_or_default(),
+                    locked_by: row.locked_by.unwrap_or_default(),
+                    locked_at,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Records a Global write (or the one-shot authorization that prepared the store) in `operations`.
+///
+/// The row is the audit trail of an elevated scope: it proves what happened after the OS prompt.
+/// A record failure never fails the action that produced it, because the bytes are already in
+/// place by then.
+#[derive(Debug, Clone)]
+pub struct DatabaseGlobalOperationLog {
+    database: Arc<Mutex<Database>>,
+}
+
+impl DatabaseGlobalOperationLog {
+    /// Wraps the shared index handle.
+    #[must_use]
+    pub fn new(database: Arc<Mutex<Database>>) -> Self {
+        Self { database }
+    }
+}
+
+impl GlobalOperationLog for DatabaseGlobalOperationLog {
+    fn record(&self, operation: &GlobalWriteOperation) -> Result<(), OperationsLogError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| OperationsLogError::new("operation log is unavailable"))?;
+        let kind = at_db::ops::OperationKind::GlobalWrite;
+        let actor = at_db::ops::OperationActor::Ui;
+        if operation.files.is_empty() {
+            at_db::ops::record_completed(
+                database.connection(),
+                kind,
+                actor,
+                Some("Enabled Global writes"),
+            )
+            .map(|_| ())
+            .map_err(|error| OperationsLogError::new(error.to_string()))
+        } else {
+            let paths = operation
+                .files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            let files = paths
+                .iter()
+                .map(|path| at_db::ops::TouchedFile {
+                    path,
+                    action: at_db::ops::FileAction::Modified,
+                    before_hash: None,
+                    after_hash: None,
+                    backup_id: None,
+                    bytes_before: None,
+                    bytes_after: None,
+                })
+                .collect::<Vec<_>>();
+            let summary = format!(
+                "Wrote {} file(s) into the Global store",
+                operation.files.len()
+            );
+            let new = at_db::ops::NewOperation::new(kind, actor)
+                .with_scope(Scope::Global)
+                .with_summary(&summary);
+            at_db::ops::record(
+                database.connection(),
+                &new,
+                &files,
+                at_db::ops::OperationStatus::Succeeded,
+                None,
+            )
+            .map(|_| ())
+            .map_err(|error| OperationsLogError::new(error.to_string()))
+        }
+    }
+}
+
+/// One lock row rendered on the Global card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct GlobalLockView {
+    /// Locked item.
+    pub item_id: String,
+    /// Scope holding the pinned definition.
+    pub scope: String,
+    /// Recorded reason.
+    pub reason: String,
+}
+
+/// The Global Scope card's payload: resolved path, provenance, availability and locks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct GlobalStoreView {
+    /// Resolved Global store directory; never a hard-coded literal.
+    pub path: String,
+    /// Where the path came from (`environment`, `settings` or `default`).
+    pub source: String,
+    /// `available`, `read_only` or `unavailable`.
+    pub status: String,
+    /// Why writes are unavailable, when they are.
+    pub reason: Option<String>,
+    /// Whether the read-only banner and the "Enable global writes" action are required.
+    pub needs_elevation: bool,
+    /// Locks read from the `locks` table, shown whatever the status is.
+    pub locks: Vec<GlobalLockView>,
+}
+
+impl From<GlobalOverview> for GlobalStoreView {
+    fn from(overview: GlobalOverview) -> Self {
+        Self {
+            path: overview.path.display().to_string(),
+            source: overview.source.as_str().to_owned(),
+            status: overview.status.state().to_owned(),
+            reason: overview.status.reason().map(str::to_owned),
+            needs_elevation: overview.needs_elevation(),
+            locks: overview
+                .locks
+                .into_iter()
+                .map(|lock| GlobalLockView {
+                    item_id: lock.item_id.to_string(),
+                    scope: lock.scope.to_string(),
+                    reason: lock.reason,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Builds the shell's Global scope service for the current state.
+///
+/// # Errors
+/// [`super::commands::CommandErrorCode::Unavailable`] when the index or the resolved paths are missing.
+pub fn service(state: &AppState) -> Result<GlobalStoreService, CommandError> {
+    let database = state
+        .database_handle()
+        .map_err(|_| CommandError::unavailable("database unavailable"))?;
+    let settings = {
+        let guard = database
+            .lock()
+            .map_err(|_| CommandError::unavailable("database unavailable"))?;
+        at_db::settings::load(guard.connection()).map_err(|error| {
+            CommandError::internal(format!("cannot read path settings: {error}"))
+        })?
+    };
+    let mut paths = state
+        .paths()
+        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?
+        .clone();
+    paths.apply_settings_global_store(settings.global_store_path());
+    Ok(GlobalStoreService::with_platform_elevator(paths)
+        .with_operation_log(Arc::new(DatabaseGlobalOperationLog::new(database))))
+}
+
+/// Reads the Global Scope card payload for the current application state.
+///
+/// # Errors
+/// [`super::commands::CommandErrorCode::Unavailable`] when the index or the resolved paths are missing,
+/// [`super::commands::CommandErrorCode::Internal`] when the lock rows cannot be read.
+pub fn overview_for_state(state: &AppState) -> Result<GlobalStoreView, CommandError> {
+    let database = state
+        .database_handle()
+        .map_err(|_| CommandError::unavailable("database unavailable"))?;
+    let service = service(state)?;
+    let reader = DatabaseGlobalLockReader::new(database);
+    service
+        .overview(&reader)
+        .map(GlobalStoreView::from)
+        .map_err(|error| CommandError::internal(error.to_string()))
+}
+
+/// Returns the resolved Global store path, availability and the locks the resolver enforces.
+#[tauri::command]
+pub fn global_store_overview(
+    state: tauri::State<'_, AppState>,
+) -> Result<GlobalStoreView, CommandError> {
+    overview_for_state(&state)
+}
+
+/// Runs the explicit "Enable global writes" action and records the authorization in history.
+#[tauri::command]
+pub fn global_enable_writes(
+    state: tauri::State<'_, AppState>,
+) -> Result<GlobalStoreView, CommandError> {
+    let service = service(&state)?;
+    service
+        .enable_global_writes()
+        .map_err(|_| CommandError::unavailable("Global store authorization failed"))?;
+    let database = state
+        .database_handle()
+        .map_err(|_| CommandError::unavailable("database unavailable"))?;
+    let reader = DatabaseGlobalLockReader::new(database);
+    service
+        .overview(&reader)
+        .map(GlobalStoreView::from)
+        .map_err(|error| CommandError::internal(error.to_string()))
 }

@@ -744,6 +744,21 @@ pub struct LoadedManifest {
     pub hash: ContentHash,
 }
 
+/// A `store.json` read for planning: the parsed document and its hash, or an empty manifest
+/// when the file does not exist yet.
+///
+/// First-run intents plan the item and the store skeleton in one reviewed `ChangeSet`. They need
+/// a manifest to extend before the store exists, and they must present [`at_model::ExpectedState::Absent`]
+/// instead of a hash for the file that apply creates. [`StoreManifest::load_for_plan`] is the one
+/// place that decides between those two states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedManifest {
+    /// Parsed and validated manifest, or an empty one for an absent file.
+    pub manifest: StoreManifest,
+    /// SHA-256 of the bytes read; `None` when the file is absent.
+    pub hash: Option<ContentHash>,
+}
+
 /// What a successful manifest save did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveOutcome {
@@ -1248,6 +1263,30 @@ impl StoreManifest {
             });
         }
         Ok(LoadedManifest { manifest, hash })
+    }
+
+    /// Reads `store.json` for a plan, treating an absent file as an empty manifest.
+    ///
+    /// A first-run intent plans the item and the store skeleton together. This is the only seam
+    /// that decides between extending an existing manifest and starting from an empty one; a
+    /// caller never guesses whether the file exists. Every other read failure is returned
+    /// unchanged, so a corrupt or foreign-scope store is refused instead of overwritten.
+    ///
+    /// # Errors
+    /// Every [`ManifestError`] except a missing file; those become a [`PlannedManifest`] with
+    /// [`PlannedManifest::hash`] `None`.
+    pub fn load_for_plan(layout: &StoreLayout) -> Result<PlannedManifest, ManifestError> {
+        match Self::load(layout) {
+            Ok(loaded) => Ok(PlannedManifest {
+                manifest: loaded.manifest,
+                hash: Some(loaded.hash),
+            }),
+            Err(error) if error.is_missing() => Ok(PlannedManifest {
+                manifest: Self::new(layout.scope(), StoreId::new()),
+                hash: None,
+            }),
+            Err(error) => Err(error),
+        }
     }
 
     /// Parses and validates manifest bytes without touching the filesystem.

@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 ///
 /// The first-party entries are the engine plus the crates that own every write; the
 /// rest are the parser, the JSON encoder, the error derive and two value-only crates
-/// (`time` is required by the `at-fs` repair API). Anything else needs a TU-034
-/// review, and an IO crate never qualifies.
+/// (`time` is required by the `at-fs` repair API). `at-git` and `at-secrets` provide
+/// only the runner and credential-store traits that `at-store::remote_backup` takes;
+/// the CLI passes them through and owns no git or Keychain path of its own. Anything
+/// else needs a TU-034 review, and an IO crate never qualifies.
 const ALLOWED: &[&str] = &[
     "at-model",
     "at-store",
@@ -21,6 +23,8 @@ const ALLOWED: &[&str] = &[
     "at-fs",
     "at-adapters",
     "at-migrate",
+    "at-git",
+    "at-secrets",
     "clap",
     "clap_complete",
     "serde",

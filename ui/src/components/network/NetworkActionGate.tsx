@@ -37,7 +37,7 @@ export function NetworkActionGate({ policy, action, host, onRun, onConfirm, onCa
     {confirming && !blocked && <div role="alertdialog" aria-label={`Confirm ${item.label}`} className="basis-full rounded-6 border border-warning/40 bg-warning/10 p-12 text-13 text-text">
       <p className="m-0">Connect to <strong>{host ?? "unknown destination"}</strong>?</p>
       <p className="mt-4 text-12 text-secondary">This network action is not run until you confirm.</p>
-      <div className="mt-10 flex gap-8"><button type="button" disabled={!host} className="rounded-6 bg-accent px-10 py-6 text-12 text-white disabled:opacity-50" onClick={() => execute()}>Confirm connection</button><button type="button" className="rounded-6 border border-border px-10 py-6 text-12 text-text" onClick={() => { setConfirming(false); onCancel(); }}>Cancel</button></div>
+      <div className="mt-10 flex gap-8"><button type="button" disabled={!host} className="rounded-6 bg-accent-fill px-10 py-6 text-12 text-on-accent disabled:opacity-50" onClick={() => execute()}>Confirm connection</button><button type="button" className="rounded-6 border border-border px-10 py-6 text-12 text-text" onClick={() => { setConfirming(false); onCancel(); }}>Cancel</button></div>
     </div>}
   </div>;
 }
@@ -49,5 +49,5 @@ export function NetworkActionRegistry({ policy, onRun, onConfirm, onCancel }: {
   readonly onConfirm: NetworkActionGateProps["onConfirm"];
   readonly onCancel: NetworkActionGateProps["onCancel"];
 }) {
-  return <div className="space-y-10" aria-label="Network actions">{policy.actions.map((item: NetworkActionView) => <NetworkActionGate key={item.action} policy={policy} action={item.action} onRun={onRun} onConfirm={onConfirm} onCancel={onCancel} />)}</div>;
+  return <section className="space-y-10" aria-label="Network actions">{policy.actions.map((item: NetworkActionView) => <NetworkActionGate key={item.action} policy={policy} action={item.action} onRun={onRun} onConfirm={onConfirm} onCancel={onCancel} />)}</section>;
 }

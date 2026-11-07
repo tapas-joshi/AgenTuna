@@ -149,6 +149,31 @@ impl AgentAdapter for OmpAdapter {
         Ok(skills)
     }
 
+    fn list_native_skills_including_managed(
+        &self,
+        env: &AgentEnvironment,
+        store_roots: &[PathBuf],
+    ) -> Result<Vec<crate::native_skills::NativeSkill>, crate::adapter::AgentError> {
+        let roots = [Scope::User, Scope::Project]
+            .into_iter()
+            .flat_map(|scope| self.paths(ItemKind::Skill, scope, env))
+            .collect::<Vec<_>>();
+        let mut skills = crate::native_skills::list_native_skills_with_options(
+            &self.id(),
+            env,
+            store_roots,
+            roots,
+            true,
+        )?;
+        skills.retain(|skill| {
+            !skill
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".bak-"))
+        });
+        Ok(skills)
+    }
+
     fn list_native(
         &self,
         env: &AgentEnvironment,

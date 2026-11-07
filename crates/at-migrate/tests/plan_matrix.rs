@@ -8,12 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use at_migrate::conflicts::detect_conflicts;
+use at_migrate::conflicts::{detect_conflicts, detect_conflicts_with_store};
 use at_migrate::plan::{
     BuildPlanRequest, ConflictResolution, DryRunRow, MigrationAction, MigrationPlan,
     MigrationStrategy, PlanCounts, PlanError, build_plan, dry_run, validate_plan,
 };
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, StoreItem};
 use at_model::{AgentId, ItemKind, Scope};
 use tempfile::TempDir;
 
@@ -156,6 +156,7 @@ fn plan_for(workspace: &Workspace, case: &Case) -> Result<MigrationPlan, PlanErr
         items: case.items.clone(),
         partial: false,
         skipped_roots: Vec::new(),
+        warnings: Vec::new(),
     };
     let conflicts = detect_conflicts(&scan);
     build_plan(BuildPlanRequest {
@@ -348,9 +349,19 @@ fn leave_and_watch_and_replace_counts_match_rows_for_every_selection() {
             files_created: 4,
             files_backed_up: 0,
             links_written: 0,
-            files_left_in_place: 1,
+            // One watched deployment per native source: the skill folder, the MCP config and
+            // the rule file.
+            files_left_in_place: 3,
         },
     );
+    assert!(plan.steps.iter().any(|step| {
+        step.action == MigrationAction::RecordWatched
+            && step.item_name.as_deref() == Some("example")
+    }));
+    assert!(plan.steps.iter().any(|step| {
+        step.action == MigrationAction::RecordWatched
+            && step.item_name.as_deref() == Some("team-rules")
+    }));
     assert!(plan.steps.iter().any(|step| {
         step.action == MigrationAction::RenderMcp && step.item_name.as_deref() == Some("example")
     }));
@@ -422,6 +433,13 @@ fn conflict_resolution_permutations_produce_one_item_per_selected_copy() {
             let case = Case::new(vec![first.clone(), second.clone()], strategy)
                 .resolve(name, resolution.clone());
             let plan = plan_for(&workspace, &case).expect("resolved conflict plan");
+            // Leave-and-watch records one watched deployment per migrated rule copy; replacing
+            // is only possible for skills, so rule items are never linked.
+            let expected_watched = if strategy == MigrationStrategy::LeaveAndWatch {
+                expected_items
+            } else {
+                0
+            };
             assert_counts(
                 &plan,
                 PlanCounts {
@@ -429,7 +447,7 @@ fn conflict_resolution_permutations_produce_one_item_per_selected_copy() {
                     files_created: expected_created,
                     files_backed_up: 0,
                     links_written: 0,
-                    files_left_in_place: 0,
+                    files_left_in_place: expected_watched,
                 },
             );
             validate_plan(&plan).expect("resolved plan validates");
@@ -595,4 +613,88 @@ fn plan_keeps_backup_paths_for_replaced_originals_only() {
             .all(|row| row.backup_path.is_none())
     );
     assert_counts_match_rows(&plan);
+}
+
+/// A native copy that differs from the canonical store item is a conflict group whose second
+/// copy is the store, so overwriting reviewed store content needs an explicit decision.
+#[test]
+fn a_store_copy_conflict_requires_a_choice_before_the_store_is_overwritten() {
+    let workspace = Workspace::new();
+    let mut native = workspace.rule(
+        "native/claude/rules.md",
+        b"# Rules\nnative\n",
+        AgentId::ClaudeCode,
+    );
+    native.ownership = Ownership::Conflict;
+    let store_path = workspace.store.join("rules/rules.md");
+    fs::create_dir_all(store_path.parent().expect("store rules dir")).expect("store rules dir");
+    fs::write(&store_path, b"# Rules\nstore\n").expect("store rule");
+    let store_items = vec![StoreItem {
+        kind: ItemKind::Rule,
+        name: "rules".to_owned(),
+        content_hash: at_migrate::normalize::rule_bytes(b"# Rules\nstore\n").to_string(),
+        scope: Scope::User,
+        path: store_path.clone(),
+    }];
+    let scan = ScanReport {
+        items: vec![native.clone()],
+        partial: false,
+        skipped_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let conflicts = detect_conflicts_with_store(&scan, &store_items);
+    assert_eq!(conflicts.conflicts.len(), 1, "the store copy is compared");
+    assert_eq!(
+        conflicts.conflicts[0].copies[1].origin,
+        at_migrate::conflicts::CopyOrigin::Store
+    );
+    assert_eq!(conflicts.conflicts[0].copies[1].path, store_path);
+
+    let plan = |resolution: Option<ConflictResolution>| {
+        let resolutions = resolution
+            .map(|resolution| BTreeMap::from([("rules".to_owned(), resolution)]))
+            .unwrap_or_default();
+        build_plan(BuildPlanRequest {
+            scan: &scan,
+            conflicts: &conflicts,
+            resolutions: &resolutions,
+            selected_paths: &BTreeSet::from([native.path.clone()]),
+            store_root: workspace.store.clone(),
+            copy_agents: &BTreeSet::new(),
+            strategy: MigrationStrategy::LeaveAndWatch,
+            scope: Scope::User,
+            backup_root: workspace.backup.clone(),
+        })
+    };
+
+    assert!(matches!(
+        plan(None),
+        Err(PlanError::UnresolvedConflict { .. })
+    ));
+    let kept_native = plan(Some(ConflictResolution::KeepA)).expect("keeping the native copy");
+    let rendered = kept_native
+        .steps
+        .iter()
+        .find(|step| step.action == MigrationAction::RenderRule)
+        .expect("a rendered rule step");
+    assert_eq!(rendered.item_name.as_deref(), Some("rules"));
+    assert_eq!(rendered.source.as_deref(), Some(native.path.as_path()));
+    validate_plan(&kept_native).expect("keeping the native copy validates");
+
+    // Keeping the store copy migrates nothing, so no applicable plan exists for that choice.
+    assert!(matches!(
+        plan(Some(ConflictResolution::KeepB)),
+        Err(PlanError::EmptySelection)
+    ));
+
+    let renamed = plan(Some(ConflictResolution::KeepBoth {
+        names: vec!["rules-native".to_owned(), "rules-store".to_owned()],
+    }))
+    .expect("keeping both copies");
+    let rendered = renamed
+        .steps
+        .iter()
+        .find(|step| step.action == MigrationAction::RenderRule)
+        .expect("a rendered rule step");
+    assert_eq!(rendered.item_name.as_deref(), Some("rules-native"));
 }

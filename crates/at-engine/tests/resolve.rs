@@ -190,6 +190,18 @@ fn normalization_trims_and_composes_before_merging() {
 }
 
 #[test]
+fn normalized_skill_names_share_identity_across_case_space_unicode_and_trailing_dot() {
+    let canonical = skill("café", "/canonical/SKILL.md").logical_id();
+    for variant in ["CAFÉ", "  café  ", "Cafe\u{0301}", "café."] {
+        assert_eq!(
+            skill(variant, "/variant/SKILL.md").logical_id(),
+            canonical,
+            "skill name `{variant}` must resolve to the same logical id"
+        );
+    }
+}
+
+#[test]
 fn mcp_servers_with_the_same_name_but_different_ids_stay_distinct() {
     let layers = [
         layer(

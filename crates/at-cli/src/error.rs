@@ -160,6 +160,14 @@ pub enum ErrorCode {
     UndoExpired,
     /// A multi-file operation failed part-way and the completed part was rolled back.
     PartialFailure,
+    /// A drift event changed again after review; rebuild the decision (TC-031).
+    DriftChangedAgain,
+    /// The sync destination changed after the plan was built (TC-031).
+    TargetChanged,
+    /// The network or remote is unreachable (TC-031).
+    Offline,
+    /// The remote credential is missing or was rejected (TC-031).
+    AuthFailed,
     /// An invariant of the CLI itself was violated.
     Internal,
 }
@@ -181,6 +189,10 @@ impl ErrorCode {
         Self::StalePlan,
         Self::UndoExpired,
         Self::PartialFailure,
+        Self::DriftChangedAgain,
+        Self::TargetChanged,
+        Self::Offline,
+        Self::AuthFailed,
         Self::Internal,
     ];
 
@@ -202,6 +214,10 @@ impl ErrorCode {
             Self::StalePlan => "stale_plan",
             Self::UndoExpired => "undo_expired",
             Self::PartialFailure => "partial_failure",
+            Self::DriftChangedAgain => "drift_changed_again",
+            Self::TargetChanged => "target_changed",
+            Self::Offline => "offline",
+            Self::AuthFailed => "auth_failed",
             Self::Internal => "internal",
         }
     }
@@ -224,6 +240,10 @@ impl ErrorCode {
             Self::StalePlan => exit_code::CONFLICT,
             Self::UndoExpired => exit_code::CONFLICT,
             Self::PartialFailure => exit_code::PARTIAL,
+            Self::DriftChangedAgain => exit_code::CONFLICT,
+            Self::TargetChanged => exit_code::CONFLICT,
+            Self::Offline => exit_code::NETWORK_REQUIRED,
+            Self::AuthFailed => exit_code::NETWORK_REQUIRED,
             Self::Internal => exit_code::INTERNAL,
         }
     }
@@ -378,5 +398,27 @@ impl CliError {
                 human: None,
             })
         })
+    }
+}
+
+/// Maps a refused store initialisation onto the CLI error contract.
+///
+/// Creating the Global store is the one scope that needs an explicit consent first; the remedy
+/// names the action that grants it instead of inventing a CLI flag or writing the store anyway.
+pub(crate) fn store_init_error(error: at_store::StoreInitError) -> CliError {
+    match error {
+        at_store::StoreInitError::GlobalConsentRequired { path, .. } => CliError::new(
+            ErrorCode::ConfirmationRequired,
+            format!(
+                "creating the Global store requires enabling Global writes first ({})",
+                path.display()
+            ),
+            "open AgenTuna, choose the Global scope in Overview and press Enable global writes, then rerun",
+        ),
+        other => CliError::new(
+            ErrorCode::Conflict,
+            format!("the store for this command could not be planned: {other}"),
+            "inspect the store root and retry",
+        ),
     }
 }

@@ -367,6 +367,21 @@ fn scan_reports_discovered_new_missing_and_unchanged() {
         .collect();
     assert!(new_paths.contains(&fs::canonicalize(&fresh).unwrap().to_str().unwrap()));
 
+    let registered = agentuna(&sandbox, &["projects", "list", "--json"]);
+    assert_eq!(exit_code(&registered), 0, "{}", stderr(&registered));
+    let registered_envelope = envelope(&registered);
+    let registered_projects = registered_envelope["data"]["projects"]
+        .as_array()
+        .expect("project registry rows");
+    let discovered_row = registered_projects
+        .iter()
+        .find(|project| project["path"] == fs::canonicalize(&fresh).unwrap().to_str().unwrap())
+        .expect("scan upserts newly discovered projects");
+    assert_eq!(
+        discovered_row["source_root"],
+        fs::canonicalize(&home_projects).unwrap().to_str().unwrap()
+    );
+
     let unchanged_paths: Vec<&str> = data["unchanged"]
         .as_array()
         .unwrap()
@@ -395,6 +410,19 @@ fn scan_reports_discovered_new_missing_and_unchanged() {
             .any(|p| p.as_str().unwrap().contains("gone-project")),
         "missing must name the vanished project: {missing:?}"
     );
+    let after_missing = agentuna(&sandbox, &["projects", "list", "--json"]);
+    let missing_row = envelope(&after_missing)["data"]["projects"]
+        .as_array()
+        .expect("project registry rows")
+        .iter()
+        .find(|project| {
+            project["path"]
+                .as_str()
+                .is_some_and(|path| path.contains("gone-project"))
+        })
+        .cloned()
+        .expect("missing project remains in the registry");
+    assert_eq!(missing_row["hidden"], true);
 }
 
 #[test]
@@ -429,27 +457,39 @@ fn scan_honours_depth_and_reports_warnings_without_failing() {
 }
 
 #[test]
-fn scan_missing_root_is_a_warning_and_still_exits_zero() {
+fn scan_skips_a_missing_default_root_without_a_warning() {
     let sandbox = Sandbox::new();
     sandbox.healthy();
-    // The sandbox home has no Projects folder at all.
+    // The sandbox home has no Projects folder at all: the documented default root is a
+    // convenience, so its absence is skipped silently instead of warning on every run.
 
     let output = agentuna(&sandbox, &["scan", "--json"]);
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
     let envelope = envelope(&output);
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["data"]["discovered"].as_array().unwrap().len(), 0);
-    let warnings = envelope["warnings"].as_array().unwrap();
-    assert!(
-        warnings.iter().any(|w| w["code"] == "scan_missing_root"),
-        "expected a scan_missing_root warning: {envelope}"
+    assert_eq!(
+        envelope["warnings"].as_array().unwrap().len(),
+        0,
+        "a missing default root is not a warning: {envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["warnings"].as_array().unwrap().len(),
+        0,
+        "the report lists no scan warning either: {envelope}"
     );
     assert!(
-        envelope["data"]["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w["kind"] == "missing_root")
+        !stderr(&output).contains("warning:"),
+        "nothing is written to stderr: {}",
+        stderr(&output)
+    );
+
+    let human = agentuna(&sandbox, &["scan"]);
+    assert_eq!(exit_code(&human), 0);
+    assert!(
+        !stdout(&human).contains("missing_root"),
+        "the human report omits the absent default root: {}",
+        stdout(&human)
     );
 }
 
@@ -496,6 +536,110 @@ fn scan_permission_denied_root_is_a_warning_and_still_exits_zero() {
     );
 }
 
+#[test]
+fn scan_nested_repos_collapse_to_shallowest_match() {
+    let sandbox = Sandbox::new();
+    sandbox.healthy();
+
+    let projects_root = sandbox.path("home").join("Projects");
+    let outer = make_project(&projects_root, "outer");
+    let _inner = make_project(&outer, "inner");
+
+    let output = agentuna(&sandbox, &["scan", "--json"]);
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let envelope = envelope(&output);
+    assert_eq!(envelope["ok"], true);
+    let discovered = envelope["data"]["discovered"].as_array().unwrap();
+    let paths: Vec<&str> = discovered
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+
+    let canonical_outer = fs::canonicalize(&outer).unwrap();
+    assert_eq!(paths.len(), 1, "nested inner repo must collapse into outer");
+    assert_eq!(paths[0], canonical_outer.to_str().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_symlink_cycle_does_not_loop_and_reports_cleanly() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = Sandbox::new();
+    sandbox.healthy();
+
+    let projects_root = sandbox.path("home").join("Projects");
+    let _repo = make_project(&projects_root, "real_repo");
+    symlink(&projects_root, projects_root.join("loop")).expect("cycle symlink");
+
+    let output = agentuna(&sandbox, &["scan", "--json"]);
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let envelope = envelope(&output);
+    assert_eq!(envelope["ok"], true);
+    let discovered = envelope["data"]["discovered"].as_array().unwrap();
+    assert_eq!(
+        discovered.len(),
+        1,
+        "symlink loop must not duplicate or recurse"
+    );
+}
+
+#[test]
+fn scan_never_modifies_last_used_at_on_existing_projects() {
+    let sandbox = Sandbox::new();
+    sandbox.healthy();
+
+    let projects_root = sandbox.path("home").join("Projects");
+    let known = make_project(&projects_root, "known_project");
+
+    // Register project and touch it with `projects use` so last_used_at is recorded
+    let add_out = agentuna(
+        &sandbox,
+        &["projects", "add", known.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(exit_code(&add_out), 0);
+    let use_out = agentuna(
+        &sandbox,
+        &["projects", "use", known.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(exit_code(&use_out), 0);
+
+    let list_before = agentuna(&sandbox, &["projects", "list", "--json"]);
+    let env_before = envelope(&list_before);
+    let project_before = env_before["data"]["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "known_project")
+        .expect("found known_project");
+    let last_used_before = project_before["last_used_at"]
+        .as_str()
+        .expect("has last_used_at");
+
+    // Create a new project so scan has a new project to discover and diff
+    let _fresh = make_project(&projects_root, "fresh_project");
+
+    // Run scan
+    let scan_out = agentuna(&sandbox, &["scan", "--json"]);
+    assert_eq!(exit_code(&scan_out), 0, "stderr: {}", stderr(&scan_out));
+
+    let list_after = agentuna(&sandbox, &["projects", "list", "--json"]);
+    let env_after = envelope(&list_after);
+    let project_after = env_after["data"]["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "known_project")
+        .expect("found known_project after scan");
+    let last_used_after = project_after["last_used_at"]
+        .as_str()
+        .expect("has last_used_at");
+
+    assert_eq!(
+        last_used_before, last_used_after,
+        "applying scan diff must never modify last_used_at on existing projects"
+    );
+}
 #[test]
 fn json_mode_keeps_stdout_to_exactly_one_object() {
     let sandbox = Sandbox::new();

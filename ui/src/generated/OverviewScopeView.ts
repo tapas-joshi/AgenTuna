@@ -31,4 +31,8 @@ last_edited: string | null,
 /**
  * Number of disabled items.
  */
-disabled: bigint, };
+disabled: bigint, 
+/**
+ * Whether the scope already has a canonical store (`store.json` present).
+ */
+store_ready: boolean, };

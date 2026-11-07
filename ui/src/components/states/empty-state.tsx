@@ -12,6 +12,8 @@ export interface EmptyStateProps {
   readonly icon?: ReactNode;
   /** The one action that resolves the emptiness; rendered as a primary button. */
   readonly action?: StateAction;
+  /** Optional secondary action, rendered after the primary one. */
+  readonly secondaryAction?: StateAction;
   /** Reserves space so swapping a table for the empty state does not shift layout. */
   readonly minHeight?: number;
   /** Heading element. Defaults to `h2`. */
@@ -30,6 +32,7 @@ export function EmptyState({
   hint,
   icon,
   action,
+  secondaryAction,
   minHeight,
   headingLevel,
   className,
@@ -40,7 +43,7 @@ export function EmptyState({
       title={title}
       body={hint}
       icon={icon}
-      actions={action === undefined ? [] : [action]}
+      actions={[action, secondaryAction].filter((entry): entry is StateAction => entry !== undefined)}
       minHeight={minHeight}
       headingLevel={headingLevel}
       className={className}

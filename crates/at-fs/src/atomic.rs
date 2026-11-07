@@ -235,7 +235,7 @@ fn concurrent(path: &Path, expected: &str, actual: &Observed) -> FsError {
 
 fn sync_dir(dir: &Path) -> Result<(), FsError> {
     File::open(dir)
-        .and_then(|d| d.sync_all())
+        .and_then(|d| crate::durability::sync_all(&d))
         .map_err(|e| FsError::from_io(dir, e))
 }
 
@@ -309,8 +309,7 @@ pub fn apply_with_hook(
             .map_err(|e| FsError::from_platform_io(&temp.path, e))?;
     }
     fault(FaultPoint::TempSync, &temp.path)?;
-    temp_file
-        .sync_all()
+    crate::durability::sync_all(&temp_file)
         .map_err(|e| FsError::from_platform_io(&temp.path, e))?;
     drop(temp_file);
     hook(Stage::TempWritten);

@@ -107,6 +107,9 @@ pub enum SkillAddPlanError {
     /// The existing destination is not a regular file.
     #[error("existing skill path is not a regular file: {0}")]
     NonFileCollision(PathBuf),
+    /// A library Link target already exists at the canonical destination.
+    #[error("the linked destination already exists; choose another scope or copy the skill")]
+    LinkedDestinationExists,
 }
 
 /// Inputs for constructing an Add Skill plan.
@@ -274,6 +277,79 @@ pub fn plan_skill_add(
         stage_available: request.scope == Scope::Project && request.repository.is_some(),
         change_set,
     })
+}
+
+/// Rewrites a copy plan so the canonical package is one link to `source_path`.
+///
+/// Library imports offer Copy or Link. [`plan_skill_add`] always plans a copied package; this
+/// function converts that reviewed plan in place: the canonical directory becomes a symlink to
+/// the source package, every file write under it is dropped, and agent deployments that pointed
+/// at the canonical directory are retargeted to the source. The optional stage list is rebuilt
+/// from the remaining planned paths.
+///
+/// # Errors
+/// Returns [`SkillAddPlanError::LinkedDestinationExists`] when the canonical directory already
+/// exists, or [`SkillAddPlanError::ReadExisting`] when it cannot be inspected.
+pub fn convert_to_library_link(
+    plan: &mut SkillAddFilePlan,
+    source_path: &Path,
+) -> Result<(), SkillAddPlanError> {
+    let canonical_dir = plan.canonical_dir.clone();
+    match std::fs::symlink_metadata(&canonical_dir) {
+        Ok(_) => return Err(SkillAddPlanError::LinkedDestinationExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(SkillAddPlanError::ReadExisting {
+                path: canonical_dir,
+                reason: error.to_string(),
+            });
+        }
+    }
+    let mut operations = Vec::with_capacity(plan.change_set.ops.len());
+    operations.push(FileOp::Symlink {
+        link_path: canonical_dir.clone(),
+        target: source_path.to_path_buf(),
+        mode: at_model::DeployMode::Link,
+    });
+    for operation in std::mem::take(&mut plan.change_set.ops) {
+        match operation {
+            FileOp::Write { path, .. } if path.starts_with(&canonical_dir) => {}
+            FileOp::Symlink {
+                link_path,
+                target,
+                mode,
+            } if target == canonical_dir => operations.push(FileOp::Symlink {
+                link_path,
+                target: source_path.to_path_buf(),
+                mode,
+            }),
+            other => operations.push(other),
+        }
+    }
+    plan.change_set.ops = operations;
+    plan.files
+        .retain(|file| !file.path.starts_with(&canonical_dir));
+    plan.files.push(PlannedSkillFile {
+        path: canonical_dir,
+        package_path: "linked skill folder".to_owned(),
+    });
+    if let Some(stage) = &mut plan.stage {
+        let mut paths = Vec::new();
+        for file in &plan.files {
+            let relative = file
+                .path
+                .strip_prefix(&stage.repository_root)
+                .map_err(|_| SkillAddPlanError::OutsideRepository(file.path.clone()))?;
+            let relative = relative
+                .to_str()
+                .ok_or_else(|| SkillAddPlanError::OutsideRepository(file.path.clone()))?;
+            paths.push(relative.to_owned());
+        }
+        paths.sort();
+        paths.dedup();
+        stage.paths = paths;
+    }
+    Ok(())
 }
 
 fn inspect_collision(
@@ -610,6 +686,76 @@ mod tests {
                 stage_requested: false,
             }),
             Err(SkillAddPlanError::OutsideAgentRoot(_))
+        ));
+    }
+
+    #[test]
+    fn library_link_changes_a_copy_plan_into_one_symlink_operation() {
+        let (temp, _paths, layout, slug, package) = fixture();
+        let source = temp.path().join("library-source").join("fixture-skill");
+        std::fs::create_dir_all(&source).expect("library source");
+        std::fs::write(source.join("SKILL.md"), b"# Fixture\n").expect("source document");
+        let copy = plan_skill_add(SkillAddPlanRequest {
+            layout: &layout,
+            slug: &slug,
+            package: &package,
+            scope: Scope::Project,
+            deployments: &[],
+            repository: None,
+            stage_requested: false,
+        })
+        .expect("copy plan");
+        assert!(
+            copy.change_set
+                .ops
+                .iter()
+                .all(|operation| matches!(operation, FileOp::Write { .. })),
+            "Copy plans write every package file: {:?}",
+            copy.change_set.ops
+        );
+        assert_eq!(copy.files.len(), 2);
+
+        let mut link = copy.clone();
+        convert_to_library_link(&mut link, &source).expect("link plan");
+        assert_eq!(link.change_set.ops.len(), 1);
+        let FileOp::Symlink {
+            link_path,
+            target,
+            mode,
+        } = &link.change_set.ops[0]
+        else {
+            panic!("Link mode must plan one symlink");
+        };
+        assert_eq!(link_path, &layout.skill_dir(&slug));
+        assert_eq!(target, &source);
+        assert_eq!(*mode, at_model::DeployMode::Link);
+        assert_eq!(link.files.len(), 1);
+        assert_eq!(link.files[0].path, layout.skill_dir(&slug));
+        assert_eq!(link.files[0].package_path, "linked skill folder");
+        assert_ne!(
+            copy.files, link.files,
+            "Copy and Link reviews must list different file operations"
+        );
+    }
+
+    #[test]
+    fn library_link_refuses_an_existing_destination() {
+        let (_temp, _paths, layout, slug, package) = fixture();
+        std::fs::create_dir_all(layout.skill_dir(&slug)).expect("existing destination");
+        let mut plan = plan_skill_add(SkillAddPlanRequest {
+            layout: &layout,
+            slug: &slug,
+            package: &package,
+            scope: Scope::Project,
+            deployments: &[],
+            repository: None,
+            stage_requested: false,
+        })
+        .expect("copy plan");
+        let source = layout.root().join("source");
+        assert!(matches!(
+            convert_to_library_link(&mut plan, &source),
+            Err(SkillAddPlanError::LinkedDestinationExists)
         ));
     }
 

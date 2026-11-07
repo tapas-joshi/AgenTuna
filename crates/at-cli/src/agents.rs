@@ -54,6 +54,7 @@ impl CommandGroup for AgentsGroup {
         } else {
             None
         };
+        crate::runtime::refresh_agent_registry_if_needed(globals)?;
         let paths = resolve_paths(globals)?;
         let _access = CliAccess::read(&paths)?;
         let index_path = paths.db_path();
@@ -91,21 +92,21 @@ impl CommandGroup for AgentsGroup {
         }
         let mut rows = Vec::with_capacity(selected.len());
         for agent in selected {
-            let health =
-                health::line_with_connection(database.connection(), &agent.id, home, false)
-                    .map_err(|error| {
-                        CliError::new(
-                            ErrorCode::Conflict,
-                            format!("cannot compute health for agent `{}`: {error}", agent.id),
-                            "run `agentuna doctor` to check the index",
-                        )
-                    })?;
+            let health = health::line_with_connection(database.connection(), &agent.id, home)
+                .map_err(|error| {
+                    CliError::new(
+                        ErrorCode::Conflict,
+                        format!("cannot compute health for agent `{}`: {error}", agent.id),
+                        "run `agentuna doctor` to check the index",
+                    )
+                })?;
             rows.push(json!({
                 "id": agent.id.to_string(),
                 "installed": agent.presence == at_db::agents::AgentPresence::Installed,
                 "version": agent.version,
                 "primary_path": agent.primary_path.as_ref().map(|path| path.display().to_string()),
                 "health_line": health.text,
+                "copy_fallback": health.copy_fallback,
             }));
         }
         let human = rows.iter().map(render_agent).collect::<Vec<_>>().join("\n");

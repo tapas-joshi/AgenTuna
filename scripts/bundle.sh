@@ -24,13 +24,15 @@ APP_BUNDLE="$TARGET_DIR/release/$APP_NAME.app"
 ICON="${AGENTUNA_ICON:-$ROOT/crates/at-app/icons/icon.icns}"
 PLIST_TEMPLATE="${AGENTUNA_PLIST_TEMPLATE:-}"
 UNIVERSAL=0
+DRY_RUN=0
 
 usage() {
     cat <<EOF
-Usage: scripts/bundle.sh [--universal]
+Usage: scripts/bundle.sh [--universal] [--dry-run]
 
 Builds $APP_BUNDLE and validates the result.
   --universal  build arm64 + x86_64 and lipo them into one universal binary
+  --dry-run    print the build commands in order without running them
   -h, --help   show this help
 EOF
 }
@@ -38,6 +40,7 @@ EOF
 while (( $# > 0 )); do
     case "$1" in
         --universal) UNIVERSAL=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -49,11 +52,27 @@ fail() {
     exit 1
 }
 
+# Echoes the command as `+ ...` and runs it unless this is a dry run. The printed form is the
+# script's build plan: crates/at-app/tests/packaging.rs reads it to check the order of the steps.
+run_in() {
+    local dir="$1"
+    shift
+    printf '+ (cd %q &&' "$dir"
+    printf ' %q' "$@"
+    printf ')\n'
+    if (( DRY_RUN )); then
+        return 0
+    fi
+    (cd "$dir" && "$@")
+}
+
 # --- Preconditions -----------------------------------------------------------
 
 [[ -f "$ROOT/Cargo.toml" ]] || fail "not inside the AgenTuna repository (no Cargo.toml)"
 [[ -f "$ICON" ]] || fail "missing app icon: $ICON"
-[[ -d "$ROOT/ui/node_modules" ]] || fail "UI dependencies missing; run: pnpm --dir ui install --frozen-lockfile"
+if (( ! DRY_RUN )); then
+    [[ -d "$ROOT/ui/node_modules" ]] || fail "UI dependencies missing; run: pnpm --dir ui install --frozen-lockfile"
+fi
 
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/p' "$ROOT/Cargo.toml" \
     | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -69,15 +88,19 @@ BUILD_NUMBER="$((10#$VERSION_MAJOR * 1000000 + 10#$VERSION_MINOR * 1000 + 10#$VE
 # --- Build -------------------------------------------------------------------
 
 echo "==> Building UI assets"
-(cd "$ROOT" && pnpm --dir ui build)
+run_in "$ROOT" pnpm --dir ui build
 
 build_host() {
-    (cd "$ROOT" && cargo build --release --locked -p at-app -p at-cli)
+    # `--features custom-protocol` is what `tauri build` sets for a release build: it makes
+    # tauri embed build.frontendDist instead of compiling cfg(dev) against build.devUrl.
+    run_in "$ROOT" cargo build --release --locked -p at-app --features custom-protocol
+    run_in "$ROOT" cargo build --release --locked -p at-cli
 }
 
 build_target() {
     local triple="$1"
-    (cd "$ROOT" && cargo build --release --locked --target "$triple" -p at-app -p at-cli)
+    run_in "$ROOT" cargo build --release --locked --target "$triple" -p at-app --features custom-protocol
+    run_in "$ROOT" cargo build --release --locked --target "$triple" -p at-cli
 }
 
 APP_BINARIES=()
@@ -87,7 +110,7 @@ if (( UNIVERSAL )); then
     echo "==> Building universal binaries (arm64 + x86_64)"
     UNIVERSAL_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
     for triple in "${UNIVERSAL_TARGETS[@]}"; do
-        if command -v rustup >/dev/null 2>&1; then
+        if (( ! DRY_RUN )) && command -v rustup >/dev/null 2>&1; then
             rustup target list --installed | grep -qx "$triple" \
                 || fail "Rust target $triple is not installed; run: rustup target add $triple"
         fi
@@ -103,6 +126,11 @@ else
     build_host
     APP_BINARIES+=("$TARGET_DIR/release/agentuna-app")
     CLI_BINARIES+=("$TARGET_DIR/release/agentuna")
+fi
+
+if (( DRY_RUN )); then
+    echo "==> Dry run: printed the build plan for $APP_BUNDLE; nothing was built or written"
+    exit 0
 fi
 
 for binary in "${APP_BINARIES[@]}" "${CLI_BINARIES[@]}"; do
@@ -165,6 +193,17 @@ else
     <string>$BUILD_NUMBER</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.agentuna.app</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>agentuna</string>
+            </array>
+        </dict>
+    </array>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

@@ -13,7 +13,10 @@ import { Button, Input, Badge, Chip } from "../../components";
 import type { ScopeToken } from "../../theme";
 import { ScopeSwitcher } from "../../components/scope_switcher/ScopeSwitcher";
 import { DataTable } from "../../components/table";
+import { agentColumns } from "../../components/table";
+import type { AgentCellState, AgentDescriptor } from "../../components/table";
 import type { DataTableFeatures } from "../../components/table/features";
+import type { AgentCardView } from "../../generated/AgentCardView";
 import type { McpActionPreviewView } from "../../generated/McpActionPreviewView";
 import type { McpServerActionOutcome } from "../../generated/McpServerActionOutcome";
 import type { McpServerActionRequest } from "../../generated/McpServerActionRequest";
@@ -23,6 +26,7 @@ import type { McpServerTestView } from "../../generated/McpServerTestView";
 import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
 import type { AdoptApplyView } from "../../generated/AdoptApplyView";
 import { Modal, WhyTraceDialog } from "../../overlays";
+import { AdoptModal } from "../../overlays/dialogs/AdoptModal";
 import { McpServerActions } from "../../overlays/menus";
 import type { McpServerAction } from "../../overlays/menus";
 import { useToast } from "../../overlays/toasts";
@@ -50,18 +54,50 @@ const SCOPE_BADGE: Readonly<Record<string, string>> = {
 type DialogState =
   | { readonly kind: "disable-repo"; readonly row: McpServerRowView }
   | { readonly kind: "disable-agent"; readonly row: McpServerRowView; readonly agent: string }
+  | { readonly kind: "enable-agent"; readonly row: McpServerRowView; readonly agent: string }
   | { readonly kind: "delete"; readonly row: McpServerRowView }
   | { readonly kind: "lock"; readonly row: McpServerRowView }
   | { readonly kind: "unlock"; readonly row: McpServerRowView }
   | null;
 
+/** Column labels for the known agents; unknown ids fall back to the detected name. */
+const AGENT_LABEL: Readonly<Record<string, string>> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  omp: "omp",
+  cursor: "Cursor",
+};
+
+/** Display order used by the design for the per-agent columns. */
+const AGENT_ORDER: readonly string[] = ["claude_code", "codex", "omp", "cursor"];
+
+/** Health presentation: text plus a tone dot, never colour alone. */
+const HEALTH_META: Readonly<Record<string, { readonly label: string; readonly tone: "success" | "danger" | "muted" }>> = {
+  ok: { label: "Healthy", tone: "success" },
+  failed: { label: "Failing", tone: "danger" },
+  unknown: { label: "Not tested", tone: "muted" },
+};
+
+/** Capitalised scope name for lock tooltips and status text. */
+function scopeLabel(scope: string | null): string {
+  if (scope === null) return "Global";
+  return scope.charAt(0).toUpperCase() + scope.slice(1);
+}
+
 /** MCP server list with per-agent matrix, health status, filter chips, and row actions. */
-export function McpListScreen() {
-  const { scope, activeProject } = useAppSnapshot();
+export function McpListScreen({
+  localEnabled = false,
+  globalLocked = false,
+}: {
+  readonly localEnabled?: boolean;
+  readonly globalLocked?: boolean;
+} = {}) {
+  const { scope, activeProject, externalRefreshVersion } = useAppSnapshot();
   const app = useAppState();
   const toast = useToast();
 
   const [list, setList] = useState<McpServerListView | null>(null);
+  const [agentCards, setAgentCards] = useState<readonly AgentCardView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,6 +105,7 @@ export function McpListScreen() {
   const [searchQuery, setSearchQuery] = useState("");
   const [bannerHidden, setBannerHidden] = useState(false);
   const [adoptingPath, setAdoptingPath] = useState<string | null>(null);
+  const [adoptModalTarget, setAdoptModalTarget] = useState<McpServerRowView | null>(null);
 
   const [menuRow, setMenuRow] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -83,13 +120,15 @@ export function McpListScreen() {
     setLoading(true);
     setError(null);
     try {
-      const [view, settingsResult] = await Promise.all([
+      const [view, settingsResult, cards] = await Promise.all([
         invoke<McpServerListView>("mcp_server_list", {
           request: { scope: "", project_id: activeProject },
         }),
         invoke<Record<string, unknown>>("settings_load").catch(() => null),
+        invoke<AgentCardView[]>("agents_list").catch(() => [] as AgentCardView[]),
       ]);
       setList(view);
+      setAgentCards(Array.isArray(cards) ? cards : []);
       if (settingsResult !== null) {
         setBannerHidden(settingsResult["native_banner_hidden.mcp_server"] === true);
       }
@@ -98,7 +137,7 @@ export function McpListScreen() {
     } finally {
       setLoading(false);
     }
-  }, [activeProject]);
+  }, [activeProject, externalRefreshVersion]);
 
   useEffect(() => {
     void load();
@@ -114,7 +153,7 @@ export function McpListScreen() {
 
   const requestPreview = useCallback(
     async (
-      command: "mcp_server_disable" | "mcp_server_delete",
+      command: "mcp_server_disable" | "mcp_server_delete" | "mcp_server_enable",
       request: McpServerActionRequest,
     ) => {
       setPreview(null);
@@ -133,7 +172,7 @@ export function McpListScreen() {
 
   const applyAction = useCallback(
     async (
-      command: "mcp_server_disable" | "mcp_server_delete",
+      command: "mcp_server_disable" | "mcp_server_delete" | "mcp_server_enable",
       request: McpServerActionRequest,
       name: string,
     ) => {
@@ -146,9 +185,11 @@ export function McpListScreen() {
         toast.success(
           command === "mcp_server_delete"
             ? `Deleted ${name}`
-            : request.in_repo
-              ? `Disabled ${name} in this repo`
-              : `Disabled ${name} for ${request.agent ?? "this agent"}`,
+            : command === "mcp_server_enable"
+              ? `Enabled ${name} for ${request.agent ?? "this agent"}`
+              : request.in_repo
+                ? `Disabled ${name} in this repo`
+                : `Disabled ${name} for ${request.agent ?? "this agent"}`,
         );
         closeDialog();
         await load();
@@ -159,6 +200,36 @@ export function McpListScreen() {
       }
     },
     [closeDialog, load, preview, toast],
+  );
+
+  /**
+   * Opens the reviewed enable/disable plan for one agent switch.
+   *
+   * A switch never writes by itself: the typed command returns a preview of
+   * the exact agent files, and only the dialog's confirm applies it.
+   */
+  const requestAgentChange = useCallback(
+    (row: McpServerRowView, agent: AgentDescriptor, enabled: boolean) => {
+      if (row.id === "") {
+        toast.info(`${row.name} must be adopted into AgenTuna before it can change.`);
+        return;
+      }
+      if (row.locked) {
+        toast.warning(`${row.name} is locked: ${row.lock_reason ?? "locked"}`, { title: "Locked" });
+        return;
+      }
+      setDialog({ kind: enabled ? "enable-agent" : "disable-agent", row, agent: agent.id });
+      void requestPreview(enabled ? "mcp_server_enable" : "mcp_server_disable", {
+        item_id: row.id,
+        scope: row.scope,
+        project_id: activeProject,
+        agent: agent.id,
+        in_repo: false,
+        apply: false,
+        preview_id: null,
+      });
+    },
+    [activeProject, requestPreview, toast],
   );
 
   const openAction = useCallback(
@@ -179,6 +250,7 @@ export function McpListScreen() {
             app.navigate("migrate");
             return;
           }
+          app.recordVisitedItem(`server:${row.id}`);
           app.setSelection("mcp-detail", [row.id]);
           app.navigate("mcp-detail");
           return;
@@ -266,15 +338,19 @@ export function McpListScreen() {
       if (!row.source_path) return;
       setAdoptingPath(row.source_path);
       try {
+        // A native MCP row names one server inside a shared document, so the adoption has to
+        // select that entry and not the first server the configuration happens to hold.
         const preview = await invoke<AdoptPreviewView>("adopt_preview", {
           path: row.source_path,
-          expected_hash: null,
+          expectedHash: null,
           handling: "link",
+          name: row.name,
         });
         await invoke<AdoptApplyView>("adopt_apply", {
           path: preview.source,
-          expected_hash: null,
+          expectedHash: null,
           handling: "link",
+          name: row.name,
         });
         toast.success(`Adopted ${row.name} into AgenTuna`);
         await load();
@@ -333,23 +409,86 @@ export function McpListScreen() {
     return servers;
   }, [allServers, activeChip, searchQuery]);
 
-  const detectedAgents = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of allServers) {
-      for (const a of s.agents) {
-        set.add(a.agent);
+  // Columns come from detection, so an installed agent always gets a switch even when no
+  // server currently targets it. Row cells fill in the rest for agents detection missed.
+  const detectedAgents = useMemo<readonly AgentDescriptor[]>(() => {
+    const ids = new Set<string>();
+    for (const card of agentCards) ids.add(card.id);
+    for (const server of allServers) {
+      for (const cell of server.agents) {
+        if (cell.state !== "not_installed") ids.add(cell.agent);
       }
     }
-    const order = ["claude_code", "codex", "omp", "cursor"];
-    const result: string[] = [];
-    for (const a of order) {
-      if (set.has(a)) result.push(a);
+    if (ids.size === 0) for (const id of AGENT_ORDER) ids.add(id);
+    const ordered = AGENT_ORDER.filter((id) => ids.has(id));
+    for (const id of ids) {
+      if (!ordered.includes(id)) ordered.push(id);
     }
-    for (const a of set) {
-      if (!result.includes(a)) result.push(a);
+    return ordered.map((id) => ({
+      id,
+      label: AGENT_LABEL[id] ?? agentCards.find((card) => card.id === id)?.name ?? id,
+    }));
+  }, [agentCards, allServers]);
+
+  /**
+   * Maps one MCP agent cell onto the shared cell vocabulary.
+   *
+   * Locked and native cells render a disabled switch with the reason in the
+   * tooltip; only `linked` and `off` are switchable, and the switch opens the
+   * reviewed enable/disable plan rather than writing from the render pass.
+   */
+  const agentStateFor = useCallback((row: McpServerRowView, agent: AgentDescriptor): AgentCellState => {
+    const cell = row.agents.find((candidate) => candidate.agent === agent.id);
+    const presence = agentCards.find((card) => card.id === agent.id)?.presence ?? null;
+    const missing = `${agent.label} is not installed on this Mac`;
+    if (presence === "not_installed") {
+      return { kind: "off", readOnly: true, disabledReason: missing };
     }
-    return result.length > 0 ? result : ["claude_code", "codex", "omp", "cursor"];
-  }, [allServers]);
+    if (row.locked) {
+      return {
+        kind: "locked",
+        lockedBy:
+          row.lock_reason === null
+            ? scopeLabel(row.lock_scope)
+            : `${scopeLabel(row.lock_scope)} · ${row.lock_reason}`,
+        enabled: cell?.enabled ?? false,
+      };
+    }
+    if (cell === undefined) {
+      return { kind: "none" };
+    }
+    switch (cell.state) {
+      case "linked":
+        return { kind: "linked" };
+      case "off":
+        return { kind: "off" };
+      case "locked":
+        return { kind: "locked", lockedBy: scopeLabel(row.lock_scope), enabled: cell.enabled };
+      case "shadowed":
+        return { kind: "shadowed", shadowedBy: "a higher scope" };
+      case "native": {
+        const sharedWith = row.agents
+          .filter(
+            (other) =>
+              other.agent !== agent.id &&
+              other.state === "native" &&
+              other.config_path !== null &&
+              other.config_path === cell.config_path,
+          )
+          .map((other) => AGENT_LABEL[other.agent] ?? other.agent);
+        return {
+          kind: "native",
+          path: cell.config_path ?? row.source_path ?? "",
+          readOnly: true,
+          sharedWith: sharedWith.length > 0 ? sharedWith : undefined,
+        };
+      }
+      case "not_installed":
+        return { kind: "off", readOnly: true, disabledReason: `${agent.label} is not installed on this Mac` };
+      default:
+        return { kind: "none" };
+    }
+  }, [agentCards]);
 
   const columns: ReadonlyArray<ColumnDef<DataTableFeatures, McpServerRowView>> = useMemo(() => {
     const nameCol: ColumnDef<DataTableFeatures, McpServerRowView> = {
@@ -374,14 +513,14 @@ export function McpListScreen() {
               )}
               {item.native && (
                 <Badge tone="muted">
-                  native · not in Studio
+                  native · not in AgenTuna
                 </Badge>
               )}
             </div>
             <span className="truncate text-12 text-text-secondary">{item.transport}</span>
             {item.native && item.source_path && (
-              <div className="flex flex-wrap items-center gap-6 pt-2">
-                <span className="font-mono text-11 text-text-muted truncate max-w-[200px]" title={item.source_path}>
+              <div className="flex items-center gap-6 pt-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-11 text-text-muted" title={item.source_path}>
                   {item.source_path}
                 </span>
                 <Button
@@ -390,7 +529,7 @@ export function McpListScreen() {
                   disabled={isAdopted || isAdopting}
                   onClick={(e) => {
                     e.stopPropagation();
-                    void handleAdopt(item);
+                    setAdoptModalTarget(item);
                   }}
                 >
                   {isAdopted ? "Adopted" : isAdopting ? "Adopting…" : "Adopt"}
@@ -437,73 +576,33 @@ export function McpListScreen() {
       },
     };
 
-    const agentCols: ReadonlyArray<ColumnDef<DataTableFeatures, McpServerRowView>> = detectedAgents.map(
-      (agentId) => ({
-        id: `agent:${agentId}`,
-        header: agentId,
-        size: 100,
-        meta: { align: "center" },
-        cell: ({ row }) => {
-          const item = row.original;
-          const cell = item.agents.find((c) => c.agent === agentId);
-          if (!cell) {
-            return <span className="text-12 text-text-muted">—</span>;
-          }
-
-          const isLocked = item.locked;
-          const tooltip = isLocked
-            ? item.lock_reason ?? `Locked at ${item.lock_scope ?? "Global"} scope`
-            : cell.config_path ?? undefined;
-
-          return (
-            <button
-              type="button"
-              disabled={isLocked || !cell.enabled}
-              title={tooltip}
-              aria-label={`${cell.agent}: ${cell.state}`}
-              onClick={() => {
-                if (isLocked) {
-                  toast.warning(`${item.name} is locked: ${item.lock_reason ?? "locked"}`, {
-                    title: "Locked",
-                  });
-                  return;
-                }
-                setDialog({ kind: "disable-agent", row: item, agent: cell.agent });
-                void requestPreview("mcp_server_disable", {
-                  item_id: item.id,
-                  scope: item.scope,
-                  project_id: activeProject,
-                  agent: cell.agent,
-                  in_repo: false,
-                  apply: false,
-                  preview_id: null,
-                });
-              }}
-              className="rounded-6 border border-border bg-surface px-8 py-4 text-12 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {cell.agent}: {cell.state}
-            </button>
-          );
-        },
-      })
-    );
+    const agentCols = agentColumns<McpServerRowView>({
+      agents: detectedAgents,
+      getState: agentStateFor,
+      onToggle: (row, agent, next) => requestAgentChange(row, agent, next),
+    });
 
     const healthCol: ColumnDef<DataTableFeatures, McpServerRowView> = {
       id: "health",
       accessorKey: "health",
       header: "Health",
-      size: 110,
-      meta: { align: "center" },
+      size: 150,
+      enableSorting: false,
       cell: ({ row }) => {
         const item = row.original;
+        const meta = HEALTH_META[item.health] ?? { label: "Not tested", tone: "muted" as const };
         return (
-          <span className="text-12 text-text-secondary">health: {item.health}</span>
+          <span data-slot="mcp-health" className="flex min-w-0 flex-col items-start gap-2 py-4">
+            <Badge tone={meta.tone} dot title={item.locked ? `Locked in ${scopeLabel(item.lock_scope)}` : undefined}>
+              {meta.label}
+            </Badge>
+          </span>
         );
       },
     };
 
     return [nameCol, scopeCol, ...agentCols, healthCol];
-  }, [detectedAgents, adoptingPath, handleAdopt, activeProject, requestPreview, toast, app]);
+  }, [detectedAgents, agentStateFor, requestAgentChange, adoptingPath, handleAdopt, app]);
 
   const projectAgents = list?.project_agents ?? [];
   const repoAgents = useMemo(
@@ -547,8 +646,9 @@ export function McpListScreen() {
             <h1 className="m-0 text-22 font-semibold text-text">MCP Servers</h1>
             <ScopeSwitcher
               scope={scope as ScopeToken}
-              localEnabled={false}
+              localEnabled={localEnabled}
               hasProject={Boolean(activeProject)}
+              globalLocked={globalLocked}
               onScopeSelected={(s) => app.receiveScope(s)}
             />
           </div>
@@ -649,6 +749,7 @@ export function McpListScreen() {
         columns={columns}
         getRowId={(row) => (row.id === "" ? `native:${row.name}` : row.id)}
         viewportHeight={600}
+        rowHeight={76}
         selectionMode="none"
         getRowLabel={(row) => row.name}
         loading={loading}
@@ -680,21 +781,25 @@ export function McpListScreen() {
 
       {/* Action Dialogs */}
       <Modal
-        open={dialog?.kind === "disable-repo" || dialog?.kind === "disable-agent"}
+        open={dialog?.kind === "disable-repo" || dialog?.kind === "disable-agent" || dialog?.kind === "enable-agent"}
         onOpenChange={(open) => {
           if (!open) closeDialog();
         }}
         title={
           dialog?.kind === "disable-repo"
             ? `Disable ${dialog.row.name} in ${list?.project_name ?? "this repo"}?`
-            : `Disable ${dialog?.kind === "disable-agent" ? dialog.row.name : ""} for ${dialog?.kind === "disable-agent" ? dialog.agent : ""}?`
+            : dialog?.kind === "enable-agent"
+              ? `Enable ${dialog.row.name} for ${AGENT_LABEL[dialog.agent] ?? dialog.agent}?`
+              : `Disable ${dialog?.kind === "disable-agent" ? dialog.row.name : ""} for ${dialog?.kind === "disable-agent" ? AGENT_LABEL[dialog.agent] ?? dialog.agent : ""}?`
         }
         description={
           dialog?.kind === "disable-repo"
             ? repoAgents.length === 0
               ? `${dialog.row.name} stays available for every agent because none has a project-level MCP scope. Disable it for one agent instead.`
               : `It stops loading in ${list?.project_name ?? "this repo"} for ${repoAgents.map((cell) => cell.agent).join(", ")}. Other agents keep loading it.`
-            : "The server keeps its definition and stays available for other agents."
+            : dialog?.kind === "enable-agent"
+              ? `The reviewed change writes this server into ${AGENT_LABEL[dialog.agent] ?? dialog.agent}'s own config file after a backup. It does not start the server.`
+              : "The server keeps its definition and stays available for other agents."
         }
         footer={
           <>
@@ -735,10 +840,24 @@ export function McpListScreen() {
                     },
                     dialog.row.name,
                   );
+                } else if (dialog.kind === "enable-agent") {
+                  void applyAction(
+                    "mcp_server_enable",
+                    {
+                      item_id: dialog.row.id,
+                      scope: dialog.row.scope,
+                      project_id: activeProject,
+                      agent: dialog.agent,
+                      in_repo: false,
+                      apply: true,
+                      preview_id: preview?.preview_id ?? null,
+                    },
+                    dialog.row.name,
+                  );
                 }
               }}
             >
-              Disable
+              {dialog?.kind === "enable-agent" ? "Enable" : "Disable"}
             </Button>
           </>
         }
@@ -866,6 +985,20 @@ export function McpListScreen() {
           onClose={() => setWhy(null)}
         />
       ) : null}
+
+      {adoptModalTarget !== null && adoptModalTarget.source_path && (
+        <AdoptModal
+          path={adoptModalTarget.source_path}
+          name={adoptModalTarget.name}
+          onAdoptSuccess={() => {
+            toast.success(`Adopted ${adoptModalTarget.name} into AgenTuna`);
+            setAdoptModalTarget(null);
+            void load();
+          }}
+          onRescan={() => void load()}
+          onClose={() => setAdoptModalTarget(null)}
+        />
+      )}
     </main>
   );
 }

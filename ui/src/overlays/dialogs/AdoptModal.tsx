@@ -8,6 +8,7 @@ import { Modal } from "./Modal";
 
 export interface AdoptModalProps {
   readonly path: string;
+  readonly name?: string | null;
   readonly expectedHash?: string | null;
   readonly onAdoptSuccess: (result: AdoptApplyView) => void;
   readonly onRescan?: () => void;
@@ -19,6 +20,7 @@ export interface AdoptModalProps {
  */
 export function AdoptModal({
   path,
+  name: itemPropName,
   expectedHash,
   onAdoptSuccess,
   onRescan,
@@ -38,7 +40,8 @@ export function AdoptModal({
 
     invoke<AdoptPreviewView>("adopt_preview", {
       path,
-      expected_hash: expectedHash ?? null,
+      name: itemPropName ?? null,
+      expectedHash: expectedHash ?? null,
       handling: "link",
     })
       .then((view) => {
@@ -60,7 +63,7 @@ export function AdoptModal({
     return () => {
       active = false;
     };
-  }, [path, expectedHash]);
+  }, [path, itemPropName, expectedHash]);
 
   async function handleAdopt() {
     setBusy(true);
@@ -68,7 +71,8 @@ export function AdoptModal({
     try {
       const outcome = await invoke<AdoptApplyView>("adopt_apply", {
         path,
-        expected_hash: expectedHash ?? null,
+        name: itemPropName ?? null,
+        expectedHash: expectedHash ?? null,
         handling: "link",
       });
       onAdoptSuccess(outcome);
@@ -159,6 +163,15 @@ export function AdoptModal({
               </p>
             </section>
 
+            <section className="flex flex-col gap-4">
+              <span className="text-11 font-semibold uppercase tracking-wide text-text-muted">
+                Backup directory
+              </span>
+              <p className="m-0 font-mono text-13 text-text">{preview.backup_dir}</p>
+              <p className="m-0 text-12 text-text-secondary">
+                original copy preserved before changes
+              </p>
+            </section>
             <section className="rounded-8 border border-border bg-raised p-12">
               <h3 className="m-0 text-13 font-semibold text-text">What changes</h3>
               <ul className="m-0 mt-6 flex list-disc flex-col gap-4 pl-16 text-12 text-text-secondary">

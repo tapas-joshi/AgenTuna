@@ -3,4 +3,4 @@
 /**
  * Actionable remedy associated with a typed remote-backup failure.
  */
-export type RemoteBackupRemedy = "configure_repository" | "save_token" | "replace_token" | "turn_network_on" | "review_network_policy" | "sync_first" | "confirm_deletions" | "choose_empty_store" | "review_again" | "retry";
+export type RemoteBackupRemedy = "configure_repository" | "save_token" | "replace_token" | "add_repo_scope" | "edit_repo_name" | "turn_network_on" | "review_network_policy" | "sync_first" | "confirm_deletions" | "choose_empty_store" | "review_again" | "retry";

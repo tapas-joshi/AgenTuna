@@ -5,9 +5,9 @@ import { cn } from "./cn";
 
 const BASE_CLASSES =
   "inline-flex size-16 shrink-0 cursor-pointer items-center justify-center rounded-3 border border-border bg-raised text-surface transition-colors " +
-  "data-[state=checked]:border-accent data-[state=checked]:bg-accent " +
-  "data-[state=indeterminate]:border-accent data-[state=indeterminate]:bg-accent " +
-  "hover:border-text-muted data-[state=checked]:hover:bg-accent/90 " +
+  "data-[state=checked]:border-accent-fill data-[state=checked]:bg-accent-fill data-[state=checked]:text-on-accent " +
+  "data-[state=indeterminate]:border-accent-fill data-[state=indeterminate]:bg-accent-fill data-[state=indeterminate]:text-on-accent " +
+  "hover:border-text-muted data-[state=checked]:hover:bg-accent-fill/90 " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 

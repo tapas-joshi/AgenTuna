@@ -1,0 +1,60 @@
+{
+  "agent": "omp",
+  "agents": [
+    {
+      "name": "omp"
+    }
+  ],
+  "expect": {
+    "diagnostics": [],
+    "disabled": [
+      {
+        "agents": [
+          "omp"
+        ],
+        "key": {
+          "Declared": "srv-logs"
+        },
+        "kind": "mcp_server",
+        "name": "logs",
+        "scope": "project"
+      }
+    ],
+    "gitignore": null,
+    "items": [],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [],
+    "skipped": []
+  },
+  "id": "mcp-omp-disabled-here",
+  "schema_version": 1,
+  "stores": [
+    {
+      "mcp": [
+        {
+          "command": "logs",
+          "id": "srv-logs",
+          "slug": "logs"
+        }
+      ],
+      "scope": "user"
+    },
+    {
+      "scope": "project"
+    }
+  ],
+  "title": "A Project tombstone disables the inherited MCP server for Omp",
+  "tombstones": [
+    {
+      "agents": [
+        "omp"
+      ],
+      "kind": "mcp_server",
+      "scope": "project",
+      "target": "srv-logs"
+    }
+  ]
+}

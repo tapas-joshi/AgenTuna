@@ -25,6 +25,8 @@ export type AgentCellState =
       readonly readOnly?: boolean;
       /** A write is in flight; the switch renders disabled and busy. */
       readonly pending?: boolean;
+      /** Why the switch is disabled; shown as the tooltip instead of the status text. */
+      readonly disabledReason?: string;
     }
   | {
       /** Not deployed to this agent. */
@@ -33,6 +35,8 @@ export type AgentCellState =
       readonly readOnly?: boolean;
       /** A write is in flight; the switch renders disabled and busy. */
       readonly pending?: boolean;
+      /** Why the switch is disabled; shown as the tooltip instead of the status text. */
+      readonly disabledReason?: string;
     }
   | {
       /** Found only in the agent's own folder, outside AgenTuna management. */

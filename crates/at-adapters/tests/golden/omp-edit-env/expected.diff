@@ -1,0 +1,13 @@
+--- fixture
++++ output
+@@ -8,8 +8,8 @@
+         "local-tool-mcp"
+       ],
+       "env": {
+-        "TOOL_HOME": "/tmp/tool",
+-        "API_KEY": "${API_KEY}"
++        "API_KEY": "${API_KEY}",
++        "TOOL_HOME": "/tmp/tool-v2"
+       },
+       "enabled": true,
+       "timeout": 20000,

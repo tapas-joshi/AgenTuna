@@ -293,7 +293,10 @@ fn open_lock_file(layout: &StoreLayout, access: StoreAccess) -> Result<Option<Fi
     let path = store_lock_path(layout);
     if access.is_writable() {
         let state_dir = layout.state_dir();
-        fs::create_dir_all(&state_dir).map_err(|source| lock_error(&state_dir, source))?;
+        at_fs::ensure_dir(&state_dir).map_err(|source| match source {
+            at_fs::FsError::Io { source, .. } => lock_error(&state_dir, source),
+            other => lock_error(&state_dir, io::Error::other(other.to_string())),
+        })?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)

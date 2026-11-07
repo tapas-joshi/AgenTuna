@@ -6,19 +6,28 @@ pub mod bulk_skill;
 pub mod cli_install;
 pub mod commands;
 pub mod config;
+pub mod deep_link;
 pub mod detection;
 pub mod diagnostics;
 pub mod dialogs;
 pub mod drift;
+pub mod drift_commands;
+#[cfg(test)]
+pub(crate) mod drift_testkit;
 pub mod effective;
+pub mod external_link;
+pub mod flow_harness;
 pub mod instance;
 pub mod jobs;
 pub mod linux;
 pub mod logs;
+pub mod mcp_copy;
 pub mod mcp_form;
+pub mod mcp_launch;
 pub mod mcp_servers;
 pub mod menu;
 pub mod migrate;
+pub mod native_scan;
 pub mod network;
 pub mod overview;
 pub mod overwrite;
@@ -35,21 +44,24 @@ pub mod settings;
 pub mod skill_agent;
 pub mod skill_delete;
 pub mod skill_detail;
+pub mod skill_transfer;
 pub mod skill_wizard;
 pub mod skills_list;
 pub mod source_updates;
+pub mod startup;
 pub mod state;
+pub mod store_setup;
 pub mod updater;
 pub mod window_state;
 pub mod workflows;
 
 use at_store::config::LogLevel;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
-use bridge::{JobBridge, TauriEventSink, TracingOperationsLog};
+use bridge::{DatabaseOperationsLog, JobBridge, TauriEventSink, TracingOperationsLog};
 use cli_install::CliInstaller;
 use network::NetworkState;
 use state::AppState;
@@ -112,13 +124,17 @@ pub fn run() -> tauri::Result<()> {
     let setup_config = Arc::clone(&config);
     let setup_logging = logging.clone();
     let setup_paths = paths.clone();
-    let database = match at_db::Database::open_file(paths.db_path()) {
-        Ok(database) => Some(database),
-        Err(error) => {
-            tracing::error!(%error, "application database unavailable");
-            None
-        }
-    };
+    let startup = startup::open_database(&paths);
+    if let Some(report) = &startup.rebuild {
+        tracing::info!(
+            items = report.counts.items,
+            native_items = report.counts.native_items,
+            duration_ms = report.duration_ms,
+            "derived data rebuilt at startup"
+        );
+    }
+    let setup_warnings = startup.warnings;
+    let database = startup.database;
     let setup_updates_opt_in = database
         .as_ref()
         .and_then(|database| at_db::settings::load(database.connection()).ok())
@@ -127,7 +143,10 @@ pub fn run() -> tauri::Result<()> {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            app.set_menu(menu::build(app.handle())?)?;
+            create_main_window(app)?;
+            let native_menu = menu::build(app.handle())?;
+            app.set_menu(native_menu.menu)?;
+            app.manage(native_menu.controls);
             app.handle().on_menu_event(|handle, event| {
             if let Some(action) = menu::MenuAction::from_id(event.id().as_ref())
                 && let Err(error) = handle.emit("menu-action", action.id())
@@ -145,7 +164,14 @@ pub fn run() -> tauri::Result<()> {
                 );
             }
             let sink = Arc::new(TauriEventSink::new(app.handle().clone()));
-            let bridge = Arc::new(JobBridge::new(sink, Arc::new(TracingOperationsLog)));
+            // One database handle is shared by the app state and the bridge's operations log, so
+            // a shutdown row and a command write go through the same connection.
+            let database = database.map(|database| Arc::new(Mutex::new(database)));
+            let operations: Arc<dyn bridge::OperationsLog> = match &database {
+                Some(database) => Arc::new(DatabaseOperationsLog::new(Arc::clone(database))),
+                None => Arc::new(TracingOperationsLog),
+            };
+            let bridge = Arc::new(JobBridge::new(sink, operations));
             let cli = match CliInstaller::for_current_app() {
                 Ok(installer) => Some(installer),
                 Err(error) => {
@@ -157,9 +183,10 @@ pub fn run() -> tauri::Result<()> {
                 .with_config(setup_config)
                 .with_instance(instance_state)
                 .with_logging(setup_logging)
-                .with_paths(setup_paths.clone());
+                .with_paths(setup_paths.clone())
+                .with_startup_warnings(setup_warnings);
             let state = match database {
-                Some(database) => state.with_database(database),
+                Some(database) => state.with_database_handle(database),
                 None => state,
             };
             let state = match state.database_handle() {
@@ -182,6 +209,7 @@ pub fn run() -> tauri::Result<()> {
                 }
                 Err(_) => state,
             };
+            app.manage(deep_link::DeepLinkRelay::default());
             app.manage(state);
             if let Ok(database) = app.state::<AppState>().database_handle()
                 && let Err(error) = detection::start(
@@ -193,15 +221,14 @@ pub fn run() -> tauri::Result<()> {
             {
                 tracing::warn!(%error, "agent filesystem detection watcher unavailable");
             }
-            if let Ok(database) = app.state::<AppState>().database_handle()
-                && let Err(error) = drift::start(
+            if let Ok(database) = app.state::<AppState>().database_handle() {
+                let watcher = drift::start(
                     app.handle().clone(),
                     setup_paths.clone(),
                     database,
                     app.state::<AppState>().recent_writes(),
-                )
-            {
-                tracing::warn!(%error, "drift watcher unavailable");
+                );
+                app.manage(watcher);
             }
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore_window(&window, app.state::<AppState>().inner());
@@ -214,6 +241,47 @@ pub fn run() -> tauri::Result<()> {
                     .with_updates_opt_in(setup_updates_opt_in),
             );
             app.manage(network.clone());
+            // App-update state: staged archives, the persisted install queue and the journal of
+            // the last bundle swap. The cache lives beside the other derived app data.
+            app.manage(updater::commands::UpdaterState::system(
+                setup_paths.cache_dir().join("updates"),
+            ));
+            {
+                let updater_handle = app.handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let updater = updater_handle.state::<updater::commands::UpdaterState>();
+                    match updater.reconcile(env!("CARGO_PKG_VERSION")) {
+                        Ok(updater::install::BundleSwapReconcile::Committed { version }) => {
+                            tracing::info!(%version, "confirmed the updated bundle on first launch");
+                        }
+                        Ok(updater::install::BundleSwapReconcile::RolledBack { version }) => {
+                            tracing::warn!(?version, "restored the previous bundle after an interrupted update");
+                            match version {
+                                Some(version) => {
+                                    updater.set_status(updater::install::UpdateInstallStatus::RolledBack {
+                                        version,
+                                        reason: "The previous update did not start.".to_owned(),
+                                        remedy: "AgenTuna is running the previous version again; retry the update or install the release manually.".to_owned(),
+                                    });
+                                }
+                                None => tracing::warn!(
+                                    "the restored bundle has no recorded version"
+                                ),
+                            }
+                        }
+                        Ok(updater::install::BundleSwapReconcile::ManualReview { reason }) => {
+                            tracing::warn!(%reason, "update journal needs manual review");
+                        }
+                        Ok(
+                            updater::install::BundleSwapReconcile::Nothing
+                            | updater::install::BundleSwapReconcile::Disposed,
+                        ) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "could not reconcile the update journal");
+                        }
+                    }
+                });
+            }
             if let Ok(update_database) = app.state::<AppState>().database_handle() {
                 let update_network = network.clone();
                 tauri::async_runtime::spawn_blocking(move || {
@@ -261,6 +329,15 @@ pub fn run() -> tauri::Result<()> {
     #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::app_info,
+        external_link::open_external_link,
+        deep_link::deep_link_take,
+        commands::app_signing_status,
+        updater::commands::app_update_status,
+        updater::commands::app_update_check,
+        updater::commands::app_update_install_request,
+        updater::commands::app_update_install_resume,
+        updater::commands::app_update_install_cancel,
+        menu::app_menu_set_add_skill_enabled,
         commands::jobs_list,
         commands::jobs_cancel,
         commands::cli_install_status,
@@ -271,6 +348,7 @@ pub fn run() -> tauri::Result<()> {
         commands::settings_set,
         remote_backup::remote_backup_settings,
         remote_backup::remote_backup_configure,
+        remote_backup::remote_backup_create_repo,
         remote_backup::actions::status,
         remote_backup::actions::backup_now,
         remote_backup::actions::sync_now,
@@ -287,8 +365,24 @@ pub fn run() -> tauri::Result<()> {
         effective::effective_lock,
         effective::effective_unlock,
         migrate::migrate_scan,
+        migrate::migrate_scan_start,
+        migrate::migrate_scan_result,
         overview::overview_load,
+        drift_commands::drift_snapshot,
+        drift_commands::drift_rescan,
+        drift_commands::drift_watcher_set_paused,
+        drift_commands::drift_preview,
+        drift_commands::drift_adopt,
+        drift_commands::drift_restore,
+        drift_commands::drift_open_in_editor,
+        drift_commands::backups_list,
+        drift_commands::backup_preview,
+        drift_commands::backup_restore,
         overview::overview_enable_global_writes,
+        overview::overview_setup_preview,
+        overview::overview_setup_apply,
+        privilege::global_store_overview,
+        privilege::global_enable_writes,
         commands::recovery_sheet,
         commands::recovery_discard,
         commands::recovery_restore,
@@ -296,6 +390,7 @@ pub fn run() -> tauri::Result<()> {
         skill_detail::skill_detail_load,
         skill_agent::skill_agent_preview,
         skill_agent::skill_agent_apply,
+        skill_agent::skill_agent_discard,
         skills_list::skills_list,
         skill_detail::skill_auto_update_set,
         skill_detail::skill_update_ignore,
@@ -330,33 +425,49 @@ pub fn run() -> tauri::Result<()> {
         network::network_set_offline,
         mcp_form::mcp_plan_preview,
         mcp_form::mcp_save,
+        mcp_form::mcp_test_draft,
+        mcp_form::mcp_launch_prepare,
         mcp_servers::mcp_server_list,
         mcp_servers::mcp_server_disable,
         mcp_servers::mcp_server_delete,
         mcp_servers::mcp_server_test,
         mcp_servers::mcp_server_enable,
         mcp_servers::mcp_server_detail,
+        mcp_copy::mcp_server_copy_preview,
+        mcp_copy::mcp_server_copy_apply,
         bulk_skill::bulk_skill_apply,
-        commands::mcp_test_connection,
         secrets::secrets_list,
         secrets::secrets_create,
         secrets::secrets_rotate,
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
+        overwrite::overwrite_undo_move,
         overwrite::adopt_preview,
         overwrite::adopt_apply,
         overwrite::operation_undo,
         skill_wizard::skill_wizard_transition,
+        skill_wizard::skill_scope_options,
         skill_wizard::skill_add_preview,
         skill_wizard::skill_template_preview,
         skill_wizard::skill_import_choose_folder,
         skill_wizard::skill_import_choose_zip,
         skill_wizard::skill_library_catalog,
-        skill_wizard::skill_import_git_candidates,
+        skill_wizard::skill_import_git_start,
+        skill_wizard::skill_import_local_start,
+        skill_wizard::skill_import_job_result,
+        skill_wizard::skill_import_release,
         skill_wizard::skill_marketplace_search,
-        skill_wizard::skill_add_apply,
+        skill_wizard::skill_add_apply_start,
+        skill_wizard::skill_add_apply_result,
         skill_delete::skill_delete_preview,
         skill_delete::skill_delete_apply,
+        skill_transfer::skill_transfer_options,
+        skill_transfer::skill_transfer_preview,
+        skill_transfer::skill_transfer_apply,
+        skill_transfer::skill_disable_in_repo_preview,
+        skill_transfer::skill_disable_in_repo_apply,
+        skill_transfer::skill_transfer_bulk_preview,
+        skill_transfer::skill_transfer_bulk_apply,
         migrate::migrate_conflicts,
         workflows::instructions_list,
         workflows::instruction_save,
@@ -389,6 +500,15 @@ pub fn run() -> tauri::Result<()> {
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::app_info,
+        external_link::open_external_link,
+        deep_link::deep_link_take,
+        commands::app_signing_status,
+        updater::commands::app_update_status,
+        updater::commands::app_update_check,
+        updater::commands::app_update_install_request,
+        updater::commands::app_update_install_resume,
+        updater::commands::app_update_install_cancel,
+        menu::app_menu_set_add_skill_enabled,
         commands::jobs_list,
         commands::jobs_cancel,
         commands::cli_install_status,
@@ -402,10 +522,23 @@ pub fn run() -> tauri::Result<()> {
         effective::effective_lock,
         effective::effective_unlock,
         migrate::migrate_scan,
+        migrate::migrate_scan_start,
+        migrate::migrate_scan_result,
+        drift_commands::drift_snapshot,
+        drift_commands::drift_rescan,
+        drift_commands::drift_watcher_set_paused,
+        drift_commands::drift_preview,
+        drift_commands::drift_adopt,
+        drift_commands::drift_restore,
+        drift_commands::drift_open_in_editor,
+        drift_commands::backups_list,
+        drift_commands::backup_preview,
+        drift_commands::backup_restore,
         migrate::migrate_conflicts,
         commands::settings_set,
         remote_backup::remote_backup_settings,
         remote_backup::remote_backup_configure,
+        remote_backup::remote_backup_create_repo,
         remote_backup::actions::status,
         remote_backup::actions::backup_now,
         remote_backup::actions::sync_now,
@@ -421,10 +554,15 @@ pub fn run() -> tauri::Result<()> {
         commands::recovery_restore,
         overview::overview_load,
         overview::overview_enable_global_writes,
+        overview::overview_setup_preview,
+        overview::overview_setup_apply,
+        privilege::global_store_overview,
+        privilege::global_enable_writes,
         commands::item_lookup,
         skill_detail::skill_detail_load,
         skill_agent::skill_agent_preview,
         skill_agent::skill_agent_apply,
+        skill_agent::skill_agent_discard,
         skills_list::skills_list,
         skill_detail::skill_auto_update_set,
         skill_detail::skill_update_ignore,
@@ -455,38 +593,54 @@ pub fn run() -> tauri::Result<()> {
         project_sync::project_sync_status,
         project_sync::project_sync_preview,
         project_sync::project_sync_apply,
+        network::network_clear_events,
         network::network_set_offline,
         config::config_report,
         mcp_form::mcp_plan_preview,
         mcp_form::mcp_save,
+        mcp_form::mcp_test_draft,
+        mcp_form::mcp_launch_prepare,
         mcp_servers::mcp_server_list,
         mcp_servers::mcp_server_disable,
         mcp_servers::mcp_server_delete,
         mcp_servers::mcp_server_test,
         mcp_servers::mcp_server_enable,
         mcp_servers::mcp_server_detail,
+        mcp_copy::mcp_server_copy_preview,
+        mcp_copy::mcp_server_copy_apply,
         bulk_skill::bulk_skill_apply,
-        commands::mcp_test_connection,
         secrets::secrets_list,
         secrets::secrets_create,
         secrets::secrets_rotate,
         secrets::secrets_delete,
         overwrite::overwrite_move_aside,
+        overwrite::overwrite_undo_move,
         overwrite::adopt_preview,
         overwrite::adopt_apply,
         overwrite::operation_undo,
         skill_wizard::skill_wizard_transition,
+        skill_wizard::skill_scope_options,
         skill_wizard::skill_template_preview,
         skill_wizard::skill_add_preview,
         skill_wizard::skill_import_choose_folder,
         skill_wizard::skill_import_choose_zip,
-        skill_wizard::skill_import_candidates,
+        skill_wizard::skill_import_local_start,
         skill_wizard::skill_library_catalog,
         skill_wizard::skill_marketplace_search,
-        skill_wizard::skill_import_git_candidates,
-        skill_wizard::skill_add_apply,
+        skill_wizard::skill_import_git_start,
+        skill_wizard::skill_import_job_result,
+        skill_wizard::skill_import_release,
+        skill_wizard::skill_add_apply_start,
+        skill_wizard::skill_add_apply_result,
         skill_delete::skill_delete_preview,
         skill_delete::skill_delete_apply,
+        skill_transfer::skill_transfer_options,
+        skill_transfer::skill_transfer_preview,
+        skill_transfer::skill_transfer_apply,
+        skill_transfer::skill_disable_in_repo_preview,
+        skill_transfer::skill_disable_in_repo_apply,
+        skill_transfer::skill_transfer_bulk_preview,
+        skill_transfer::skill_transfer_bulk_apply,
         workflows::instructions_list,
         workflows::instruction_save,
         rule_create::instruction_create_options,
@@ -548,6 +702,14 @@ pub fn run() -> tauri::Result<()> {
             );
             tracing::debug!(paused, "updated health scheduler visibility state");
         }
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = &event {
+            if let Some(relay) = handle.try_state::<deep_link::DeepLinkRelay>() {
+                relay.deliver(handle, urls);
+            } else {
+                tracing::warn!("deep link arrived before the relay was managed");
+            }
+        }
         if !matches!(event, tauri::RunEvent::Exit) {
             return;
         }
@@ -570,6 +732,35 @@ pub fn run() -> tauri::Result<()> {
             tracing::warn!(%error, "could not mark the session as a clean exit");
         }
     });
+    Ok(())
+}
+
+/// Creates the `main` webview from `tauri.conf.json` with the navigation guard attached.
+///
+/// The window declares `"create": false`, so Tauri leaves it to this function: the builder's
+/// navigation and new-window hooks are the only seam where a webview can be confined to the app
+/// origin, and a config-created window has none. Everything else in the window config (size,
+/// title, label) still comes from the config file.
+fn create_main_window<R: tauri::Runtime>(
+    app: &mut tauri::App<R>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("tauri.conf.json defines no `main` window"))?;
+    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .on_navigation(external_link::navigation_allowed)
+        .on_new_window(|_url, _features| {
+            tracing::warn!(
+                "refused a new webview window; external links open in the system browser"
+            );
+            tauri::webview::NewWindowResponse::<R>::Deny
+        })
+        .build()?;
     Ok(())
 }
 

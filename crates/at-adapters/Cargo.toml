@@ -13,6 +13,7 @@ workspace = true
 at-model.workspace = true
 thiserror.workspace = true
 at-fs.workspace = true
+libc.workspace = true
 jsonc-parser = { workspace = true, features = ["cst", "serde_json"] }
 serde_json.workspace = true
 url.workspace = true

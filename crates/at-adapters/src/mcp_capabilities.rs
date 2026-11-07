@@ -64,6 +64,17 @@ pub enum UnsupportedField {
     OAuth,
 }
 
+impl UnsupportedField {
+    /// Stable lower-case name shown in acknowledgement warnings and previews.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Headers => "headers",
+            Self::OAuth => "oauth",
+        }
+    }
+}
+
 /// MCP data retained for deployment after unsupported fields were explicitly acknowledged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedEntry {

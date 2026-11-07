@@ -243,6 +243,16 @@ pub enum OmpMcpError {
     /// The guarded write pipeline refused or failed.
     #[error(transparent)]
     Fs(#[from] at_fs::FsError),
+    /// A secret reference cannot be emitted because omp does not verify `${VAR}` expansion.
+    #[error(
+        "server `{server}`: secret variable `{variable}` cannot be rendered as ${{VAR}}; omp does not verify ${{VAR}} expansion"
+    )]
+    UnverifiedSecretExpansion {
+        /// Server name.
+        server: String,
+        /// Variable name.
+        variable: String,
+    },
 }
 
 /// One server entry as it appears in omp's `mcpServers` object.
@@ -840,14 +850,29 @@ fn validate_server(server: &OmpServer) -> Result<(), OmpMcpError> {
         });
     }
     match &server.transport {
-        McpTransport::Stdio { command, .. } => {
+        McpTransport::Stdio { command, env, .. } => {
             if command.is_empty() {
                 return Err(OmpMcpError::MissingCommand {
                     server: server.name.clone(),
                 });
             }
+            for value in env.values() {
+                if let EnvValue::Secret(secret) = value
+                    && !crate::secret_launch::verifies_var_expansion(&at_model::AgentId::Omp)
+                {
+                    return Err(OmpMcpError::UnverifiedSecretExpansion {
+                        server: server.name.clone(),
+                        variable: secret.env_name.clone(),
+                    });
+                }
+            }
         }
-        McpTransport::Http { url, oauth, .. } => {
+        McpTransport::Http {
+            url,
+            oauth,
+            headers,
+            ..
+        } => {
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
                 return Err(OmpMcpError::InvalidUrl {
                     server: server.name.clone(),
@@ -855,6 +880,16 @@ fn validate_server(server: &OmpServer) -> Result<(), OmpMcpError> {
             }
             if oauth.is_some() {
                 return Err(OmpMcpError::UnsupportedField { field: "oauth" });
+            }
+            for value in headers.values() {
+                if let EnvValue::Secret(secret) = value
+                    && !crate::secret_launch::verifies_var_expansion(&at_model::AgentId::Omp)
+                {
+                    return Err(OmpMcpError::UnverifiedSecretExpansion {
+                        server: server.name.clone(),
+                        variable: secret.env_name.clone(),
+                    });
+                }
             }
         }
     }
@@ -1104,12 +1139,8 @@ fn json_to_cst(value: &Value) -> CstInputValue {
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), OmpMcpError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
-        OmpMcpError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
+    at_fs::set_permissions(path, mode).map_err(|source| match source {
+        at_fs::FsError::Io { path, source } => OmpMcpError::Io { path, source },
+        other => OmpMcpError::Fs(other),
     })
 }

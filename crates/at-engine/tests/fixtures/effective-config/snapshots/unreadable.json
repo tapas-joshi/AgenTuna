@@ -1,0 +1,54 @@
+{
+  "effective": {
+    "diagnostics": [],
+    "disabled_here": [],
+    "items": []
+  },
+  "trace": {
+    "active_scope": "project",
+    "agent": "claude_code",
+    "item_id": "itm_018f47aa-7a3d-7000-8000-000000000011",
+    "steps": [
+      {
+        "location": null,
+        "reason": "No definition at this scope",
+        "scope": "global",
+        "status": "Absent"
+      },
+      {
+        "location": {
+          "byte_span": {
+            "end": 18,
+            "start": 0
+          },
+          "line": 3,
+          "path": "<user>/mcp.json",
+          "rendering_path": "<agent>/settings.json"
+        },
+        "reason": "Owning file is unreadable: <OS error>",
+        "scope": "user",
+        "status": {
+          "Unreadable": {
+            "os_error": "<OS error>"
+          }
+        }
+      },
+      {
+        "location": null,
+        "reason": "No definition at this scope",
+        "scope": "project",
+        "status": "Absent"
+      },
+      {
+        "location": null,
+        "reason": "No definition at this scope",
+        "scope": "local",
+        "status": "Absent"
+      }
+    ],
+    "verdict": {
+      "decisive_step": null,
+      "on": false
+    }
+  }
+}

@@ -285,7 +285,7 @@ fn changing_only_the_command_keeps_env_vars_and_enabled() {
 }
 
 #[test]
-fn secrets_are_written_as_references_and_flagged() {
+fn secrets_are_refused_when_unverified_and_env_vars_used_instead() {
     let secret = EnvValue::Secret(SecretRef {
         env_name: "FIGMA_TOKEN".to_owned(),
         keychain_account: "agentuna/figma".to_owned(),
@@ -296,19 +296,30 @@ fn secrets_are_written_as_references_and_flagged() {
         ..CodexServerEntry::default()
     };
     let mut config = CodexConfigFile::parse(DOTTED).expect("parse");
-    let flags = config.set_server("figma", &entry).expect("set server");
-    assert_eq!(
-        flags,
-        [CodexFlag::UnverifiedInterpolation {
-            server: "figma".to_owned(),
-            env_name: "FIGMA_TOKEN".to_owned(),
-        }]
-    );
-    let text = config.text();
+    let error = config
+        .set_server("figma", &entry)
+        .expect_err("secret expansion in env must be refused");
     assert!(
-        text.contains("env = { FIGMA_TOKEN = \"${FIGMA_TOKEN}\" }"),
-        "{text}"
+        matches!(
+            error,
+            CodexError::UnverifiedSecretExpansion { ref id, ref variable }
+            if id == "figma" && variable == "FIGMA_TOKEN"
+        ),
+        "expected UnverifiedSecretExpansion, got {error:?}"
     );
+
+    // Codex uses env_vars instead
+    let env_vars_entry = CodexServerEntry {
+        command: Some("npx".to_owned()),
+        env_vars: Some(vec!["FIGMA_TOKEN".to_owned()]),
+        ..CodexServerEntry::default()
+    };
+    let flags = config
+        .set_server("figma", &env_vars_entry)
+        .expect("set server with env_vars");
+    assert!(flags.is_empty());
+    let text = config.text();
+    assert!(text.contains("env_vars = [\"FIGMA_TOKEN\"]"), "{text}");
     assert!(
         !text.contains("agentuna/figma"),
         "keychain account leaked:\n{text}"
@@ -434,13 +445,7 @@ fn stdio_transport_is_projected_to_command_args_and_env() {
         command: "uvx".to_owned(),
         args: vec!["mcp-server-fetch".to_owned()],
         cwd: Some(PathBuf::from("<project>")),
-        env: BTreeMap::from([(
-            "TOKEN".to_owned(),
-            EnvValue::Secret(SecretRef {
-                env_name: "TOKEN".to_owned(),
-                keychain_account: "agentuna/token".to_owned(),
-            }),
-        )]),
+        env: BTreeMap::from([("TOKEN".to_owned(), EnvValue::Literal("${TOKEN}".to_owned()))]),
     };
     let (entry, unmodelled) = CodexServerEntry::from_transport(&transport);
     assert!(unmodelled.is_empty());
@@ -621,5 +626,43 @@ fn an_interleaved_config_keeps_its_order_and_gains_the_server_last() {
     assert_same_document(
         &config.text(),
         "[mcp_servers.a]\ncommand = \"1\"\n\n[features]\nx = true\n\n[mcp_servers.b]\ncommand = \"2\"\n\n[mcp_servers.c]\ncommand = \"3\"\n",
+    );
+}
+
+#[test]
+fn removing_the_first_server_keeps_the_file_header_comment() {
+    // Minimised case from the generative property test: the header comment above the first
+    // table belongs to the file, not to that table, so removing the server keeps it.
+    let source =
+        "# My config\n\n[mcp_servers.alpha]\ncommand = \"a\"\n\n[features]\nweb_search = true\n";
+    let mut config = CodexConfigFile::parse(source).expect("parse");
+    assert!(config.remove_server("alpha").expect("remove"));
+    assert_eq!(
+        config.text(),
+        "# My config\n\n[features]\nweb_search = true\n"
+    );
+}
+
+#[test]
+fn a_byte_order_mark_is_refused_before_any_edit() {
+    // Minimised case from the generative property test: toml_edit accepts a BOM but renders
+    // without it, so an accepted load silently dropped the byte order mark on the next save.
+    let source = "\u{feff}[mcp_servers.alpha]\ncommand = \"a\"\n";
+    assert!(matches!(
+        CodexConfigFile::parse(source),
+        Err(CodexError::ByteOrderMark)
+    ));
+}
+
+#[test]
+fn parse_errors_do_not_echo_the_offending_line() {
+    // Minimised case from the secret property test: toml_edit's Display quotes the source line.
+    let token = "sk-live-0123456789ab";
+    let source = format!("model = {token}\n");
+    let error = CodexConfigFile::parse(&source).expect_err("invalid TOML");
+    assert!(matches!(error, CodexError::InvalidToml { line: 1, .. }));
+    assert!(
+        !error.to_string().contains(token),
+        "the parse error echoed the offending value: {error}"
     );
 }

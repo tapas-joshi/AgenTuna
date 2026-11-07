@@ -4,6 +4,7 @@
 //! network, and [`local`] runs read-mostly commands (`rev-parse`, `status`, `check-ignore`,
 //! `add`) that stay on the local machine. Both spawn git with argv arrays only, never a shell.
 
+pub mod github;
 pub mod import;
 pub mod local;
 pub mod marketplace;

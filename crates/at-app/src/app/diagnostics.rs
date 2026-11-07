@@ -50,25 +50,42 @@ pub async fn diagnostics_export(
         .and_then(Value::as_i64)
         .ok_or_else(|| CommandError::internal("could not read database schema version"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(path) = super::dialogs::choose_save_file(
+        let path = super::dialogs::choose_save_file(
             &app,
             "Export AgenTuna diagnostics",
             "agentuna-diagnostics.zip",
             "zip",
         )
-        .map_err(|_| CommandError::unavailable("the save dialog could not return a local path"))?
-        else {
-            return Ok(DiagnosticsExportOutcome::Cancelled);
-        };
-        let log = read_redacted_log(logging.log_dir(), logging.redactor())?;
+        .map_err(|_| CommandError::unavailable("the save dialog could not return a local path"))?;
         let schema = logging
             .redactor()
             .redact(&format!("schema_version={schema_version}\n"));
-        let bytes = build_bundle(&log, &report, &schema)?;
-        install_bundle(path, bytes)
+        export_chosen(
+            path,
+            || read_redacted_log(logging.log_dir(), logging.redactor()),
+            &report,
+            &schema,
+        )
     })
     .await
     .map_err(|_| CommandError::internal("diagnostics export task failed"))?
+}
+
+/// Builds and installs the archive for the destination the save dialog returned.
+///
+/// The log is read only once a destination exists, so cancelling the dialog leaves no temporary
+/// or partial file and does not touch the log files.
+fn export_chosen(
+    chosen: Option<PathBuf>,
+    log: impl FnOnce() -> Result<String, CommandError>,
+    report: &Value,
+    schema: &str,
+) -> Result<DiagnosticsExportOutcome, CommandError> {
+    let Some(path) = chosen else {
+        return Ok(DiagnosticsExportOutcome::Cancelled);
+    };
+    let bytes = build_bundle(&log()?, report, schema)?;
+    install_bundle(path, bytes)
 }
 
 /// Returns the redacted local diagnostics report for the copyable Doctor dialog.
@@ -228,6 +245,14 @@ fn install_bundle(path: PathBuf, bytes: Vec<u8>) -> Result<DiagnosticsExportOutc
         Ok(_) => Ok(DiagnosticsExportOutcome::Exported {
             path: path.display().to_string(),
         }),
+        Err(at_fs::FsError::PermissionDenied { path: denied }) => Err(CommandError::new(
+            CommandErrorCode::PermissionDenied,
+            format!(
+                "permission denied: could not export diagnostics to {} ({})",
+                path.display(),
+                denied.display()
+            ),
+        )),
         Err(error) => Err(CommandError::internal(format!(
             "could not export diagnostics to {}: {error}",
             path.display()
@@ -277,5 +302,100 @@ mod tests {
         ));
         let valid = zip::ZipArchive::new(fs::File::open(path).expect("archive file"));
         assert!(valid.is_ok());
+    }
+
+    #[test]
+    fn cancelled_export_creates_no_file_and_reads_no_log() {
+        let dir = tempdir().expect("temp dir");
+        let report = serde_json::json!({"app_version": "test"});
+        let outcome = export_chosen(
+            None,
+            || {
+                Err(CommandError::internal(
+                    "the log must not be read after a cancel",
+                ))
+            },
+            &report,
+            "schema_version=9\n",
+        )
+        .expect("cancelling the save dialog is not an error");
+        assert_eq!(outcome, DiagnosticsExportOutcome::Cancelled);
+        assert_eq!(
+            fs::read_dir(dir.path()).expect("list sandbox").count(),
+            0,
+            "a cancel leaves no temporary or partial file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_export_location_reports_permission_denied_with_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("temp dir");
+        let read_only = dir.path().join("read-only");
+        fs::create_dir_all(&read_only).expect("read-only directory");
+        fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555))
+            .expect("make the directory read-only");
+        let target = read_only.join("support.zip");
+        let result = install_bundle(target.clone(), b"archive".to_vec());
+        fs::set_permissions(&read_only, fs::Permissions::from_mode(0o755))
+            .expect("restore fixture permissions");
+
+        let error = result.expect_err("a read-only location cannot be written");
+        assert_eq!(error.code, CommandErrorCode::PermissionDenied);
+        assert!(
+            error.message.contains(&target.display().to_string()),
+            "the message names the chosen path: {}",
+            error.message
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn exported_archive_passes_unzip_test_and_diagnostics_json_parses() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("support.zip");
+        let report = serde_json::json!({"app_version": "test", "schema_version": 9});
+        let bytes = build_bundle("INFO ready\n", &report, "schema_version=9\n").expect("bundle");
+        install_bundle(path.clone(), bytes).expect("install bundle");
+
+        let mut archive =
+            zip::ZipArchive::new(fs::File::open(&path).expect("archive file")).expect("zip opens");
+        assert_eq!(archive.len(), 3);
+        for name in ["logs/app.log", "diagnostics.json", "schema.txt"] {
+            assert!(archive.by_name(name).is_ok(), "{name} is present");
+        }
+        let mut diagnostics = String::new();
+        archive
+            .by_name("diagnostics.json")
+            .expect("diagnostics entry")
+            .read_to_string(&mut diagnostics)
+            .expect("diagnostics read");
+        let parsed: Value = serde_json::from_str(&diagnostics).expect("diagnostics.json parses");
+        assert_eq!(parsed["app_version"], "test");
+
+        // The story names `unzip -t`; run the real tool when the host has it and always keep the
+        // zip-crate assertions above so the test is portable.
+        match std::process::Command::new("unzip")
+            .arg("-t")
+            .arg(&path)
+            .output()
+        {
+            Ok(output) => {
+                assert!(
+                    output.status.success(),
+                    "unzip -t failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("No errors detected"),
+                    "{}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("unzip could not start: {error}"),
+        }
     }
 }

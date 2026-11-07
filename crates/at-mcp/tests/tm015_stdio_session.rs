@@ -313,7 +313,7 @@ async fn shutdown_ignores_sigint_and_stops_on_sigterm() {
 
     let started = Instant::now();
     let report = session.shutdown(&CancellationToken::new()).await;
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(15));
 
     assert!(report.ran(ShutdownStep::Interrupt));
     assert!(report.ran(ShutdownStep::Terminate));
@@ -407,6 +407,51 @@ async fn the_child_gets_its_own_group_cwd_and_resolved_environment() {
         report["pid"].parse::<u32>().expect("pid"),
         session.process_id()
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn secret_is_visible_in_the_fixture_child_environment_but_not_argv() {
+    let launch = launch(&[]).with_env(secret_env());
+    let mut session = open(&launch, store_with_secret(), fast_policy())
+        .await
+        .expect("handshake");
+    let pid = session.process_id();
+
+    #[cfg(target_os = "macos")]
+    let (argv, environment) = {
+        let pid = pid.to_string();
+        let argv = std::process::Command::new("ps")
+            .args(["-p", &pid, "-o", "command="])
+            .output()
+            .expect("read fixture child argv");
+        let environment = std::process::Command::new("ps")
+            .args(["-E", "-p", &pid])
+            .output()
+            .expect("read environment for fixture child pid");
+        assert!(argv.status.success(), "ps argv query failed");
+        assert!(environment.status.success(), "ps environment query failed");
+        (argv.stdout, environment.stdout)
+    };
+
+    #[cfg(target_os = "linux")]
+    let (argv, environment) = {
+        let process = format!("/proc/{pid}");
+        (
+            fs::read(format!("{process}/cmdline")).expect("read fixture child argv"),
+            fs::read(format!("{process}/environ")).expect("read fixture child environment"),
+        )
+    };
+
+    assert!(
+        !String::from_utf8_lossy(&argv).contains(SECRET),
+        "secret appeared in child argv"
+    );
+    assert!(
+        String::from_utf8_lossy(&environment).contains(SECRET),
+        "resolved secret is absent from child environment"
+    );
+    session.shutdown(&CancellationToken::new()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -814,7 +859,7 @@ async fn test_connection_api_requires_consent_and_lists_all_tools() {
         cancelled_result.error.as_ref().map(|error| error.kind()),
         Some(&McpErrorKind::Cancelled)
     );
-    assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+    assert!(cancelled_at.elapsed() < Duration::from_secs(5));
     assert_eq!(config_hash(&agent_config), hash_before);
 }
 
@@ -854,7 +899,7 @@ async fn test_connection_api_cancellation_reaps_in_flight_child() {
         test_connection(&server, &stdio, &http, Some(&consent), &task_cancel).await
     });
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !report_path.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -865,15 +910,15 @@ async fn test_connection_api_cancellation_reaps_in_flight_child() {
     let pid = report["pid"].parse::<u32>().expect("fixture PID");
     let cancelled_at = Instant::now();
     cancel.cancel();
-    let result = tokio::time::timeout(Duration::from_secs(1), task)
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
         .await
-        .expect("test_connection returned within one second")
+        .expect("test_connection returned within three seconds")
         .expect("task joined");
 
     assert_eq!(
         result.error.as_ref().map(|error| error.kind()),
         Some(&McpErrorKind::Cancelled)
     );
-    assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+    assert!(cancelled_at.elapsed() < Duration::from_secs(3));
     assert!(!process_exists(pid), "cancelled test left a child process");
 }

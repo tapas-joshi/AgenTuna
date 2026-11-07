@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_model::{AgentId, ItemId, ItemKind, Scope};
 
-use crate::rules::{MANAGED_BEGIN, MANAGED_END, RuleSource};
+use crate::rules::RuleSource;
 
 /// Native rule-file names supported by the create intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +123,9 @@ pub enum RuleEditorError {
     /// A safe filesystem/operation-history write failed.
     #[error(transparent)]
     Apply(#[from] at_fs::ChangeSetApplyError),
+    /// Deployment baselines could not be refreshed after the write.
+    #[error(transparent)]
+    Drift(#[from] crate::drift::DriftResolutionError),
     /// Version history could not be recorded.
     #[error(transparent)]
     Database(#[from] at_db::DbError),
@@ -221,6 +224,7 @@ pub fn save_rule_raw(
         &apply.operation_id,
         connection,
     )?;
+    sync_rule_baseline(connection, source.scope, &source.path)?;
     Ok(RuleSaveOutcome {
         changed: true,
         apply: Some(apply),
@@ -306,6 +310,7 @@ pub fn save_rule(
         &apply.operation_id,
         connection,
     )?;
+    sync_rule_baseline(connection, source.scope, &source.path)?;
     Ok(RuleSaveOutcome {
         changed: true,
         apply: Some(apply),
@@ -384,7 +389,14 @@ pub fn new_rule(
     if std::fs::symlink_metadata(&path).is_ok() {
         return Err(RuleEditorError::AlreadyExists { path });
     }
-    let template = format!("# {}\n", file_type.file_name()).into_bytes();
+    // The file is AgenTuna-managed from birth, so it carries the managed-block markers from the
+    // first write: an unmarked template could never be saved, because `save_rule` replaces only
+    // the region between the markers and refuses to invent them.
+    let template = at_fs::managed_block::render_managed_block(
+        &path,
+        None,
+        format!("# {}\n", file_type.file_name()).as_bytes(),
+    )?;
     let change_set = rule_change_set(
         "edit_rule",
         "Create native rule file",
@@ -432,6 +444,7 @@ pub fn apply_new_rule(
         &outcome.operation_id,
         connection,
     )?;
+    sync_rule_baseline(connection, intent.scope, &intent.path)?;
     let mtime = std::fs::metadata(&intent.path)
         .ok()
         .and_then(|metadata| metadata.modified().ok());
@@ -547,6 +560,23 @@ fn record_version(
         .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_millis()).ok());
     at_db::versions::record_skill_version(connection, &version)?;
+    // The item projection must agree with the bytes the editor just wrote; without this a
+    // saved rule keeps the `NULL` hash it had at creation and every later sync reports stale.
+    at_db::items::update_content_hash_for_id(connection, item_id, hash)?;
+    Ok(())
+}
+
+/// Records the deployment baselines of a rule file the editor just wrote.
+///
+/// A rule item can carry deployment rows from a migration or an adopt; the file the save just
+/// rendered is what those rows describe, so their baseline must move with it. Paths with no
+/// deployment rows refresh nothing.
+fn sync_rule_baseline(
+    connection: &rusqlite::Connection,
+    scope: Scope,
+    path: &Path,
+) -> Result<(), RuleEditorError> {
+    crate::drift::sync_written_target(connection, Some(scope), path, None)?;
     Ok(())
 }
 
@@ -592,24 +622,12 @@ fn managed_content<'a>(
 type ManagedParts<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 
 fn split_managed<'a>(path: &Path, bytes: &'a [u8]) -> Result<ManagedParts<'a>, RuleEditorError> {
-    let begin = bytes
-        .windows(MANAGED_BEGIN.len())
-        .position(|window| window == MANAGED_BEGIN)
-        .ok_or_else(|| at_fs::managed_block::ManagedBlockError::AdoptRequired {
-            path: path.to_path_buf(),
-        })?;
-    let body_start = begin + MANAGED_BEGIN.len();
-    let end_rel = bytes[body_start..]
-        .windows(MANAGED_END.len())
-        .position(|window| window == MANAGED_END)
-        .ok_or_else(
-            || at_fs::managed_block::ManagedBlockError::MalformedManagedBlock {
-                path: path.to_path_buf(),
-                line: bytes[..begin].iter().filter(|byte| **byte == b'\n').count() + 1,
-            },
-        )?;
-    let end = body_start + end_rel;
-    Ok((&bytes[..body_start], &bytes[body_start..end], &bytes[end..]))
+    let span = at_fs::managed_block::managed_span(path, bytes)?;
+    Ok((
+        &bytes[..span.body_start],
+        &bytes[span.body_start..span.body_end],
+        &bytes[span.body_end..],
+    ))
 }
 
 fn differing_line(a: &[u8], b: &[u8]) -> usize {
@@ -637,6 +655,22 @@ mod tests {
         let marker_edit = b"hand\n<!-- agentuna:begin -->\nnew\n<!-- agentuna:end -->\nchanged\n";
         assert!(matches!(
             managed_content(path, original, marker_edit),
+            Err(RuleEditorError::HandEditInsideMarkers { .. })
+        ));
+    }
+
+    #[test]
+    fn marker_examples_in_code_fences_do_not_shift_the_managed_region() {
+        let path = Path::new("CLAUDE.md");
+        let original = b"docs\n```\n<!-- agentuna:begin -->\n```\n<!-- agentuna:begin -->\nold\n<!-- agentuna:end -->\ntail\n";
+        let edited = b"docs\n```\n<!-- agentuna:begin -->\n```\n<!-- agentuna:begin -->\nnew\n<!-- agentuna:end -->\ntail\n";
+        assert_eq!(
+            managed_content(path, original, edited).expect("managed body"),
+            b"new"
+        );
+        let outside = b"docs changed\n```\n<!-- agentuna:begin -->\n```\n<!-- agentuna:begin -->\nnew\n<!-- agentuna:end -->\ntail\n";
+        assert!(matches!(
+            managed_content(path, original, outside),
             Err(RuleEditorError::HandEditInsideMarkers { .. })
         ));
     }
@@ -672,7 +706,10 @@ mod tests {
         .expect("new rule intent");
         assert_eq!(intent.path, project.join("CLAUDE.local.md"));
         assert!(intent.local_only);
-        assert_eq!(intent.template, b"# CLAUDE.local.md\n");
+        assert_eq!(
+            intent.template,
+            b"<!-- agentuna:begin -->\n# CLAUDE.local.md\n<!-- agentuna:end -->\n"
+        );
         assert!(matches!(
             intent.change_set.ops.as_slice(),
             [at_model::FileOp::Write {
@@ -735,7 +772,7 @@ mod tests {
         .expect("apply rule");
         assert_eq!(
             std::fs::read(&created.path).expect("read new rule"),
-            b"# CLAUDE.local.md\n"
+            b"<!-- agentuna:begin -->\n# CLAUDE.local.md\n<!-- agentuna:end -->\n"
         );
         let scan = crate::rules::scan(&registry, &env, &[AgentId::ClaudeCode], &[Scope::Project]);
         assert!(
@@ -893,5 +930,158 @@ mod tests {
             external
         );
         assert_eq!(recorder.0, 0);
+    }
+
+    /// The editor buffer used by the read-only tests: it changes the managed body only.
+    const READ_ONLY_TEST_ORIGINAL: &[u8] =
+        b"hand\n<!-- agentuna:begin -->\nold\n<!-- agentuna:end -->\ntail\n";
+    const READ_ONLY_TEST_EDITED: &[u8] =
+        b"hand\n<!-- agentuna:begin -->\nnew\n<!-- agentuna:end -->\ntail\n";
+
+    /// Reads the read-only fixture snapshot, then removes the write bit.
+    fn read_only_rule_source(root: &std::path::Path) -> (RuleSource, std::path::PathBuf) {
+        let path = root.join("CLAUDE.md");
+        std::fs::write(&path, READ_ONLY_TEST_ORIGINAL).expect("rule file");
+        let metadata = std::fs::metadata(&path).expect("metadata");
+        let source = RuleSource {
+            scope: Scope::Project,
+            agent_consumers: Vec::new(),
+            path: path.clone(),
+            bytes: READ_ONLY_TEST_ORIGINAL.to_vec(),
+            mtime: metadata.modified().ok(),
+            sha256: at_fs::sha256_hex(READ_ONLY_TEST_ORIGINAL),
+            managed: true,
+            link_target: None,
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            .expect("remove the write bit");
+        (source, path)
+    }
+
+    #[test]
+    fn read_only_managed_rule_save_is_refused_without_writing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let store = temporary.path().join("store");
+        std::fs::create_dir_all(&store).expect("store");
+        let backups = temporary.path().join("backups");
+        let (source, path) = read_only_rule_source(temporary.path());
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o222,
+            0,
+            "the fixture is read-only before the save"
+        );
+        let recent_writes = at_fs::RecentWrites::new();
+        let mut recorder = CountingRecorder::default();
+        let mut context = at_fs::ApplyContext {
+            store_root: &store,
+            backup_folder: &backups,
+            recorder: &mut recorder,
+        };
+        let roots = at_fs::ApplyRoots::new([temporary.path().to_path_buf()]).expect("roots");
+        let db = rusqlite::Connection::open_in_memory().expect("database");
+
+        let result = save_rule(
+            &source,
+            READ_ONLY_TEST_EDITED,
+            &ItemId::new(),
+            &db,
+            &mut context,
+            &roots,
+            &recent_writes,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(RuleEditorError::PermissionDenied { path: refused, .. }) if refused == path
+            ),
+            "a read-only rule reports PermissionDenied with its path"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("disk unchanged"),
+            READ_ONLY_TEST_ORIGINAL,
+            "a refused save leaves no partial write"
+        );
+        assert_eq!(recorder.0, 0, "no operation row or backup is started");
+        assert!(
+            recent_writes.is_empty(),
+            "a refused save records no self-write for the watcher to suppress"
+        );
+        assert!(
+            !recent_writes.should_suppress(&path),
+            "the watcher has no reason to report the untouched file back as drift"
+        );
+    }
+
+    #[test]
+    fn read_only_raw_rule_save_is_refused_without_writing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let store = temporary.path().join("store");
+        std::fs::create_dir_all(&store).expect("store");
+        let backups = temporary.path().join("backups");
+        let path = temporary.path().join("AGENTS.md");
+        let original = b"# Whole file\nBe kind.\n";
+        std::fs::write(&path, original).expect("rule file");
+        let metadata = std::fs::metadata(&path).expect("metadata");
+        let source = RuleSource {
+            scope: Scope::Project,
+            agent_consumers: Vec::new(),
+            path: path.clone(),
+            bytes: original.to_vec(),
+            mtime: metadata.modified().ok(),
+            sha256: at_fs::sha256_hex(original),
+            managed: false,
+            link_target: None,
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            .expect("remove the write bit");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o222,
+            0
+        );
+        let recent_writes = at_fs::RecentWrites::new();
+        let mut recorder = CountingRecorder::default();
+        let mut context = at_fs::ApplyContext {
+            store_root: &store,
+            backup_folder: &backups,
+            recorder: &mut recorder,
+        };
+        let roots = at_fs::ApplyRoots::new([temporary.path().to_path_buf()]).expect("roots");
+        let db = rusqlite::Connection::open_in_memory().expect("database");
+
+        let result = save_rule_raw(
+            &source,
+            b"# Whole file\nBe kinder.\n",
+            &ItemId::new(),
+            &db,
+            &mut context,
+            &roots,
+            &recent_writes,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(RuleEditorError::PermissionDenied { path: refused, .. }) if refused == path
+            ),
+            "the raw writer reports PermissionDenied too"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("disk unchanged"),
+            original,
+            "a refused raw save leaves no partial write"
+        );
+        assert_eq!(recorder.0, 0);
+        assert!(recent_writes.is_empty());
     }
 }

@@ -53,6 +53,11 @@ describe("text contrast", () => {
   test.each(MODES)("%s: every text-on-surface pair reaches 4.5:1", (mode) => {
     expect(report(mode)).toBe("");
   });
+  test.each(MODES)("%s: on-accent text reaches 4.5:1 on accent fills", (mode) => {
+    const tokens = ThemeTokens[mode];
+    expect(contrastRatio(tokens.color.onAccent, tokens.color.accentFill), mode).toBeGreaterThanOrEqual(4.5);
+  });
+
 
   test("the contrast helper agrees with the WCAG reference values", () => {
     expect(contrastRatio("#000000", "#FFFFFF")).toBeCloseTo(21, 5);

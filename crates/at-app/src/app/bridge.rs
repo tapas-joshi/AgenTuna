@@ -34,6 +34,8 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 use ts_rs::TS;
 
+use at_db::Database;
+
 /// Webview event emitted when a job starts running.
 pub const EVENT_JOB_STARTED: &str = "agentuna:job-started";
 /// Webview event emitted when a job reports progress (at most 10 times per second).
@@ -341,10 +343,11 @@ impl OperationsLogError {
 
 /// Durable operations log used by the bridge at shutdown.
 ///
-/// The SQLite-backed implementation belongs to TF-009 (`at-db`). Until it is wired in,
-/// [`TracingOperationsLog`] records the same row as a structured log entry. The bridge
-/// is the only writer: it calls [`OperationsLog::record_interrupted`] exactly once per
-/// job that was running when the app quit.
+/// [`DatabaseOperationsLog`] writes the TF-009 `operations` row; [`TracingOperationsLog`] is
+/// the fallback for a launch whose database could not be opened, and records the same row as
+/// a structured log entry. The bridge is the only writer: it calls
+/// [`OperationsLog::record_interrupted`] exactly once per job that was running when the app
+/// quit.
 pub trait OperationsLog: Send + Sync + 'static {
     /// Records one `interrupted` operations row for a job that outlived shutdown.
     ///
@@ -355,9 +358,43 @@ pub trait OperationsLog: Send + Sync + 'static {
     fn record_interrupted(&self, job: &InterruptedJob) -> Result<(), OperationsLogError>;
 }
 
+/// [`OperationsLog`] backed by the `operations` table (TF-009).
+///
+/// `at_db::ops::record_interrupted` finishes an existing `running` row for the job id or
+/// inserts one `interrupted` row with the job name as the summary and the recorded start time,
+/// so a retried shutdown never duplicates a row.
+pub struct DatabaseOperationsLog {
+    database: Arc<Mutex<Database>>,
+}
+
+impl DatabaseOperationsLog {
+    /// Wraps the app database handle.
+    #[must_use]
+    pub fn new(database: Arc<Mutex<Database>>) -> Self {
+        Self { database }
+    }
+}
+
+impl OperationsLog for DatabaseOperationsLog {
+    fn record_interrupted(&self, job: &InterruptedJob) -> Result<(), OperationsLogError> {
+        let database = lock(&self.database);
+        at_db::ops::record_interrupted(
+            database.connection(),
+            job.id.as_str(),
+            None,
+            Some(job.name.as_str()),
+            job.started_at_unix_ms,
+        )
+        .map_err(|error| {
+            OperationsLogError::new(format!("could not record job {}: {error}", job.id))
+        })
+    }
+}
+
 /// Fallback [`OperationsLog`] that emits a structured `tracing` record instead of a row.
 ///
-/// Replace it with the `at-db` implementation once TF-009 exposes its write API.
+/// Used only when the launch has no database; [`DatabaseOperationsLog`] is the production
+/// implementation.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TracingOperationsLog;
 

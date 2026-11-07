@@ -76,6 +76,7 @@ fn applies_reviewed_plan_through_one_journalled_changeset() -> Result<(), Box<dy
         backup_root: &backup_root,
         authorized_roots: &roots,
         database: &mut database,
+        project_id: None,
     };
     let result = apply_plan(&plan, &mut context)?;
     assert_eq!(result.touched_paths, targets);
@@ -208,6 +209,7 @@ fn renders_mcp_and_rule_migrations_through_adapter_projections() -> Result<(), B
         backup_root: &backup_root,
         authorized_roots: &roots,
         database: &mut database,
+        project_id: None,
     };
     let applied = apply_plan(&plan, &mut context)?;
 
@@ -292,6 +294,7 @@ fn replaces_original_with_link_or_manifest_copy_in_one_changeset() -> Result<(),
             backup_root: &backup_root,
             authorized_roots: &roots,
             database: &mut database,
+            project_id: None,
         };
         let result = apply_plan(&plan, &mut context)?;
         let detail = at_db::ops::operation_detail(database.connection_mut(), &result.operation_id)?
@@ -380,6 +383,7 @@ impl SharedRootReplacement {
             items: vec![shared.clone()],
             partial: false,
             skipped_roots: Vec::new(),
+            warnings: Vec::new(),
         };
         let conflicts = detect_conflicts(&single);
         assert!(
@@ -441,6 +445,7 @@ fn apply_with_database(
         backup_root: &backup_root,
         authorized_roots: &roots,
         database,
+        project_id: None,
     };
     Ok(apply_plan(&replacement.plan, &mut context)?)
 }
@@ -861,5 +866,132 @@ fn backup_failure_aborts_with_no_mutation() -> Result<(), Box<dyn Error>> {
         )?
         .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn migration_of_a_project_scope_item_records_valid_item_row() -> Result<(), Box<dyn Error>> {
+    let fixture = MigrationFixture::new(at_model::LinkMode::Link)?;
+    let paths = fixture.paths();
+    std::fs::create_dir_all(&paths.support_dir)?;
+    std::fs::create_dir_all(&paths.project)?;
+    std::fs::create_dir_all(paths.project.join(".agentuna"))?;
+
+    // Seed a project-scope rule file
+    let rule_file = paths.project.join("AGENTS.md");
+    std::fs::write(&rule_file, "# Project Rule Instructions\n")?;
+
+    let mut database = Database::open_file(&paths.db_path)?;
+    // Register the project in DB
+    let added = at_db::projects::add_project(
+        database.connection(),
+        &paths.project,
+        Some("fixture-project"),
+        None,
+    )?;
+    let project_id = added.id;
+
+    // Register agents
+    for agent in [AgentId::Codex, AgentId::Omp, AgentId::ClaudeCode] {
+        at_db::agents::upsert_agent(
+            database.connection(),
+            &at_model::Agent {
+                id: agent.clone(),
+                display_name: agent.to_string(),
+                version: None,
+                detected: true,
+            },
+        )?;
+    }
+
+    // Scan with project
+    let env = at_adapters::adapter::AgentEnvironment {
+        home: paths.home.clone(),
+        project: Some(paths.project.clone()),
+        variables: std::collections::BTreeMap::new(),
+    };
+    let registry = at_adapters::adapter::AgentAdapterRegistry::register();
+    let scan_report = at_migrate::scan::scan(at_migrate::scan::ScanRequest {
+        environment: &env,
+        adapters: &registry,
+        store_roots: &[paths.project.join(".agentuna")],
+        store_items: &[],
+    })?;
+
+    let project_item = scan_report
+        .items
+        .iter()
+        .find(|i| i.scope == at_model::Scope::Project && i.path == rule_file)
+        .expect("must find project-scope AGENTS.md");
+
+    let conflicts = detect_conflicts(&scan_report);
+    let mut selected_paths = BTreeSet::from([project_item.path.clone()]);
+    let mut resolutions = BTreeMap::new();
+    for conflict in &conflicts.conflicts {
+        for copy in &conflict.copies {
+            selected_paths.insert(copy.path.clone());
+        }
+        resolutions.insert(conflict.name.clone(), ConflictResolution::KeepA);
+    }
+    let plan = build_plan(BuildPlanRequest {
+        scan: &scan_report,
+        conflicts: &conflicts,
+        resolutions: &resolutions,
+        selected_paths: &selected_paths,
+        strategy: MigrationStrategy::ReplaceWithLinks,
+        scope: at_model::Scope::Project,
+        store_root: paths.project.join(".agentuna"),
+        backup_root: paths.support_dir.join("backups"),
+        copy_agents: &BTreeSet::new(),
+    })?;
+
+    let roots = ApplyRoots::new([
+        paths.home.clone(),
+        paths.project.clone(),
+        paths.support_dir.clone(),
+    ])?;
+    let backup_root = paths.support_dir.join("backups");
+    // 1. Without project_id, apply_plan must return typed MissingProjectId error
+    {
+        let mut context_without_project = ApplyPlanContext {
+            store_root: &paths.project.join(".agentuna"),
+            backup_root: &backup_root,
+            authorized_roots: &roots,
+            database: &mut database,
+            project_id: None,
+        };
+        let err = apply_plan(&plan, &mut context_without_project)
+            .expect_err("must fail without project_id");
+        assert!(matches!(
+            err,
+            at_migrate::apply::ApplyPlanError::MissingProjectId(_)
+        ));
+    }
+
+    // 2. With project_id, apply_plan succeeds and records a valid item row
+    {
+        let mut context_with_project = ApplyPlanContext {
+            store_root: &paths.project.join(".agentuna"),
+            backup_root: &backup_root,
+            authorized_roots: &roots,
+            database: &mut database,
+            project_id: Some(&project_id),
+        };
+        let outcome = apply_plan(&plan, &mut context_with_project)?;
+        assert!(!outcome.operation_id.is_empty());
+
+        // Verify the item row in DB has scope = 'project' and matching project_id
+        let row_project_id: Option<String> = database.connection().query_row(
+            "SELECT project_id FROM items WHERE scope = 'project' AND kind = 'rule'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            row_project_id.as_deref(),
+            Some(project_id.as_str()),
+            "project item row must have valid project_id"
+        );
+    }
+
     Ok(())
 }

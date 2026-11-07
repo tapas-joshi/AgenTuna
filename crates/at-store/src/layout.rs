@@ -24,10 +24,11 @@ use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use at_fs::{WriteRequest, apply};
-use at_model::Scope;
 use at_model::skill::SKILL_FILE_NAME;
+use at_model::{ChangeSet, ExpectedState, FileOp, ItemId, OperationKind, Scope};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -59,7 +60,10 @@ pub const BACKUPS_DIR: &str = "backups";
 pub const STATE_DIR: &str = ".state";
 
 /// Journals of in-flight multi-file operations.
-pub const JOURNALS_DIR: &str = "journals";
+///
+/// `at-fs` writes one `<operation id>.journal` file here (`<store>/.state/journal`); startup
+/// recovery scans this directory, so the name must match the writer exactly.
+pub const JOURNALS_DIR: &str = "journal";
 
 /// Advisory locks on AgenTuna's own files.
 pub const LOCKS_DIR: &str = "locks";
@@ -273,7 +277,7 @@ impl StoreLayout {
         self.root.join(STATE_DIR)
     }
 
-    /// `.state/journals/`.
+    /// `.state/journal/`.
     #[must_use]
     pub fn journals_dir(&self) -> PathBuf {
         self.state_dir().join(JOURNALS_DIR)
@@ -319,6 +323,27 @@ impl StoreLayout {
     /// `store.json` cannot be used.
     pub fn init(&self) -> Result<InitOutcome, StoreError> {
         init_at(self)
+    }
+
+    /// Whether `store.json` exists as a regular file, i.e. the scope has a store.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        fs::symlink_metadata(self.manifest_path()).is_ok_and(|metadata| metadata.is_file())
+    }
+
+    /// Plans the entries [`Self::init`] would create as one reviewed change set.
+    ///
+    /// Nothing is written. The plan follows the same rules as [`Self::init`]: only missing
+    /// entries are created, existing directories and files are reported, and foreign entries
+    /// are left byte-identical. `store.json` is validated before anything is planned.
+    ///
+    /// `.state/` itself is never a planned destination because the journaled apply creates it
+    /// before the first operation; its child directories are planned with `parents: true`.
+    ///
+    /// # Errors
+    /// See [`Self::init`], plus [`StoreError::Plan`] when the change set cannot be built.
+    pub fn plan_init(&self) -> Result<InitPlan, StoreError> {
+        plan_init_at(self)
     }
 
     /// Reads and validates `store.json` without modifying anything.
@@ -473,6 +498,32 @@ impl InitOutcome {
     }
 }
 
+/// A reviewed plan that creates the missing entries of one store through `at-fs`.
+///
+/// Built by [`StoreLayout::plan_init`] from the same rules as [`StoreLayout::init`]. The
+/// caller previews [`Self::change_set`] and applies that reviewed plan, so a file or
+/// directory that appeared in the meantime is refused instead of overwritten.
+#[derive(Debug, Clone)]
+pub struct InitPlan {
+    /// Reviewed multi-file change set with absolute destinations, ready for
+    /// `at_fs::apply_with_roots`.
+    pub change_set: ChangeSet,
+    /// Identity read from an existing `store.json`, or the id this plan writes.
+    pub store_id: StoreId,
+    /// Document version of the manifest.
+    pub schema_version: u32,
+    /// Entries the plan creates, relative to the store root.
+    pub created: Vec<PathBuf>,
+    /// Entries that were already present, relative to the store root.
+    pub existing: Vec<PathBuf>,
+    /// Foreign entries left byte-identical, relative to the store root.
+    pub foreign: Vec<PathBuf>,
+    /// Whether applying the plan creates the store root itself.
+    pub creates_root: bool,
+    /// Whether applying the plan creates `.state/` as a parent of planned state directories.
+    pub creates_state_dir: bool,
+}
+
 /// Why a store could not be laid out or read.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -568,6 +619,14 @@ pub enum StoreError {
         /// Requested scope (Project or Local).
         scope: Scope,
     },
+    /// The store setup change set could not be built.
+    #[error("{}: could not plan store setup: {reason}", .path.display())]
+    Plan {
+        /// Store root being planned.
+        path: PathBuf,
+        /// Why the plan is invalid.
+        reason: String,
+    },
     /// A guarded file write failed.
     #[error("{}: could not write store file: {source}", .path.display())]
     Write {
@@ -586,6 +645,175 @@ pub enum StoreError {
 /// See [`StoreLayout::init`].
 pub fn init_store(scope: Scope, root: impl Into<PathBuf>) -> Result<InitOutcome, StoreError> {
     StoreLayout::new(scope, root).init()
+}
+
+/// Builds the reviewed change set for [`StoreLayout::plan_init`].
+fn plan_init_at(layout: &StoreLayout) -> Result<InitPlan, StoreError> {
+    let root = layout.root();
+    let root_exists = match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => true,
+        Ok(_) => {
+            return Err(StoreError::RootNotDirectory {
+                path: root.to_path_buf(),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // A dangling symlink reports `NotFound` but is still something at the path.
+            if fs::symlink_metadata(root).is_ok() {
+                return Err(StoreError::RootNotDirectory {
+                    path: root.to_path_buf(),
+                });
+            }
+            false
+        }
+        Err(error) => return Err(map_read_io(root, error)),
+    };
+    let manifest_path = layout.manifest_path();
+    // Validate a store written by another AgenTuna before planning to extend it.
+    let existing_header = match entry_state(&manifest_path)? {
+        EntryState::File => Some(layout.read_header()?),
+        EntryState::Absent => None,
+        EntryState::Dir | EntryState::Other => {
+            return Err(StoreError::ManifestInvalid {
+                path: manifest_path,
+                reason: "not a regular file".to_owned(),
+            });
+        }
+    };
+    let state_dir = layout.state_dir();
+    let locks_dir = layout.locks_dir();
+    let journals_dir = layout.journals_dir();
+    let mut created = Vec::new();
+    let mut existing = Vec::new();
+    let mut foreign = BTreeSet::new();
+    let mut ops = Vec::new();
+    let mut creates_state_dir = false;
+    for dir in layout.directories() {
+        if dir == state_dir || dir == locks_dir || dir == journals_dir {
+            // The journaled apply writes its journal into `.state/journal` and takes its lock in
+            // `.state/locks` before the first operation, so it creates those directories (and
+            // `.state/` above them) itself: planning them again would fail with `File exists`.
+            // Other `.state` children are planned with `parents: true`.
+            match entry_state(&dir)? {
+                EntryState::Dir => existing.push(relative_path(root, &dir)),
+                EntryState::Absent => {}
+                EntryState::File | EntryState::Other => {
+                    foreign.insert(relative_path(root, &dir));
+                }
+            }
+            continue;
+        }
+        match entry_state(&dir)? {
+            EntryState::Absent => {
+                if dir.starts_with(&state_dir) {
+                    creates_state_dir = true;
+                }
+                ops.push(FileOp::Mkdir {
+                    path: dir.clone(),
+                    mode: Some(STORE_DIR_MODE),
+                    parents: true,
+                });
+                created.push(relative_path(root, &dir));
+            }
+            EntryState::Dir => existing.push(relative_path(root, &dir)),
+            EntryState::File | EntryState::Other => {
+                foreign.insert(relative_path(root, &dir));
+            }
+        }
+    }
+    let mcp_file = layout.mcp_file();
+    match entry_state(&mcp_file)? {
+        EntryState::Absent => {
+            let bytes = empty_mcp_document(&mcp_file)?;
+            ops.push(FileOp::Write {
+                path: mcp_file.clone(),
+                bytes,
+                expected: ExpectedState::Absent,
+                follow_symlink: false,
+                backup: false,
+            });
+            created.push(relative_path(root, &mcp_file));
+        }
+        EntryState::File => existing.push(relative_path(root, &mcp_file)),
+        EntryState::Dir | EntryState::Other => {
+            foreign.insert(relative_path(root, &mcp_file));
+        }
+    }
+    let (store_id, schema_version) = match existing_header {
+        Some(header) => {
+            existing.push(relative_path(root, &manifest_path));
+            (header.store_id, header.schema_version)
+        }
+        None => {
+            let header = StoreHeader {
+                schema_version: SCHEMA_VERSION,
+                store_id: StoreId::new(),
+                scope: layout.scope(),
+                updated_at: OffsetDateTime::now_utc(),
+            };
+            let document = manifest_document(&header, &manifest_path)?;
+            ops.push(FileOp::Write {
+                path: manifest_path.clone(),
+                bytes: document,
+                expected: ExpectedState::Absent,
+                follow_symlink: false,
+                backup: false,
+            });
+            created.push(relative_path(root, &manifest_path));
+            (header.store_id, header.schema_version)
+        }
+    };
+    if root_exists {
+        let known = layout.known_entries();
+        let entries = fs::read_dir(root).map_err(|error| map_read_io(root, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| map_read_io(root, error))?;
+            let path = entry.path();
+            if !known.contains(&path) {
+                foreign.insert(relative_path(root, &path));
+            }
+        }
+    }
+    // The operations log has no store-setup kind; a Global store write is exactly that kind
+    // after the authorization prompt, and another scope's setup is recorded as a settings
+    // change so the operation stays undoable through `operation_undo`.
+    let operation_kind = if layout.scope() == Scope::Global {
+        "global_write"
+    } else {
+        "settings"
+    };
+    let operation_kind =
+        OperationKind::parse(operation_kind).map_err(|error| StoreError::Plan {
+            path: root.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    let change_set = ChangeSet {
+        id: ItemId::new().to_string(),
+        preview_id: String::new(),
+        operation_kind,
+        scope: Some(layout.scope()),
+        project_id: None,
+        summary: format!("Set up the {} store", layout.scope()),
+        ops,
+        created_at_unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs()),
+    };
+    Ok(InitPlan {
+        change_set,
+        store_id,
+        schema_version,
+        created,
+        existing,
+        foreign: foreign.into_iter().collect(),
+        creates_root: !root_exists,
+        creates_state_dir,
+    })
+}
+
+fn relative_path(root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(root)
+        .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
 }
 
 /// What is at a path, without following symlinks.
@@ -721,17 +949,22 @@ fn ensure_root(
             if let Some(parent) = root.parent().filter(|path| !path.as_os_str().is_empty()) {
                 // Ancestors outside the store are not AgenTuna's entries: they keep the mode
                 // the platform gives them, while the store root itself is 0700.
-                fs::create_dir_all(parent).map_err(|source| {
-                    if source.kind() == io::ErrorKind::PermissionDenied {
+                at_fs::ensure_dir(parent).map_err(|source| match source {
+                    at_fs::FsError::Io { source, .. }
+                        if source.kind() == io::ErrorKind::PermissionDenied =>
+                    {
                         StoreError::PermissionDenied {
                             path: parent.to_path_buf(),
                         }
-                    } else {
-                        StoreError::CreateDir {
-                            path: parent.to_path_buf(),
-                            source,
-                        }
                     }
+                    at_fs::FsError::Io { source, .. } => StoreError::CreateDir {
+                        path: parent.to_path_buf(),
+                        source,
+                    },
+                    other => StoreError::CreateDir {
+                        path: parent.to_path_buf(),
+                        source: io::Error::other(other.to_string()),
+                    },
                 })?;
             }
             create_dir(root)?;

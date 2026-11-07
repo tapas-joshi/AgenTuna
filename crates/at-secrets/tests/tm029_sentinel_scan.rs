@@ -166,3 +166,85 @@ fn secret_error_and_panic_payloads_are_redacted_before_serialization() {
     assert!(!panic_log.contains(SENTINEL));
     assert!(panic_log.contains("***"));
 }
+
+/// Kills the fixture child even when an assertion panics.
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Runs `ps` and returns its stdout.
+fn ps_output(args: &[&str]) -> String {
+    let output = std::process::Command::new("/bin/ps")
+        .args(args)
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn a_spawned_child_receives_the_secret_only_through_its_environment() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let dir = tempdir().expect("temporary root");
+    let observed = dir.path().join("child-env.txt");
+    // The script mentions only the variable name; the value comes from the environment and
+    // is written by the child itself, so this proves delivery without trusting `ps -E`.
+    let script = format!(
+        "printf '%s' \"$AGENTUNA_TM029_SECRET\" > '{}'; sleep 30",
+        observed.display()
+    );
+    let child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .env("AGENTUNA_TM029_SECRET", SENTINEL)
+        .spawn()
+        .expect("fixture child spawns");
+    let mut guard = ChildGuard(child);
+    let pid = guard.0.id().to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if observed.metadata().is_ok_and(|meta| meta.len() > 0) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(&observed).expect("the child wrote its environment value"),
+        SENTINEL,
+        "the secret reaches the child through its environment"
+    );
+
+    // The argv line must never carry the value, even though the script names the variable.
+    let argv = ps_output(&["-o", "args=", "-ww", "-p", &pid]);
+    assert!(
+        !argv.contains(SENTINEL),
+        "the secret must never appear in a child's argv: {argv}"
+    );
+    assert!(
+        argv.contains("AGENTUNA_TM029_SECRET"),
+        "ps reports the fixture process and its script: {argv}"
+    );
+
+    // Where the platform still exposes environments through `ps -E`, the value must be there
+    // — never in argv. Current macOS omits the environment section, so the child's own report
+    // above is the authoritative positive check.
+    let with_environment = ps_output(&["-E", "-ww", "-p", &pid]);
+    assert!(
+        !with_environment.contains(SENTINEL) || with_environment.contains("AGENTUNA_TM029_SECRET="),
+        "an exposed environment lists the assignment, not a bare argument: {with_environment}"
+    );
+    assert!(
+        with_environment.contains(&pid),
+        "ps -E still reports the fixture process: {with_environment}"
+    );
+
+    let _ = guard.0.kill();
+    let _ = guard.0.wait();
+}

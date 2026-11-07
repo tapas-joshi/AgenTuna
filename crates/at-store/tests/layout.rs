@@ -560,3 +560,99 @@ fn unique_slug_reports_exhaustion() {
     ));
     assert_eq!(unique_slug("x", |_| false).expect("free").as_str(), "x");
 }
+
+#[test]
+fn plan_init_plans_the_documented_layout_without_writing() {
+    let home = TempDir::new().expect("temp home");
+    let layout = user_layout(home.path());
+    let plan = layout.plan_init().expect("plan empty store");
+
+    assert!(!layout.root().exists(), "planning must not touch the disk");
+    assert!(plan.creates_root);
+    let created = plan.created.iter().cloned().collect::<BTreeSet<_>>();
+    let state = Path::new(".state");
+    for entry in [
+        PathBuf::from("skills"),
+        PathBuf::from("rules"),
+        PathBuf::from("backups"),
+        state.join(at_store::layout::STAGING_DIR),
+        state.join(at_store::layout::TMP_DIR),
+        PathBuf::from("mcp.json"),
+        PathBuf::from("store.json"),
+    ] {
+        assert!(
+            created.contains(entry.as_path()),
+            "{} must be planned; planned: {created:?}",
+            entry.display()
+        );
+    }
+    assert!(
+        !created.contains(Path::new(".state")),
+        "the apply pipeline creates .state/ itself"
+    );
+    assert!(
+        !created.contains(state.join(at_store::layout::JOURNALS_DIR).as_path()),
+        "the journaled apply writes its journal into .state/journal before the first operation, \
+         so planning that directory would fail with `File exists`"
+    );
+    assert_eq!(plan.change_set.ops.len(), created.len());
+    for op in &plan.change_set.ops {
+        let destination = op.destination().expect("planned destination");
+        assert!(
+            destination.is_absolute() && destination.starts_with(layout.root()),
+            "{} must be an absolute path below the store root",
+            destination.display()
+        );
+    }
+    let manifest = plan
+        .change_set
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            at_model::FileOp::Write { path, bytes, .. } if path == &layout.manifest_path() => {
+                Some(bytes)
+            }
+            _ => None,
+        })
+        .expect("store.json is written");
+    let document: serde_json::Value = serde_json::from_slice(manifest).expect("manifest json");
+    assert_eq!(document["store_id"], plan.store_id.to_string());
+    assert_eq!(document["scope"], "user");
+    assert_eq!(document["schema_version"], SCHEMA_VERSION);
+}
+
+#[test]
+fn plan_init_on_an_initialized_store_is_empty() {
+    let home = TempDir::new().expect("temp home");
+    let layout = user_layout(home.path());
+    let outcome = layout.init().expect("init");
+    let plan = layout.plan_init().expect("plan initialized store");
+
+    assert!(!plan.creates_root);
+    assert!(!plan.creates_state_dir);
+    assert!(plan.created.is_empty(), "planned: {:?}", plan.created);
+    assert!(plan.change_set.ops.is_empty());
+    assert_eq!(plan.store_id, outcome.store_id);
+    assert!(plan.existing.contains(&PathBuf::from("store.json")));
+    assert!(plan.existing.contains(&PathBuf::from("mcp.json")));
+    assert!(plan.existing.contains(&PathBuf::from("skills")));
+}
+
+#[test]
+fn plan_init_reports_foreign_entries_without_touching_them() {
+    let home = TempDir::new().expect("temp home");
+    let layout = user_layout(home.path());
+    fs::create_dir_all(layout.root()).expect("store root");
+    fs::write(layout.root().join("notes.txt"), b"my notes").expect("foreign file");
+
+    let plan = layout.plan_init().expect("plan");
+    assert!(plan.foreign.contains(&PathBuf::from("notes.txt")));
+    assert!(!plan.change_set.ops.iter().any(|op| {
+        op.destination()
+            .is_some_and(|path| path.ends_with("notes.txt"))
+    }));
+    assert_eq!(
+        fs::read(layout.root().join("notes.txt")).expect("foreign file"),
+        b"my notes"
+    );
+}

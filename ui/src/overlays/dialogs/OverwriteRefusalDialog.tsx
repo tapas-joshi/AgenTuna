@@ -21,6 +21,8 @@ export interface OverwriteRemedyResult {
   readonly summary: string;
   readonly movedTo: string;
   readonly operationId?: string;
+  /** Which remedy produced the result; the Undo command differs per remedy. */
+  readonly remedy?: "adopt" | "move";
 }
 
 /** Converts the serialized typed Tauri error into the refusal-dialog view. */
@@ -68,6 +70,7 @@ export function OverwriteRefusalDialog({
   onAdoptApply,
   onMoveAside,
   onUndo,
+  onUndoMove,
   onClose,
 }: {
   readonly refusal: RefusedOverwriteDetails;
@@ -75,10 +78,12 @@ export function OverwriteRefusalDialog({
   readonly onAdoptApply?: (handling: AdoptHandling) => Promise<AdoptApplyView>;
   readonly onMoveAside: () => Promise<OverwriteRemedyResult>;
   readonly onUndo?: (operationId: string) => Promise<void>;
+  readonly onUndoMove?: (operationId: string) => Promise<void>;
   readonly onClose: () => void;
 }): JSX.Element {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const [status, setStatus] = useState<"refused" | "reviewing" | "working" | "done" | "error">("refused");
+  const [pending, setPending] = useState<"adopt" | "move" | null>(null);
   const [result, setResult] = useState<OverwriteRemedyResult | null>(null);
   const [preview, setPreview] = useState<AdoptPreviewView | null>(null);
   const [handling, setHandling] = useState<AdoptHandling>("link");
@@ -86,22 +91,27 @@ export function OverwriteRefusalDialog({
   const [undoing, setUndoing] = useState(false);
   const kindLabel = refusal.kind === "directory" ? "directory" : "file";
   const canAdopt = Boolean(onAdoptPreview && onAdoptApply);
+  const undoHandler = result?.remedy === "move" ? onUndoMove : onUndo;
   const dismiss = () => {
     if (status === "refused" || status === "done" || status === "reviewing") onClose();
   };
   const run = async () => {
+    setPending("move");
     setStatus("working");
     setError(null);
     try {
-      setResult(await onMoveAside());
+      setResult({ ...(await onMoveAside()), remedy: "move" });
       setStatus("done");
     } catch (reason) {
       setError(String(reason));
       setStatus("error");
+    } finally {
+      setPending(null);
     }
   };
   const review = async () => {
     if (!onAdoptPreview) return;
+    setPending("adopt");
     setStatus("working");
     setError(null);
     try {
@@ -110,10 +120,13 @@ export function OverwriteRefusalDialog({
     } catch (reason) {
       setError(String(reason));
       setStatus("error");
+    } finally {
+      setPending(null);
     }
   };
   const adopt = async () => {
     if (!onAdoptApply) return;
+    setPending("adopt");
     setStatus("working");
     setError(null);
     try {
@@ -122,18 +135,21 @@ export function OverwriteRefusalDialog({
         summary: applied.summary,
         movedTo: applied.store_destination,
         operationId: applied.operation_id,
+        remedy: "adopt",
       });
       setStatus("done");
     } catch (reason) {
       setError(String(reason));
       setStatus("error");
+    } finally {
+      setPending(null);
     }
   };
   const undo = async () => {
-    if (!result?.operationId || !onUndo) return;
+    if (!result?.operationId || !undoHandler) return;
     setUndoing(true);
     try {
-      await onUndo(result.operationId);
+      await undoHandler(result.operationId);
       onClose();
     } catch (reason) {
       setError(String(reason));
@@ -176,13 +192,13 @@ export function OverwriteRefusalDialog({
       {status === "done" && result && <div role="status" className="flex flex-col gap-8 text-13"><p>{result.summary}</p>{result.movedTo && <p>Now at <code className="[overflow-wrap:anywhere]">{result.movedTo}</code></p>}</div>}
     </div>
     <div className="mt-16 flex justify-end gap-8">
-      {status === "done" ? <>{result?.operationId && onUndo && <Button variant="secondary" disabled={undoing} onClick={() => void undo()}>{undoing ? "Undoing…" : "Undo"}</Button>}<Button onClick={onClose}>Done</Button></> : status === "reviewing" ? <>
-        <Button variant="secondary" onClick={() => { setStatus("refused"); setPreview(null); }}>Back</Button>
-        <Button onClick={() => void adopt()}>Confirm adopt</Button>
+      {status === "done" ? <>{result?.operationId && undoHandler && <Button variant="secondary" disabled={undoing} onClick={() => void undo()}>{undoing ? "Undoing…" : "Undo"}</Button>}<Button onClick={onClose}>Done</Button></> : status === "reviewing" ? <>
+        <Button variant="secondary" disabled={pending !== null} onClick={() => { setStatus("refused"); setPreview(null); }}>Back</Button>
+        <Button loading={pending === "adopt"} disabled={pending !== null} onClick={() => void adopt()}>Confirm adopt</Button>
       </> : <>
-        <Button variant="secondary" disabled={!canAdopt || status === "working"} title={canAdopt ? "Review the adoption" : "Native adoption is unavailable"} onClick={() => void review()}>Adopt</Button>
-        <Button variant="destructive" disabled={status === "working"} onClick={() => void run()}>Move aside</Button>
-        <button ref={cancelRef} type="button" disabled={status === "working"} className="inline-flex h-32 items-center justify-center rounded-6 border border-border bg-raised px-12 text-13 text-text focus-visible:outline-2 focus-visible:outline-focus disabled:opacity-50" onClick={onClose}>Cancel</button>
+        <Button variant="primary" loading={pending === "adopt"} disabled={!canAdopt || pending !== null} title={canAdopt ? "Review the adoption" : "Native adoption is unavailable"} onClick={() => void review()}>Adopt</Button>
+        <Button variant="destructive" loading={pending === "move"} disabled={pending !== null} onClick={() => void run()}>Move aside</Button>
+        <button ref={cancelRef} type="button" disabled={pending !== null} className="inline-flex h-32 items-center justify-center rounded-6 border border-border bg-raised px-12 text-13 text-text focus-visible:outline-2 focus-visible:outline-focus disabled:opacity-50" onClick={onClose}>Cancel</button>
       </>}
     </div>
   </Modal>;

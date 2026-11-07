@@ -17,6 +17,7 @@ export interface AddMenuAction {
 /** Props for the top-bar Add menu. */
 export interface AddMenuProps {
   readonly scope: ScopeToken;
+  readonly disabledReasons?: Partial<Record<AddActionId, string>>;
   readonly disabledReason?: string;
   readonly onAction: (action: AddMenuAction) => void;
   readonly trigger?: ReactElement;
@@ -26,7 +27,7 @@ export interface AddMenuProps {
 }
 
 /** Add flow menu; keyboard behavior and focus restoration come from Radix Menu. */
-export function AddMenu({ scope, disabledReason, onAction, trigger, open: controlledOpen, onOpenChange, routeKey }: AddMenuProps): JSX.Element {
+export function AddMenu({ scope, disabledReason, disabledReasons, onAction, trigger, open: controlledOpen, onOpenChange, routeKey }: AddMenuProps): JSX.Element {
   const [localOpen, setLocalOpen] = useState(false);
   const open = controlledOpen ?? localOpen;
   const setOpen = onOpenChange ?? setLocalOpen;
@@ -37,11 +38,14 @@ export function AddMenu({ scope, disabledReason, onAction, trigger, open: contro
       setOpen(false);
     }
   }, [routeKey, setOpen]);
-  const triggerButton = trigger ?? <button type="button" aria-label="Add" className="inline-flex h-[28px] items-center gap-6 rounded-8 bg-accent px-12 text-on-accent"><span aria-hidden="true">+</span>Add</button>;
+  const triggerButton = trigger ?? <button type="button" aria-label="Add" className="inline-flex h-[28px] items-center gap-6 rounded-8 bg-accent-fill px-12 text-on-accent"><span aria-hidden="true">+</span>Add</button>;
   const select = (id: AddActionId) => { onAction({ id, scope }); setOpen(false); };
+  const skillDisabledReason = disabledReasons?.["add.skill"] ?? disabledReason;
+  const serverDisabledReason = disabledReasons?.["add.server"] ?? disabledReason;
+  const ruleDisabledReason = disabledReasons?.["add.rule"] ?? disabledReason;
   return <Menu open={open} onOpenChange={setOpen} trigger={triggerButton} align="end">
-    <MenuItem label="New skill" shortcut="⌘⇧S" disabled={disabledReason !== undefined} disabledReason={disabledReason} onSelect={() => select("add.skill")} />
-    <MenuItem label="Add MCP server" shortcut="⌘⇧M" disabled={disabledReason !== undefined} disabledReason={disabledReason} onSelect={() => select("add.server")} />
-    <MenuItem label="New rule file" disabled={disabledReason !== undefined} disabledReason={disabledReason} onSelect={() => select("add.rule")} />
+    <MenuItem label="New skill" shortcut="⌘⇧S" disabled={skillDisabledReason !== undefined} disabledReason={skillDisabledReason} onSelect={() => select("add.skill")} />
+    <MenuItem label="Add MCP server" shortcut="⌘⇧M" disabled={serverDisabledReason !== undefined} disabledReason={serverDisabledReason} onSelect={() => select("add.server")} />
+    <MenuItem label="New rule file" disabled={ruleDisabledReason !== undefined} disabledReason={ruleDisabledReason} onSelect={() => select("add.rule")} />
   </Menu>;
 }

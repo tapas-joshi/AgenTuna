@@ -309,7 +309,7 @@ pub(crate) fn skill_delete_apply_impl(
         ));
     }
 
-    std::fs::create_dir_all(&cached.backup_folder)
+    at_fs::ensure_dir(&cached.backup_folder)
         .map_err(|e| CommandError::internal(format!("failed to create backup folder: {e}")))?;
 
     let mut existing_roots = Vec::new();
@@ -327,6 +327,17 @@ pub(crate) fn skill_delete_apply_impl(
     })?;
 
     let database = state.database().map_err(CommandError::unavailable)?;
+    // Capture the index rows the delete removes; undo restores them exactly.
+    let undo_metadata = at_migrate::undo_meta::capture(database.connection(), &cached.plan.item_id)
+        .map_err(|error| {
+            CommandError::internal(format!("could not snapshot the skill index rows: {error}"))
+        })?;
+    let operations_before = at_migrate::undo_meta::operation_rowid_high_water(
+        database.connection(),
+    )
+    .map_err(|error| {
+        CommandError::internal(format!("could not read the operation history: {error}"))
+    })?;
     let mut recorder = at_fs::DbOperationRecorder::new(database.connection(), 30);
     let mut context = at_fs::ApplyContext {
         store_root: &cached.plan.store_root,
@@ -347,6 +358,14 @@ pub(crate) fn skill_delete_apply_impl(
         })?;
 
     state.record_writes(&cached.plan.change_set, &cached.plan.store_root);
+    if let Err(error) = at_migrate::undo_meta::write_for_new_operations(
+        database.connection(),
+        &cached.backup_folder,
+        operations_before,
+        &undo_metadata,
+    ) {
+        tracing::warn!(%error, "skill delete undo metadata could not be written");
+    }
 
     Ok(SkillDeleteResultView {
         operation_id: outcome.operation_id,

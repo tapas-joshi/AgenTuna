@@ -4,7 +4,11 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
   snapshotPathTemplate: "{testDir}/snapshots/{projectName}/{arg}{ext}",
-  reporter: "list",
+  // CI keeps the HTML report as an artifact next to Playwright's own diff files; the side-by-side
+  // reporter merges expected/actual/diff into one image per failed comparison.
+  reporter: process.env.CI
+    ? [["list"], ["html", { open: "never" }], ["./e2e/support/side-by-side-reporter.ts"]]
+    : [["list"], ["./e2e/support/side-by-side-reporter.ts"]],
   use: {
     baseURL: "http://127.0.0.1:4173",
     ...devices["Desktop Chrome"],
@@ -20,10 +24,10 @@ export default defineConfig({
     { name: "2x", use: { deviceScaleFactor: 2 } },
   ],
   webServer: {
-    command: "pnpm run build && pnpm run preview -- --host 127.0.0.1 --port 4173 --strictPort",
+    command: `${process.env.PLAYWRIGHT_SKIP_BUILD === "1" ? "" : "pnpm run build && "}pnpm exec vite preview --host 127.0.0.1 --port 4173 --strictPort`,
     url: "http://127.0.0.1:4173",
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 300_000,
   },
   expect: {
     toHaveScreenshot: { animations: "disabled", maxDiffPixelRatio: 0.001 },

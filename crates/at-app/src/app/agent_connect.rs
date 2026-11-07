@@ -384,7 +384,7 @@ pub(crate) fn custom_agent_create_impl(
     } else {
         slug
     };
-    let agent_id = at_model::AgentId::Custom(slug);
+    let agent_id = at_model::AgentId::Custom(slug.clone());
 
     {
         let database = state.database().map_err(CommandError::unavailable)?;
@@ -459,6 +459,48 @@ pub(crate) fn custom_agent_create_impl(
             .map_err(|e| CommandError::internal(format!("could not set rule path: {e}")))?;
         }
     }
+
+    // Register the adapter in this process's shared registry so the Effective agent filter
+    // offers the new agent immediately, without an application restart.
+    let declared_subfolder = request.skills_subfolder.as_deref().unwrap_or("").trim();
+    let skills_subfolder = if declared_subfolder.is_empty() {
+        PathBuf::from("skills")
+    } else {
+        PathBuf::from(declared_subfolder)
+    };
+    let mcp_format = match request.mcp_format.trim().to_lowercase().as_str() {
+        "toml" => at_adapters::custom_agent::CustomMcpFormat::Toml,
+        "none" => at_adapters::custom_agent::CustomMcpFormat::None,
+        _ => at_adapters::custom_agent::CustomMcpFormat::Json,
+    };
+    let mcp_file = if matches!(mcp_format, at_adapters::custom_agent::CustomMcpFormat::None) {
+        None
+    } else {
+        request
+            .mcp_file
+            .as_deref()
+            .map(|declared| PathBuf::from(declared.trim()))
+    };
+    let spec = at_adapters::custom_agent::CustomAgentSpec {
+        id: slug,
+        display_name: request.display_name.clone(),
+        root: PathBuf::from(request.root.trim()),
+        skills_subfolder,
+        mcp_file,
+        mcp_format,
+        rule_files: request
+            .rule_files
+            .iter()
+            .map(|declared| PathBuf::from(declared.trim()))
+            .collect(),
+        supports_symlink: request.supports_symlink,
+    };
+    let adapter = at_adapters::custom_agent::CustomAgentAdapter::new(spec)
+        .map_err(|e| CommandError::internal(format!("could not register custom agent: {e}")))?;
+    state
+        .adapters()
+        .insert(std::sync::Arc::new(adapter))
+        .map_err(|e| CommandError::internal(format!("could not register custom agent: {e}")))?;
 
     let agents = super::workflows::agents_list_impl(state)?;
     agents
@@ -633,6 +675,81 @@ mod tests {
         assert_eq!(
             dup.reason.as_deref(),
             Some("An agent with this name exists")
+        );
+    }
+
+    #[test]
+    fn a_created_custom_agent_joins_the_effective_agent_filter_without_a_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("index.db");
+        let database = at_db::Database::open_file(&db_path).expect("db");
+        let state = AppState::new(
+            Arc::new(JobBridge::new(
+                Arc::new(NullSink),
+                Arc::new(TracingOperationsLog),
+            )),
+            None,
+        )
+        .with_database(database);
+        let environment = at_adapters::adapter::AgentEnvironment {
+            home: temp.path().join("home"),
+            project: None,
+            variables: Default::default(),
+        };
+        let custom = at_model::AgentId::Custom(String::from("my-tool"));
+        let before = crate::app::effective::observe_effective_agents(&state, &environment)
+            .expect("observations before creation");
+        assert!(
+            before.iter().all(|observation| observation.agent != custom),
+            "the custom agent is unknown before its spec is added"
+        );
+
+        let root_dir = temp.path().join("my-tool");
+        std::fs::create_dir_all(root_dir.join("my-skills")).expect("skills root");
+        std::fs::create_dir_all(&environment.home).expect("home");
+        custom_agent_create_impl(
+            &state,
+            CustomAgentSpecRequest {
+                display_name: String::from("My Tool"),
+                root: root_dir.display().to_string(),
+                skills_subfolder: Some(String::from("my-skills")),
+                mcp_file: None,
+                mcp_format: String::from("none"),
+                rule_files: vec![String::from("RULES.md")],
+                supports_symlink: false,
+            },
+        )
+        .expect("create");
+
+        let after = crate::app::effective::observe_effective_agents(&state, &environment)
+            .expect("observations after creation");
+        let registered = after
+            .iter()
+            .find(|observation| observation.agent == custom)
+            .expect("the created custom agent joins the Effective agent filter in-process");
+        assert!(
+            registered.installed,
+            "its root folder exists, so it is reported as installed"
+        );
+        assert!(
+            registered.diagnostics.is_empty(),
+            "the declaration resolves cleanly: {:?}",
+            registered.diagnostics
+        );
+        let database = state.database().expect("database handle");
+        let loads = at_engine::loader::agent_loads(
+            database.connection(),
+            &after,
+            &[],
+            at_model::Scope::User,
+            None,
+        )
+        .expect("agent loads");
+        assert!(
+            loads
+                .iter()
+                .any(|load| load.agent == custom && load.installed),
+            "the effective query's installed-agent input includes the new agent: {loads:?}"
         );
     }
 }

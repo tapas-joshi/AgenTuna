@@ -6,6 +6,7 @@ import type { MigrateConflictCopyView } from "../../generated/MigrateConflictCop
 import type { MigrateConflictView } from "../../generated/MigrateConflictView";
 import type { MigrateConflictsView } from "../../generated/MigrateConflictsView";
 import type { MigrateResolutionView } from "../../generated/MigrateResolutionView";
+import { describeCause } from "./applyJob";
 
 /** One reviewed conflict decision. */
 export type ConflictChoice = "keep_a" | "keep_b" | "keep_both";
@@ -117,7 +118,7 @@ export function MigrateResolveScreen({
         onNamesChange(seededNames);
       },
       (cause: unknown) => {
-        if (active) setError(String(cause));
+        if (active) setError(describeCause(cause));
       },
     ).finally(() => {
       if (active) setLoading(false);
@@ -163,7 +164,7 @@ export function MigrateResolveScreen({
   });
 
   return (
-    <main aria-label="Resolve migration conflicts" className="flex min-h-0 flex-1 flex-col">
+    <section aria-label="Resolve migration conflicts" className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-4">
         <p className="m-0 text-12 uppercase tracking-wide text-text-muted">Migrate to AgenTuna</p>
         <h1 className="m-0 text-26 font-semibold text-text">Resolve conflicts</h1>
@@ -336,6 +337,6 @@ export function MigrateResolveScreen({
           </Button>
         </div>
       </footer>
-    </main>
+    </section>
   );
 }

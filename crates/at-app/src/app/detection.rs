@@ -1,24 +1,238 @@
 //! Agent detection and filesystem-change loop.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment, DetectionState};
+use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_adapters::detect::{VersionProbe, detect_one, find_executable};
 use at_db::Database;
-use at_fs::{WatchConfig, WatchEvent, WatchRoot, WatchRootKind, WatchService};
-use at_model::{Agent, ItemKind, Scope};
+use at_fs::{
+    RecentWrites, WatchConfig, WatchError, WatchEvent, WatchRoot, WatchRootKind, WatchService,
+};
+use at_model::{AgentId, ItemKind, Scope};
 use at_store::paths::AppPaths;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use ts_rs::TS;
 
 /// Event emitted after a complete detection pass.
 pub const EVENT_AGENTS_DETECTED: &str = "agentuna:agents-detected";
 
+/// Event emitted after a self-write-suppressed filesystem watcher batch is indexed.
+pub const EVENT_EXTERNAL_REFRESH: &str = "agentuna:external-refresh";
+
+/// Event emitted for each non-fatal diagnostic the detection loop records.
+pub const EVENT_DETECTION_DIAGNOSTIC: &str = "agentuna:detection-diagnostic";
+
+/// A non-fatal problem the detection loop recorded and worked around (TA-081).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Diagnostic {
+    /// The platform refused to watch a root.
+    ///
+    /// That root is dropped from the watch set so every remaining root keeps delivering
+    /// change events instead of one unwatchable path stopping detection entirely.
+    WatchFailed {
+        /// Root the platform refused.
+        path: String,
+        /// Platform error text.
+        os_error: String,
+    },
+}
+
+/// What one detection pass recorded for one agent (TA-081 AC1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DetectionResult {
+    /// The agent's index rows and candidate paths were refreshed.
+    Refreshed {
+        /// Agent whose rows this pass wrote.
+        agent: AgentId,
+    },
+    /// The agent is detected and stays visible, but the user marked it unmanaged: the pass
+    /// records no deployment work for it and never rewrites its native configuration.
+    SkippedUnmanaged {
+        /// Agent the user opted out of managing.
+        agent: AgentId,
+    },
+}
+
+/// Aggregate result of one detection pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DetectionPass {
+    /// Agents whose detection rows were written, including skipped unmanaged agents, because
+    /// the Agents screen still shows them.
+    pub detected: Vec<AgentId>,
+    /// One result per detected agent, in registry order.
+    pub results: Vec<DetectionResult>,
+}
+
+impl DetectionPass {
+    /// Agents the pass detected but did not treat as managed.
+    #[must_use]
+    pub fn skipped_unmanaged(&self) -> Vec<String> {
+        self.results
+            .iter()
+            .filter_map(|result| match result {
+                DetectionResult::SkippedUnmanaged { agent } => Some(agent.to_string()),
+                DetectionResult::Refreshed { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// Coalesces rescan requests so a burst that arrives while a scan runs yields exactly one
+/// follow-up scan instead of one scan per event (TA-081 AC3).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RescanCoalescer {
+    running: bool,
+    pending: bool,
+}
+
+impl RescanCoalescer {
+    /// Requests one scan; returns `true` when the caller must run it now.
+    ///
+    /// A request while a scan runs is folded into a single pending follow-up.
+    pub fn request(&mut self) -> bool {
+        if self.running {
+            self.pending = true;
+            false
+        } else {
+            self.running = true;
+            true
+        }
+    }
+
+    /// Marks the running scan finished; returns `true` when one folded request still owes a scan.
+    ///
+    /// The coalescer is running again in that case, so the caller scans once more and calls
+    /// this method again when that scan finishes.
+    pub fn finished(&mut self) -> bool {
+        self.running = false;
+        if std::mem::take(&mut self.pending) {
+            self.running = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether a scan is currently marked as running.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+}
+
+/// Watch startup seam so the tolerant-root policy is exercised without a platform failure.
+pub trait WatchStarter {
+    /// Builds and starts a service over exactly these roots.
+    ///
+    /// # Errors
+    /// Returns the platform startup error, including [`WatchError::WatchFailed`] for a root the
+    /// platform refuses.
+    fn start(&mut self, roots: Vec<WatchRoot>) -> Result<WatchService, WatchError>;
+}
+
+/// The real platform watcher, sharing the app's self-write registry.
+pub struct PlatformWatcher {
+    registry: Arc<RecentWrites>,
+}
+
+impl PlatformWatcher {
+    /// Creates a starter that shares one write-suppression registry with the write path.
+    #[must_use]
+    pub fn new(registry: Arc<RecentWrites>) -> Self {
+        Self { registry }
+    }
+}
+
+impl WatchStarter for PlatformWatcher {
+    fn start(&mut self, roots: Vec<WatchRoot>) -> Result<WatchService, WatchError> {
+        let service =
+            WatchService::new(WatchConfig::new(roots).with_registry(Arc::clone(&self.registry)));
+        service.start()?;
+        Ok(service)
+    }
+}
+
+/// Starts a watch service over every root the platform accepts (TA-081 AC4).
+///
+/// A root the platform refuses is dropped and reported as [`Diagnostic::WatchFailed`] so one
+/// unwatchable path cannot stop detection for every other agent. The failure is returned
+/// unchanged when nothing watchable remains.
+///
+/// # Errors
+/// Returns the startup error when the failure is not per-root, or when dropping refused roots
+/// leaves nothing to watch.
+pub fn start_retaining_watchable_roots(
+    mut roots: Vec<WatchRoot>,
+    starter: &mut dyn WatchStarter,
+) -> Result<(WatchService, Vec<Diagnostic>), WatchError> {
+    debug_assert!(
+        !roots.is_empty(),
+        "the detection loop needs at least one watch root"
+    );
+    let mut diagnostics = Vec::new();
+    loop {
+        match starter.start(roots.clone()) {
+            Ok(service) => return Ok((service, diagnostics)),
+            Err(WatchError::WatchFailed { path, source }) => {
+                diagnostics.push(Diagnostic::WatchFailed {
+                    path: path.to_string_lossy().into_owned(),
+                    os_error: source.to_string(),
+                });
+                let before = roots.len();
+                // The refused path is a root or one of its ancestors: file roots are watched
+                // through their parent, and a missing directory through its nearest existing
+                // ancestor, so match the refused path against each root's prefix too.
+                roots.retain(|root| !root.path.starts_with(&path));
+                if roots.len() == before || roots.is_empty() {
+                    return Err(WatchError::WatchFailed { path, source });
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Typed filesystem invalidation delivered to the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct ExternalRefreshEvent {
+    /// Changed paths in the observed batch. Empty when a complete rescan is required.
+    pub paths: Vec<String>,
+    /// Whether the event requires reloading the complete current screen snapshot.
+    pub full_rescan: bool,
+}
+
+/// Maps one watcher event to the typed invalidation the frontend reloads on.
+///
+/// Returns `None` for events that need no view refresh; `full_rescan` is set when the batch is
+/// too coarse to name paths (`RescanRequired`) or a watched path disappeared.
+#[must_use]
+pub fn external_refresh_event(event: &WatchEvent) -> Option<ExternalRefreshEvent> {
+    let (paths, full_rescan) = match event {
+        WatchEvent::Batch(batch) => (
+            batch
+                .paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            false,
+        ),
+        WatchEvent::RescanRequired { .. } => (Vec::new(), true),
+        WatchEvent::PathGone { path, .. } => (vec![path.to_string_lossy().into_owned()], true),
+        _ => return None,
+    };
+    Some(ExternalRefreshEvent { paths, full_rescan })
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DetectionEvent {
     agents: usize,
+    skipped_unmanaged: Vec<String>,
 }
 
 /// Starts an initial agent scan and keeps the index current as native files change.
@@ -26,23 +240,23 @@ pub fn start(
     app: AppHandle,
     paths: AppPaths,
     database: Arc<Mutex<Database>>,
-    registry: Arc<at_fs::RecentWrites>,
-) -> Result<(), at_fs::WatchError> {
+    registry: Arc<RecentWrites>,
+) -> Result<(), WatchError> {
     let adapters = Arc::new(AgentAdapterRegistry::register());
-    let mut variables = BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH") {
-        variables.insert(String::from("PATH"), path);
-    }
-    let environment = AgentEnvironment {
-        home: paths.home_dir().unwrap_or(paths.user_store()).to_path_buf(),
-        project: paths.project_store().map(ToOwned::to_owned),
-        variables,
-    };
+    let environment = at_engine::refresh::agent_environment(&paths);
     let roots = watch_roots(&adapters, &environment, &paths);
-    let watcher = Arc::new(WatchService::new(
-        WatchConfig::new(roots).with_registry(registry),
-    ));
-    watcher.start()?;
+    let mut starter = PlatformWatcher::new(registry);
+    let (watcher, diagnostics) = start_retaining_watchable_roots(roots, &mut starter)?;
+    for diagnostic in &diagnostics {
+        tracing::warn!(
+            ?diagnostic,
+            "watch root refused; the remaining roots stay live"
+        );
+        if let Err(error) = app.emit(EVENT_DETECTION_DIAGNOSTIC, diagnostic) {
+            tracing::warn!(%error, "detection diagnostic event emission failed");
+        }
+    }
+    let watcher = Arc::new(watcher);
 
     let initial_app = app.clone();
     let initial_adapters = adapters.clone();
@@ -58,18 +272,29 @@ pub fn start(
     });
 
     tauri::async_runtime::spawn_blocking(move || {
+        let mut coalescer = RescanCoalescer::default();
         loop {
             let Some(event) = watcher.next_event(Duration::from_secs(1)) else {
                 continue;
             };
-            match event {
+            let refresh = external_refresh_event(&event);
+            // WatchEvent can grow; an event we do not know needs no rescan.
+            let invalidates = matches!(
+                &event,
                 WatchEvent::Batch(_)
-                | WatchEvent::RescanRequired { .. }
-                | WatchEvent::PathGone { .. } => {
+                    | WatchEvent::RescanRequired { .. }
+                    | WatchEvent::PathGone { .. }
+            );
+            if invalidates && coalescer.request() {
+                detect_and_persist(&app, &adapters, &environment, &database);
+                while coalescer.finished() {
                     detect_and_persist(&app, &adapters, &environment, &database);
                 }
-                // WatchEvent can grow; an event we do not know needs no rescan.
-                _ => {}
+            }
+            if let Some(payload) = refresh
+                && let Err(error) = app.emit(EVENT_EXTERNAL_REFRESH, payload)
+            {
+                tracing::warn!(%error, "external refresh event emission failed");
             }
         }
     });
@@ -81,15 +306,7 @@ pub fn start(
 /// Shared with the drift watcher (TC-012) so both consumers watch exactly the same paths.
 pub(crate) fn watch_roots_for(paths: &AppPaths) -> Vec<WatchRoot> {
     let adapters = AgentAdapterRegistry::register();
-    let mut variables = BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH") {
-        variables.insert(String::from("PATH"), path);
-    }
-    let environment = AgentEnvironment {
-        home: paths.home_dir().unwrap_or(paths.user_store()).to_path_buf(),
-        project: paths.project_store().map(ToOwned::to_owned),
-        variables,
-    };
+    let environment = at_engine::refresh::agent_environment(paths);
     watch_roots(&adapters, &environment, paths)
 }
 
@@ -144,7 +361,7 @@ pub fn rescan(
     adapters: &Arc<AgentAdapterRegistry>,
     environment: &AgentEnvironment,
     database: &Arc<Mutex<Database>>,
-) -> Result<usize, &'static str> {
+) -> Result<DetectionPass, &'static str> {
     let adapter_list = adapters
         .adapters()
         .map_err(|_| "agent adapter registry unavailable")?;
@@ -210,53 +427,75 @@ fn detect_and_persist(
         tracing::warn!("database lock poisoned during agent detection");
         return;
     };
-    let detected_count = persist_results(database.connection(), results);
+    let detected = persist_results(database.connection(), results);
     if let Some(state) = app.try_state::<super::state::AppState>() {
         state.invalidate_scope_cache();
     }
     if let Err(error) = app.emit(
         EVENT_AGENTS_DETECTED,
         DetectionEvent {
-            agents: detected_count,
+            agents: detected.detected.len(),
+            skipped_unmanaged: detected.skipped_unmanaged(),
         },
     ) {
         tracing::warn!(%error, "agent detection event emission failed");
     }
 }
 
-/// Persists one completed detection pass and returns how many agents were recorded.
+/// Persists one completed detection pass and records what it did per agent.
+///
+/// Every detected agent keeps a visible row so the Agents screen stays complete, but an agent
+/// the user marked unmanaged is recorded as [`DetectionResult::SkippedUnmanaged`] instead of
+/// [`DetectionResult::Refreshed`]: nothing is rescanned into deployments for it and its native
+/// configuration is never rewritten.
 fn persist_results(
     connection: &rusqlite::Connection,
     results: Vec<(
         at_model::AgentId,
         Result<at_adapters::detect::AgentDetectionResult, at_adapters::adapter::AgentError>,
     )>,
-) -> usize {
-    let mut detected_count = 0;
+) -> DetectionPass {
+    let unmanaged: std::collections::BTreeSet<AgentId> =
+        at_db::agents::list_agents_on_mac(connection)
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|row| !row.managed)
+                    .map(|row| row.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+    let mut agents = Vec::with_capacity(results.len());
     for (id, result) in results {
         match result {
-            Ok(result) => {
-                let presence = result.detection.presence.state;
-                let agent = Agent {
-                    id: id.clone(),
-                    display_name: result.agent.to_string(),
-                    detected: matches!(presence, DetectionState::Installed),
-                    version: result.detection.version,
-                };
-                match at_db::agents::upsert_agent(connection, &agent) {
-                    Ok(()) => {
-                        persist_candidates(connection, &id, &result.detection.presence.candidates);
-                        detected_count += 1;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, agent = %agent.id, "agent detection persistence failed")
-                    }
-                }
-            }
+            Ok(result) => agents.push(at_engine::refresh::DetectedAgent::from_detection(
+                &id,
+                &result.detection,
+            )),
             Err(error) => tracing::warn!(%error, agent = %id, "agent detection failed"),
         }
     }
-    detected_count
+    let mut pass = DetectionPass {
+        detected: Vec::with_capacity(agents.len()),
+        results: Vec::with_capacity(agents.len()),
+    };
+    for agent in &agents {
+        pass.detected.push(agent.id.clone());
+        pass.results.push(if unmanaged.contains(&agent.id) {
+            DetectionResult::SkippedUnmanaged {
+                agent: agent.id.clone(),
+            }
+        } else {
+            DetectionResult::Refreshed {
+                agent: agent.id.clone(),
+            }
+        });
+    }
+    if let Err(error) = at_engine::refresh::persist_detected_agents(connection, &agents) {
+        tracing::warn!(%error, "agent detection persistence failed");
+        pass.detected.clear();
+        pass.results.clear();
+    }
+    pass
 }
 
 fn version_probe_for(
@@ -278,47 +517,4 @@ fn version_probe_for(
         executable,
         args: vec![String::from("--version")],
     })
-}
-
-fn persist_candidates(
-    connection: &rusqlite::Connection,
-    agent: &at_model::AgentId,
-    candidates: &[at_adapters::adapter::AgentPathCandidate],
-) {
-    for candidate in candidates {
-        let Some(kind) = at_db::agents::AgentPathKind::parse(&candidate.kind) else {
-            continue;
-        };
-        let metadata = std::fs::metadata(&candidate.path);
-        let exists = metadata.is_ok();
-        let verified = metadata.is_ok_and(|metadata| {
-            if kind == at_db::agents::AgentPathKind::SkillsDir
-                || candidate.format.as_deref() == Some("dir")
-            {
-                metadata.is_dir() && std::fs::read_dir(&candidate.path).is_ok()
-            } else {
-                metadata.is_file() && std::fs::File::open(&candidate.path).is_ok()
-            }
-        });
-        let format = candidate
-            .format
-            .as_deref()
-            .and_then(at_db::agents::AgentPathFormat::parse);
-        if let Err(error) = at_db::agents::record_agent_path_probe(
-            connection,
-            &at_db::agents::AgentPathProbeSpec {
-                agent,
-                scope: candidate.scope,
-                kind,
-                path: &candidate.path,
-                format,
-                is_primary: candidate.primary,
-                exists,
-                verified,
-                is_override: false,
-            },
-        ) {
-            tracing::warn!(%error, agent = %agent, path = %candidate.path.display(), "agent path detection persistence failed");
-        }
-    }
 }

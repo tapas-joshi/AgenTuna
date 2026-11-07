@@ -2,7 +2,10 @@
 
 use at_model::{AgentId, McpTransport, Scope};
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 /// One native MCP projection operation.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,24 +78,8 @@ pub fn project(
 }
 
 fn project_claude(request: &McpProjectionRequest) -> Result<String, String> {
-    use crate::claude_mcp::{ClaudeConfigScope, ClaudeMcpConfig, ClaudeServer};
-    let scope = if request.scope == Scope::User {
-        ClaudeConfigScope::User
-    } else if request
-        .path
-        .file_name()
-        .is_some_and(|name| name == ".mcp.json")
-    {
-        ClaudeConfigScope::ProjectFile
-    } else {
-        let project_path = request
-            .project
-            .as_deref()
-            .ok_or_else(|| "project path required".to_owned())?;
-        ClaudeConfigScope::Project {
-            project_path: project_path.to_string_lossy().into_owned(),
-        }
-    };
+    use crate::claude_mcp::{ClaudeMcpConfig, ClaudeServer};
+    let scope = claude_scope(request.scope, &request.path, request.project.as_deref())?;
     let config = ClaudeMcpConfig::parse(&request.source, scope).map_err(|e| e.to_string())?;
     match &request.operation {
         McpProjectionOperation::Upsert {
@@ -164,6 +151,65 @@ fn project_omp(request: &McpProjectionRequest) -> Result<String, String> {
             config.remove_server(name).map_err(|e| e.to_string())
         }
     }
+}
+
+/// Routes a Claude Code document to the map that owns its `mcpServers` entries.
+fn claude_scope(
+    scope: Scope,
+    path: &Path,
+    project: Option<&Path>,
+) -> Result<crate::claude_mcp::ClaudeConfigScope, String> {
+    use crate::claude_mcp::ClaudeConfigScope;
+    if scope == Scope::User {
+        return Ok(ClaudeConfigScope::User);
+    }
+    if path.file_name().is_some_and(|name| name == ".mcp.json") {
+        return Ok(ClaudeConfigScope::ProjectFile);
+    }
+    let project_path = project.ok_or_else(|| "project path required".to_owned())?;
+    Ok(ClaudeConfigScope::Project {
+        project_path: project_path.to_string_lossy().into_owned(),
+    })
+}
+
+/// Whether one native document already holds an entry named `name`.
+///
+/// The delete plan enumerates every installed agent so it can clean up an entry whose
+/// deployment row was lost. An agent whose file never held the server must not turn that
+/// cleanup into a failure, so the planner asks this before projecting a removal.
+///
+/// # Errors
+/// Returns [`McpProjectionError`] when the document cannot be parsed or the agent has no MCP
+/// format.
+pub fn contains(
+    agent: &AgentId,
+    source: &str,
+    path: &Path,
+    scope: Scope,
+    project: Option<&Path>,
+    name: &str,
+) -> Result<bool, McpProjectionError> {
+    let present = match agent {
+        AgentId::ClaudeCode => {
+            let claude = claude_scope(scope, path, project).map_err(|e| native_error(agent, e))?;
+            crate::claude_mcp::ClaudeMcpConfig::parse(source, claude)
+                .map_err(|error| native_error(agent, error.to_string()))?
+                .servers()
+                .contains_key(name)
+        }
+        AgentId::Codex => crate::codex_mcp::CodexConfigFile::parse(source)
+            .map_err(|error| native_error(agent, error.to_string()))?
+            .server_ids()
+            .map_err(|error| native_error(agent, error.to_string()))?
+            .iter()
+            .any(|id| id == name),
+        AgentId::Omp => crate::omp_mcp::OmpMcpConfig::parse(source)
+            .map_err(|error| native_error(agent, error.to_string()))?
+            .server(name)
+            .is_some(),
+        other => return Err(McpProjectionError::Unsupported(other.clone())),
+    };
+    Ok(present)
 }
 
 fn native_error(agent: &AgentId, message: String) -> McpProjectionError {

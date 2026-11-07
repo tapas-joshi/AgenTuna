@@ -16,7 +16,67 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::DbError;
+use crate::{Database, DbError};
+
+/// A project registry write failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}: {message}", .path.display())]
+pub struct ProjectRegistryError {
+    /// Project path whose registry row could not be updated.
+    pub path: PathBuf,
+    /// Database failure details.
+    pub message: String,
+}
+
+/// Registry operations required to reconcile a filesystem scan.
+pub trait ProjectRegistry {
+    /// Registers a newly discovered project.
+    ///
+    /// # Errors
+    /// Returns a database error with the affected project path.
+    fn insert_discovered(
+        &mut self,
+        path: &Path,
+        name: &str,
+        source_root: &Path,
+    ) -> Result<(), ProjectRegistryError>;
+
+    /// Hides a registered project that no longer exists or has no project marker.
+    ///
+    /// # Errors
+    /// Returns a database error with the affected project path.
+    fn mark_missing(&mut self, path: &Path) -> Result<(), ProjectRegistryError>;
+}
+
+impl ProjectRegistry for Database {
+    fn insert_discovered(
+        &mut self,
+        path: &Path,
+        name: &str,
+        source_root: &Path,
+    ) -> Result<(), ProjectRegistryError> {
+        add_project(self.connection(), path, Some(name), Some(source_root))
+            .map(|_| ())
+            .map_err(|error| ProjectRegistryError {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })
+    }
+
+    fn mark_missing(&mut self, path: &Path) -> Result<(), ProjectRegistryError> {
+        let stored = lookup_path(path);
+        self.connection()
+            .execute(
+                "UPDATE projects SET hidden = 1 WHERE path = ?1",
+                [stored.to_string_lossy().as_ref()],
+            )
+            .map(|_| ())
+            .map_err(|error| ProjectRegistryError {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })
+    }
+}
 
 /// One project as the project list renders it, including counts.
 #[derive(Clone, Debug, PartialEq, Eq)]

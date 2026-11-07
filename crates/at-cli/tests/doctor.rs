@@ -99,7 +99,13 @@ fn every_check_reports_a_finding_with_code_message_and_fix() {
             finding.check
         );
         assert!(
-            [Severity::Ok, Severity::Warn, Severity::Error].contains(&finding.severity),
+            [
+                Severity::Ok,
+                Severity::Warn,
+                Severity::Error,
+                Severity::NotApplicable
+            ]
+            .contains(&finding.severity),
             "{} has an unknown severity",
             finding.check
         );
@@ -119,7 +125,11 @@ fn every_check_reports_a_finding_with_code_message_and_fix() {
                 "`{field}` is a string: {finding}"
             );
         }
-        assert!(["ok", "warn", "error"].contains(&finding["severity"].as_str().unwrap_or("")));
+        assert!(
+            ["ok", "warn", "error", "not_applicable"]
+                .contains(&finding["severity"].as_str().unwrap_or("")),
+            "`severity` is a documented status: {finding}"
+        );
     }
     assert_eq!(payload["summary"]["errors"], 0);
 }
@@ -129,7 +139,14 @@ fn a_warnings_only_run_succeeds_with_ok_and_warnings() {
     let sandbox = Sandbox::new();
     sandbox.healthy();
     let paths = sandbox.paths();
-    let probes = FixtureProbes::default();
+    // A real warning: free space cannot be measured. The GUI-owned probes now report
+    // `not_applicable` in a CLI run, so they no longer supply the warning.
+    let probes = FixtureProbes {
+        free: Capability::Unavailable {
+            reason: "fixture: df cannot run".to_owned(),
+        },
+        ..FixtureProbes::default()
+    };
 
     let report = doctor::inspect(&paths, &options_with(&probes));
     assert_eq!(report.error_count(), 0);
@@ -544,4 +561,76 @@ fn fix_refuses_to_write_in_read_only_mode() {
         !sandbox.paths().support_dir().exists(),
         "a refused repair writes nothing"
     );
+}
+
+#[test]
+fn cli_reports_gui_owned_checks_as_not_applicable() {
+    let sandbox = Sandbox::new();
+    sandbox.healthy();
+
+    let output = agentuna(&sandbox, &["--json", "doctor"]);
+    assert_eq!(
+        process_exit(&output),
+        exit_code::SUCCESS,
+        "not-applicable checks must not degrade the status: {}",
+        stderr(&output)
+    );
+    let envelope: Value = serde_json::from_str(&stdout(&output)).expect("one JSON envelope");
+    assert_eq!(envelope["data"]["summary"]["errors"], 0);
+    assert_eq!(envelope["data"]["summary"]["not_applicable"], 3);
+    let findings = envelope["data"]["findings"]
+        .as_array()
+        .expect("data.findings");
+    for check in ["agent_paths", "keychain", "watcher"] {
+        let finding = findings
+            .iter()
+            .find(|finding| finding["check"] == check)
+            .unwrap_or_else(|| panic!("`{check}` wrote no finding: {envelope}"));
+        assert_eq!(
+            finding["severity"], "not_applicable",
+            "`{check}` is owned by the desktop app: {finding}"
+        );
+        assert!(
+            !finding["code"].as_str().unwrap_or_default().is_empty(),
+            "a not-applicable finding still carries a stable code: {finding}"
+        );
+    }
+    let warning_codes = envelope["warnings"]
+        .as_array()
+        .expect("envelope warnings")
+        .iter()
+        .filter_map(|warning| warning["code"].as_str())
+        .collect::<Vec<_>>();
+    for code in [
+        "agent_paths_unavailable",
+        "keychain_unavailable",
+        "watcher_unavailable",
+    ] {
+        assert!(
+            !warning_codes.contains(&code),
+            "`{code}` is not a CLI warning: {warning_codes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_desktop_run_keeps_warnings_for_gui_owned_checks() {
+    let sandbox = Sandbox::new();
+    sandbox.healthy();
+    let probes = FixtureProbes::default();
+
+    let report = doctor::inspect(&sandbox.paths(), &options_with(&probes).with_desktop(true));
+    assert_eq!(report.not_applicable_count(), 0);
+    for check in ["agent_paths", "keychain", "watcher"] {
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.check == check)
+            .unwrap_or_else(|| panic!("`{check}` wrote no finding"));
+        assert_eq!(
+            finding.severity,
+            Severity::Warn,
+            "the app could run `{check}`, so an unavailable probe is a warning"
+        );
+    }
 }

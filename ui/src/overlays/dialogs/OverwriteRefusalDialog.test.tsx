@@ -1,9 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OverwriteRefusalDialog } from "./OverwriteRefusalDialog";
-import type { RefusedOverwriteDetails } from "./OverwriteRefusalDialog";
-import { refusedOverwriteDetails } from "./OverwriteRefusalDialog";
+import { OverwriteRefusalDialog, refusedOverwriteDetails } from "./OverwriteRefusalDialog";
+import type { OverwriteRemedyResult, RefusedOverwriteDetails } from "./OverwriteRefusalDialog";
 
 afterEach(cleanup);
 const refusal: RefusedOverwriteDetails = {
@@ -46,6 +45,7 @@ function renderDialog(overrides: Partial<React.ComponentProps<typeof OverwriteRe
     onAdoptApply: vi.fn().mockResolvedValue(applied),
     onMoveAside: vi.fn().mockResolvedValue({ summary: "Moved aside", movedTo: "/tmp/support/.moved-aside/item" }),
     onUndo: vi.fn().mockResolvedValue(undefined),
+    onUndoMove: vi.fn().mockResolvedValue(undefined),
     onClose: vi.fn(),
     ...overrides,
   };
@@ -109,14 +109,39 @@ describe("OverwriteRefusalDialog", () => {
     expect(props.onAdoptApply).not.toHaveBeenCalled();
     expect(screen.queryByText(preview.store_destination)).toBeNull();
   });
-  it("moves aside and displays the destination without claiming an undo operation", async () => {
+  it("moves aside, shows the destination and undoes through the move journal", async () => {
     const user = userEvent.setup();
-    const props = renderDialog();
+    const props = renderDialog({
+      onMoveAside: vi.fn().mockResolvedValue({
+        summary: "Moved aside",
+        movedTo: "/tmp/support/.moved-aside/item",
+        operationId: "op_move_1",
+        remedy: "move",
+      }),
+    });
     await user.click(screen.getByRole("button", { name: "Move aside" }));
     expect(await screen.findByText(/Now at/)).toBeTruthy();
     expect(screen.getByText("/tmp/support/.moved-aside/item")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(props.onUndoMove).toHaveBeenCalledWith("op_move_1");
     expect(props.onUndo).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Adopt primary and disables every remedy while Move aside runs", async () => {
+    const user = userEvent.setup();
+    const { promise: settled, resolve: finish } = Promise.withResolvers<OverwriteRemedyResult>();
+    renderDialog({ onMoveAside: vi.fn().mockReturnValue(settled) });
+    const adopt = screen.getByRole("button", { name: "Adopt" });
+    expect(adopt.getAttribute("data-variant")).toBe("primary");
+    const move = screen.getByRole("button", { name: "Move aside" });
+    await user.click(move);
+    await waitFor(() => expect(move.getAttribute("aria-busy")).toBe("true"));
+    expect((move as HTMLButtonElement).disabled).toBe(true);
+    expect((adopt as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    finish({ summary: "Moved aside", movedTo: "/tmp/support/.moved-aside/item", operationId: "op_move_2", remedy: "move" });
+    expect(await screen.findByText("Moved aside")).toBeTruthy();
   });
 
 

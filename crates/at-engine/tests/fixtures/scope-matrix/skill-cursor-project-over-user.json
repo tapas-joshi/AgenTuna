@@ -1,0 +1,79 @@
+{
+  "agent": "cursor",
+  "agents": [
+    {
+      "name": "cursor"
+    }
+  ],
+  "expect": {
+    "diagnostics": [],
+    "gitignore": null,
+    "items": [
+      {
+        "key": {
+          "Name": "deploy"
+        },
+        "kind": "skill",
+        "lock": null,
+        "locked": false,
+        "name": "deploy",
+        "path": "<project>/.agentuna/skills/deploy/SKILL.md",
+        "scope": "project",
+        "trace": [
+          {
+            "outcome": "shadowed",
+            "scope": "user"
+          },
+          {
+            "outcome": "winner",
+            "scope": "project"
+          }
+        ]
+      }
+    ],
+    "local": {
+      "reason": null,
+      "status": "available"
+    },
+    "shadowed": [
+      {
+        "blocked": false,
+        "key": {
+          "Name": "deploy"
+        },
+        "kind": "skill",
+        "name": "deploy",
+        "path": "<home>/.agentuna/skills/deploy/SKILL.md",
+        "scope": "user",
+        "shadowed_by": {
+          "path": "<project>/.agentuna/skills/deploy/SKILL.md",
+          "scope": "project"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "id": "skill-cursor-project-over-user",
+  "schema_version": 1,
+  "stores": [
+    {
+      "scope": "user",
+      "skills": [
+        {
+          "description": "User deployment.",
+          "slug": "deploy"
+        }
+      ]
+    },
+    {
+      "scope": "project",
+      "skills": [
+        {
+          "description": "Project deployment.",
+          "slug": "deploy"
+        }
+      ]
+    }
+  ],
+  "title": "Cursor resolves the Project skill above the User copy"
+}

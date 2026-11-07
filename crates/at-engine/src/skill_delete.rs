@@ -334,6 +334,7 @@ pub fn apply_delete_skill(
             )
             .map_err(at_db::DbError::Sqlite)?;
         at_db::items::delete_item(connection, &plan.item_id)?;
+        at_db::presets::remove_members_for_item(connection, &plan.item_id)?;
         if let Some(source_id) = source_id.as_deref() {
             at_db::sources::archive_source(connection, source_id, None)?;
         }
@@ -343,7 +344,7 @@ pub fn apply_delete_skill(
         let rollback_error = connection
             .execute_batch("ROLLBACK TO skill_delete_db; RELEASE skill_delete_db")
             .err();
-        let files = match at_fs::rollback_committed(handle) {
+        let files = match at_fs::rollback_committed(handle, context.recorder) {
             Ok(()) => "complete".to_owned(),
             Err(rollback_failure) => format!("failed: {rollback_failure}"),
         };
@@ -578,11 +579,16 @@ mod tests {
 
     fn deployment_row(fixture: &Fixture, agent: &AgentId, mode: &str, target: &Path) {
         let target_text = target.to_string_lossy().into_owned();
-        let spec =
-            DeploymentSpec::new(&fixture.id, agent, fixture.store.scope(), ItemState::Linked)
-                .with_mode(mode)
-                .with_target_path(&target_text)
-                .with_operation("op_seed");
+        let spec = DeploymentSpec::applied(
+            &fixture.id,
+            agent,
+            fixture.store.scope(),
+            ItemState::Linked,
+            Some(mode),
+            Some(&target_text),
+            at_db::deployments::DeploymentHashes::none(),
+        )
+        .with_operation("op_seed");
         upsert_deployment(fixture.database.connection(), &spec).expect("deployment row");
     }
 
@@ -707,6 +713,74 @@ mod tests {
         let restored = std::fs::read(fixture.store.skill_dir(&fixture.slug).join("SKILL.md"))
             .expect("restored skill file");
         assert_eq!(restored, SKILL_MD);
+    }
+
+    #[test]
+    fn database_failure_rolls_the_files_back_and_closes_the_operation() {
+        let fixture = fixture(Scope::User);
+        let plan = plan_delete_skill(request(&fixture, true, None)).expect("delete plan");
+        fixture
+            .database
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_item_delete BEFORE DELETE ON items \
+                 BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;",
+            )
+            .expect("refusing trigger");
+        let mut recorder = at_fs::DbOperationRecorder::new(fixture.database.connection(), 30);
+        let (mut context, roots) = apply_context(&fixture, &mut recorder);
+
+        let error = apply_delete_skill(fixture.database.connection(), &plan, &mut context, &roots)
+            .expect_err("the database update fails");
+
+        assert!(
+            matches!(&error, DeleteSkillError::Rehome { rollback, .. } if rollback == "complete"),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.store.skill_dir(&fixture.slug).join("SKILL.md"))
+                .expect("restored skill file"),
+            SKILL_MD,
+            "the applied deletion is reversed"
+        );
+        let operation: String = fixture
+            .database
+            .connection()
+            .query_row(
+                "SELECT id FROM operations ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("operation row");
+        let detail = at_db::ops::operation_detail(fixture.database.connection(), &operation)
+            .expect("detail")
+            .expect("the operation exists");
+        assert_eq!(
+            detail.operation.status,
+            Some(at_db::ops::OperationStatus::Failed)
+        );
+        assert_eq!(detail.operation.error_kind.as_deref(), Some("rolled_back"));
+        assert!(!detail.files.is_empty(), "the deletion was recorded");
+        for file in &detail.files {
+            assert_eq!(
+                file.before_hash, file.after_hash,
+                "row {} describes the restored state",
+                file.id
+            );
+        }
+        let undo = at_migrate::undo::undo_operation(
+            at_migrate::undo::UndoOperationRequest {
+                connection: fixture.database.connection(),
+                store_root: fixture.store.root(),
+                backup_root: &fixture.backup_dir,
+                authorized_roots: &roots,
+                actor: at_db::ops::OperationActor::Ui,
+                force: false,
+            },
+            &operation,
+        )
+        .expect("undo runs");
+        assert_eq!(undo, at_migrate::undo::UndoOutcome::NotUndoable);
     }
 
     #[test]
@@ -855,5 +929,48 @@ mod tests {
             )
             .expect("source row after delete");
         assert!(deleted_at.is_some(), "source row must be archived");
+    }
+
+    #[test]
+    fn delete_skill_cascades_preset_members() {
+        let mut fixture = fixture(Scope::User);
+        let preset_id = at_db::presets::create_preset(
+            fixture.database.connection_mut(),
+            &at_db::presets::NewPreset {
+                id: None,
+                name: "Reviewers",
+                description: None,
+                scope: Scope::User,
+                is_builtin: false,
+            },
+        )
+        .expect("create preset");
+        at_db::presets::set_member(
+            fixture.database.connection(),
+            &preset_id,
+            &fixture.id,
+            at_model::ItemKind::Skill,
+            true,
+        )
+        .expect("set member");
+        let before_members =
+            at_db::presets::preset_members(fixture.database.connection(), &preset_id)
+                .expect("members");
+        assert_eq!(before_members.len(), 1);
+
+        let plan = plan_delete_skill(request(&fixture, true, None)).expect("delete plan");
+        let mut recorder = at_fs::DbOperationRecorder::new(fixture.database.connection(), 30);
+        let (mut context, roots) = apply_context(&fixture, &mut recorder);
+        apply_delete_skill(fixture.database.connection(), &plan, &mut context, &roots)
+            .expect("apply delete");
+
+        let after_members =
+            at_db::presets::preset_members(fixture.database.connection(), &preset_id)
+                .expect("members");
+        assert_eq!(
+            after_members.len(),
+            0,
+            "preset_members row must cascade when skill is deleted"
+        );
     }
 }

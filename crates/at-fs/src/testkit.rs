@@ -77,6 +77,18 @@
 //! # fn main() {}
 //! ```
 
+pub mod generative;
+
+/// Skips every fsync the safe-write pipeline makes for the rest of the process.
+///
+/// This is the only place the switch can be reached: it exists only with the `testkit`
+/// cargo feature, which crates list as a dev-dependency. A release build compiles the
+/// switch out, so production durability cannot be disabled.
+#[cfg(feature = "testkit")]
+pub fn set_fast_sync(enabled: bool) {
+    crate::durability::set_fast_sync(enabled);
+}
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
