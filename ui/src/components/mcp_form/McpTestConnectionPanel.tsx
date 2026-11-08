@@ -41,7 +41,10 @@ export function McpTestConnectionPanel({
           {onCancel && <Button size="sm" onClick={onCancel} aria-label="Cancel test">Cancel</Button>}
         </div>
       ) : (
-        <Button size="sm" variant="secondary" onClick={onRunTest}>Run test</Button>
+        <Button size="sm" variant="secondary" onClick={onRunTest}>Test connection</Button>
+      )}
+      {!running && result === null && (
+        <p className="m-0 text-12 text-text-muted">Tools appear after a successful test.</p>
       )}
       {!running && result?.ok && (
         <div className="grid gap-8" role="status">

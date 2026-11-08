@@ -109,6 +109,7 @@ describe("MigratePlanScreen", () => {
     expect(screen.queryByText("./.config-studio/")).toBeNull();
 
     // Preview is open by default so every planned file is visible before Apply.
+    expect(screen.getByRole("heading", { name: "Files Apply will write" })).toBeTruthy();
     expect(screen.getByText(/1\. Back up original/)).toBeTruthy();
     expect(screen.getByText(/2\. Copy into store/)).toBeTruthy();
     expect(screen.getByText(/1\. Rewrite rule document/)).toBeTruthy();

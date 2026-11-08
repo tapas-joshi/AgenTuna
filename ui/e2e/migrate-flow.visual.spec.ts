@@ -22,6 +22,10 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
 
   // 2. Resolve step
   await expect(page.getByRole("heading", { name: "Resolve conflicts" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "review-helper differing lines" })).toContainText("old copy");
+  await expect(page.getByRole("region", { name: "review-helper differing lines" })).toContainText("new copy");
+  await expect(page.getByText("sha aaaaaaaa")).toBeVisible();
+  await expect(page).toHaveScreenshot("migrate-resolve-inline-diff.png", { animations: "disabled", caret: "hide" });
   await page.getByLabel("Keep both").check();
   await page.getByRole("button", { name: "Continue" }).click();
 
@@ -30,6 +34,7 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
   await expect(page.getByText("3 items copied into the store")).toBeVisible();
   await expect(page.getByRole("region", { name: "Planned files" })).toBeVisible();
   await expect(page.getByText(/Back up original/)).toBeVisible();
+  await expect(page).toHaveScreenshot("migrate-preview-file-first.png", { animations: "disabled", caret: "hide" });
 
   // 4. Apply confirmation modal
   await page.getByRole("button", { name: "Apply 3 items" }).click();

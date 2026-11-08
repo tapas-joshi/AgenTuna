@@ -150,7 +150,8 @@ test("design parity: add-skill library, scope, review and done steps", async ({ 
 
   await page.getByRole("button", { name: /^Continue with 1/ }).click();
   await expect(page.getByRole("heading", { name: "Scope & agents" })).toBeVisible();
-  await page.getByRole("checkbox", { name: /Codex/ }).click();
+  await expect(page.getByRole("radio", { name: "Project", exact: true })).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("checkbox", { name: /Codex \+ omp/ }).click();
   await page.screenshot({ path: "test-results/design/add-skill-scope.png", animations: "disabled", caret: "hide" });
   await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByRole("heading", { name: "Review" })).toBeVisible();

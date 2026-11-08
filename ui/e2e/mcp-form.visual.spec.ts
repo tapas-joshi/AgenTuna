@@ -29,9 +29,10 @@ test("MCP add form reviews and saves a real-shaped preview", async ({ page }) =>
   await page.getByRole("textbox", { name: "Command" }).fill("npx");
   await page.getByRole("button", { name: "Codex" }).click();
   await page.getByRole("button", { name: "Review changes" }).click();
-  await expect(page.getByText("Files that will change")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Test connection" }).getByRole("button", { name: "Test connection" })).toBeVisible();
+  await expect(page.getByText("Tools appear after a successful test.")).toBeVisible();
   await expect(page.getByText("/sandbox/user/.codex/config.toml")).toBeVisible();
-  await page.screenshot({ path: "test-results/mcp-add-review.png", animations: "disabled" });
+  await expect(page).toHaveScreenshot("mcp-add-review-empty-tools.png", { animations: "disabled", caret: "hide" });
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText("MCP server saved.", { exact: true })).toBeVisible();
 });

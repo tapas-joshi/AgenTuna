@@ -106,17 +106,24 @@ export function NativeSkillDetail({ path, onClose }: NativeSkillDetailProps) {
           );
         }
         const labels = new Map(view.agents.map((agent) => [agent.id, agent.label]));
+        // A native physical folder is a separate projection row. Pull together
+        // same-name copies across scopes so a detail opened from any root can
+        // explain independent folders and shared roots.
+        const copies = view.rows.filter(
+          (candidate) => candidate.native && candidate.name === row.name,
+        );
         const folders = new Map<string, string[]>();
-        for (const cell of row.agents) {
-          if (cell.state !== "native" || cell.config_path === null) continue;
-          const readers = folders.get(cell.config_path) ?? [];
-          readers.push(labels.get(cell.agent) ?? cell.agent);
-          folders.set(cell.config_path, readers);
+        for (const copy of copies) {
+          for (const cell of copy.agents) {
+            if (cell.state !== "native" || cell.config_path === null) continue;
+            const readers = folders.get(cell.config_path) ?? [];
+            readers.push(labels.get(cell.agent) ?? cell.agent);
+            folders.set(cell.config_path, readers);
+          }
         }
-        const classes: NativeFolder[] = [...folders].map(([folderPath, agents]) => ({
-          path: folderPath,
-          agents,
-        }));
+        const classes: NativeFolder[] = [...folders]
+          .map(([folderPath, agents]) => ({ path: folderPath, agents }))
+          .sort((left, right) => left.agents.length - right.agents.length);
         const shared = classes.filter((folder) => folder.agents.length > 1);
         const readers = [...new Set(classes.flatMap((folder) => folder.agents))];
         const scopeLabel = SCOPE_NAME[row.scope] ?? row.scope;

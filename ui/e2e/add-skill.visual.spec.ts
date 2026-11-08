@@ -310,7 +310,7 @@ test("library import keeps cross-source selections, skips destination clashes, a
   await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByRole("heading", { name: "Review" })).toBeVisible();
   await expect(page.getByText("Link · Project Skill")).toBeVisible();
-  await expect(page.getByText("/sandbox/Projects/AgenTuna/.config-studio/skills/project-skill → /sandbox/user/skills/project-skill")).toBeVisible();
+  await expect(page.getByLabel("/sandbox/Projects/AgenTuna/.config-studio/skills/project-skill → /sandbox/user/skills/project-skill")).toBeVisible();
   await expect(page).toHaveScreenshot("add-skill-library-review.png", { animations: "disabled", caret: "hide" });
 });
 test("library Copy selection is shown as a copied folder in Review", async ({ page }) => {
@@ -407,9 +407,8 @@ test("new skill scope and agents review exact destinations before writing", asyn
   const wizard = wizardMain(page);
   await expect(wizard.getByRole("heading", { name: "Scope & agents" })).toBeVisible();
   await wizard.getByRole("radio", { name: /Project/ }).click();
-  await wizard.getByLabel("Codex").check();
-  await expect(wizard.getByText("Visual Skill: /sandbox/Projects/AgenTuna/.agents/skills/visual-skill", { exact: true })).toBeVisible();
-  await expect(wizard.getByText("Shared skills folder with omp; enabling this path loads the skill in both agents.", { exact: true })).toBeVisible();
+  await wizard.getByRole("checkbox", { name: /Codex \+ omp/ }).check();
+  await expect(wizard.getByText("Shared skills folder; enabling this path loads the skill in both agents.", { exact: true })).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
   await expect(page).toHaveScreenshot("add-skill-scope-agents.png", { animations: "disabled", caret: "hide" });
 

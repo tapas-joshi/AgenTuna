@@ -103,7 +103,7 @@ function RouteBody({
 }) {
   if (route === "overview") return <OverviewScreen projectName={projectName} />;
   if (route === "skill-detail") return <SkillDetailScreen />;
-  if (route === "add-skill") return <AddSkillWizard onClose={onClose} projectId={projectId} initialScope={scope} initialSource={initialSkillSource} />;
+  if (route === "add-skill") return <AddSkillWizard onClose={onClose} projectId={projectId} initialScope={projectId !== null ? "project" : scope} initialSource={initialSkillSource} />;
   if (route === "secrets") return <SecretInventoryScreen />;
   if (route === "instructions") return <InstructionsScreen />;
   if (route === "agents") return <AgentsScreen />;

@@ -103,7 +103,7 @@ const conflict = {
     { agent: "codex", origin: "native", path: "/sandbox/home/.codex/skills/review-helper", scope: "user", raw_hash: "b".repeat(64), normalized_hash: "b".repeat(64) },
   ],
   formatting_only: false,
-  unified_diff: "--- A\n+++ B\n",
+  unified_diff: "--- A\n+++ B\n- old copy\n+ new copy\n",
   proposed_resolution: "needschoice",
 };
 const formattingConflict = {
@@ -390,6 +390,9 @@ describe("MigrateScanScreen", () => {
     });
     renderScreen();
     await openResolve();
+    expect(screen.getByRole("region", { name: "review-helper differing lines" }).textContent).toContain("old copy");
+    expect(screen.getByRole("region", { name: "review-helper differing lines" }).textContent).toContain("new copy");
+    expect(screen.getByTitle("a".repeat(64)).textContent).toBe("sha aaaaaaaa");
     fireEvent.click(screen.getByRole("radio", { name: "Keep both" }));
     expect((screen.getByRole("textbox", { name: "Copy A name" }) as HTMLInputElement).value).toBe(
       "review-helper-claude-code",

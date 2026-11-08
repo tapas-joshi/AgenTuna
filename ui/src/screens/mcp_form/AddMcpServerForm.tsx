@@ -303,7 +303,7 @@ export function AddMcpServerForm({
           <fieldset className="grid gap-8"><legend className="text-13 font-medium text-text">Agents</legend><div className="flex flex-wrap gap-8">{(["claude_code", "codex", "omp", "cursor"] as const).map((agent) => { const label = agent === "claude_code" ? "Claude Code" : agent === "codex" ? "Codex" : agent; const selected = agents.includes(agent); return <div key={agent} className="flex items-center gap-8"><button type="button" aria-pressed={selected} disabled={!installedAgents.includes(agent)} onClick={() => toggleAgent(agent, !selected)} className={`rounded-8 border px-10 py-6 text-13 ${selected ? "border-accent bg-accent/10" : "border-border"}`}>{label}</button>{!installedAgents.includes(agent) && <span className="text-11 text-muted">not installed</span>}</div>; })}</div>{errors.agents && <span role="alert" className="text-danger">{errors.agents}</span>}</fieldset>
           {saveError && <p role="alert" className="text-13 text-danger">Save failed: {saveError}</p>}
         </div>
-        <div className="flex flex-col gap-24">
+        <div className="flex flex-col gap-24 lg:sticky lg:top-16 lg:max-h-[calc(100vh-4rem)] lg:self-start lg:overflow-y-auto">
           {onTest && onPrepareLaunch && <McpTestConnectionPanel
             result={testStale ? null : testResult}
             running={testing || preparing}
