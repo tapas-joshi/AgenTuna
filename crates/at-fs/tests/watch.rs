@@ -479,7 +479,6 @@ fn a_full_queue_collapses_into_one_rescan_and_stays_bounded() {
     let service = WatchService::new(
         WatchConfig::new([WatchRoot::dir(&root, WatchRootKind::UserStore)])
             .with_capacity(3)
-            .with_max_batch_paths(0)
             .with_debounce(Duration::from_millis(100)),
     );
     settle_fixture();
