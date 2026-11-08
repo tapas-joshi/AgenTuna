@@ -583,6 +583,11 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
     );
     service.start()?;
     std::thread::sleep(SETTLE);
+    // FSEvents may replay the fixture's own pre-watch write (the file was created moments before
+    // the stream started; on the macOS arm64 runner this arrives on every run). That is not the
+    // AgenTuna write under test: it carries the original bytes and is harmless (`process` finds no
+    // drift), so consume everything already queued before writing.
+    while service.next_event(Duration::from_millis(1_000)).is_some() {}
 
     let written = br#"{"mcpServers":{"example":{"command":"node","args":["-y"]}}}"#;
     let t0 = Instant::now();
