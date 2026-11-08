@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use at_store::PortablePlatform;
 use at_store::paths::{
     AppPaths, DEFAULT_GLOBAL_STORE, GlobalStoreSource, PathEnvironment, PathError, PathOverrides,
 };
@@ -253,4 +254,53 @@ fn create_dirs_makes_every_directory_with_the_documented_modes() {
     }
     // Creating twice is fine.
     paths.create_dirs().expect("idempotent create");
+}
+
+/// A caller-supplied home governs every root, whatever the process environment says.
+///
+/// Linux derives the support, state and cache trees from `XDG_*` (`%APPDATA%` and
+/// `%LOCALAPPDATA%` on Windows). Reading those from the process while a home is injected put a
+/// sandbox's database, logs and backups outside the sandbox; GitHub's Linux runner hit exactly
+/// that when a sibling test's environment scope pointed the process at another sandbox mid-run.
+#[test]
+fn an_injected_home_outranks_process_platform_roots() {
+    let outside = "/outside/the-sandbox";
+    let _environment = env_lock::lock_env(
+        [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "APPDATA",
+            "LOCALAPPDATA",
+        ]
+        .map(|name| (name, Some(outside))),
+    );
+    assert_eq!(
+        std::env::var("XDG_CONFIG_HOME").as_deref(),
+        Ok(outside),
+        "the guard points the process away from the sandbox"
+    );
+
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let home = sandbox.path().to_str().expect("utf-8 temp path");
+    let paths = resolve(&injected(home));
+    for root in [
+        paths.support_dir(),
+        paths.local_state_dir(),
+        paths.cache_dir(),
+    ] {
+        assert!(
+            root.starts_with(home),
+            "{} must stay under the injected home {home}",
+            root.display()
+        );
+    }
+
+    // An explicit lookup still honours the variables: that is how a foreign layout is asserted.
+    let linux = AppPaths::resolve_for(PortablePlatform::Linux, &injected(home), |name| {
+        (name == "XDG_CONFIG_HOME").then(|| OsString::from(outside))
+    })
+    .expect("linux layout");
+    assert_eq!(linux.support_dir(), Path::new(outside).join("agentuna"));
 }

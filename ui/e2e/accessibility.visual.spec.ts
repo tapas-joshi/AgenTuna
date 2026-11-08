@@ -9,6 +9,16 @@ const project = {
   server_count: 2,
 };
 
+/**
+ * Full-page baselines with several screenshot comparisons per test.
+ *
+ * The suite runs four browsers at once on a three-core runner, and these tests legitimately take
+ * 25–30 s there, so the default 30 s cap failed them for machine speed rather than behaviour. Each
+ * step still waits for the state it asserts, so a real regression fails on the assertion instead of
+ * on the clock.
+ */
+test.describe.configure({ timeout: 120_000 });
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
@@ -35,6 +45,7 @@ test("picker, palette, Preferences and state-view baselines", async ({ page }) =
   await expect(page).toHaveScreenshot("preferences-populated.png", { animations: "disabled", caret: "hide" });
 
   await page.getByRole("button", { name: "Skills", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Skills", level: 1 })).toBeVisible();
   await page.getByRole("tab", { name: "Presets" }).click();
   await expect(page.getByRole("heading", { name: "Presets", exact: true })).toBeVisible();
   await expect(page).toHaveScreenshot("state-empty.png", { animations: "disabled", caret: "hide" });

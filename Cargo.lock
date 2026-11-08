@@ -516,6 +516,7 @@ dependencies = [
  "at-model",
  "at-secrets",
  "directories",
+ "env-lock",
  "fs4",
  "saphyr",
  "serde",

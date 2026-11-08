@@ -19,7 +19,10 @@ jobs:
   rust:
     name: rust
     runs-on: macos-15-intel
-    timeout-minutes: 45
+    # A cold cache on this Intel image spends ~18 min in tests, ~9 in clippy and over 14 in the
+    # release build with the embedded frontend, so 45 minutes cancelled the job mid-build. 70
+    # leaves headroom for the whole sequence without hiding a genuine hang.
+    timeout-minutes: 70
     env:
       RUST_BACKTRACE: "1"
     steps:
@@ -206,12 +209,20 @@ jobs:
           retention-days: 7
 
   visual:
-    name: visual
+    name: visual (${{ matrix.shard }}/3)
     # TU-025. Informational: the required checks stay `rust`, `frontend` and `supply-chain`.
     # The goldens were captured with Chromium on macOS and macOS/Linux font rasterisation differs
     # by more than the 0.1% pixel budget, so this runs on the same macOS image as `rust`.
+    #
+    # Three shards keep each one inside the story's 180-second budget: the whole suite took 479 s
+    # on this image, so one job could never fit. `fail-fast: false` keeps every shard's failures
+    # visible instead of cancelling the others.
     runs-on: macos-15-intel
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -242,23 +253,26 @@ jobs:
       - name: Compare against the goldens
         # Headless by default, so no window server is involved. The suite is the whole step, and
         # its wall clock is checked against the story's 180-second budget after it finishes (the
-        # bundle was built in the step above, so the budget covers only the comparison).
+        # bundle was built in the step above, so the budget covers only the comparison). The
+        # budget applies per shard: three shards of the same suite, each under 180 s.
         env:
           PLAYWRIGHT_SKIP_BUILD: "1"
         run: |
           mkdir -p target/ci-logs
           started="$(date +%s)"
           set +e
-          pnpm --dir ui run visual 2>&1 | tee target/ci-logs/visual.log
+          # `pnpm exec` forwards the flag verbatim; `pnpm run visual -- --shard=…` swallowed it
+          # (pnpm 12 passed an extra `--`, so Playwright read the shard as a file filter).
+          pnpm --dir ui exec playwright test --shard="${{ matrix.shard }}/3" 2>&1 | tee "target/ci-logs/visual-${{ matrix.shard }}.log"
           status="${PIPESTATUS[0]}"
           elapsed="$(( $(date +%s) - started ))"
-          echo "Visual suite wall clock: ${elapsed}s (story budget: 180s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Visual suite wall clock (shard ${{ matrix.shard }}/3): ${elapsed}s (story budget: 180s)" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$status" -ne 0 ]; then
-            echo "::error::the visual suite failed; compare ui/test-results with the goldens"
+            echo "::error::the visual suite failed on shard ${{ matrix.shard }}/3; compare ui/test-results with the goldens"
             exit "$status"
           fi
           if [ "$elapsed" -gt 180 ]; then
-            echo "::error::the visual suite took ${elapsed}s, over the 180s budget"
+            echo "::error::visual shard ${{ matrix.shard }}/3 took ${elapsed}s, over the 180s budget"
             exit 1
           fi
 
@@ -275,11 +289,11 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: visual-failure-artifacts
+          name: visual-failure-artifacts-${{ matrix.shard }}
           path: |
             ui/test-results/
             ui/playwright-report/
-            target/ci-logs/visual.log
+            target/ci-logs/visual-${{ matrix.shard }}.log
           if-no-files-found: ignore
           retention-days: 7
 
