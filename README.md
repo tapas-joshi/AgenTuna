@@ -22,6 +22,10 @@ brew install --cask agentuna     # the macOS Apple Silicon app + the `agentuna` 
 brew install agentuna-cli        # only the command-line tool (macOS Apple Silicon, Linux x86_64)
 ```
 
+Since Homebrew 6 third-party taps must be trusted: the fully qualified form
+`brew install --cask tapas-joshi/agentuna/agentuna` trusts that one install, or run
+`brew trust tapas-joshi/agentuna` once.
+
 The cask verifies the download against its pinned SHA-256 and clears the quarantine flag, so the
 unnotarized preview opens without the Gatekeeper prompt. The tap lives in
 [tapas-joshi/homebrew-agentuna](https://github.com/tapas-joshi/homebrew-agentuna).
