@@ -630,6 +630,73 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
 }
 
 #[test]
+fn a_late_watcher_event_for_an_agentuna_write_is_still_suppressed()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Regression for the macOS arm64 runner: FSEvents reported the rename twice and delivered the
+    // second event after the time window had passed, so the own write reached a batch as drift.
+    // Attribution is by content, so a window of zero changes nothing: the bytes on disk are still
+    // the ones AgenTuna installed.
+    let fixture = Fixture::new()?;
+    let original = br#"{"mcpServers":{}}"#;
+    let path = fixture.write(".claude.json", original)?;
+    fixture.seed(
+        &ItemId::new(),
+        &AgentId::ClaudeCode,
+        "mcp_server",
+        &path,
+        "native",
+        Some(&file_hash(original)),
+        None,
+    )?;
+    let registry = Arc::new(RecentWrites::with_ttl(Duration::ZERO));
+    let service = WatchService::new(
+        WatchConfig::new([WatchRoot::file(&path, WatchRootKind::McpFile)])
+            .with_registry(Arc::clone(&registry)),
+    );
+    service.start()?;
+    std::thread::sleep(SETTLE);
+
+    at_fs::apply_with_registry(
+        &WriteRequest::replace(
+            &path,
+            b"{\"mcpServers\":{\"x\":{\"command\":\"node\"}}}".to_vec(),
+            at_fs::ExpectedState::Hash(file_hash(original)),
+        ),
+        registry.as_ref(),
+    )?;
+    let deadline = Instant::now() + QUIET * 4;
+    let mut attributed = false;
+    // An absence assertion cannot tell "suppressed" from "not delivered yet", so this waits for
+    // the kernel callback in short slices: any batch carrying the path fails at once, and the
+    // deadline only covers a runner too loaded to deliver the callback at all.
+    while !attributed {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        if let Some(event) = service.next_event(remaining.min(Duration::from_secs(1))) {
+            if let Some(batch) = event.batch() {
+                assert!(
+                    !batch.contains(&path),
+                    "a late event for an AgenTuna write must not reach a batch: {:?}",
+                    batch.paths
+                );
+            }
+            assert!(
+                fixture.process(&event)?.is_empty(),
+                "a late event for an AgenTuna write must not produce drift"
+            );
+        }
+        attributed = registry.suppressed_count() > 0;
+    }
+    assert!(
+        attributed,
+        "the watcher must attribute the event to the write on disk"
+    );
+    service.stop()?;
+    Ok(())
+}
+
+#[test]
 fn drift_detection_declares_no_network_dependency() -> Result<(), Box<dyn std::error::Error>> {
     // The detection path is the engine's drift service plus the filesystem watcher: neither may
     // own an HTTP, TLS, socket or git client, which is what keeps detection offline.

@@ -14,9 +14,10 @@
 //! * One debounce window ([`DEFAULT_DEBOUNCE`], 300 ms) per burst of changes: fifty writes to the
 //!   same file in quick succession produce one batch.
 //! * Self-writes are suppressed: record every [`WriteOutcome`] in the [`RecentWrites`] registry
-//!   shared with the service and the events caused by those writes never reach a batch. The
-//!   suppression re-reads the file, so an external write that lands inside the suppression
-//!   window is still reported.
+//!   shared with the service and the events caused by those writes never reach a batch.
+//!   Attribution is by content, so a starved watcher thread that delivers the event long after
+//!   the write still has it suppressed, while an external write that lands inside the window is
+//!   reported immediately because its bytes hash differently.
 //! * Build artefacts and editor litter are ignored: `.git/`, `node_modules/`, `*.agentuna-tmp-*`
 //!   and `*.swp` never appear in a batch. A watched store root also hides its own `cache/` and
 //!   `backups/` subtrees, so store scratch never looks like a user change.
@@ -61,7 +62,8 @@ use crate::hash::sha256_hex;
 /// Debounce window applied to a burst of changes.
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// How long a recorded write keeps suppressing the events it caused.
+/// How long a recorded write keeps suppressing events for a path whose content can no longer be
+/// read: a delete racing the read is the only case the content comparison cannot decide.
 pub const DEFAULT_SUPPRESS_TTL: Duration = Duration::from_secs(5);
 
 /// Capacity of the batch queue.
@@ -296,9 +298,13 @@ impl IgnoreRules {
 ///
 /// Share one registry between the write path and the watch service. The write pipeline registers
 /// expected content before installing it, so watcher events cannot race ahead of suppression.
-/// An entry stops suppressing when the file no longer holds the recorded content or when the
-/// configured time-to-live elapses.
-
+///
+/// A record stands for the *content* AgenTuna installed, not for a single event: every event for
+/// that path is suppressed for as long as the file still holds a recorded hash, no matter how late
+/// the platform delivers it. A record is dropped when the file holds different bytes (the change
+/// is then the user's and is reported) or, for a path that cannot be read at all, when the
+/// configured time-to-live elapses. Nothing is consumed, so two events for one write are two
+/// suppressions.
 #[derive(Debug)]
 pub struct RecentWrites {
     ttl: Duration,
@@ -345,17 +351,19 @@ impl RecentWrites {
 
     /// Records a write that is happening now.
     ///
-    /// Existing paths are canonicalized so this registry uses the same spelling as platform
-    /// watcher events (notably macOS paths under `/private/var`).
+    /// Paths are canonicalized (resolving the part that exists) so this registry uses the same
+    /// spelling as platform watcher events, notably macOS paths under `/private/var` and
+    /// destinations that a dotfile manager symlinks.
     pub fn record(&self, path: impl Into<PathBuf>, after_hash: impl Into<String>) {
-        let path = path.into();
-        let path = fs::canonicalize(&path).unwrap_or(path);
+        let path = canonical_path(&path.into());
         self.record_at(path, after_hash, Instant::now());
     }
 
-    /// Records a write observed at `at`.
+    /// Records a write observed at `at`, storing `path` exactly as spelled.
     ///
-    /// Tests use the explicit instant to exercise the TTL without sleeping.
+    /// Tests use the explicit instant to exercise the time window without sleeping. Production
+    /// code goes through [`Self::record`] or the write pipeline's ticket, which both resolve the
+    /// path the way the platform reports it.
     pub fn record_at(&self, path: impl Into<PathBuf>, after_hash: impl Into<String>, at: Instant) {
         let id = WRITE_TICKET_ID.fetch_add(1, Ordering::Relaxed);
         self.append_record(path.into(), after_hash.into(), at, id);
@@ -373,7 +381,7 @@ impl RecentWrites {
     }
 
     pub(crate) fn record_expected(&self, path: &Path, after_hash: String) -> WriteTicket {
-        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = canonical_path(path);
         let id = WRITE_TICKET_ID.fetch_add(1, Ordering::Relaxed);
         self.append_record(path.clone(), after_hash, Instant::now(), id);
         WriteTicket { path, id }
@@ -412,42 +420,59 @@ impl RecentWrites {
     }
 
     /// [`Self::should_suppress`] evaluated at `now`.
+    ///
+    /// The decision is by content: when the file holds a hash AgenTuna recorded, every event for
+    /// that path belongs to that write, however many events the platform produces for it and
+    /// however late a starved watcher delivers them. Different bytes are the user's change and are
+    /// reported immediately. `now` only bounds records whose file cannot be read.
     #[must_use]
     pub fn should_suppress_at(&self, path: &Path, now: Instant) -> bool {
-        let recorded = {
-            let mut entries = lock(&self.entries);
-            let Some(recorded) = entries.get_mut(path) else {
-                return false;
-            };
-            recorded.retain(|entry| now.saturating_duration_since(entry.at) <= self.ttl);
-            if recorded.is_empty() {
-                entries.remove(path);
-                return false;
+        // Sample the record ids first: a write that registers between this and the read below
+        // installed bytes the read cannot see yet, so its record must stay.
+        let sampled = {
+            let entries = lock(&self.entries);
+            match entries.get(path) {
+                Some(recorded) if !recorded.is_empty() => {
+                    recorded.iter().map(|entry| entry.id).collect::<Vec<u64>>()
+                }
+                _ => return false,
             }
-            recorded.clone()
         };
-        let Ok(bytes) = fs::read(path) else {
+        let observed = fs::read(path).map(|bytes| sha256_hex(&bytes));
+        let mut entries = lock(&self.entries);
+        let Some(recorded) = entries.get_mut(path) else {
             return false;
         };
-        let hash = sha256_hex(&bytes);
-        if recorded.iter().any(|entry| entry.after_hash == hash) {
-            let mut refreshed = false;
-            if let Some(current) = lock(&self.entries).get_mut(path) {
-                for entry in current {
-                    if entry.after_hash == hash
-                        && recorded.iter().any(|expected| expected.id == entry.id)
-                    {
+        let suppressed = match observed.as_deref() {
+            Ok(hash) => {
+                let mut matched = false;
+                for entry in &mut *recorded {
+                    if entry.after_hash == hash {
+                        // Slide the window so a burst of late events stays bounded by one TTL
+                        // past the last one, never expiring under a live burst.
                         entry.at = now;
-                        refreshed = true;
+                        matched = true;
                     }
                 }
+                if !matched {
+                    recorded.retain(|entry| !sampled.contains(&entry.id));
+                }
+                matched
             }
-            if refreshed {
-                self.suppressed.fetch_add(1, Ordering::Relaxed);
-                return true;
+            // No content to compare: the time window alone decides.
+            Err(_) => {
+                recorded.retain(|entry| now.saturating_duration_since(entry.at) <= self.ttl);
+                !recorded.is_empty()
             }
+        };
+        if recorded.is_empty() {
+            entries.remove(path);
         }
-        false
+        drop(entries);
+        if suppressed {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+        }
+        suppressed
     }
 
     /// Number of events suppressed since this registry was created.
@@ -1276,7 +1301,7 @@ impl Roots {
                 let mut root = root.clone();
                 // The platform reports events on resolved paths (`/private/var/...` on macOS),
                 // so the roots have to be resolved too or nothing ever matches them.
-                root.path = canonicalize_root(&root.path);
+                root.path = canonical_path(&root.path);
                 let present = fs::symlink_metadata(&root.path).is_ok();
                 RootRuntime {
                     watch_path: desired_watch_path(&root, present),
@@ -1454,7 +1479,12 @@ fn desired_watch_path(root: &WatchRoot, present: bool) -> Option<PathBuf> {
 }
 
 /// Resolves `path` as far as it exists, keeping the missing tail.
-fn canonicalize_root(path: &Path) -> PathBuf {
+///
+/// Used for watch roots and for recorded writes alike: both must use the spelling the platform
+/// reports, and a destination that does not exist yet has no inode to canonicalize, so its parent
+/// is resolved instead. Without that a create under `/var` or a symlinked dotfile manager
+/// directory would record one spelling and be matched against the other.
+fn canonical_path(path: &Path) -> PathBuf {
     if let Ok(resolved) = fs::canonicalize(path) {
         return resolved;
     }
@@ -1901,16 +1931,90 @@ mod tests {
     }
 
     #[test]
-    fn recent_writes_expire_after_their_ttl() {
+    fn recent_writes_expire_only_when_the_content_cannot_be_read() {
+        // A path that is gone cannot be compared, so the time-to-live alone decides; a path that
+        // still holds the recorded bytes is attributed by content, however old the record is.
         let dir = TempDir::new().expect("temp");
         let file = dir.path().join("config.json");
-        touch(&file);
         let registry = RecentWrites::with_ttl(Duration::from_secs(2));
         let now = Instant::now();
         registry.record_at(&file, sha256_hex(b"x"), now - Duration::from_secs(3));
-        assert_eq!(registry.len(), 1);
         assert!(!registry.should_suppress_at(&file, now));
         assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn recent_writes_suppress_every_event_for_one_write() {
+        // The macOS failure this guards against: FSEvents reports the atomic rename more than
+        // once and delivers the later event after the suppression window has passed. The bytes on
+        // disk are still ours, so both events are ours too: nothing is consumed, nothing expires.
+        let dir = TempDir::new().expect("temp");
+        let file = dir.path().join("config.json");
+        fs::write(&file, b"written").expect("write");
+        let registry = RecentWrites::with_ttl(Duration::from_secs(2));
+        let start = Instant::now();
+        registry.record_at(&file, sha256_hex(b"written"), start);
+
+        assert!(registry.should_suppress_at(&file, start + Duration::from_millis(200)));
+        assert!(
+            registry.should_suppress_at(&file, start + Duration::from_millis(5_000)),
+            "a second event for the same write is a suppression, not a drift notice"
+        );
+        assert_eq!(registry.suppressed_count(), 2);
+        assert_eq!(
+            registry.len(),
+            1,
+            "the record stays for the next late event"
+        );
+    }
+
+    #[test]
+    fn recent_writes_report_an_external_edit_immediately() {
+        let dir = TempDir::new().expect("temp");
+        let file = dir.path().join("config.json");
+        fs::write(&file, b"written").expect("write");
+        let registry = RecentWrites::with_ttl(Duration::from_secs(30));
+        let start = Instant::now();
+        registry.record_at(&file, sha256_hex(b"written"), start);
+
+        fs::write(&file, b"user edited").expect("external write");
+        assert!(
+            !registry.should_suppress_at(&file, start),
+            "different bytes inside the window are the user's change"
+        );
+        assert_eq!(registry.suppressed_count(), 0);
+        assert_eq!(registry.len(), 0, "a superseded record is dropped");
+    }
+
+    #[test]
+    fn recent_writes_keep_nothing_after_a_later_external_edit() {
+        let dir = TempDir::new().expect("temp");
+        let file = dir.path().join("config.json");
+        fs::write(&file, b"written").expect("write");
+        let registry = RecentWrites::with_ttl(Duration::from_secs(30));
+        let start = Instant::now();
+        registry.record_at(&file, sha256_hex(b"written"), start);
+        assert!(registry.should_suppress_at(&file, start + Duration::from_secs(10)));
+
+        fs::write(&file, b"user edited").expect("external write");
+        assert!(!registry.should_suppress_at(&file, start + Duration::from_secs(11)));
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn recent_writes_resolve_a_destination_that_does_not_exist_yet() {
+        // A create has no inode to canonicalize, so the parent is resolved instead. Otherwise the
+        // record keeps the caller's spelling while the watcher reports the resolved one, and a
+        // path under `/var` (every macOS temporary directory) is never suppressed.
+        let dir = TempDir::new().expect("temp");
+        let created = dir.path().join("new/nested/config.json");
+        let registry = RecentWrites::new();
+        registry.record(&created, sha256_hex(b"new"));
+        fs::create_dir_all(created.parent().expect("parent")).expect("parents");
+        fs::write(&created, b"new").expect("write");
+
+        let reported = fs::canonicalize(&created).expect("canonical");
+        assert!(registry.should_suppress_at(&reported, Instant::now()));
     }
 
     #[test]
