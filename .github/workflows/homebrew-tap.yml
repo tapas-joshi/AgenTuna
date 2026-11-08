@@ -1,0 +1,83 @@
+name: Homebrew tap
+
+# Keeps the Homebrew tap (tapas-joshi/homebrew-agentuna) in step with GitHub releases: when a
+# release is PUBLISHED (a draft's assets are not downloadable, so the tap must wait), generate the
+# cask and formula from the release's SHA256SUMS with scripts/homebrew-tap.sh and push them.
+#
+# Needs the repository secret HOMEBREW_TAP_TOKEN: a fine-grained personal access token limited to
+# the tap repository with "Contents: read and write". Without it the job only prints what it
+# would have published, so forks and fresh clones stay green.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish to the tap (for example v0.1.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tap:
+    name: update tap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      TAP_REPO: ${{ github.repository_owner }}/homebrew-agentuna
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Check out the generator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/homebrew-tap.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Generate the cask and formula from the release checksums
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::unexpected tag: $TAG"; exit 1 ;;
+          esac
+          case "$TAG" in
+            *-*) echo "Pre-release tag $TAG: the tap only tracks stable releases."; echo "skip=true" >>"$GITHUB_ENV"; exit 0 ;;
+          esac
+          VERSION="${TAG#v}"
+          mkdir -p work/tap
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir work
+          sh scripts/homebrew-tap.sh --version "$VERSION" --sums work/SHA256SUMS --out work/tap
+          echo "VERSION=$VERSION" >>"$GITHUB_ENV"
+
+      - name: Publish to the tap
+        if: env.skip != 'true'
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set: showing the generated files instead of pushing."
+            cat work/tap/Casks/agentuna.rb work/tap/Formula/agentuna-cli.rb
+            exit 0
+          fi
+          git clone --quiet "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap-checkout
+          cp work/tap/Casks/agentuna.rb tap-checkout/Casks/agentuna.rb
+          cp work/tap/Formula/agentuna-cli.rb tap-checkout/Formula/agentuna-cli.rb
+          cd tap-checkout
+          if git diff --quiet; then
+            echo "The tap already matches ${TAG}."
+            exit 0
+          fi
+          git config user.name "agentuna release bot"
+          git config user.email "agentuna-release-bot@users.noreply.github.com"
+          git add Casks/agentuna.rb Formula/agentuna-cli.rb
+          git commit --quiet -m "agentuna ${VERSION}: update cask and CLI formula"
+          git push --quiet origin HEAD:main
+          echo "Updated ${TAP_REPO} to ${VERSION}." >>"$GITHUB_STEP_SUMMARY"
