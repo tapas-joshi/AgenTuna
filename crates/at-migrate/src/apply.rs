@@ -1081,13 +1081,11 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
 
 /// Whether the current user may create entries in `path`.
 ///
-/// `access(2)` honours ACLs, which mode bits alone would miss. A check that fails for any
-/// other reason returns `true` and lets the apply surface its own typed error.
+/// `at_fs::probe_directory_write` answers with `access(2)` on Unix and with a create-and-remove
+/// probe on Windows, both of which honour ACLs. A check that fails for any other reason returns
+/// `true` and lets the apply surface its own typed error.
 fn writable_directory(path: &Path) -> bool {
-    match rustix::fs::access(
-        path,
-        rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
-    ) {
+    match at_fs::probe_directory_write(path) {
         Ok(()) => true,
         Err(error) => !matches!(
             error.kind(),

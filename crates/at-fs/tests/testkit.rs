@@ -1,4 +1,8 @@
 //! Behaviour of the shared test fixtures (`at_fs::testkit`).
+
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
 #![cfg(feature = "testkit")]
 
 use std::collections::BTreeSet;

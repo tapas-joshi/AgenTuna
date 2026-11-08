@@ -3,6 +3,7 @@
 use crate::failpoint::{self, FaultPoint};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -216,10 +217,15 @@ fn create_temp(parent: &Path, name: &str) -> Result<(File, TempGuard), FsError> 
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = parent.join(format!(".{name}.agentuna-tmp-{}-{n}", std::process::id()));
     fault(FaultPoint::TempCreate, &path)?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    // Unix asks for owner-only access on the staging file. Windows has no mode bits: the file
+    // inherits the parent directory's ACL, which is the user's own profile for every caller.
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let file = options
         .open(&path)
         .map_err(|e| FsError::from_platform_io(parent, e))?;
     Ok((file, TempGuard { path }))
@@ -233,10 +239,56 @@ fn concurrent(path: &Path, expected: &str, actual: &Observed) -> FsError {
     }
 }
 
+/// Flushes the directory entry that the rename created.
+///
+/// Unix opens the directory and fsyncs it. Windows has no directory handle to flush
+/// (`FlushFileBuffers` takes a file), so this step is a documented no-op there: the rename is
+/// still atomic and the new bytes were flushed before it, but a crash immediately afterwards may
+/// leave the directory entry itself unflushed. See the crate documentation.
 fn sync_dir(dir: &Path) -> Result<(), FsError> {
-    File::open(dir)
-        .and_then(|d| crate::durability::sync_all(&d))
-        .map_err(|e| FsError::from_io(dir, e))
+    #[cfg(unix)]
+    {
+        File::open(dir)
+            .and_then(|d| crate::durability::sync_all(&d))
+            .map_err(|e| FsError::from_io(dir, e))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// How often a rename may be retried when another process holds the destination open.
+const RENAME_ATTEMPTS: usize = 3;
+
+/// Backoff before each retry of [`rename_replacing`].
+const RENAME_BACKOFF: [std::time::Duration; RENAME_ATTEMPTS - 1] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(300),
+];
+
+/// Renames `from` onto `to`, replacing `to`.
+///
+/// Windows reports `ERROR_SHARING_VIOLATION` when another process (an editor, a virus scanner)
+/// has the destination open, and succeeds once it lets go, so the rename is retried a bounded
+/// number of times with a short backoff. Unix has no such state and always makes the single
+/// attempt. When every attempt fails the last error is returned unchanged: nothing is deleted and
+/// the staged file is removed by its guard.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if crate::errno::is_sharing_violation(&error) && attempt < RENAME_ATTEMPTS - 1 =>
+            {
+                std::thread::sleep(RENAME_BACKOFF[attempt]);
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Applies `request`. See the module docs for the exact order of operations.
@@ -398,17 +450,33 @@ fn install(
             _ => FsError::from_platform_io(dest, e),
         })?,
         WriteMode::Replace => {
-            fs::rename(&temp.path, dest).map_err(|e| FsError::from_platform_io(dest, e))?
+            rename_replacing(&temp.path, dest).map_err(|e| FsError::from_platform_io(dest, e))?
         }
     }
     Ok(())
 }
 
 /// Re-exported for tests that need to compute modes.
+///
+/// Unix reports the permission bits. Windows has none, so the result is the only distinction the
+/// platform can express: `Some(0o444)` for a read-only file and `Some(0o644)` otherwise.
 #[doc(hidden)]
 #[must_use]
 pub fn mode_bits(path: &Path) -> Option<u32> {
-    fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o7777)
+    #[cfg(unix)]
+    {
+        fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::metadata(path).ok().map(|m| {
+            if m.permissions().readonly() {
+                0o444
+            } else {
+                0o644
+            }
+        })
+    }
 }

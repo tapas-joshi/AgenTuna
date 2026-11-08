@@ -1,5 +1,9 @@
 //! Backups, scope setup and read-only refusals through the real at-app command bodies.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::os::unix::fs::PermissionsExt;

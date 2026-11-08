@@ -1,6 +1,10 @@
 //! TA-050: the Overview "Set up this scope" action creates the scope store through the
 //! reviewed at-fs ChangeSet pipeline and stays undoable through `operation_undo`.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

@@ -388,7 +388,7 @@ fn perform_move(from: &Path, to: &Path, fs_impl: &dyn MoveFs) -> Result<MoveStra
     }
     match fs_impl.rename(from, to) {
         Ok(()) => Ok(MoveStrategy::Rename),
-        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+        Err(error) if crate::errno::is_cross_device(&error) => {
             copy_verified_move(from, to, fs_impl)
         }
         Err(error) => Err(FsError::from_io(from, error)),

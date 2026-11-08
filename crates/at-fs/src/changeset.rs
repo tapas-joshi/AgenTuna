@@ -1083,9 +1083,23 @@ fn execute_op(
                 fs::create_dir(path).map_err(|error| error.to_string())?;
             }
             if let Some(mode) = mode {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(path, fs::Permissions::from_mode(*mode & 0o777))
-                    .map_err(|error| error.to_string())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(path, fs::Permissions::from_mode(*mode & 0o777))
+                        .map_err(|error| error.to_string())?;
+                }
+                #[cfg(not(unix))]
+                {
+                    // Windows has no POSIX mode. The one bit it can express is honoured: a mode
+                    // without a write bit creates the directory read-only, so the caller's intent
+                    // survives instead of being dropped.
+                    let mut permissions = fs::metadata(path)
+                        .map_err(|error| error.to_string())?
+                        .permissions();
+                    permissions.set_readonly(*mode & 0o200 == 0);
+                    fs::set_permissions(path, permissions).map_err(|error| error.to_string())?;
+                }
             }
             Ok(None)
         }
@@ -1105,7 +1119,7 @@ fn execute_op(
             }
             match fs::rename(&source, path) {
                 Ok(()) => {}
-                Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+                Err(error) if crate::errno::is_cross_device(&error) => {
                     let stage = path.with_file_name(format!(
                         ".{}.agentuna-move-stage-{}",
                         path.file_name().and_then(OsStr::to_str).unwrap_or("move"),
@@ -1147,13 +1161,20 @@ fn resolve_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
 }
 
 fn backup_meta(set: &ChangeSet, operation_id: &str, path: &Path, relative: &Path) -> BackupMeta {
+    // Unix records the permission bits so a restore can put them back. Windows keeps `None`
+    // rather than a made-up mode: the sidecar then restores content only, which is what the
+    // platform can guarantee.
+    #[cfg(unix)]
+    let mode = fs::metadata(path)
+        .ok()
+        .map(|meta| std::os::unix::fs::MetadataExt::mode(&meta) & 0o7777);
+    #[cfg(not(unix))]
+    let mode = None;
     BackupMeta {
         scope: set.scope,
         relpath: Some(relative.to_string_lossy().into_owned()),
         operation_id: Some(operation_id.to_owned()),
-        mode: fs::metadata(path)
-            .ok()
-            .map(|meta| std::os::unix::fs::MetadataExt::mode(&meta) & 0o7777),
+        mode,
     }
 }
 
@@ -1519,7 +1540,9 @@ fn fail_rollback(
         rollback: rolled_back.err().unwrap_or_else(|| "complete".to_owned()),
     })
 }
-#[cfg(test)]
+// Unix-only fixtures: POSIX symlinks, permission bits and raw errno constants. The
+// Windows twins arrive with the slice that enables the Windows test suite.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::failpoint::{FailInjector, Fault, FaultPoint};

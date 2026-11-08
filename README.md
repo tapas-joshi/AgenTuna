@@ -4,6 +4,15 @@ A local-first desktop app and CLI for managing skills, MCP servers, and rule fil
 
 Rust core + Tauri 2 shell (`crates/at-app`) + React/TypeScript frontend (`ui/`). macOS first.
 
+## Downloads
+
+No release is published yet. The release workflow ([docs/releasing.md](docs/releasing.md)) builds,
+for macOS arm64, a `.dmg` and a `.app.zip` plus the `agentuna` CLI; and for Linux x86_64, a
+portable tarball (with `scripts/install-linux.sh`), the `.deb`/`.AppImage` when the Tauri bundler
+succeeds, and the `agentuna` CLI. Windows is not built yet. macOS builds are ad-hoc signed unless
+the maintainers' Developer ID secrets are configured, so a downloaded dmg needs right-click →
+**Open** the first time.
+
 ## Try it (MVP-1)
 
 Use a throwaway sandbox first: AgenTuna reads and edits real agent configuration (Claude Code, Codex, omp), so the first run should never point at your real home folder. Every path is injectable through environment variables, and every write is a reviewed, backed-up, undoable change.

@@ -3,6 +3,10 @@
 //! Everything here runs offline in temporary directories. The signature verifier and the
 //! relauncher are fakes, and the swap failpoint simulates a rename that fails halfway.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

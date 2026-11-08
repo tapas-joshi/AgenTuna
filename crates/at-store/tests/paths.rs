@@ -1,5 +1,9 @@
 //! Acceptance tests for `AppPaths`: every root, override order and directory modes.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};

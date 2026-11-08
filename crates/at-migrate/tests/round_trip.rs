@@ -5,6 +5,9 @@
 //! underneath. Nothing in the harness stands in for the implementation, so every assertion is
 //! about what the production code did to the filesystem, not about a simulation of it.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
 #![cfg(feature = "testkit")]
 
 use at_fs::{ApplyRoots, COPY_MANIFEST_FILE};

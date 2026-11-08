@@ -10,7 +10,6 @@
 //! capabilities and never the real home, Keychain or agent folders.
 
 use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,6 +21,56 @@ use time::OffsetDateTime;
 use crate::error::{CliError, ErrorCode};
 use crate::globals::GlobalArgs;
 use crate::output::{CommandOutput, Warning};
+
+/// Reports whether a store directory can be written, using the check the platform exposes.
+///
+/// Unix reads the owner write bit and names the exact `chmod` that restores it. Windows has one
+/// read-only attribute and no `chmod`, so the finding names the attribute instead.
+fn store_path_permissions(label: &str, path: &Path, metadata: &std::fs::Metadata) -> Finding {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o200 == 0 {
+            return Finding::error(
+                "store_path",
+                "store_path_read_only",
+                format!(
+                    "the {label} {} is not writable by its owner (mode 0o{mode:03o})",
+                    path.display()
+                ),
+                format!("restore write permission: `chmod u+w {}`", path.display()),
+            );
+        }
+        Finding::ok(
+            "store_path",
+            "store_path_ok",
+            format!(
+                "the {label} {} is writable (mode 0o{mode:03o})",
+                path.display()
+            ),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        if metadata.permissions().readonly() {
+            return Finding::error(
+                "store_path",
+                "store_path_read_only",
+                format!("the {label} {} is marked read-only", path.display()),
+                format!(
+                    "clear the read-only attribute: `attrib -R \"{}\"`",
+                    path.display()
+                ),
+            );
+        }
+        Finding::ok(
+            "store_path",
+            "store_path_ok",
+            format!("the {label} {} is writable", path.display()),
+        )
+    }
+}
 
 /// Free space below this is an error: backups and the index cannot grow.
 pub const MIN_FREE_BYTES: u64 = 256 * 1024 * 1024;
@@ -655,29 +704,7 @@ fn inspect_store_root(label: &'static str, path: &Path, creatable: bool) -> Find
             format!("the {label} {} is not a directory", path.display()),
             "move the file out of the way so AgenTuna can create the directory",
         ),
-        Ok(metadata) => {
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode & 0o200 == 0 {
-                Finding::error(
-                    "store_path",
-                    "store_path_read_only",
-                    format!(
-                        "the {label} {} is not writable by its owner (mode 0o{mode:03o})",
-                        path.display()
-                    ),
-                    format!("restore write permission: `chmod u+w {}`", path.display()),
-                )
-            } else {
-                Finding::ok(
-                    "store_path",
-                    "store_path_ok",
-                    format!(
-                        "the {label} {} is writable (mode 0o{mode:03o})",
-                        path.display()
-                    ),
-                )
-            }
-        }
+        Ok(metadata) => store_path_permissions(label, path, &metadata),
     }
 }
 

@@ -30,6 +30,32 @@ const installing = { status: { state: "installing", version: "0.2.0" }, can_inst
 afterEach(() => { cleanup(); ipc.calls.length = 0; events.handlers.clear(); });
 
 describe("AppUpdatesSection", () => {
+
+  test("unsupported platforms show the release link and no in-place update controls", async () => {
+    ipc.reply = command => {
+      if (command === "app_info") return Promise.resolve({ name: "AgenTuna", version: "0.1.0" });
+      if (command === "app_update_status") return Promise.resolve({
+        status: {
+          state: "unsupported",
+          reason: "in-place install is macOS-only; download the new release from GitHub",
+        },
+        can_install: false,
+        defer_reason: null,
+        can_cancel: false,
+      });
+      return Promise.resolve(undefined);
+    };
+    render(<AppUpdatesSection />);
+    expect(await screen.findByText(/in-place install is macOS-only/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Install update" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Download release from GitHub" }));
+    await waitFor(() => expect(ipc.calls.some(call => call.command === "open_external_link")).toBe(true));
+    expect(ipc.calls.find(call => call.command === "open_external_link")?.args).toEqual({
+      url: "https://github.com/tapas-joshi/AgenTuna/releases/latest",
+    });
+    expect(ipc.calls.some(call => call.command === "app_update_check")).toBe(false);
+  });
   test("a check is explicit and a ready update can be installed", async () => {
     ipc.reply = command => {
       if (command === "app_info") return Promise.resolve({ name: "AgenTuna", version: "0.1.0" });

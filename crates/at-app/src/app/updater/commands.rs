@@ -64,15 +64,18 @@ impl UpdaterState {
         }
     }
 
-    /// Builds production state: `/usr/bin/codesign`, `/usr/bin/open` and the system clock.
+    /// Builds production state. In-place bundle updates are supported on macOS only.
     #[must_use]
     pub fn system(updates_dir: PathBuf) -> Self {
-        Self::with_seams(
+        let state = Self::with_seams(
             updates_dir,
             Arc::new(CodesignVerifier::system()),
             Arc::new(OpenRelauncher::system()),
             Arc::new(SystemClock),
-        )
+        );
+        #[cfg(not(target_os = "macos"))]
+        state.set_status(unsupported_status());
+        state
     }
 
     /// The update cache directory (`<cache>/updates`).
@@ -173,6 +176,9 @@ pub async fn app_update_check(
     network: State<'_, NetworkState>,
     updater: State<'_, UpdaterState>,
 ) -> Result<UpdateInstallGate, CommandError> {
+    if !cfg!(target_os = "macos") {
+        return Ok(install_gate(unsupported_status(), None));
+    }
     let Some(endpoint) = manifest_url() else {
         return Err(CommandError::unavailable(
             "this build has no update source configured",
@@ -237,6 +243,9 @@ pub fn app_update_install_request(
     editor_dirty: bool,
     modal_open: bool,
 ) -> Result<UpdateInstallGate, CommandError> {
+    if !cfg!(target_os = "macos") {
+        return Ok(install_gate(unsupported_status(), None));
+    }
     updater.artifact_path(&version).map_err(map_install_error)?;
     if matches!(
         updater.status(),
@@ -275,6 +284,9 @@ pub fn app_update_install_resume(
     editor_dirty: bool,
     modal_open: bool,
 ) -> Result<UpdateInstallGate, CommandError> {
+    if !cfg!(target_os = "macos") {
+        return Ok(install_gate(unsupported_status(), None));
+    }
     let reason = activity(&app, editor_dirty, modal_open);
     if matches!(
         updater.status(),
@@ -310,6 +322,9 @@ pub fn app_update_install_resume(
 pub fn app_update_install_cancel(
     updater: State<'_, UpdaterState>,
 ) -> Result<UpdateInstallGate, CommandError> {
+    if !cfg!(target_os = "macos") {
+        return Ok(install_gate(unsupported_status(), None));
+    }
     if matches!(updater.status(), UpdateInstallStatus::Installing { .. }) {
         return Err(CommandError::new(
             CommandErrorCode::Conflict,
@@ -322,11 +337,11 @@ pub fn app_update_install_cancel(
 
 fn effective_status(updater: &UpdaterState) -> UpdateInstallStatus {
     let current = updater.status();
-    // A pending request wins over every resting status: it is about to be retried, so the UI must
-    // show the queue rather than a stale failure or a previous ready state.
     if matches!(
         current,
-        UpdateInstallStatus::Installing { .. } | UpdateInstallStatus::Installed { .. }
+        UpdateInstallStatus::Unsupported { .. }
+            | UpdateInstallStatus::Installing { .. }
+            | UpdateInstallStatus::Installed { .. }
     ) {
         return current;
     }
@@ -334,6 +349,12 @@ fn effective_status(updater: &UpdaterState) -> UpdateInstallStatus {
         .queue()
         .pending()
         .map_or(current, |queued| queued_status(&queued))
+}
+
+fn unsupported_status() -> UpdateInstallStatus {
+    UpdateInstallStatus::Unsupported {
+        reason: "in-place install is macOS-only; download the new release from GitHub".to_owned(),
+    }
 }
 
 fn queued_status(queued: &super::install::QueuedInstall) -> UpdateInstallStatus {
@@ -536,5 +557,34 @@ fn map_install_error(error: InstallError) -> CommandError {
             "no staged archive exists for that version",
         ),
         other => CommandError::internal(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_status_disables_install_and_gives_release_remedy() {
+        let status = unsupported_status();
+        assert!(matches!(
+            &status,
+            UpdateInstallStatus::Unsupported { reason }
+                if reason == "in-place install is macOS-only; download the new release from GitHub"
+        ));
+        let gate = install_gate(status, None);
+        assert!(!gate.can_install);
+        assert!(!gate.can_cancel);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn system_updater_is_unsupported_off_macos() {
+        let temp = tempfile::tempdir().expect("temporary update directory");
+        let updater = UpdaterState::system(temp.path().to_path_buf());
+        assert!(matches!(
+            updater.status(),
+            UpdateInstallStatus::Unsupported { .. }
+        ));
     }
 }

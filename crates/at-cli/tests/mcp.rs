@@ -1,5 +1,9 @@
 //! TM-027: the MCP command surface is registered and secret values are not arguments.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::ffi::OsString;

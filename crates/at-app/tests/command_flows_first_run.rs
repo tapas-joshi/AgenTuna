@@ -4,6 +4,10 @@
 //! store creation, the apply must create the store and the item as one operation, and undo must
 //! remove what that operation created.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;

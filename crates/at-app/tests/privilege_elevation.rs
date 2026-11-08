@@ -4,6 +4,10 @@
 //! recording authorization runner. Nothing here opens a real authorization dialog, writes a
 //! machine-wide directory or touches the real home.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

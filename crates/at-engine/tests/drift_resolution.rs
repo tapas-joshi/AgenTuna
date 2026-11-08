@@ -4,6 +4,10 @@
 //! directory, and skill target all live under it, so nothing touches the real
 //! HOME, the Keychain, or a real agent configuration.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;

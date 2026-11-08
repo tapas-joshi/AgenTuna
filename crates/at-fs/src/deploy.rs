@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -164,7 +165,17 @@ pub struct SystemFs;
 
 impl DeployFs for SystemFs {
     fn symlink(&self, link_target: &Path, link_path: &Path) -> io::Result<()> {
-        std::os::unix::fs::symlink(link_target, link_path)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(link_target, link_path)
+        }
+        #[cfg(windows)]
+        {
+            // Every deployment this trait creates is a directory tree. A refusal
+            // (`ERROR_PRIVILEGE_NOT_HELD` without Developer Mode) is classified as a link refusal
+            // and falls back to a verified copy, never to an unverified junction.
+            std::os::windows::fs::symlink_dir(link_target, link_path)
+        }
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -172,11 +183,21 @@ impl DeployFs for SystemFs {
     }
 
     fn same_volume(&self, a: &Path, b: &Path) -> bool {
-        match (fs::metadata(a), fs::metadata(b)) {
-            // A failed lookup can only make the answer more conservative: an absolute link
-            // works everywhere, a relative one does not.
-            (Ok(a), Ok(b)) => a.dev() == b.dev(),
-            _ => false,
+        #[cfg(unix)]
+        {
+            match (fs::metadata(a), fs::metadata(b)) {
+                // A failed lookup can only make the answer more conservative: an absolute link
+                // works everywhere, a relative one does not.
+                (Ok(a), Ok(b)) => a.dev() == b.dev(),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows exposes the volume serial number only behind an unstable std feature, so
+            // the answer is the conservative one: every deployment link is written absolute.
+            let _ = (a, b);
+            false
         }
     }
 }
@@ -698,8 +719,7 @@ fn install(
 fn is_dir_not_empty(error: &FsError) -> bool {
     matches!(
         error,
-        FsError::Io { source, .. }
-            if matches!(source.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST))
+        FsError::Io { source, .. } if crate::errno::is_dir_not_empty(source)
     )
 }
 
@@ -756,7 +776,7 @@ fn rename(from: &Path, to: &Path, fs_impl: &dyn DeployFs) -> Result<(), FsError>
     #[cfg(any(test, feature = "faults", feature = "testkit"))]
     if let Err(f) = crate::failpoint::hit(crate::failpoint::FaultPoint::DeployRename, to) {
         let e = f.into_io();
-        if e.raw_os_error() == Some(libc::EXDEV) {
+        if crate::errno::is_cross_device(&e) {
             return Err(FsError::CrossDeviceRename {
                 from: from.to_path_buf(),
                 to: to.to_path_buf(),
@@ -766,7 +786,7 @@ fn rename(from: &Path, to: &Path, fs_impl: &dyn DeployFs) -> Result<(), FsError>
         }
     }
     fs_impl.rename(from, to).map_err(|e| {
-        if e.raw_os_error() == Some(libc::EXDEV) {
+        if crate::errno::is_cross_device(&e) {
             FsError::CrossDeviceRename {
                 from: from.to_path_buf(),
                 to: to.to_path_buf(),
@@ -778,12 +798,7 @@ fn rename(from: &Path, to: &Path, fs_impl: &dyn DeployFs) -> Result<(), FsError>
 }
 
 fn is_link_unsupported(error: &io::Error) -> bool {
-    // macOS gives ENOTSUP and EOPNOTSUPP distinct values; on Linux they are equal, so compare
-    // rather than repeat the constant inside one pattern.
-    let Some(code) = error.raw_os_error() else {
-        return false;
-    };
-    code == libc::EPERM || code == libc::ENOTSUP || code == libc::EOPNOTSUPP || code == libc::ENOSYS
+    crate::errno::is_link_refusal(error)
 }
 
 /// A staged link or directory tree, deleted unless it was installed.
@@ -1168,9 +1183,15 @@ fn update_copy(
 
 fn copy_permissions(from: &Path, to: &Path) -> Result<(), FsError> {
     let meta = fs::metadata(from).map_err(|e| FsError::from_io(from, e))?;
-    fs::set_permissions(
-        to,
-        fs::Permissions::from_mode(meta.permissions().mode() & 0o7777),
-    )
-    .map_err(|e| FsError::from_io(to, e))
+    #[cfg(unix)]
+    let permissions = fs::Permissions::from_mode(meta.permissions().mode() & 0o7777);
+    #[cfg(not(unix))]
+    let permissions = {
+        // Windows has one permission bit, read-only; copying it keeps a read-only source
+        // read-only at its destination and leaves everything else writable.
+        let mut permissions = meta.permissions();
+        permissions.set_readonly(permissions.readonly());
+        permissions
+    };
+    fs::set_permissions(to, permissions).map_err(|e| FsError::from_io(to, e))
 }

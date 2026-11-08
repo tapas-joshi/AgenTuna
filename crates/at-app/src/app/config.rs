@@ -108,5 +108,6 @@ pub fn config_report(state: State<'_, AppState>) -> serde_json::Value {
     }
 }
 
-#[cfg(test)]
+// Unix-only fixtures: permission bits.
+#[cfg(all(test, unix))]
 mod tests;

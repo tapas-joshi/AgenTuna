@@ -6,6 +6,10 @@
 //! write and rename must leave nothing at the final name, whereas a direct O_EXCL create
 //! would have exposed a truncated blob.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::sync::Arc;
 

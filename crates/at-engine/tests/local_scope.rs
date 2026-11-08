@@ -3,6 +3,10 @@
 //! Every test runs in a temporary directory with an injected home; none touches the real
 //! user's stores, agent folders or Git configuration.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

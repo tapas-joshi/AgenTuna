@@ -4,7 +4,11 @@ import type { InstallDeferReason } from "./InstallDeferReason";
 /**
  * What the UI shows for an update install.
  */
-export type UpdateInstallStatus = { "state": "idle" } | { "state": "ready", 
+export type UpdateInstallStatus = { "state": "unsupported", 
+/**
+ * Why in-place updates are unavailable and where users can get a release.
+ */
+reason: string, } | { "state": "idle" } | { "state": "ready", 
 /**
  * Version that will be installed.
  */

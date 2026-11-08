@@ -134,7 +134,7 @@ test("design parity: add-skill library, scope, review and done steps", async ({ 
   await seed(page);
   await page.goto("/");
   await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
   await page.getByRole("button", { name: /From your library/ }).click();

@@ -1,15 +1,26 @@
 //! Safe write pipeline: diff preview, backup, atomic replace and optimistic concurrency.
 //!
-//! Unix only for now (macOS first); Windows support arrives with TF-038.
-//!
 //! Every production mutation of a config or store file goes through [`apply`]. It never
 //! overwrites silently: the caller states what it expects to find, and a mismatch is an
 //! error that writes nothing.
+//!
+//! # Platforms
+//!
+//! macOS and Linux are the primary targets; Windows is compiled and exercised by the `windows`
+//! CI job since TF-038 slice 1. The pipeline keeps the same guarantees on Windows with three
+//! documented differences, each of which is a platform limit rather than a policy choice:
+//!
+//! * **No directory fsync.** Windows offers no equivalent of `fsync` on a directory, so after the
+//!   rename the directory entry ordering is not forced to disk (see [`atomic`]). The rename itself
+//!   is still atomic, and the new bytes are flushed before it.
+//! * **Renames are retried.** Windows refuses to replace a file another process holds open
+//!   (`ERROR_SHARING_VIOLATION`), where Unix succeeds; [`atomic`] retries a bounded number of times
+//!   with a short backoff and then fails with a typed error. Nothing is left half-written.
+//! * **No POSIX mode bits.** Permission modes are captured and restored on Unix only. An
+//!   operation that cannot provide its guarantee on Windows returns
+//!   [`FsError::UnsupportedPlatform`] instead of reporting success.
 
 #![allow(clippy::disallowed_methods)] // at-fs is the canonical safe write pipeline implementation and legitimately calls std::fs primitives.
-
-#[cfg(not(unix))]
-compile_error!("at-fs currently supports Unix platforms only");
 
 pub mod atomic;
 pub mod backup;
@@ -25,6 +36,7 @@ pub mod concurrency;
 pub mod deploy;
 pub mod diff;
 mod durability;
+mod errno;
 mod error;
 /// Test-only fault injection. Compiled only with the `faults` or `testkit` cargo feature, or in test builds.
 #[cfg(any(test, feature = "testkit", feature = "faults"))]
@@ -36,6 +48,7 @@ mod hash;
 pub mod managed_block;
 pub mod platform;
 pub mod privilege;
+pub mod probe;
 pub mod recovery;
 pub mod remedies;
 pub mod restore;
@@ -72,6 +85,7 @@ pub use platform::{
     SystemLinker, classify_link_shape, ensure_mode_supported, host_platform, link_attempt_order,
     link_with_fallback, removal_operation, remove_link,
 };
+pub use probe::probe_directory_write;
 #[doc(hidden)]
 pub use remedies::MoveFs;
 /// TF-042's store move. Kept out of the root re-export because

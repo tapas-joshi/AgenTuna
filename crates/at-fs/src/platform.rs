@@ -4,9 +4,10 @@
 //! macOS tests can assert the Windows fallback order and removal rules. Only [`SystemLinker`]
 //! and [`remove_link`] contain `cfg(windows)` code.
 //!
-//! **The Windows implementation has never run here.** The crate is Unix-only until the Windows
-//! port lifts the `compile_error!` in `lib.rs`; the `#[cfg(windows)]` code and its tests only
-//! compile on a Windows CI runner. Everything else in this module is covered by macOS tests.
+//! **The Windows half compiles since TF-038 slice 1 but has not run yet.** The `windows` CI job
+//! type-checks the `#[cfg(windows)]` code; its tests execute in the later slice that enables the
+//! Windows test suite, where they run on a Windows runner. Everything else in this module is
+//! covered by macOS tests.
 //!
 //! A junction is a reparse point: removing it must use `RemoveDirectory`, which deletes the
 //! point and never the directory it points at. A symbolic link is removed with `remove_file`.
@@ -19,9 +20,6 @@ use std::path::{Path, PathBuf};
 
 use crate::error::FsError;
 use crate::guard::resolve_existing_prefix;
-
-/// `ERROR_PRIVILEGE_NOT_HELD` from `CreateSymbolicLinkW` on Windows.
-const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 
 /// The operating system a decision is made for.
 ///
@@ -390,27 +388,7 @@ pub fn link_with_fallback(
 }
 
 fn is_link_refusal(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::Unsupported {
-        return true;
-    }
-    let Some(code) = error.raw_os_error() else {
-        return false;
-    };
-    if code == ERROR_PRIVILEGE_NOT_HELD {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        code == libc::EPERM
-            || code == libc::ENOTSUP
-            || code == libc::EOPNOTSUPP
-            || code == libc::ENOSYS
-    }
-    #[cfg(not(unix))]
-    {
-        // `EPERM` is 1 on Windows as well.
-        code == 1
-    }
+    crate::errno::is_link_refusal(error)
 }
 
 /// What kind of entry sits at a deployment path.

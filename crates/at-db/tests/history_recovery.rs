@@ -3,6 +3,10 @@
 //! The fixture is a 3,000-item, three-scope store tree. Every test gets its own temporary
 //! support directory; the real home, Keychain and network are never touched.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

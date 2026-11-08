@@ -13,6 +13,10 @@
 //! Asserts typed error kinds, backup existence, destination bytes integrity (never partial),
 //! zero temp leftovers, at-db operation row failure, and crash recovery idempotency.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

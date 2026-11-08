@@ -257,6 +257,7 @@ pub fn run() -> tauri::Result<()> {
             app.manage(updater::commands::UpdaterState::system(
                 setup_paths.cache_dir().join("updates"),
             ));
+            #[cfg(target_os = "macos")]
             {
                 let updater_handle = app.handle().clone();
                 tauri::async_runtime::spawn_blocking(move || {

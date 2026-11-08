@@ -784,6 +784,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn deployments_are_removed_with_symlink_targets_intact_and_rows_cascaded() {
         let fixture = fixture(Scope::User);
         let agent_root = fixture._temp.path().join("agents");

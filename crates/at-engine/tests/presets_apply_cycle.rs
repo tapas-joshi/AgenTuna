@@ -1,5 +1,9 @@
 //! TS-046: preset apply/unapply round-trips and applied ratios over the database.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::path::Path;
 
 use at_db::Database;

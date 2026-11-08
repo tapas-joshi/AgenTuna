@@ -34,10 +34,15 @@
 //! against the filesystem (and against the inode index it keeps) instead of trusting the event
 //! kind, so the batches describe what is true after the burst rather than what the platform
 //! happened to report.
+//!
+//! Windows (`ReadDirectoryChangesW`) has no stable file id in `std`, so the inode index is empty
+//! there and a rename arrives as a delete plus a create. That is a coarser batch, not a weaker
+//! guarantee: every reported path is still checked against the filesystem before it is emitted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1405,11 +1410,25 @@ struct PathIndex {
     capacity: usize,
 }
 
+/// A stable identity for a path across a rename, when the platform offers one.
+///
+/// Unix pairs the device and inode. Windows `ReadDirectoryChangesW` reports a rename as one old
+/// name and one new name with no shared key and std exposes no file id without an unstable
+/// feature, so pairing is disabled there: a rename is then reported as a delete plus a create.
+/// Both describe what is true on disk; only the shape of the batch differs.
 fn inode_key(meta: &fs::Metadata) -> Option<(u64, u64)> {
-    if meta.file_type().is_symlink() {
+    #[cfg(unix)]
+    {
+        if meta.file_type().is_symlink() {
+            None
+        } else {
+            Some((meta.dev(), meta.ino()))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
         None
-    } else {
-        Some((meta.dev(), meta.ino()))
     }
 }
 
@@ -1585,7 +1604,9 @@ impl BurstGuard {
     }
 }
 
-#[cfg(test)]
+// Unix-only fixtures: POSIX symlinks, permission bits and raw errno constants. The
+// Windows twins arrive with the slice that enables the Windows test suite.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

@@ -1976,7 +1976,9 @@ pub fn restore_file(request: &RestoreRequest) -> Result<WriteOutcome, RecoveryEr
     };
     apply(&write).map_err(RecoveryError::from)
 }
-#[cfg(test)]
+// Unix-only fixtures: POSIX symlinks, permission bits and raw errno constants. The
+// Windows twins arrive with the slice that enables the Windows test suite.
+#[cfg(all(test, unix))]
 mod startup_recovery_tests {
     use std::collections::BTreeMap;
     use std::fs;

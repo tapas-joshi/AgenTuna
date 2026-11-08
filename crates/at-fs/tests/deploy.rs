@@ -1,5 +1,9 @@
 //! Deployment primitive: link and copy modes, atomic replacement, manifests and removal.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;

@@ -1453,8 +1453,7 @@ fn read_manifest_file(path: &Path) -> Result<Vec<u8>, ManifestError> {
         path: path.to_path_buf(),
         source,
     })?;
-    use std::os::unix::fs::MetadataExt;
-    if opened.dev() != meta.dev() || opened.ino() != meta.ino() {
+    if !crate::fs_identity::same_file_identity(&opened, &meta) {
         return Err(ManifestError::Changed {
             path: path.to_path_buf(),
         });
@@ -1797,7 +1796,6 @@ fn walk_skill(
 }
 
 fn read_skill_file(path: &Path, expected: &fs::Metadata) -> Result<Vec<u8>, HashError> {
-    use std::os::unix::fs::MetadataExt;
     let mut file = fs::File::open(path).map_err(|source| HashError::Read {
         path: path.to_path_buf(),
         source,
@@ -1806,7 +1804,7 @@ fn read_skill_file(path: &Path, expected: &fs::Metadata) -> Result<Vec<u8>, Hash
         path: path.to_path_buf(),
         source,
     })?;
-    if opened.dev() != expected.dev() || opened.ino() != expected.ino() {
+    if !crate::fs_identity::same_file_identity(&opened, expected) {
         return Err(HashError::Changed {
             path: path.to_path_buf(),
         });

@@ -3,6 +3,7 @@ target/
 node_modules/
 ui/dist/
 crates/at-app/gen/
+dist/
 
 # local state, never commit
 .env

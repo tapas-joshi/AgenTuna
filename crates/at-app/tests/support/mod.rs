@@ -383,7 +383,19 @@ fn copy_node(source: &Path, dest: &Path, source_root: &Path, dest_root: &Path) -
             Ok(relative) => dest_root.join(relative),
             Err(_) => target,
         };
+        // A copied fixture tree keeps its links on Unix; Windows fixtures are built without
+        // links until the test-suite slice adds junction twins.
+        #[cfg(unix)]
         std::os::unix::fs::symlink(rewritten, dest)?;
+        #[cfg(not(unix))]
+        {
+            let _ = rewritten;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlinked fixture trees are unsupported on this platform",
+            )
+            .into());
+        }
     } else if metadata.is_dir() {
         fs::create_dir(dest)?;
         fs::set_permissions(dest, metadata.permissions())?;

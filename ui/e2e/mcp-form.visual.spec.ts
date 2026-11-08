@@ -22,7 +22,7 @@ test("MCP add form reviews and saves a real-shaped preview", async ({ page }) =>
     mocks.commandOverrides.mcp_save = { operation_id: "op-visual-mcp", files_changed: 2 };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "Add MCP server" }).click();
   await expect(page.getByRole("heading", { name: "Add MCP server" })).toBeVisible();
   await page.getByLabel("Name").fill("Search");

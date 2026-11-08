@@ -95,7 +95,7 @@ test("keyboard-only project, scope, palette, Add menu and focus behavior", async
   await expect(page.getByRole("menu")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu")).toBeHidden();
-  await expect(page.getByRole("button", { name: "Add" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Add", exact: true })).toBeFocused();
   await expect(page.getByRole("heading", { name: "Preferences" })).toBeVisible();
   steps.push({ step: "Dismiss Add menu", keystrokes: "Cmd+N; Esc", expectedFocus: "Add button; route unchanged", observed: "Add button focused; Preferences route remains", result: "pass" });
   await page.keyboard.press("Escape");

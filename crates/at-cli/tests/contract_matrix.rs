@@ -15,6 +15,10 @@
 //! Everything runs in a temporary AgenTuna home with the credential store switched to
 //! memory, so no case reads or writes the developer's files, Keychain or network.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};

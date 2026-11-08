@@ -1,5 +1,9 @@
 //! Acceptance tests for `store.json`: schema, ids, hashing and atomic persistence.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;

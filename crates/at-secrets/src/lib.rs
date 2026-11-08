@@ -1,10 +1,10 @@
-//! OS credential store (Keychain) operations for AgenTuna.
+//! OS credential-store operations for AgenTuna.
 //!
-//! [`SecretStore`] is the seam. [`KeychainStore`] wraps `keyring` 4.x and the macOS
-//! Keychain under service [`KEYCHAIN_SERVICE`]; [`MemoryStore`] is an in-process
-//! implementation for tests and dry runs. Values travel as [`SecretString`], which
-//! zeroes on drop and renders as `<redacted>`; errors carry names and services, never
-//! values.
+//! [`SecretStore`] is the seam. [`KeychainStore`] wraps `keyring` 4.x and the platform store
+//! (macOS Keychain, Linux Secret Service, or Windows credential store) under service
+//! [`KEYCHAIN_SERVICE`]; [`MemoryStore`] is an in-process implementation for tests and dry runs.
+//! Values travel as [`SecretString`], which zeroes on drop and renders as `<redacted>`; errors
+//! carry names and services, never values.
 //!
 //! This crate never passes a secret as a process argument. Callers that spawn a server
 //! put the resolved value in the child environment or an HTTP header.

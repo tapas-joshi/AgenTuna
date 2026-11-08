@@ -616,7 +616,12 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<PathBuf, Instal
                     path: enclosed.display().to_string(),
                 });
             }
+            #[cfg(unix)]
             std::os::unix::fs::symlink(&link_target, &target)?;
+            #[cfg(not(unix))]
+            return Err(InstallError::UnsafeEntry {
+                path: enclosed.display().to_string(),
+            });
         } else {
             // Bound the read as well: a zip header may understate the decompressed size.
             let mut bytes = Vec::new();
@@ -695,6 +700,11 @@ pub enum InstallDeferReason {
 #[ts(export, export_to = "../../../ui/src/generated/")]
 #[non_exhaustive]
 pub enum UpdateInstallStatus {
+    /// This platform does not support in-place updates.
+    Unsupported {
+        /// Why in-place updates are unavailable and where users can get a release.
+        reason: String,
+    },
     /// Nothing is staged or requested.
     Idle,
     /// A verified archive is staged; installing is a single explicit action.

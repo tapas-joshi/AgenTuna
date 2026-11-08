@@ -15,12 +15,16 @@
 //! [`at_fs::ExpectedState::Absent`], so a file that appeared between the existence check and the
 //! write is an error, never an overwrite.
 //!
-//! Unix only, like `at-fs`: store directories are created with mode 0700.
+//! Store directories are created with mode 0700 on Unix. Windows has no mode bits: the directory
+//! inherits the ACL of the account's own profile (`%APPDATA%`/`%LOCALAPPDATA%`), which is the same
+//! protection for a per-user store, and is recorded as a documented difference rather than a
+//! weakening of a check.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -984,21 +988,27 @@ fn ensure_root(
 }
 
 fn create_dir(path: &Path) -> Result<(), StoreError> {
-    fs::DirBuilder::new()
-        .mode(STORE_DIR_MODE)
-        .create(path)
-        .map_err(|source| {
-            if source.kind() == io::ErrorKind::PermissionDenied {
-                StoreError::PermissionDenied {
-                    path: path.to_path_buf(),
-                }
-            } else {
-                StoreError::CreateDir {
-                    path: path.to_path_buf(),
-                    source,
-                }
+    // Windows cannot express 0700; the per-user profile ACL is the equivalent protection.
+    #[cfg(unix)]
+    let builder = {
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(STORE_DIR_MODE);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
+    builder.create(path).map_err(|source| {
+        if source.kind() == io::ErrorKind::PermissionDenied {
+            StoreError::PermissionDenied {
+                path: path.to_path_buf(),
             }
-        })
+        } else {
+            StoreError::CreateDir {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })
 }
 
 fn map_read_io(path: &Path, source: io::Error) -> StoreError {

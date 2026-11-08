@@ -3389,6 +3389,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn enabling_and_disabling_a_server_follows_a_symlinked_claude_config() {
         use at_fs::{ApplyContext, ApplyRoots, DbOperationRecorder};
 

@@ -171,7 +171,12 @@ fn write_report(options: &Options, grandchild: Option<u32>) {
     };
     let mut file = std::io::BufWriter::new(file);
     let _ = writeln!(file, "pid={}", std::process::id());
+    // The process group is a POSIX concept; on Windows the field is reported as zero so the
+    // report shape stays the same for every reader.
+    #[cfg(unix)]
     let _ = writeln!(file, "pgid={}", rustix::process::getpgrp().as_raw_pid());
+    #[cfg(not(unix))]
+    let _ = writeln!(file, "pgid=0");
     if let Some(pid) = grandchild {
         let _ = writeln!(file, "grandchild={pid}");
     }

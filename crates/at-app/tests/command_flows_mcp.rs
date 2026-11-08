@@ -4,6 +4,10 @@
 //! adapters write, and applies the reviewed ChangeSet. These tests assert on the native file
 //! bytes (format-preserving JSON/TOML edits), the index rows, refusals and drift.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use at_app::app::flow_harness;

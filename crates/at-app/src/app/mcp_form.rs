@@ -1048,6 +1048,12 @@ fn write_refusal(path: &Path) -> Option<String> {
             return Some("Permission denied: the file is read-only".to_owned());
         }
     }
+    #[cfg(not(unix))]
+    {
+        if metadata.permissions().readonly() {
+            return Some("Permission denied: the file is read-only".to_owned());
+        }
+    }
     None
 }
 

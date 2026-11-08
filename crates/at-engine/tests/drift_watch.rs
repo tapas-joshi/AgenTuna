@@ -6,6 +6,10 @@
 //! platform decides when a batch arrives, while the timing budget checks that it arrives in
 //! time.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};

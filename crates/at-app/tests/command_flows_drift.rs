@@ -4,6 +4,10 @@
 //! resolved by restoring the canonical bytes or by adopting the on-disk bytes. Every command
 //! leaves a reconcile with no open events.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use at_app::app::flow_harness::{self, skill_agent_apply, skill_agent_preview};

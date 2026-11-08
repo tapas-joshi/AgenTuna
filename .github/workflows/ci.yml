@@ -144,9 +144,9 @@ jobs:
 
   portability:
     name: portability
-    # TF-037/TF-038/TF-039: compile the path modules natively on Linux. The Windows check is
-    # informational and cannot pass yet (at-fs still refuses non-Unix builds and the Windows
-    # deployment primitive has no Windows runner), so only that step is allowed to fail.
+    # TF-037/TF-039: compile the path modules natively on Linux. The Windows build is proved by
+    # the `windows` job on a Windows runner; a cross-check from Linux only proved the target was
+    # installable, so it lives there now.
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -156,10 +156,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install the pinned Rust toolchain and the Windows target
+      - name: Install the pinned Rust toolchain
         run: |
           channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
-          rustup toolchain install "$channel" --profile minimal --target x86_64-pc-windows-msvc
+          rustup toolchain install "$channel" --profile minimal
           rustup default "$channel"
 
       - name: Cache cargo registry and target
@@ -170,10 +170,6 @@ jobs:
 
       - name: Check the path modules on Linux
         run: cargo check -p at-store
-
-      - name: Check the path modules on Windows (blocked by at-fs, informational)
-        continue-on-error: true
-        run: cargo check -p at-store --target x86_64-pc-windows-msvc
 
   golden:
     name: golden files
@@ -286,3 +282,100 @@ jobs:
             target/ci-logs/visual.log
           if-no-files-found: ignore
           retention-days: 7
+
+  ubuntu:
+    name: ubuntu
+    # Informational while the Linux target is being established; macOS remains the required Rust job.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustup default "$channel"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-ubuntu
+          cache-on-failure: true
+
+      - name: Check workspace on Linux
+        run: cargo check --workspace --all-targets
+
+      - name: Test workspace libraries and CLI on Linux
+        run: cargo test --workspace --exclude at-app
+
+      - name: Test app command layer on Linux
+        run: cargo test -p at-app --lib
+
+  windows:
+    name: windows
+    # TF-038 slice 1: the workspace compiles for x86_64-pc-windows-msvc. Informational while the
+    # Windows port is being built out (the remaining slices enable the test suite, the updater and
+    # an NSIS installer); the required checks stay `rust`, `frontend` and `supply-chain`.
+    continue-on-error: true
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      # `tauri.conf.json` embeds `ui/dist`, and the build script refuses to run without it, so the
+      # same frontend the macOS job builds is built here before any Rust compilation.
+      - name: Build the UI the Tauri app embeds
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui build
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-windows
+          cache-on-failure: true
+
+      - name: Check the workspace for x86_64-pc-windows-msvc
+        run: cargo check --workspace --all-targets

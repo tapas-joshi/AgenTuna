@@ -339,8 +339,7 @@ fn read_mcp_file(path: &Path) -> Result<Vec<u8>, McpStoreError> {
         path: path.to_path_buf(),
         source,
     })?;
-    use std::os::unix::fs::MetadataExt;
-    if opened.dev() != meta.dev() || opened.ino() != meta.ino() {
+    if !crate::fs_identity::same_file_identity(&opened, &meta) {
         return Err(McpStoreError::Changed {
             path: path.to_path_buf(),
         });

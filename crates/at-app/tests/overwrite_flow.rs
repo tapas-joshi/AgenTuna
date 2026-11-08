@@ -3,6 +3,10 @@
 //! The sandbox registers a fake Claude Code skills folder in the index, moves an unmanaged
 //! skill out of it and undoes the move. Nothing here touches a real agent folder.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;

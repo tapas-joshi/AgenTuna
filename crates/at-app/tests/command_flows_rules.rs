@@ -3,6 +3,10 @@
 //! Creating, previewing and saving native rule files, the typed read-only refusal for the
 //! Global scope, and the concurrent-external-edit refusal the editor dialog renders.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::os::unix::fs::PermissionsExt;

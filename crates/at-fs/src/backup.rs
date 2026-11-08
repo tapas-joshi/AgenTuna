@@ -6,6 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,10 +108,7 @@ impl BackupFiles {
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> BackupError + '_ {
     move |source| {
-        #[cfg(unix)]
-        if let Some(code) = source.raw_os_error()
-            && (code == libc::ENOSPC || code == libc::EDQUOT)
-        {
+        if crate::errno::is_no_space(&source) || crate::errno::is_quota_exceeded(&source) {
             return BackupError::BackupFailed {
                 path: path.to_path_buf(),
                 source,
@@ -155,12 +153,14 @@ fn write_staged(dest: &Path, bytes: &[u8]) -> Result<(), BackupError> {
         return Err(io_err(dest)(f.into_io()));
     }
     let temp = temp_path(dest);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(io_err(dest))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    // Owner-only staging file on Unix; on Windows the file inherits the operation folder's ACL.
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp).map_err(io_err(dest))?;
     if let Err(error) = file.write_all(bytes) {
         drop(file);
         let _ = fs::remove_file(&temp);

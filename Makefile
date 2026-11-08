@@ -1,6 +1,6 @@
 # Developer entry points. The Cargo workspace is the source of truth for checks.
 
-.PHONY: bundle-app bundle-app-universal sign dmg notarize install-linux
+.PHONY: bundle-app bundle-app-universal bundle-linux sign dmg notarize install-linux
 
 # Build and validate target/release/AgenTuna.app for the host architecture.
 bundle-app:
@@ -22,6 +22,10 @@ dmg: sign
 # Notarize and staple the app and the dmg (credentials only from the environment).
 notarize: dmg
 	./scripts/notarize.sh
+
+# Build the Linux release artifacts into dist/ (add --bundler for the deb and AppImage).
+bundle-linux:
+	./scripts/bundle-linux.sh
 
 # Install the Linux desktop entry, hicolor icons and binary under the XDG directories.
 # Pass --uninstall to remove them: ./scripts/install-linux.sh --uninstall

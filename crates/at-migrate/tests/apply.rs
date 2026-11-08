@@ -1,5 +1,9 @@
 //! Real scan-to-apply migration coverage using injected temporary roots.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
