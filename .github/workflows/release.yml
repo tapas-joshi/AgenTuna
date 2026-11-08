@@ -409,6 +409,13 @@ jobs:
       TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
+      - name: Check out the changelog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - name: Download the build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -445,7 +452,20 @@ jobs:
       - name: Create the draft release
         run: |
           set -euo pipefail
-          flags=(--draft --verify-tag --generate-notes --title "AgenTuna ${VERSION}")
+          # Release notes: the matching `## [VERSION]` section of CHANGELOG.md (checked out above);
+          # generated notes are the fallback when the section is missing.
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md >notes.md
+          flags=(--draft --verify-tag --title "AgenTuna ${VERSION}")
+          if [[ -s notes.md ]]; then
+            flags+=(--notes-file notes.md)
+          else
+            echo "::warning::CHANGELOG.md has no section for ${VERSION}; using generated notes"
+            flags+=(--generate-notes)
+          fi
           # A tag with a prerelease suffix (v0.2.0-rc.1) is marked as a GitHub pre-release.
           case "$TAG" in
             *-*) flags+=(--prerelease) ;;
