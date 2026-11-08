@@ -672,6 +672,8 @@ fn a_late_watcher_event_for_an_agentuna_write_is_still_suppressed()
     );
     service.start()?;
     std::thread::sleep(SETTLE);
+    // Consume the FSEvents replay of the fixture's pre-watch write (see the sibling test).
+    while service.next_event(Duration::from_millis(1_000)).is_some() {}
 
     at_fs::apply_with_registry(
         &WriteRequest::replace(
