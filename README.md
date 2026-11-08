@@ -10,8 +10,9 @@ Builds are attached to each [GitHub release](https://github.com/tapas-joshi/Agen
 macOS Apple Silicon (`.dmg`, `.app.zip`), Linux x86_64 (`.tar.gz`, `.deb`, `.AppImage`) and the
 `agentuna` CLI for both, with a `SHA256SUMS` file. What changed is in [CHANGELOG.md](CHANGELOG.md);
 how releases are built is in [docs/releasing.md](docs/releasing.md). Windows is not built yet.
-macOS builds are ad-hoc signed and not notarized (right-click the app and choose **Open** the
-first time); the Linux desktop app has not been launched by the maintainers yet.
+macOS builds are ad-hoc signed and not notarized: on macOS 15 and later use **System Settings >
+Privacy & Security > Open Anyway** after the first blocked launch (macOS 13/14: right-click >
+**Open**), or run `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`; the Linux desktop app has not been launched by the maintainers yet.
 
 ## Try it (MVP-1)
 

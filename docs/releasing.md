@@ -134,10 +134,11 @@ The job wires the Apple-ID notarization method. `scripts/notarize.sh` also accep
 ## Known limits
 
 - **Unsigned builds trigger Gatekeeper.** A dmg built without the Apple secrets carries an
-  ad-hoc signature, so macOS blocks the first launch of a downloaded copy. The user must
-  right-click → **Open** or run
+  ad-hoc signature, so macOS blocks the first launch of a downloaded copy. On macOS 15 and later
+  the user must open **System Settings > Privacy & Security** and click **Open Anyway** (the
+  right-click → **Open** override only works on macOS 13 and 14), or run
   `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`. Only a Developer ID signed and
-  notarized build avoids that.
+  notarized build avoids that; it requires the paid Apple Developer Program membership.
 - **The Linux GUI is unverified.** No CI job has built the Linux app before: `ci.yml` compiles
   the workspace on macOS and only `at-store` on Linux, so the release workflow is the first Linux
   build. Nothing starts the window, and the `.deb`/`.AppImage` from the Tauri bundler have never

@@ -41,8 +41,12 @@ Verify downloads with `SHA256SUMS`. Windows and Intel macOS builds are not provi
 
 ### Known limitations
 
-- **macOS builds are not notarized** (no Developer ID yet): open the dmg, then right-click the
-  app and choose **Open** the first time.
+- **macOS builds are not notarized** (no Developer ID yet), so Gatekeeper blocks the first launch.
+  On macOS 15 (Sequoia) and later: try to open the app once, then go to **System Settings >
+  Privacy & Security**, scroll to the message about AgenTuna and click **Open Anyway**. On macOS 13
+  and 14 you can instead right-click the app and choose **Open**. In a terminal:
+  `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`. The `agentuna` CLI tarball is not
+  affected when downloaded with `curl`.
 - **The Linux GUI has not been launched by the maintainers.** The Linux engine and CLI pass their
   tests in a Linux container and on a GitHub Linux runner; the desktop app is built but untested.
   Secrets on Linux need a running Secret Service (GNOME Keyring or KWallet).
