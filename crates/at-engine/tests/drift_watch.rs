@@ -585,6 +585,7 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
     std::thread::sleep(SETTLE);
 
     let written = br#"{"mcpServers":{"example":{"command":"node","args":["-y"]}}}"#;
+    let t0 = Instant::now();
     at_fs::apply_with_registry(
         &WriteRequest::replace(
             &path,
@@ -593,6 +594,8 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
         ),
         registry.as_ref(),
     )?;
+    let apply_took = t0.elapsed();
+    let mut arrivals: Vec<Duration> = Vec::new();
     let events: Vec<WatchEvent> = {
         // An absence assertion: the longer the window, the stronger, and a loaded runner may
         // deliver the suppressed event late.
@@ -600,7 +603,10 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
         let mut events = Vec::new();
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match service.next_event(remaining) {
-                Some(event) => events.push(event),
+                Some(event) => {
+                    arrivals.push(t0.elapsed());
+                    events.push(event);
+                }
                 None => break,
             }
         }
@@ -610,9 +616,11 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
         if let Some(batch) = event.batch() {
             assert!(
                 !batch.contains(&path),
-                "an AgenTuna write must not reach a batch: {:?} (suppressed events: {}); all events: {:?}; on disk matches the write: {}",
+                "an AgenTuna write must not reach a batch: {:?} (suppressed events: {}); apply took {:?}; arrivals after apply start {:?}; all events: {:?}; on disk matches the write: {}",
                 batch.paths,
                 registry.suppressed_count(),
+                apply_took,
+                arrivals,
                 events,
                 fs::read(&path)
                     .map(|bytes| bytes == written)
