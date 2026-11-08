@@ -94,6 +94,7 @@ test("Add MCP server form (design 03-mcp-server-editor)", async ({ page }) => {
     };
   });
 
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto("/");
   await page.getByRole("button", { name: "MCP Servers", exact: true }).click();
   await page.getByRole("button", { name: "+ Add server" }).click();
@@ -172,6 +173,7 @@ test("Edit MCP server form (design 03b-edit-mcp-server)", async ({ page }) => {
     };
   });
 
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto("/");
   await page.getByRole("button", { name: "MCP Servers", exact: true }).click();
   // Open server and click Edit
@@ -181,8 +183,7 @@ test("Edit MCP server form (design 03b-edit-mcp-server)", async ({ page }) => {
   const main = page.getByRole("main", { name: /Edit/ });
   await expect(main.getByRole("heading", { name: /Edit/ })).toBeVisible();
   await expect(main.getByRole("textbox", { name: "Command" })).toHaveValue("npx");
-  await page.getByRole("button", { name: "Add argument" }).click();
-  await main.getByRole("textbox", { name: "Argument 3" }).fill("--verbose");
+  await main.getByRole("textbox", { name: "Argument 2" }).fill("@modelcontextprotocol/server-github@latest");
   await page.getByRole("button", { name: "Review edit" }).click();
   await page.evaluate(() => {
     window.scrollTo(0, 0);

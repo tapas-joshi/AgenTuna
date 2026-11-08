@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Badge, Button, Input } from "../../components";
@@ -86,6 +87,7 @@ function CopyColumn({ label, copy }: { readonly label: string; readonly copy: Mi
 
 /** Screen two of migration: compare conflicting native copies and record explicit choices. */
 export function MigrateResolveScreen({
+  steps,
   projectId,
   selectedPaths,
   choices,
@@ -95,6 +97,7 @@ export function MigrateResolveScreen({
   onBack,
   onContinue,
 }: {
+  readonly steps?: ReactNode;
   readonly projectId: string | null;
   readonly selectedPaths: readonly string[];
   readonly choices: ConflictChoices;
@@ -180,12 +183,13 @@ export function MigrateResolveScreen({
     <section aria-label="Resolve migration conflicts" className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-4">
         <p className="m-0 text-12 uppercase tracking-wide text-text-muted">Migrate to AgenTuna</p>
-        <h1 className="m-0 text-26 font-semibold text-text">Resolve conflicts</h1>
+        <h1 className="m-0 font-mono text-26 font-semibold text-text">Resolve conflicts</h1>
         <p className="m-0 text-13 text-text-secondary">
           Two agents hold different copies of the same item. Choose what AgenTuna keeps before the
           plan is built.
         </p>
       </div>
+      {steps}
 
       {loading ? (
         <p role="status" className="mt-20 text-13 text-text-secondary">
@@ -252,9 +256,9 @@ export function MigrateResolveScreen({
               const error = nameErrors[key];
               const lines = changedLines(conflict.unified_diff);
               return (
-                <li key={key} className="rounded-10 border border-border bg-raised p-12">
+                <li key={key} className="rounded-12 border border-border bg-raised p-24">
                   <header className="flex flex-wrap items-center gap-8">
-                    <h2 className="m-0 text-14 font-semibold text-text">
+                    <h2 className="m-0 font-mono text-16 font-semibold text-text">
                       {conflict.kind} · {conflict.name}
                     </h2>
                     {conflict.formatting_only && (
@@ -284,14 +288,14 @@ export function MigrateResolveScreen({
                         </pre>
                       </div>
                     ) : (
-                      <div className="grid grid-cols-2 gap-8">
-                        <div className="min-w-0">
+                      <div className="grid grid-cols-2 gap-16">
+                        <div className="min-w-0 rounded-8 border border-border bg-surface p-12">
                           <h3 className="m-0 text-11 font-medium text-text-secondary">Copy A changed lines</h3>
-                          <pre className="m-0 mt-4 max-h-[144px] overflow-auto whitespace-pre-wrap break-all font-mono text-11 text-text-secondary">{lines.original.join("\n") || "No changed lines"}</pre>
+                          <pre className="m-0 mt-8 max-h-[144px] overflow-auto whitespace-pre-wrap break-all bg-danger/10 p-8 font-mono text-11 text-danger">{lines.original.join("\n") || "No changed lines"}</pre>
                         </div>
-                        <div className="min-w-0">
+                        <div className="min-w-0 rounded-8 border border-border bg-surface p-12">
                           <h3 className="m-0 text-11 font-medium text-text-secondary">Copy B changed lines</h3>
-                          <pre className="m-0 mt-4 max-h-[144px] overflow-auto whitespace-pre-wrap break-all font-mono text-11 text-text-secondary">{lines.proposed.join("\n") || "No changed lines"}</pre>
+                          <pre className="m-0 mt-8 max-h-[144px] overflow-auto whitespace-pre-wrap break-all bg-success/10 p-8 font-mono text-11 text-success">{lines.proposed.join("\n") || "No changed lines"}</pre>
                         </div>
                       </div>
                       )}

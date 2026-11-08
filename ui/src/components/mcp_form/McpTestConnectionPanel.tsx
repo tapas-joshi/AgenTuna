@@ -30,9 +30,9 @@ export function McpTestConnectionPanel({
   const hiddenCount = Math.max(0, tools.length - MAX_VISIBLE_TOOLS);
 
   return (
-    <section aria-labelledby="mcp-test-heading" className="grid gap-8" data-slot="mcp-test-panel">
+    <section aria-labelledby="mcp-test-heading" className="grid gap-12 rounded-12 border border-border bg-raised p-24" data-slot="mcp-test-panel">
       <div className="flex items-center justify-between gap-8">
-        <h2 id="mcp-test-heading" className="text-13 font-semibold text-text">Test connection</h2>
+        <h2 id="mcp-test-heading" className="m-0 text-16 font-semibold text-text">Test connection</h2>
         {stale && <span role="status" className="text-11 text-warning">Test result is stale</span>}
       </div>
       {running ? (
@@ -41,7 +41,7 @@ export function McpTestConnectionPanel({
           {onCancel && <Button size="sm" onClick={onCancel} aria-label="Cancel test">Cancel</Button>}
         </div>
       ) : (
-        <Button size="sm" variant="secondary" onClick={onRunTest}>Test connection</Button>
+        <Button className="justify-self-start" variant="secondary" onClick={onRunTest}>Test connection</Button>
       )}
       {!running && result === null && (
         <p className="m-0 text-12 text-text-muted">Tools appear after a successful test.</p>

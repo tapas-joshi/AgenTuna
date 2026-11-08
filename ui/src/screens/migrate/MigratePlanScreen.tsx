@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { Badge, Button, Checkbox, RadioCardGroup } from "../../components";
 import type { MigratePlanView } from "../../generated/MigratePlanView";
 import { Modal } from "../../overlays/dialogs/Modal";
@@ -42,6 +42,7 @@ const STRATEGY_OPTIONS = [
 
 /** Screen three of migration: reviewed strategy, counts and the exact dry run (TC-023). */
 export function MigratePlanScreen({
+  steps,
   plan,
   strategy,
   busy,
@@ -52,6 +53,7 @@ export function MigratePlanScreen({
   onBack,
   onCancel,
 }: {
+  readonly steps?: ReactNode;
   readonly plan: MigratePlanView | null;
   readonly strategy: "replace_with_links" | "leave_and_watch";
   readonly busy: boolean;
@@ -93,6 +95,7 @@ export function MigratePlanScreen({
           Nothing has been written yet. Review the exact paths Apply will change.
         </p>
       </div>
+      {steps}
 
       {error !== null && (
         <div role="alert" className="mt-16 rounded-8 border border-danger/40 bg-danger/10 p-12">
@@ -100,7 +103,7 @@ export function MigratePlanScreen({
         </div>
       )}
 
-      <div className="mt-16 grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-16 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
+      <div className="mt-24 grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-24 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
         <div className="flex min-h-0 min-w-0 flex-col gap-16 overflow-y-auto">
           <section aria-label="Planned files" className="flex min-h-0 min-w-0 shrink-0 flex-col gap-8 rounded-10 border border-border bg-raised p-16">
             <h2 className="m-0 text-14 font-semibold text-text">Files Apply will write</h2>
@@ -188,8 +191,11 @@ export function MigratePlanScreen({
           </section>
         </div>
 
-        <section aria-label="What will happen" className="flex min-h-0 min-w-0 flex-col gap-8 overflow-y-auto rounded-10 border border-border bg-raised p-16">
-          <h2 className="m-0 text-14 font-semibold text-text">What will happen</h2>
+        <div className="flex min-h-0 min-w-0 flex-col gap-24 overflow-y-auto">
+        <section aria-label="What will happen" className="flex min-w-0 flex-col gap-12 rounded-12 border border-border bg-raised p-24">
+          <h2 className="m-0 text-16 font-semibold text-text">Preflight</h2>
+          <p className="m-0 text-12 text-text-secondary">Apply re-checks every reviewed source and destination before writing.</p>
+          <h3 className="m-0 text-13 font-medium text-text">What will happen</h3>
           {plan === null ? (
             <p role="status" className="m-0 text-13 text-text-secondary">
               {busy ? "Building the reviewed plan…" : "No plan yet."}
@@ -213,6 +219,12 @@ export function MigratePlanScreen({
             </>
           )}
         </section>
+        <section aria-label="Ownership guard" className="rounded-12 border border-scope-user/40 bg-scope-user/10 p-24">
+          <h2 className="m-0 text-14 font-semibold text-text">Ownership guard</h2>
+          <p className="m-0 mt-8 text-12 text-text-secondary">AgenTuna writes only the reviewed paths. Unselected unmanaged items remain untouched; selected originals change only as reviewed.</p>
+          <p className="m-0 mt-16 text-12 text-text-secondary">If any file changed, Apply stops for a new review. Undo restores originals only when newer edits would not be lost.</p>
+        </section>
+        </div>
       </div>
 
       <footer className="mt-16 flex items-center justify-between gap-8 border-t border-border pt-16">
