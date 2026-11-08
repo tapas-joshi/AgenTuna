@@ -85,6 +85,7 @@ fn an_external_edit_is_previewed_then_restored_with_zero_drift_left() -> TestRes
         preview.previous_version_available,
         "the canonical bytes are still available: {preview:?}"
     );
+    assert_eq!(preview.baseline_unavailable_reason, None);
     assert!(
         preview.diff.contains("Edited outside AgenTuna"),
         "{}",

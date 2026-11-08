@@ -33,6 +33,74 @@ pub enum ParseStatus {
     Error(String),
 }
 
+/// Secret-free summary of one MCP transport definition.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct McpDefinitionSummary {
+    /// Transport name such as `stdio`, `http` or `sse`.
+    pub transport: String,
+    /// Executable basename for stdio definitions.
+    pub command: Option<String>,
+    /// Number of arguments; argument values are never retained.
+    pub argument_count: Option<usize>,
+    /// URL host and path only; credentials, query and fragment are excluded.
+    pub url: Option<String>,
+    /// Environment variable names only.
+    pub env_names: Vec<String>,
+    /// HTTP header names only.
+    pub header_names: Vec<String>,
+}
+
+/// Extracts a display-safe MCP definition summary without retaining secret values.
+fn mcp_definition_summary(entry: &Value) -> McpDefinitionSummary {
+    let transport = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if entry.get("command").is_some() {
+                "stdio"
+            } else {
+                "http"
+            }
+        })
+        .to_owned();
+    let command = entry.get("command").and_then(Value::as_str).map(|value| {
+        Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("command")
+            .to_owned()
+    });
+    let argument_count = entry.get("args").and_then(Value::as_array).map(Vec::len);
+    let url = entry.get("url").and_then(Value::as_str).and_then(safe_url);
+    let env_names = object_keys(entry.get("env"));
+    let header_names = object_keys(entry.get("headers"));
+    McpDefinitionSummary {
+        transport,
+        command,
+        argument_count,
+        url,
+        env_names,
+        header_names,
+    }
+}
+
+fn object_keys(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_object)
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn safe_url(value: &str) -> Option<String> {
+    let (_, rest) = value.split_once("://")?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host = authority.rsplit('@').next()?;
+    let suffix = &rest[authority_end..];
+    let path_end = suffix.find(['?', '#']).unwrap_or(suffix.len());
+    Some(format!("{host}{}", &suffix[..path_end]))
+}
+
 /// A discovered native item or per-item discovery error.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScanItem {
@@ -50,6 +118,8 @@ pub struct ScanItem {
     pub content_hash: Option<String>,
     /// Kind-specific normalized hash for conflict detection.
     pub normalized_hash: Option<String>,
+    /// Safe summary of an MCP definition; secret values are excluded.
+    pub mcp_summary: Option<McpDefinitionSummary>,
     /// Parsing result.
     pub parse_status: ParseStatus,
     /// Whether this is a link into an AgenTuna store.
@@ -662,6 +732,7 @@ fn scan_skill(
         scope: skill.scope,
         content_hash: raw_digest,
         normalized_hash: digest,
+        mcp_summary: None,
         parse_status: status,
         store_link: is_store_link,
         ownership,
@@ -898,6 +969,7 @@ fn item_error(
         scope,
         content_hash: None,
         normalized_hash: None,
+        mcp_summary: None,
         parse_status: ParseStatus::Error(error),
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
@@ -951,6 +1023,7 @@ fn scan_rule(
         scope,
         content_hash: Some(raw_hash),
         normalized_hash: Some(normalized_hash.clone()),
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: ownership(ItemKind::Rule, &name, Some(&normalized_hash), stores),
@@ -992,6 +1065,7 @@ fn scan_mcp(
                         scope,
                         content_hash: Some(hash.to_string()),
                         normalized_hash: Some(hash.to_string()),
+                        mcp_summary: Some(mcp_definition_summary(&entry)),
                         parse_status: ParseStatus::Parsed,
                         store_link: false,
                         ownership: ownership(
@@ -1266,5 +1340,26 @@ mod root_tests {
                     .any(|warning| warning.path == unreadable)
             );
         }
+    }
+
+    #[test]
+    fn mcp_summary_keeps_transport_shape_and_excludes_secret_values() {
+        let secret = concat!("sk-", "live-", "fixture-secret");
+        let entry = serde_json::json!({
+            "command": "/usr/local/bin/node",
+            "args": ["server.js", secret],
+            "env": { "API_TOKEN": secret },
+            "url": format!("https://user:{secret}@example.test/mcp?token={secret}"),
+            "headers": { "Authorization": secret }
+        });
+        let summary = mcp_definition_summary(&entry);
+        assert_eq!(summary.transport, "stdio");
+        assert_eq!(summary.command.as_deref(), Some("node"));
+        assert_eq!(summary.argument_count, Some(2));
+        assert_eq!(summary.url.as_deref(), Some("example.test/mcp"));
+        assert_eq!(summary.env_names, ["API_TOKEN"]);
+        assert_eq!(summary.header_names, ["Authorization"]);
+        let serialized = serde_json::to_string(&summary).expect("serialize summary");
+        assert!(!serialized.contains(secret));
     }
 }

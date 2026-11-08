@@ -6,7 +6,8 @@ use super::{
 };
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_migrate::scan::{
-    Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest, ScanRoot, ScanRootStatus,
+    McpDefinitionSummary, Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest, ScanRoot,
+    ScanRootStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,6 +17,24 @@ use std::{
 };
 use tauri::State;
 use ts_rs::TS;
+
+/// Safe MCP transport details carried to the import review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct McpDefinitionSummaryView {
+    /// Transport kind, such as stdio or http.
+    pub transport: String,
+    /// Executable basename only.
+    pub command: Option<String>,
+    /// Number of command arguments, never their values.
+    pub argument_count: Option<usize>,
+    /// URL host and path only, without credentials or query string.
+    pub url: Option<String>,
+    /// Environment variable names only.
+    pub env_names: Vec<String>,
+    /// HTTP header names only.
+    pub header_names: Vec<String>,
+}
 
 /// One safely discovered native definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -31,6 +50,10 @@ pub struct MigrateScanItemView {
     pub path: String,
     /// Scope inferred by native discovery.
     pub scope: String,
+    /// Secret-free summary for MCP definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_summary: Option<McpDefinitionSummaryView>,
     /// Content digest when readable.
     pub content_hash: Option<String>,
     /// Parsing or read error for this item.
@@ -141,6 +164,16 @@ fn item_view(item: ScanItem) -> MigrateScanItemView {
             .collect(),
         path: item.path.display().to_string(),
         scope: item.scope.to_string(),
+        mcp_summary: item.mcp_summary.map(|summary: McpDefinitionSummary| {
+            McpDefinitionSummaryView {
+                transport: summary.transport,
+                command: summary.command,
+                argument_count: summary.argument_count,
+                url: summary.url,
+                env_names: summary.env_names,
+                header_names: summary.header_names,
+            }
+        }),
         content_hash: item.content_hash,
         parse_error: match item.parse_status {
             ParseStatus::Parsed => None,
@@ -1654,6 +1687,7 @@ mod plan_tests {
             scope: Scope::User,
             content_hash: Some(hash.to_string().repeat(64)),
             normalized_hash: Some(hash.to_string().repeat(64)),
+            mcp_summary: None,
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,
@@ -1877,6 +1911,7 @@ mod scan_view_tests {
             scope: Scope::User,
             content_hash: Some("a".repeat(64)),
             normalized_hash: Some("a".repeat(64)),
+            mcp_summary: None,
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership,

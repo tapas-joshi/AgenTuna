@@ -118,8 +118,8 @@ export function NativeSkillDetail({ path, onClose }: NativeSkillDetailProps) {
           agents,
         }));
         const shared = classes.filter((folder) => folder.agents.length > 1);
+        const readers = [...new Set(classes.flatMap((folder) => folder.agents))];
         const scopeLabel = SCOPE_NAME[row.scope] ?? row.scope;
-        const readers = [...folders.values()].flat();
         const subtitle =
           classes.length > 1
             ? `${row.name} exists ${classes.length} times: ${classes
@@ -129,7 +129,9 @@ export function NativeSkillDetail({ path, onClose }: NativeSkillDetailProps) {
                     : `an own copy for ${folder.agents.join(" + ")}`,
                 )
                 .join(", ")}. AgenTuna shows the coupling up front and offers one reviewed adoption step instead of two switches that would lie.`
-            : `${row.name} lives only in ${readers.join(" + ")}'s folder. AgenTuna does not toggle, move or delete it; adopt it first.`;
+            : shared.length > 0
+              ? `${row.name} lives in one shared folder read by ${readers.join(" and ")}. AgenTuna does not toggle, move or delete it; adopt it first.`
+              : `${row.name} lives only in ${readers.join(" + ")}'s folder. AgenTuna does not toggle, move or delete it; adopt it first.`;
         return (
           <main aria-label="Native skill detail" className="mx-auto flex w-full max-w-[1120px] flex-col gap-16 p-24">
             <div>

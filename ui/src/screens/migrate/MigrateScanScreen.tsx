@@ -285,7 +285,7 @@ export function MigrateScanScreen() {
         </header>
       )}
 
-      <nav aria-label="Migration steps" className="flex items-center gap-8">
+      {!(kindFilter === "mcp_server" && step === "scan") && <nav aria-label="Migration steps" className="flex items-center gap-8">
         {STEPS.map((entry, index) => {
           const active = index === stepIndex;
           const complete = index < stepIndex;
@@ -315,7 +315,7 @@ export function MigrateScanScreen() {
             </div>
           );
         })}
-      </nav>
+      </nav>}
 
       {step === "resolve" ? (
         <MigrateResolveScreen
@@ -428,7 +428,54 @@ export function MigrateScanScreen() {
             </p>
           )}
 
-          <div className="grid min-h-[520px] grid-cols-[320px_1fr] gap-16 max-[1099px]:grid-cols-[minmax(200px,0.6fr)_minmax(0,1.4fr)]">
+          <div className={kindFilter === "mcp_server" ? "grid min-h-[520px] grid-cols-[minmax(0,1.8fr)_minmax(260px,0.9fr)] gap-16 max-[900px]:grid-cols-1" : "grid min-h-[520px] grid-cols-[320px_1fr] gap-16 max-[1099px]:grid-cols-[minmax(200px,0.6fr)_minmax(0,1.4fr)]"}>
+            {kindFilter === "mcp_server" ? (
+              <section aria-label="Found in agent apps" className="flex flex-col rounded-10 border border-border bg-raised p-16">
+                <h2 className="m-0 text-16 font-semibold">Found in agent apps</h2>
+                <p className="mt-4 text-12 text-text-muted">Read-only scan. Same-name definitions stay separate by source.</p>
+                <div className="mt-12 flex flex-wrap gap-8">
+                  {["User", "Project", "Local"].map((scope) => (
+                    <Badge key={scope} tone="success">{scope} · scanned</Badge>
+                  ))}
+                  <Badge tone="warning">Global · only where authorized</Badge>
+                </div>
+                <div className="mt-16 grid grid-cols-[28px_minmax(160px,1fr)_minmax(180px,1fr)_minmax(100px,0.8fr)] gap-8 border-b border-border px-4 py-8 text-11 uppercase tracking-wide text-text-muted">
+                  <span aria-hidden="true" /><span>App / source</span><span>What AgenTuna would manage</span><span>State</span>
+                </div>
+                {items.length === 0 ? (
+                  <p className="p-12 text-13 text-text-muted">No MCP server definitions were found.</p>
+                ) : (
+                  <ul className="m-0 list-none p-0">
+                    {items.map((item) => {
+                      const key = itemKey(item);
+                      const conflict = item.ownership === "conflict" || item.ownership === "managed_differs";
+                      const statusLabel = item.parse_error !== null ? "Unreadable" : item.state === "in_agentuna" ? "Already managed" : item.state === "conflict" ? "Differs" : "New";
+                      return (
+                        <li key={key} className={`grid grid-cols-[28px_minmax(160px,1fr)_minmax(180px,1fr)_minmax(100px,0.8fr)] items-start gap-8 border-b border-border px-4 py-12 last:border-0 ${conflict ? "border-l-2 border-l-warning pl-8" : ""}`}>
+                          <input type="checkbox" aria-label={`Select ${item.name}`} checked={selected.has(key)} disabled={busy} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(key); else next.delete(key); return next; })} />
+                          <div className="min-w-0">
+                            <p className="m-0 truncate text-13 font-semibold text-text">{item.name}</p>
+                            <span className="text-11 text-text-muted">{item.agents.map((agent) => agent.replaceAll("_", " ")).join(", ")} · {item.scope}</span>
+                            <p className="m-0 mt-4 truncate font-mono text-11 text-text-secondary" title={item.path}>{item.path}</p>
+                          </div>
+                          <div className="min-w-0 text-11 text-text-secondary">
+                            {item.mcp_summary ? (
+                              <>
+                                <p className="m-0">{item.mcp_summary.transport === "stdio" ? `${item.mcp_summary.command ?? "command"} · ${item.mcp_summary.argument_count ?? 0} args` : item.mcp_summary.url ?? item.mcp_summary.transport}</p>
+                                {item.mcp_summary.env_names.length > 0 && <p className="m-0 mt-4 break-words">env · {item.mcp_summary.env_names.join(", ")}</p>}
+                                {item.mcp_summary.header_names.length > 0 && <p className="m-0 mt-4 break-words">headers · {item.mcp_summary.header_names.join(", ")}</p>}
+                              </>
+                            ) : "No safe details available"}
+                          </div>
+                          <span className="text-12 text-text-secondary">{statusLabel}{conflict && <span className="block text-11 text-warning">Same name · resolve before import</span>}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+                <p className="m-0 mt-auto border-t border-border pt-12 text-12 text-text-muted">{items.length} definitions · {selected.size} selected · nothing written</p>
+              </section>
+            ) : (
             <aside aria-label="Scanned folders" className="rounded-10 border border-border bg-raised p-12">
               <h2 className="m-0 text-11 font-semibold uppercase tracking-wide text-text-muted">
                 Scanned folders
@@ -485,8 +532,28 @@ export function MigrateScanScreen() {
                 </ul>
               )}
             </aside>
+            )}
 
-            <section aria-label="Scanned items" className="flex flex-col rounded-10 border border-border bg-raised">
+            {kindFilter === "mcp_server" ? (
+              <aside className="flex flex-col gap-16">
+                <section className="rounded-10 border border-border bg-raised p-16">
+                  <h2 className="m-0 text-16 font-semibold">What happens next</h2>
+                  <ol className="mt-12 list-decimal space-y-8 pl-20 text-12 text-text-secondary">
+                    <li>Review every finding</li><li>Resolve conflicting names</li><li>Preview exact file changes</li><li>Apply with backups</li>
+                  </ol>
+                  <p className="mt-16 border-t border-border pt-12 text-12 font-semibold text-success">This screen writes nothing.</p>
+                  <p className="mt-4 text-11 text-text-muted">No server starts. No agent config changes. Review is required before any write.</p>
+                </section>
+                <section className="rounded-10 border border-border bg-raised p-16">
+                  <h2 className="m-0 text-16 font-semibold">Destination scope</h2>
+                  <p className="mt-8 text-12 text-text-secondary">Choose the receiving scope in the shared migration plan.</p>
+                  <p className="mt-8 text-11 text-text-muted">Conflicts are resolved before preview. Secrets are never shown in this review.</p>
+                </section>
+              </aside>
+            ) : null}
+
+
+            {kindFilter !== "mcp_server" && <section aria-label="Scanned items" className="flex flex-col rounded-10 border border-border bg-raised">
               {items.length === 0 ? (
                 <div className="p-24">
                   <h2 className="m-0 text-16 font-semibold">Nothing to migrate</h2>
@@ -596,7 +663,7 @@ export function MigrateScanScreen() {
                   </p>
                 </>
               )}
-            </section>
+            </section>}
           </div>
 
           <footer className="mt-auto flex items-center justify-end gap-12 border-t border-border pt-16">
@@ -618,7 +685,7 @@ export function MigrateScanScreen() {
               disabled={busy || selected.size === 0}
               onClick={() => setStep("resolve")}
             >
-              Continue with {selected.size}
+              {kindFilter === "mcp_server" ? `Import ${selected.size} servers` : `Continue with ${selected.size}`}
             </Button>
           </footer>
         </>

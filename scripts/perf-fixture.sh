@@ -11,8 +11,8 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
 fi
 
 dest=$1
-skills=${2:-2000}
-servers=${3:-200}
+skills=${2-2000}
+servers=${3-200}
 case $dest in /*) ;; *) printf 'fixture path must be absolute\n' >&2; exit 2 ;; esac
 for number in "$skills" "$servers"; do
     case $number in ''|*[!0-9]*) printf 'counts must be non-negative integers\n' >&2; exit 2 ;; esac
@@ -44,7 +44,11 @@ esac
 root=$parent/$leaf
 # Never modify or remove an existing directory, including through a symlink.
 if ! mkdir "$root"; then
-    printf 'fixture destination must not already exist: %s\n' "$root" >&2
+    if [ -e "$root" ] || [ -L "$root" ]; then
+        printf 'fixture destination must not already exist: %s\n' "$root" >&2
+    else
+        printf 'cannot create fixture directory: %s\n' "$root" >&2
+    fi
     exit 2
 fi
 

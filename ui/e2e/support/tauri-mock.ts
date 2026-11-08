@@ -46,6 +46,7 @@ export const test = base.extend({
         missing: false, editable: true, update_available: false, source_commit_sha: null,
         source_remote_sha: null, source_last_checked_at: null, auto_update: "inherit",
       };
+      let createdRule: { item_id: string; scope: string; path: string; managed: boolean; content: string; hash: string; agents: string[]; read_error: null } | null = null;
       const callbacks = new Map<number, (payload: unknown) => void>();
       const eventCallbacks = new Map<string, Set<number>>();
       const pendingEvents = new Map<string, unknown>();
@@ -69,6 +70,7 @@ export const test = base.extend({
       const migratePlanCounts = { items: 3, files_created: 6, files_backed_up: 2, links_written: 2, files_left_in_place: 0 };
       const migratePlanFixture = { plan_hash: "d".repeat(64), backup_dir: "/sandbox/support/backups/migration", strategy: "replace_with_links", counts: migratePlanCounts, scopes: [{ scope: "project", store_path: "/sandbox/Projects/AgenTuna/.config-studio", counts: migratePlanCounts, steps: [{ seq: 1, action: "backuporiginal", scope: "project", item_name: "Visual migration skill", source: "/sandbox/home/.claude/skills/visual-migration", destination: null, backup_path: "/sandbox/support/backups/migration/visual-migration", bytes: 128, agents: [] }, { seq: 2, action: "createstoreitem", scope: "project", item_name: "Visual migration skill", source: "/sandbox/home/.claude/skills/visual-migration", destination: "/sandbox/Projects/AgenTuna/.config-studio/skills/visual-migration", backup_path: null, bytes: 128, agents: ["claude_code"] }] }], files_checked: 2 };
       const migrateScanFixture = { items: [{ kind: "skill", name: "Visual migration skill", agents: ["claude_code"], path: "/sandbox/home/.claude/skills/visual-migration", scope: "user", content_hash: "a".repeat(64), parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "not_in_agentuna" }, { kind: "mcp_server", name: "Local docs server", agents: ["codex", "omp"], path: "/sandbox/home/.claude.json", scope: "user", content_hash: "b".repeat(64), parse_error: null, store_link: false, state: "conflict", ownership: "conflict" }, { kind: "rule", name: "Project guidance", agents: ["claude_code"], path: "/sandbox/Projects/AgenTuna/CLAUDE.md", scope: "project", content_hash: "c".repeat(64), parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "not_in_agentuna" }], partial: false, skipped_roots: [], warnings: [], roots: [{ path: "/sandbox/home/.claude/skills", kind: "skill", agents: ["claude_code"], found_items: 1, new_items: 1, skipped_items: 0, in_sync: 0, status: "scanned", unreadable_reason: null }, { path: "/sandbox/home/.codex/skills", kind: "skill", agents: ["codex", "omp"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "empty", unreadable_reason: null }, { path: "/sandbox/home/.claude.json", kind: "mcp_server", agents: ["codex", "omp"], found_items: 1, new_items: 1, skipped_items: 0, in_sync: 0, status: "scanned", unreadable_reason: null }, { path: "/sandbox/Projects/AgenTuna/CLAUDE.md", kind: "rule", agents: ["claude_code"], found_items: 1, new_items: 1, skipped_items: 0, in_sync: 0, status: "scanned", unreadable_reason: null }, { path: "/sandbox/home/.cursor/skills", kind: "skill", agents: ["cursor"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "not_present", unreadable_reason: null }, { path: "/sandbox/home/.agents/skills", kind: "skill", agents: ["codex", "omp"], found_items: 0, new_items: 0, skipped_items: 0, in_sync: 0, status: "unreadable", unreadable_reason: "permission denied" }] };
+      (migrateScanFixture.items[1] as Record<string, unknown>).mcp_summary = { transport: "stdio", command: "node", argument_count: 2, url: null, env_names: ["LOCAL_DOCS_KEY"], header_names: [] };
       const ipc = {
         invoke: async (command: string, args?: { key?: string; value?: unknown; itemId?: string; path?: string; url?: string; reference?: string | null; kind?: string; importId?: string; scope?: string; event?: unknown; handler?: number; wizard?: unknown; request?: unknown; jobId?: string; commit?: string; confirmationToken?: string; groupId?: string; relativePath?: string; side?: string; resolution?: string; previewId?: string; confirmDeletions?: boolean }) => {
           mocks.calls.push(command);
@@ -87,11 +89,30 @@ export const test = base.extend({
             case "app_menu_set_add_skill_enabled": return null;
             case "settings_load": return settings;
             case "settings_set": if (args?.key) settings.values[args.key] = args.value; return null;
-            case "instructions_list": return [{ item_id: "itm_visual_rule", scope: "project", path: "/sandbox/Projects/AgenTuna/AGENTS.md", managed: true, content: "# Repository guidance\n\nReview changes carefully.\n", hash: "c".repeat(64), agents: ["codex", "omp"], read_error: null }, { item_id: "itm_visual_user_rule", scope: "user", path: "/sandbox/home/.claude/CLAUDE.md", managed: false, content: "# Personal preferences\n\nPrefer small PRs.\n", hash: "e".repeat(64), agents: ["claude_code"], read_error: null }];
+            case "instructions_list": return [...(createdRule ? [createdRule] : []), { item_id: "itm_visual_rule", scope: "project", path: "/sandbox/Projects/AgenTuna/AGENTS.md", managed: true, content: "# Repository guidance\n\nReview changes carefully.\n", hash: "c".repeat(64), agents: ["codex", "omp"], read_error: null }, { item_id: "itm_visual_user_rule", scope: "user", path: "/sandbox/home/.claude/CLAUDE.md", managed: false, content: "# Personal preferences\n\nPrefer small PRs.\n", hash: "e".repeat(64), agents: ["claude_code"], read_error: null }];
             case "instruction_create_options": return { global_writable: true, global_reason: null, local_available: true, local_reason: null, has_project: true };
-            case "instruction_create_preview": return { path: "/sandbox/Projects/AgenTuna/AGENTS.md", exists: false, reason: null };
-            case "instruction_create": return "/sandbox/Projects/AgenTuna/AGENTS.md";
-            case "instruction_save": return { status: "saved", conflict: null, backup_path: "/sandbox/support/backups/AGENTS.md", hash: "f".repeat(64), unreadable_path: null };
+            case "instruction_create_preview": {
+              const request = args as { fileType?: string; scope?: string } | undefined;
+              const filename = request?.fileType ?? "AGENTS.md";
+              const path = request?.scope === "local"
+                ? `/sandbox/Projects/AgenTuna/${filename}`
+                : `/sandbox/Projects/AgenTuna/.config-studio/rules/${filename}`;
+              return { path, exists: false, reason: null };
+            }
+            case "instruction_create": {
+              const request = args?.request as { file_type?: string; scope?: string } | undefined;
+              const filename = request?.file_type ?? "AGENTS.md";
+              const path = request?.scope === "local"
+                ? `/sandbox/Projects/AgenTuna/${filename}`
+                : `/sandbox/Projects/AgenTuna/.config-studio/rules/${filename}`;
+              createdRule = { item_id: "itm_visual_created_rule", scope: request?.scope ?? "project", path, managed: true, content: "# New rule\n", hash: "d".repeat(64), agents: ["codex", "omp"], read_error: null };
+              return path;
+            }
+            case "instruction_save": {
+              const request = args?.request as { path?: string; content?: string } | undefined;
+              if (createdRule !== null && request?.path === createdRule.path) createdRule = { ...createdRule, content: request.content ?? createdRule.content, hash: "f".repeat(64) };
+              return { status: "saved", conflict: null, backup_path: "/sandbox/support/backups/AGENTS.md", hash: "f".repeat(64), unreadable_path: null };
+            }
             case "agents_list": return agentCards;
             case "custom_agent_preview": {
               const request = args?.request as { display_name?: string; root?: string; skills_subfolder?: string | null; mcp_format?: string; mcp_file?: string | null; rule_files?: string[] } | undefined;

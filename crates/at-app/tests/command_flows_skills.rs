@@ -14,7 +14,7 @@ use at_app::app::skill_transfer::{SkillTransferApplyRequest, SkillTransferPrevie
 use std::str::FromStr;
 
 use at_db::Database;
-use at_model::{AgentId, ItemState, Scope};
+use at_model::{Agent, AgentId, ItemState, Scope};
 use support::{Sandbox, TestResult};
 
 const SKILL_MD: &[u8] = b"---\nname: Demo Skill\ndescription: sandbox only\n---\n\nBody.\n";
@@ -212,6 +212,84 @@ fn enable_and_disable_are_reviewed_and_undo_restores_the_exact_tree() -> TestRes
     assert!(
         flow_harness::reconcile_drift(&database)?.is_empty(),
         "undo of a disable is not external drift"
+    );
+    Ok(())
+}
+
+#[test]
+fn native_skill_list_projects_all_readers_of_a_shared_root() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let database = sandbox.database()?;
+    for (agent, display_name) in [(AgentId::Codex, "Codex"), (AgentId::Omp, "omp")] {
+        sandbox.register_agent(&database, agent.clone())?;
+        at_db::agents::upsert_agent(
+            database.connection(),
+            &Agent {
+                id: agent,
+                display_name: display_name.to_owned(),
+                detected: true,
+                version: Some("1.0".to_owned()),
+            },
+        )?;
+    }
+    let root = sandbox.agent_skills_dir(&AgentId::Codex, Scope::Project)?;
+    std::fs::create_dir_all(root.join("release-notes"))?;
+    let skill_path = root.join("release-notes");
+    let skill_path_text = skill_path.to_string_lossy().into_owned();
+    for agent in [AgentId::Codex, AgentId::Omp] {
+        at_db::agents::upsert_agent_path(
+            database.connection(),
+            &at_db::agents::AgentPathSpec {
+                agent: &agent,
+                scope: Scope::Project,
+                kind: at_db::agents::AgentPathKind::SkillsDir,
+                path: &root,
+                format: Some(at_db::agents::AgentPathFormat::Dir),
+                is_primary: true,
+                exists: true,
+            },
+        )?;
+    }
+    at_db::native::replace_scan(
+        database.connection(),
+        &AgentId::Codex,
+        Scope::Project,
+        &[at_db::native::NativeScanEntry::new(
+            at_model::ItemKind::Skill,
+            "release-notes",
+            &skill_path_text,
+        )],
+    )?;
+    let state = flow_harness::test_state(database, sandbox.project_paths()?);
+
+    let view = flow_harness::skills_list(
+        &state,
+        &at_app::app::skills_list::SkillsListRequest {
+            scope: Some("project".to_owned()),
+            project_id: None,
+        },
+    )?;
+    let row = view
+        .rows
+        .iter()
+        .find(|row| row.native && row.name == "release-notes")
+        .ok_or("shared native skill row is missing")?;
+    assert_eq!(row.agents.len(), 2);
+    assert!(row.agents.iter().all(|cell| cell.state == "native"));
+    assert!(
+        row.agents
+            .iter()
+            .all(|cell| cell.config_path.as_deref() == Some(skill_path_text.as_str()))
+    );
+    assert!(
+        view.agents
+            .iter()
+            .any(|agent| agent.id == "codex" && agent.label == "Codex")
+    );
+    assert!(
+        view.agents
+            .iter()
+            .any(|agent| agent.id == "omp" && agent.label == "omp")
     );
     Ok(())
 }

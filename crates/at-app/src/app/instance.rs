@@ -194,9 +194,6 @@ mod activation {
 
     use at_store::instance::{ACTIVATION_MESSAGE, read_activation_message};
 
-    /// Poll interval of the non-blocking accept loop.
-    const ACCEPT_POLL: Duration = Duration::from_millis(25);
-
     /// The listener a primary instance runs for its whole lifetime.
     #[derive(Debug)]
     pub struct ActivationServer {
@@ -225,7 +222,6 @@ mod activation {
                 }
             }
             let listener = UnixListener::bind(&path)?;
-            listener.set_nonblocking(true)?;
             let stop = Arc::new(AtomicBool::new(false));
             let stop_flag = Arc::clone(&stop);
             let handle = thread::Builder::new()
@@ -233,18 +229,20 @@ mod activation {
                 .spawn(move || {
                     while !stop_flag.load(Ordering::Relaxed) {
                         match listener.accept() {
-                            Ok((mut stream, _)) => match read_activation_message(&mut stream) {
-                                Ok(message) if message == ACTIVATION_MESSAGE => on_activate(),
-                                Ok(message) => tracing::debug!(
-                                    message,
-                                    "ignored an unknown activation message"
-                                ),
-                                Err(error) => {
-                                    tracing::debug!(%error, "activation message unreadable")
+                            Ok((mut stream, _)) => {
+                                if stop_flag.load(Ordering::Relaxed) {
+                                    break;
                                 }
-                            },
-                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                                thread::sleep(ACCEPT_POLL);
+                                match read_activation_message(&mut stream) {
+                                    Ok(message) if message == ACTIVATION_MESSAGE => on_activate(),
+                                    Ok(message) => tracing::debug!(
+                                        message,
+                                        "ignored an unknown activation message"
+                                    ),
+                                    Err(error) => {
+                                        tracing::debug!(%error, "activation message unreadable")
+                                    }
+                                }
                             }
                             Err(error) => {
                                 tracing::warn!(%error, "activation listener stopped");
@@ -262,6 +260,7 @@ mod activation {
 
         fn stop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
+            let _ = UnixStream::connect(&self.path);
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }

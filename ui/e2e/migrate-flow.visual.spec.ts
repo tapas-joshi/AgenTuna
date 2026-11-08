@@ -25,10 +25,10 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
   await page.getByLabel("Keep both").check();
   await page.getByRole("button", { name: "Continue" }).click();
 
-  // 3. Plan step
-  await expect(page.getByRole("heading", { name: "Plan the move" })).toBeVisible();
+  // 3. Plan step: the reviewed file list is visible without extra navigation.
+  await expect(page.getByRole("heading", { name: "Preview the exact changes" })).toBeVisible();
   await expect(page.getByText("3 items copied into the store")).toBeVisible();
-  await page.getByRole("button", { name: "Show file list" }).click();
+  await expect(page.getByRole("region", { name: "Planned files" })).toBeVisible();
   await expect(page.getByText(/Back up original/)).toBeVisible();
 
   // 4. Apply confirmation modal

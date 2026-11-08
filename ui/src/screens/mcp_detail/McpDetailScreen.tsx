@@ -19,6 +19,7 @@ import { AdoptModal } from "../../overlays/dialogs/AdoptModal";
 import { FixTokenDialog } from "../secrets/FixTokenDialog";
 import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot, useAppState } from "../../state/context";
+import { commandErrorMessage } from "../../lib/commandError";
 
 const SCOPE_BADGE: Readonly<Record<string, string>> = {
   global: "bg-scope-global/15 text-scope-global",
@@ -32,7 +33,7 @@ function parseCommandError(cause: unknown): { code: string; message: string } {
     const value = cause as { code: unknown; message: unknown };
     return { code: String(value.code), message: String(value.message) };
   }
-  return { code: "error", message: String(cause) };
+  return { code: "error", message: commandErrorMessage(cause) };
 }
 
 export function McpDetailScreen() {
@@ -525,7 +526,7 @@ export function McpDetailScreen() {
                       <Toggle
                         size="sm"
                         labelPlacement="hidden"
-                        label={`${agent.label}: ${agent.enabled ? "enabled" : "disabled"}`}
+                        label={`${detail.name}, ${agent.label}, ${agent.enabled ? "enabled" : "disabled"}${detail.locked ? ", locked" : ""}${detail.item_id.startsWith("native:") ? ", native" : ""}`}
                         checked={agent.enabled}
                         disabled={isNotInstalled || detail.locked || detail.item_id.startsWith("native:")}
                         onCheckedChange={(next) => void handleToggleAgent(agent.id, next)}

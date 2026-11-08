@@ -108,11 +108,13 @@ describe("MigratePlanScreen", () => {
     expect(screen.getByText("/sandbox/project/.agentuna")).toBeTruthy();
     expect(screen.queryByText("./.config-studio/")).toBeNull();
 
-    // Toggle dry run file list
-    await user.click(screen.getByRole("button", { name: "Show file list" }));
+    // Preview is open by default so every planned file is visible before Apply.
     expect(screen.getByText(/1\. Back up original/)).toBeTruthy();
     expect(screen.getByText(/2\. Copy into store/)).toBeTruthy();
     expect(screen.getByText(/1\. Rewrite rule document/)).toBeTruthy();
+    expect(screen.getAllByText("test-skill")).toHaveLength(2);
+    expect(screen.getAllByText("Read by claude_code").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByLabelText("Planned files")).toBeTruthy();
 
     // Click Apply
     await user.click(screen.getByRole("button", { name: "Apply 2 items" }));
@@ -134,7 +136,6 @@ describe("MigratePlanScreen", () => {
   });
 
   test("groups destinations by receiving scope with the store path the backend chose", async () => {
-    const user = userEvent.setup();
     render(
       <MigratePlanScreen
         plan={SAMPLE_PLAN}
@@ -154,7 +155,6 @@ describe("MigratePlanScreen", () => {
     const projectStore = screen.getByRole("listitem", { name: "Project store" });
     expect(within(projectStore).getByText("/sandbox/project/.agentuna")).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Show file list" }));
     expect(screen.getByLabelText("User store files")).toBeTruthy();
     expect(screen.getByLabelText("Project store files")).toBeTruthy();
   });

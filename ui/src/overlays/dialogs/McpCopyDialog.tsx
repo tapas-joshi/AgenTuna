@@ -6,6 +6,7 @@ import type { McpCopyApplyRequest } from "../../generated/McpCopyApplyRequest";
 import type { McpCopyApplyView } from "../../generated/McpCopyApplyView";
 import type { McpCopyPreviewRequest } from "../../generated/McpCopyPreviewRequest";
 import type { McpCopyPreviewView } from "../../generated/McpCopyPreviewView";
+import { commandErrorMessage } from "../../lib/commandError";
 import { Modal } from "./Modal";
 
 export interface McpCopyDialogProps {
@@ -224,9 +225,5 @@ export function McpCopyDialog({
 }
 
 function errorMessage(cause: unknown): string {
-  if (typeof cause === "string") return cause;
-  if (cause !== null && typeof cause === "object" && "message" in cause) {
-    return String(cause.message);
-  }
-  return String(cause);
+  return commandErrorMessage(cause);
 }

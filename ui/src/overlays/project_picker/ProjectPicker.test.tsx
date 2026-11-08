@@ -52,6 +52,24 @@ describe("ProjectPicker", () => {
     await userEvent.click(screen.getByRole("button", { name: "Clear" }));
     await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
   });
+  it("shows loading, cancellable scan, and retryable error states", () => {
+    const onCancelScan = vi.fn();
+    const onScan = vi.fn();
+    const props = { open: true, projects: [], onSelect: vi.fn(), onClose: vi.fn(), onAddFolder: vi.fn(), onScan, onCancelScan };
+    const { rerender } = render(<ProjectPicker {...props} loading />);
+    expect(screen.getByRole("status", { name: "Loading projects" })).toBeTruthy();
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+
+    rerender(<ProjectPicker {...props} scanning />);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onCancelScan).toHaveBeenCalledOnce();
+
+    rerender(<ProjectPicker {...props} error="Permission denied: /sandbox/projects" />);
+    expect(screen.getByRole("alert").textContent).toContain("/sandbox/projects");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onScan).toHaveBeenCalledOnce();
+  });
+
   it("has no axe accessibility violations in the populated state", async () => {
     const { container } = render(<ProjectPicker open projects={projects} onSelect={vi.fn()} onClose={vi.fn()} onAddFolder={vi.fn()} onScan={vi.fn()} />);
     expect((await axe(container)).violations).toEqual([]);

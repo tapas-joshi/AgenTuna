@@ -209,7 +209,7 @@ fn selected_scan_item<'r>(
         .find(|item| item.path == target && name.is_none_or(|wanted| item.name == wanted))
 }
 
-/// Refuses a path that is not below a registered agent root.
+/// Refuses a path that is not below a registered agent discovery root.
 fn ensure_registered_target(state: &AppState, target: &Path) -> Result<(), CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
     let agents = at_db::agents::list_agents_on_mac(database.connection())
@@ -221,6 +221,30 @@ fn ensure_registered_target(state: &AppState, target: &Path) -> Result<(), Comma
         registered_paths.extend(paths.into_iter().filter_map(|entry| entry.path));
     }
     drop(database);
+    let paths = state
+        .paths()
+        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
+    if let Some(home) = paths.home_dir() {
+        let environment = AgentEnvironment {
+            home: home.to_path_buf(),
+            project: paths
+                .project_store()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
+            variables: BTreeMap::new(),
+        };
+        let adapters = AgentAdapterRegistry::register();
+        for agent in [at_model::AgentId::Codex, at_model::AgentId::Omp] {
+            if let Ok(Some(adapter)) = adapters.get(&agent) {
+                registered_paths.extend(
+                    adapter
+                        .paths(ItemKind::Skill, Scope::Project, &environment)
+                        .into_iter()
+                        .map(|candidate| candidate.path),
+                );
+            }
+        }
+    }
     if !is_registered_target(target, &registered_paths) {
         return Err(CommandError::invalid_argument(
             "path",
@@ -234,20 +258,24 @@ fn is_registered_target(target: &Path, registered_paths: &[PathBuf]) -> bool {
     let Some(parent) = target.parent() else {
         return false;
     };
-    let Ok(canonical_parent) = parent.canonicalize() else {
+    let Ok(canonical_target) = target.canonicalize() else {
         return false;
     };
     registered_paths.iter().any(|registered| {
-        if registered == target {
-            return true;
-        }
         let Ok(canonical_root) = registered.canonicalize() else {
             return false;
         };
         let Ok(metadata) = std::fs::metadata(&canonical_root) else {
             return false;
         };
-        metadata.is_dir() && canonical_parent.starts_with(canonical_root)
+        if !metadata.is_dir() {
+            return canonical_target == canonical_root;
+        }
+        let Ok(canonical_parent) = parent.canonicalize() else {
+            return false;
+        };
+        canonical_target.starts_with(&canonical_root)
+            && canonical_parent.starts_with(canonical_root)
     })
 }
 
@@ -269,6 +297,18 @@ mod tests {
         assert!(is_registered_target(&target, std::slice::from_ref(&root)));
         assert!(!is_registered_target(&sibling, &[root]));
         assert!(!is_registered_target(&PathBuf::from("relative"), &[]));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symlinked_target_that_escapes_a_registered_root() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("agent-skills");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).expect("registered root");
+        std::fs::create_dir_all(&outside).expect("outside root");
+        let target = root.join("escaped");
+        std::os::unix::fs::symlink(&outside, &target).expect("symlink target");
+        assert!(!is_registered_target(&target, std::slice::from_ref(&root)));
     }
 
     #[test]
@@ -573,6 +613,14 @@ pub fn adopt_preview_inner(
         .clone();
     let (scope, store_root) = adopt_store_target(&paths, item.scope)?;
     let authorized = adopt_authorized_roots(&paths)?;
+    // The digest travels back to `adopt_apply` and is compared with `hash_node` there, the
+    // same representation `ensure_unchanged_since_refusal` uses. Read it before the preview
+    // verifies the source: a write that lands in between then makes the returned digest older
+    // than the verified bytes, and the apply refuses it, instead of handing the apply a digest
+    // of bytes the reviewer never saw.
+    let hash = at_fs::changeset::hash_node(&target)
+        .map_err(|_| CommandError::internal("the refused path could not be read"))?
+        .unwrap_or_default();
     let preview = preview_adopt(&AdoptPreviewRequest {
         scan: &scan,
         path: &item.path,
@@ -584,10 +632,10 @@ pub fn adopt_preview_inner(
         handling,
     })
     .map_err(adopt_error)?;
-    let (current, hash) = match preview.current {
-        at_migrate::adopt::PathState::Present(hash) => ("present".to_owned(), hash),
-        at_migrate::adopt::PathState::Missing => ("missing".to_owned(), String::new()),
-        _ => ("unknown".to_owned(), String::new()),
+    let current = match preview.current {
+        at_migrate::adopt::PathState::Present(_) => "present".to_owned(),
+        at_migrate::adopt::PathState::Missing => "missing".to_owned(),
+        _ => "unknown".to_owned(),
     };
     Ok(AdoptPreviewView {
         source: preview.source.display().to_string(),

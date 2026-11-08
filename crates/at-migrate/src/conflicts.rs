@@ -416,6 +416,7 @@ mod tests {
             scope: Scope::Project,
             content_hash: Some(raw.to_owned()),
             normalized_hash: Some(normalized.to_owned()),
+            mcp_summary: None,
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,

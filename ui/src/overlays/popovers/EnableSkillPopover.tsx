@@ -6,6 +6,7 @@ import type { SkillAgentApplyView } from "../../generated/SkillAgentApplyView";
 import type { SkillAgentPreviewRequest } from "../../generated/SkillAgentPreviewRequest";
 import { ToastContext } from "../toasts";
 import { moveRefusedItemAside, previewAdoption, applyAdoption } from "../dialogs/overwrite-commands";
+import { commandErrorMessage } from "../../lib/commandError";
 
 export type AgentChoice = {
   readonly id: string;
@@ -132,7 +133,7 @@ export function EnableSkillPopover({
         });
         return;
       }
-      setMessage(String(cause));
+      setMessage(commandErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -147,7 +148,7 @@ export function EnableSkillPopover({
       setConflict(null);
       onApplied();
     } catch (cause) {
-      toast.warning(String(cause), { title: "Could not adopt item" });
+      toast.warning(commandErrorMessage(cause), { title: "Could not adopt item" });
     } finally {
       setBusy(false);
     }
@@ -161,7 +162,7 @@ export function EnableSkillPopover({
       setConflict(null);
       onApplied();
     } catch (cause) {
-      toast.warning(String(cause), { title: "Could not move aside item" });
+      toast.warning(commandErrorMessage(cause), { title: "Could not move aside item" });
     } finally {
       setBusy(false);
     }

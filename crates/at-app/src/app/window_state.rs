@@ -80,17 +80,17 @@ pub fn clamp_layout(saved: &WindowLayout, displays: &[DisplayBounds]) -> Option<
         .iter()
         .find(|display| display.primary)
         .or_else(|| displays.first())?;
-    if saved.width < minimum(LOGICAL_MIN_WIDTH, primary)
-        || saved.height < minimum(LOGICAL_MIN_HEIGHT, primary)
-        || saved.sidebar_width < 120
-        || saved.sidebar_width > 600
-    {
-        return Some(default_layout(primary));
-    }
     let monitor = displays
         .iter()
         .find(|display| saved.monitor_id.as_deref() == Some(display.id.as_str()));
     let display = monitor.unwrap_or(primary);
+    if saved.width < minimum(LOGICAL_MIN_WIDTH, display)
+        || saved.height < minimum(LOGICAL_MIN_HEIGHT, display)
+        || saved.sidebar_width < 120
+        || saved.sidebar_width > 600
+    {
+        return Some(default_layout(display));
+    }
     let width = saved
         .width
         .min(display.width)
@@ -99,19 +99,15 @@ pub fn clamp_layout(saved: &WindowLayout, displays: &[DisplayBounds]) -> Option<
         .height
         .min(display.height)
         .max(minimum(LOGICAL_MIN_HEIGHT, display).min(display.height));
-    let x = saved.x.clamp(
-        display.x,
+    let x = saved.x.max(display.x).min(
         display
             .x
-            .saturating_add(display.width as i32)
-            .saturating_sub(width as i32),
+            .saturating_add(display.width.saturating_sub(width) as i32),
     );
-    let y = saved.y.clamp(
-        display.y,
+    let y = saved.y.max(display.y).min(
         display
             .y
-            .saturating_add(display.height as i32)
-            .saturating_sub(height as i32),
+            .saturating_add(display.height.saturating_sub(height) as i32),
     );
     Some(WindowLayout {
         x: if monitor.is_some() {
@@ -398,6 +394,115 @@ mod tests {
             (240, 90, 1440, 900)
         );
         assert!(!clamped.maximized);
+    }
+    #[test]
+    fn layouts_on_displays_smaller_than_the_logical_minimum_are_preserved() {
+        let small = DisplayBounds {
+            id: "small".to_owned(),
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+            primary: true,
+            scale_percent: 100,
+        };
+        let saved = WindowLayout {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            monitor_id: None,
+            maximized: false,
+            sidebar_width: 250,
+            column_widths: BTreeMap::new(),
+        };
+        let clamped = clamp_layout(&saved, &[small]).expect("display exists");
+        assert_eq!((clamped.width, clamped.height), (800, 600));
+    }
+
+    #[test]
+    fn clamps_geometry_on_a_display_with_a_negative_origin() {
+        let left = DisplayBounds {
+            id: "left".to_owned(),
+            x: -1920,
+            y: -1080,
+            width: 1920,
+            height: 1080,
+            primary: false,
+            scale_percent: 100,
+        };
+        let saved = WindowLayout {
+            x: -3000,
+            y: -2000,
+            width: 1280,
+            height: 800,
+            monitor_id: Some("left".to_owned()),
+            maximized: false,
+            sidebar_width: 250,
+            column_widths: BTreeMap::new(),
+        };
+        let clamped =
+            clamp_layout(&saved, &[display("primary", true), left]).expect("display exists");
+        assert_eq!((clamped.x, clamped.y), (-1920, -1080));
+    }
+
+    #[test]
+    fn validates_saved_size_using_the_saved_monitors_scale() {
+        let mut primary = display("primary", true);
+        primary.width = 3840;
+        primary.height = 2160;
+        primary.scale_percent = 200;
+        let saved = WindowLayout {
+            x: 100,
+            y: 100,
+            width: 1200,
+            height: 800,
+            monitor_id: Some("one-x".to_owned()),
+            maximized: false,
+            sidebar_width: 250,
+            column_widths: BTreeMap::new(),
+        };
+        let clamped =
+            clamp_layout(&saved, &[primary, display("one-x", false)]).expect("display exists");
+        assert_eq!(clamped.monitor_id.as_deref(), Some("one-x"));
+        assert_eq!((clamped.width, clamped.height), (1200, 800));
+    }
+
+    #[test]
+    fn clamp_layout_does_not_panic_for_extreme_geometry() {
+        let origins = [i32::MIN, -1920, 0, i32::MAX];
+        let dimensions = [0, 1, 600, 1920, i32::MAX as u32, u32::MAX];
+        for x in origins {
+            for y in origins {
+                for width in dimensions {
+                    for height in dimensions {
+                        let screen = DisplayBounds {
+                            id: "extreme".to_owned(),
+                            x,
+                            y,
+                            width,
+                            height,
+                            primary: true,
+                            scale_percent: 400,
+                        };
+                        let saved = WindowLayout {
+                            x,
+                            y,
+                            width,
+                            height,
+                            monitor_id: Some("extreme".to_owned()),
+                            maximized: false,
+                            sidebar_width: 250,
+                            column_widths: BTreeMap::new(),
+                        };
+                        assert!(
+                            std::panic::catch_unwind(|| clamp_layout(&saved, &[screen])).is_ok(),
+                            "clamp panicked for origin ({x}, {y}) and size ({width}, {height})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 /// Loads the saved window layout from the settings database.

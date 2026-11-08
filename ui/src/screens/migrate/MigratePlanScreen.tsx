@@ -62,7 +62,7 @@ export function MigratePlanScreen({
   readonly onBack: () => void;
   readonly onCancel: () => void;
 }): JSX.Element {
-  const [showFiles, setShowFiles] = useState(false);
+  const [showFiles, setShowFiles] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -193,7 +193,7 @@ export function MigratePlanScreen({
                 {showFiles ? "Hide file list" : "Show file list"}
               </Button>
               {showFiles && (
-                <div
+                <section
                   className="m-0 flex max-h-[320px] flex-col gap-10 overflow-auto"
                   aria-label="Planned files"
                 >
@@ -208,9 +208,14 @@ export function MigratePlanScreen({
                           {entry.steps.map((step) => (
                             <li key={`${entry.scope}:${step.seq}`} className="rounded-6 border border-border p-8">
                               <div className="flex items-center justify-between gap-6">
-                                <span className="text-12 text-text">
-                                  {step.seq}. {ACTION_LABEL[step.action] ?? step.action}
-                                </span>
+                                <div className="grid min-w-0 gap-2">
+                                  <span className="text-12 text-text">
+                                    {step.seq}. {ACTION_LABEL[step.action] ?? step.action}
+                                  </span>
+                                  {step.item_name !== null && (
+                                    <strong className="truncate text-12 text-text">{step.item_name}</strong>
+                                  )}
+                                </div>
                                 <span className="font-mono text-11 text-text-muted">{step.bytes} B</span>
                               </div>
                               {step.source !== null && (
@@ -228,13 +233,18 @@ export function MigratePlanScreen({
                                   backup {step.backup_path}
                                 </p>
                               )}
+                              {step.agents.length > 0 && (
+                                <p className="m-0 text-11 text-text-muted">
+                                  Read by {step.agents.join(", ")}
+                                </p>
+                              )}
                             </li>
                           ))}
                         </ol>
                       </div>
                     );
                   })}
-                </div>
+                </section>
               )}
               <p className="m-0 mt-8 text-11 text-text-muted">
                 Plan hash {plan.plan_hash.slice(0, 8)} across {plan.scopes.length} store

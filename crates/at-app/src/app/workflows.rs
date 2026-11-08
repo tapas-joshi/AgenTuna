@@ -33,7 +33,18 @@ pub fn instructions_list(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<Vec<InstructionFileView>, CommandError> {
-    let project = project_path(&state, project_id.as_deref())?;
+    instructions_list_inner(&state, project_id)
+}
+
+/// Lists discovered instruction files without requiring a Tauri state wrapper.
+///
+/// # Errors
+/// Returns [`CommandError`] if paths or database are unavailable.
+pub fn instructions_list_inner(
+    state: &AppState,
+    project_id: Option<String>,
+) -> Result<Vec<InstructionFileView>, CommandError> {
+    let project = project_path(state, project_id.as_deref())?;
     let paths = state
         .paths()
         .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
@@ -199,7 +210,15 @@ pub struct AgentCardView {
 /// Loads agents and their configuration paths from the database.
 #[tauri::command]
 pub fn agents_list(state: State<'_, AppState>) -> Result<Vec<AgentCardView>, CommandError> {
-    agents_list_impl(&state)
+    agents_list_inner(&state)
+}
+
+/// Loads agents and their configuration paths without requiring a Tauri state wrapper.
+///
+/// # Errors
+/// Returns [`CommandError`] if database or settings are unavailable.
+pub fn agents_list_inner(state: &AppState) -> Result<Vec<AgentCardView>, CommandError> {
+    agents_list_impl(state)
 }
 
 pub(crate) fn agents_list_impl(state: &AppState) -> Result<Vec<AgentCardView>, CommandError> {

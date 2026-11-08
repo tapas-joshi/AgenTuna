@@ -105,6 +105,27 @@ describe("McpDetailScreen (TM-021)", () => {
     expect(screen.getAllByText("Not tested").length).toBeGreaterThan(0);
   });
 
+  test("shows why a failing check has no cached tool names and offers Test connection", async () => {
+    ipc.reply = (command) => {
+      if (command === "mcp_server_detail") {
+        return Promise.resolve(mockDetail({
+          tools: [],
+          health_status: "failed",
+          health_error_code: "auth_failed",
+          last_checks: [
+            { checked_at: "200", status: "failed", latency_ms: null, trigger: "manual", error_text: "401 Unauthorized" },
+          ],
+        }));
+      }
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    await screen.findByText("Postgres");
+    expect(screen.getByText('No tools listed yet. Run "Test connection" to inspect advertised tools.')).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Test connection" })).toBeTruthy();
+  });
+
   test("a failing server with auth error shows Fix token and opens TM-026 dialog", async () => {
     ipc.reply = (command) => {
       if (command === "mcp_server_detail") {
@@ -154,7 +175,7 @@ describe("McpDetailScreen (TM-021)", () => {
     };
     renderScreen();
 
-    const toggle = await screen.findByRole("switch", { name: "Claude Code: enabled" });
+    const toggle = await screen.findByRole("switch", { name: "Postgres, Claude Code, enabled" });
     fireEvent.click(toggle);
 
     // Reflects new state within one render
@@ -170,7 +191,7 @@ describe("McpDetailScreen (TM-021)", () => {
     };
     renderScreen();
 
-    const toggle = await screen.findByRole("switch", { name: "Claude Code: enabled" });
+    const toggle = await screen.findByRole("switch", { name: "Postgres, Claude Code, enabled" });
     expect(toggle.getAttribute("data-slot")).toBe("toggle");
     expect(toggle.getAttribute("class")).toContain("w-40");
   });

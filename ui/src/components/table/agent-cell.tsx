@@ -19,6 +19,8 @@ import type { AgentCellState, AgentDescriptor } from "./types";
 export interface AgentCellProps {
   /** The agent this cell belongs to; its label names the switch. */
   readonly agent: AgentDescriptor;
+  /** Human-readable item name, included in the switch's accessible name. */
+  readonly itemLabel?: string;
   /** One of the six states. */
   readonly state: AgentCellState;
   /**
@@ -47,6 +49,8 @@ export function discoveryRootLabel(path: string): string {
 export interface SharedFolderCellProps {
   /** Agents that read the one folder, in column order. */
   readonly agents: readonly AgentDescriptor[];
+  /** Human-readable item name, included in the switch's accessible name. */
+  readonly itemLabel?: string;
   /** Absolute folder all of them read. */
   readonly path: string;
   /** State of the folder; the first member's state names the control. */
@@ -66,7 +70,7 @@ export interface SharedFolderCellProps {
  * visible line says `1 folder · N agents`, and the tooltip names every reader.
  * Native folders render read-only because AgenTuna does not own them yet.
  */
-export function SharedFolderCell({ agents, path, state, onToggle, disabled = false, className }: SharedFolderCellProps): JSX.Element {
+export function SharedFolderCell({ agents, itemLabel = "item", path, state, onToggle, disabled = false, className }: SharedFolderCellProps): JSX.Element {
   const labels = agents.map((agent) => agent.label).join(" + ");
   const root = discoveryRootLabel(path);
   const readOnly = state.kind === "native" || state.kind === "shadowed";
@@ -78,7 +82,7 @@ export function SharedFolderCell({ agents, path, state, onToggle, disabled = fal
       <span className="flex items-center gap-6">
         <Toggle
           size="sm"
-          label={`${labels}: ${STATUS_META[state.kind].label}, one shared folder`}
+          label={`${itemLabel}, ${labels}, ${state.kind === "linked" ? "enabled" : "disabled"}, one shared folder`}
           labelPlacement="hidden"
           checked={state.kind === "linked"}
           disabled={
@@ -144,7 +148,7 @@ export function SharedFolderCell({ agents, path, state, onToggle, disabled = fal
  * toggle. The cell is wrapped in a group named after the agent, so the column
  * context survives navigation.
  */
-export function AgentCell({ agent, state, onToggle, disabled = false, className }: AgentCellProps): JSX.Element {
+export function AgentCell({ agent, itemLabel = "item", state, onToggle, disabled = false, className }: AgentCellProps): JSX.Element {
   const readOnly = state.kind === "linked" || state.kind === "off" ? state.readOnly === true : false;
   const pending = state.kind === "linked" || state.kind === "off" ? state.pending === true : false;
 
@@ -156,7 +160,7 @@ export function AgentCell({ agent, state, onToggle, disabled = false, className 
       <span className="flex flex-col items-center gap-2">
         <Toggle
           size="sm"
-          label={`${agent.label}: ${STATUS_META[state.kind].label}`}
+          label={`${itemLabel}, ${agent.label}, ${checked ? "enabled" : "disabled"}${state.disabledReason ? `, ${state.disabledReason}` : ""}`}
           labelPlacement="hidden"
           checked={checked}
           disabled={disabled || readOnly || pending || onToggle === undefined || Boolean(state.disabledReason)}
@@ -173,7 +177,7 @@ export function AgentCell({ agent, state, onToggle, disabled = false, className 
         <span className="flex items-center gap-4">
           <Toggle
             size="sm"
-            label={`${agent.label}: ${STATUS_META.locked.label}`}
+            label={`${itemLabel}, ${agent.label}, ${state.enabled === false ? "disabled" : "enabled"}, locked by ${state.lockedBy}`}
             labelPlacement="hidden"
             checked={state.enabled !== false}
             disabled

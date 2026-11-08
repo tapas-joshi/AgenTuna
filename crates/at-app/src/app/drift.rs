@@ -19,6 +19,9 @@ use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
 use super::detection::watch_roots_for;
+fn now_ms() -> i64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
 
 /// Event emitted with every drift notice produced by one batch.
 pub const EVENT_DRIFT_DETECTED: &str = "agentuna:drift-detected";
@@ -139,6 +142,7 @@ pub fn start(
     paths: AppPaths,
     database: Arc<Mutex<Database>>,
     registry: Arc<RecentWrites>,
+    jobs: super::jobs::JobsControl,
 ) -> DriftWatcherControl {
     let roots = watch_roots_for(&paths);
     let watcher = Arc::new(WatchService::new(drift_watch_config(roots, registry)));
@@ -156,11 +160,29 @@ pub fn start(
     }
     let worker_control = control.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if jobs.window_is_paused(now_ms()) {
+            jobs.wait_until_window_active();
+        }
         reconcile_once(&app, &database);
+        let mut deferred_while_hidden = false;
         loop {
+            if jobs.window_is_paused(now_ms()) {
+                deferred_while_hidden = true;
+                jobs.wait_until_window_active();
+                continue;
+            }
+            if deferred_while_hidden {
+                // Changes received while hidden are reconciled as a non-toast startup pass.
+                reconcile_once(&app, &database);
+                deferred_while_hidden = false;
+            }
             let Some(event) = watcher.next_event(Duration::from_secs(1)) else {
                 continue;
             };
+            if jobs.window_is_paused(now_ms()) {
+                deferred_while_hidden = true;
+                continue;
+            }
             match &event {
                 WatchEvent::Batch(_) => process_event(&app, &database, &event, true),
                 WatchEvent::RescanRequired { .. } => {

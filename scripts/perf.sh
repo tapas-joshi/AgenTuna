@@ -8,7 +8,7 @@
 # items, 9,000 deployments, 3 agents, 10,000 operations) into a temporary home,
 # so the run is deterministic and never touches the real HOME, Keychain, agent
 # folders or the network. GUI budgets (first paint, scroll frame time, webview
-# RSS, watcher wakeups) are not measurable headlessly; see BENCHMARK.md.
+# RSS, watcher wakeups) are not measurable headlessly.
 set -eu
 
 usage() {
@@ -30,4 +30,4 @@ else
     exit 127
 fi
 
-exec "$cargo_bin" test -p at-app --test performance -- --nocapture
+exec "$cargo_bin" test --locked --offline -p at-app --test performance -- --nocapture

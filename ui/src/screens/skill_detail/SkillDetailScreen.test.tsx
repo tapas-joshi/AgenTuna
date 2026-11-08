@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { ToastProvider } from "../../overlays/toasts";
 import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
 import { SkillDetailScreen } from "./SkillDetailScreen";
@@ -35,6 +36,53 @@ describe("SkillDetailScreen", () => {
     expect(screen.getByText("skill_edit")).toBeTruthy();
     expect(ipc.calls[0]?.command).toBe("skill_detail_load");
   });
+  test("saves only the reviewed edit preview and reports its backed-up history entry", async () => {
+    ipc.reply = (command) => Promise.resolve(
+      command === "skill_detail_load" ? detail :
+      command === "skill_edit_preview" ? {
+        expected_hash: "abc123",
+        preview_id: "preview_edit",
+        diff: "-Use this checklist.\n+Use this revised checklist.",
+      } :
+      command === "skill_edit_apply" ? { operation_id: "op_edit", version_id: "version_edit" } :
+      undefined,
+    );
+    render(<AppStateProvider state={appState}><ToastProvider store={appState.toasts}><SkillDetailScreen /></ToastProvider></AppStateProvider>);
+    await screen.findAllByText("Review checklist");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Edit Review checklist SKILL.md" }), {
+      target: { value: "# Review checklist\n\nUse this revised checklist." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Preview changes" }));
+    expect(await screen.findByText("Reviewed changes")).toBeTruthy();
+    expect(screen.getByText(/Use this revised checklist/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save reviewed changes" }));
+
+    await waitFor(() => expect(ipc.calls).toContainEqual({
+      command: "skill_edit_apply",
+      args: { itemId: "itm_fake", content: "# Review checklist\n\nUse this revised checklist.", expectedHash: "abc123", previewId: "preview_edit" },
+    }));
+    expect(await screen.findByText("The reviewed change was backed up and added to history.")).toBeTruthy();
+  });
+
+  test("renders the typed history newest first", async () => {
+    ipc.reply = () => Promise.resolve({
+      ...detail,
+      history: [
+        { content_hash: "new", captured_at: "2026-11-06T10:00:00Z", operation_kind: "skill_edit", operation_summary: "Newest edit" },
+        { content_hash: "old", captured_at: "2026-11-05T10:00:00Z", operation_kind: "skill_add", operation_summary: "Older add" },
+      ],
+    });
+    render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
+    await screen.findAllByText("Review checklist");
+
+    const history = screen.getByRole("heading", { name: "History" }).parentElement;
+    const entries = Array.from(history?.querySelectorAll("li") ?? []);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]?.textContent).toContain("skill_edit2026-11-06T10:00:00Z");
+    expect(entries[1]?.textContent).toContain("skill_add2026-11-05T10:00:00Z");
+  });
+
 
   test("loads a real copy comparison into the shared diff viewer", async () => {
     ipc.reply = (command) => Promise.resolve(command === "skill_detail_load" ? detail : {
@@ -141,9 +189,9 @@ describe("SkillDetailScreen residuals (TS-030)", () => {
     );
     render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
 
-    const codex = await screen.findByRole("switch", { name: "Codex enabled" });
+    const codex = await screen.findByRole("switch", { name: "Review checklist, Codex, enabled, shadowed by project" });
     expect(codex.getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("switch", { name: "omp enabled" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("switch", { name: "Review checklist, omp, disabled, shadowed by project" }).getAttribute("aria-checked")).toBe("false");
 
     fireEvent.click(codex);
 
@@ -230,5 +278,38 @@ describe("SkillDetailScreen residuals (TS-030)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Discard edits and refresh" }));
     await waitFor(() => expect(loads).toBeGreaterThan(loadsBeforeRefresh));
     expect(screen.queryByRole("textbox", { name: "Edit Review checklist SKILL.md" })).toBeNull();
+  });
+  test("external refresh preserves scroll and selected skill when content changes", async () => {
+    let loads = 0;
+    ipc.reply = (command) => {
+      if (command === "skill_detail_load") {
+        loads += 1;
+        return Promise.resolve(loads === 1 ? detail : { ...detail, markdown: "# Review checklist\n\nRefreshed externally." });
+      }
+      return Promise.resolve(undefined);
+    };
+    const { container } = render(
+      <AppStateProvider state={appState}>
+        <div data-slot="shell-main" style={{ height: 240, overflowY: "auto" }}>
+          <div style={{ height: 900 }}>
+            <SkillDetailScreen />
+          </div>
+        </div>
+      </AppStateProvider>,
+    );
+    await screen.findAllByText("Review checklist");
+    const scrollRegion = container.querySelector<HTMLElement>('[data-slot="shell-main"]');
+    expect(scrollRegion).not.toBeNull();
+    if (scrollRegion === null) return;
+    scrollRegion.scrollTop = 180;
+    const before = loads;
+    const routeBeforeRefresh = appState.getSnapshot().route;
+
+    act(() => appState.requestExternalReload());
+
+    await waitFor(() => expect(loads).toBeGreaterThan(before));
+    expect(scrollRegion.scrollTop).toBe(180);
+    expect(appState.getSnapshot().route).toEqual(routeBeforeRefresh);
+    expect(await screen.findByText("Refreshed externally.")).toBeTruthy();
   });
 });

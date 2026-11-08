@@ -310,4 +310,79 @@ describe("EffectiveScreen change-it-for-this-repo controls", () => {
     expect(screen.getByText("~/.codex/config.toml")).toBeTruthy();
     expect(screen.getByText("~/.omp/agent/mcp.json")).toBeTruthy();
   });
+
+  test("selecting github updates the detail and ignores a slower filesystem trace", async () => {
+    let releaseFilesystemTrace: ((value: unknown) => void) | undefined;
+    let traceCalls = 0;
+    const filesystem = {
+      logical_id: "item:itm_filesystem",
+      item_id: "itm_filesystem",
+      kind: "mcp_server",
+      name: "filesystem",
+      winner_scope: "user",
+      source_path: "/sandbox/mcp/filesystem.json",
+      agents: [{ agent: "claude_code", state: "native", loads: true, path: "/sandbox/mcp/filesystem.json" }],
+      loads_in_agents: 1,
+      lock: null,
+    };
+    const github = {
+      ...filesystem,
+      logical_id: "item:itm_github",
+      item_id: "itm_github",
+      name: "github",
+      source_path: "/sandbox/mcp/github.json",
+    };
+    const traceResult = (itemId: string, userStatus: string) => ({
+      trace: {
+        item_id: itemId,
+        active_scope: "global",
+        agent: "claude_code",
+        steps: ["global", "user", "project", "local"].map((scope) => ({
+          scope,
+          status: scope === "user" ? userStatus : "Absent",
+          location: null,
+          reason: `${itemId} at ${scope}`,
+        })),
+        verdict: { on: true, decisive_step: 1 },
+      },
+      load_diagnostics: [],
+    });
+    ipc.reply = (command) => {
+      if (command === "effective_query") {
+        return Promise.resolve({ ...unlocked, items: [filesystem, github] });
+      }
+      if (command === "overview_load") {
+        return Promise.resolve({ global_store: { status: "available", reason: null } });
+      }
+      if (command === "effective_counts") {
+        return Promise.resolve({ skills: 0, mcp_servers: 2, rules: 0 });
+      }
+      if (command === "why_trace") {
+        traceCalls += 1;
+        if (traceCalls === 1) {
+          const deferred = Promise.withResolvers<unknown>();
+          releaseFilesystemTrace = deferred.resolve;
+          return deferred.promise;
+        }
+        return Promise.resolve(traceResult("itm_github", "Winning"));
+      }
+      return Promise.resolve(undefined);
+    };
+
+    const state = createAppState();
+    state.restore("project-id", "global");
+    render(<AppStateProvider state={state}><ToastProvider><EffectiveScreen /></ToastProvider></AppStateProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /MCP servers/ }));
+    const list = await screen.findByRole("region", { name: "Effective items" });
+    await screen.findByRole("heading", { name: "filesystem" });
+    await waitFor(() => expect(traceCalls).toBe(1));
+    fireEvent.click(within(list).getByRole("button", { name: /github/ }));
+
+    expect(await screen.findByRole("heading", { name: "github" })).toBeTruthy();
+    expect(await screen.findByText("Defined, enabled ✓ wins")).toBeTruthy();
+    expect(screen.getByText("/sandbox/mcp/github.json")).toBeTruthy();
+    releaseFilesystemTrace?.(traceResult("itm_filesystem", "Disabled"));
+    await waitFor(() => expect(screen.queryByText("Disabled here")).toBeNull());
+    expect(screen.getByRole("heading", { name: "github" })).toBeTruthy();
+  });
 });

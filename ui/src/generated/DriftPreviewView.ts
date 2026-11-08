@@ -17,13 +17,17 @@ path: string,
  */
 canonical_path: string | null, 
 /**
- * Whether current canonical bytes still match the recorded baseline hash.
+ * Whether verified baseline bytes are available from the canonical store or a retained backup.
  */
 previous_version_available: boolean, 
 /**
- * Unified diff when the previous-version bytes are still available.
+ * Unified diff from verified baseline bytes to the current on-disk file.
  */
 diff: string, 
+/**
+ * Why the baseline cannot be shown when its bytes were not retained.
+ */
+baseline_unavailable_reason: string | null, 
 /**
  * Current on-disk UTF-8 content when it can be shown without a fabricated diff.
  */

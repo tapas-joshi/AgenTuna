@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use std::path::PathBuf;
+
 use at_model::{AgentId, DeploymentState, ItemId, Scope};
 use rusqlite::{Connection, params};
 
@@ -203,6 +205,44 @@ pub fn list_skills(
         }
     }
     if filter.include_native || filter.not_in_agentuna {
+        // Native discovery stores one row per physical path. When several agents share
+        // a Skills root, recover every reader from the path registry rather than
+        // presenting the scanner's representative agent as the sole owner.
+        let mut roots = BTreeMap::<(Scope, PathBuf), Vec<AgentId>>::new();
+        let mut root_statement = connection.prepare(
+            "SELECT agent_id, scope, path FROM agent_paths \
+             WHERE kind='skills_dir' AND path IS NOT NULL",
+        )?;
+        let root_rows = root_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for root_row in root_rows {
+            let (agent, scope, path) = root_row?;
+            let agent = agent
+                .parse::<AgentId>()
+                .map_err(|error| DbError::InvalidValue {
+                    field: "agent_paths.agent_id",
+                    reason: error.to_string(),
+                })?;
+            let scope = scope
+                .parse::<Scope>()
+                .map_err(|error: at_model::ParseWireError| DbError::InvalidValue {
+                    field: "agent_paths.scope",
+                    reason: error.to_string(),
+                })?;
+            roots
+                .entry((scope, PathBuf::from(path)))
+                .or_default()
+                .push(agent);
+        }
+        for agents in roots.values_mut() {
+            agents.sort();
+            agents.dedup();
+        }
         let mut native = connection.prepare(
             "SELECT n.name, n.scope, n.path, n.last_seen_at, n.agent_id \
                FROM native_items n WHERE n.kind='skill' AND n.status='new' AND n.adopted_item_id IS NULL \
@@ -227,7 +267,7 @@ pub fn list_skills(
                 ))
             },
         )?;
-        let mut native_indexes = BTreeMap::<(String, Scope), usize>::new();
+        let mut native_indexes = BTreeMap::<(String, Scope, PathBuf), usize>::new();
         for row in native_rows {
             let (name, scope, path, updated_at, agent) = row?;
             let scope =
@@ -243,36 +283,40 @@ pub fn list_skills(
                     field: "native_items.agent_id",
                     reason: e.to_string(),
                 })?;
-            // One row per skill name and scope: agents that share a discovery root
-            // (Codex + omp over `.agents/skills`) are cells of one folder block,
-            // never two independent copies of the same folder.
-            let key = (at_model::normalized_name(&name), scope);
-            if let Some(index) = native_indexes.get(&key).copied() {
-                let existing = &mut rows[index];
-                existing
+            // A native item is unique by physical path. Include the folder in the
+            // projection key so separate same-name copies remain distinct.
+            let native_path = PathBuf::from(&path);
+            let key = (at_model::normalized_name(&name), scope, native_path.clone());
+            let readers = native_path
+                .parent()
+                .and_then(|root| roots.get(&(scope, root.to_path_buf())))
+                .cloned()
+                .unwrap_or_else(|| vec![agent.clone()]);
+            let index = if let Some(index) = native_indexes.get(&key).copied() {
+                index
+            } else {
+                native_indexes.insert(key, rows.len());
+                rows.push(SkillRow {
+                    item_id: None,
+                    name,
+                    scope,
+                    state: Some("native".into()),
+                    shadowed_by: None,
+                    deployed: BTreeMap::new(),
+                    native_path: Some(path.clone()),
+                    native_paths: BTreeMap::new(),
+                    update_available: false,
+                    updated_at,
+                    description: None,
+                });
+                rows.len() - 1
+            };
+            for reader in readers {
+                rows[index]
                     .deployed
-                    .insert(agent.clone(), DeploymentState::Native);
-                existing.native_paths.insert(agent, path);
-                continue;
+                    .insert(reader.clone(), DeploymentState::Native);
+                rows[index].native_paths.insert(reader, path.clone());
             }
-            let mut deployed = BTreeMap::new();
-            deployed.insert(agent.clone(), DeploymentState::Native);
-            let mut native_paths = BTreeMap::new();
-            native_paths.insert(agent, path.clone());
-            native_indexes.insert(key, rows.len());
-            rows.push(SkillRow {
-                item_id: None,
-                name,
-                scope,
-                state: Some("native".into()),
-                shadowed_by: None,
-                deployed,
-                native_path: Some(path),
-                native_paths,
-                update_available: false,
-                updated_at,
-                description: None,
-            });
         }
         apply_native_shadowing(&mut rows);
         rows.sort_by(|a, b| {

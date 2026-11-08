@@ -3,6 +3,12 @@
  *
  * Import widgets from `@/components` style paths; every widget is controlled by
  * props and reports interactions through typed callbacks.
+ *
+ * Heavy widgets — the table (`./table`), diff viewer (`./diff`) and markdown
+ * editor/preview (`./editor`) — are NOT re-exported here: the shell and its
+ * overlays import this barrel eagerly, and a re-export here would pull the
+ * CodeMirror/markdown/react-table stacks into the startup bundle (TF-035).
+ * Import them from their subpaths, e.g. `../../components/table`.
  */
 
 export { Badge } from "./badge";
@@ -14,36 +20,6 @@ export type { CheckboxProps } from "./checkbox";
 export { Chip } from "./chip";
 export type { ChipDotTone, ChipProps } from "./chip";
 export { cn } from "./cn";
-export { DiffViewer } from "./diff/diff-viewer";
-export type { DiffMode, DiffViewerProps } from "./diff/diff-viewer";
-export {
-  MAX_DIFF_BYTES,
-  MAX_DIFF_LINES,
-  countDiff,
-  hasWhitespaceOnlyChanges,
-  limitDiffText,
-  parseUnifiedDiff,
-  sideBySideRows,
-  visibleLines,
-} from "./diff/model";
-export type {
-  DiffCounts,
-  DiffFile,
-  DiffHunk,
-  DiffLine,
-  DiffLineKind,
-  DiffModel,
-  LimitedDiffText,
-  SideBySideRow,
-} from "./diff/model";
-export { MarkdownEditor, hasMalformedUtf16 } from "./editor/markdown-editor";
-export type {
-  MarkdownEditorHandle,
-  MarkdownEditorMode,
-  MarkdownEditorProps,
-} from "./editor/markdown-editor";
-export { MarkdownPreview } from "./editor/markdown-preview";
-export type { MarkdownPreviewProps } from "./editor/markdown-preview";
 export { Input } from "./input";
 export type { InputProps, InputSize } from "./input";
 export { RadioCardGroup } from "./radio-card";
@@ -126,38 +102,6 @@ export type {
   StateViewProps,
   SurfaceStateFixture,
 } from "./states";
-export {
-  AGENT_COLUMN_WIDTH,
-  AgentCell,
-  DataTable,
-  RowMenuTrigger,
-  TABLE_HEADER_HEIGHT,
-  TABLE_ROW_HEIGHT,
-  agentColumns,
-  bulkSelectionState,
-  countSelected,
-  dataTableFeatures,
-  selectionForClick,
-  setDisplayedSelected,
-  toggleSelection,
-  useRowMenu,
-} from "./table";
-export type {
-  AgentCellProps,
-  AgentCellState,
-  AgentColumnOptions,
-  AgentDescriptor,
-  BulkSelectionState,
-  DataTableColumnMeta,
-  DataTableFeatures,
-  DataTableProps,
-  RowMenuController,
-  RowMenuTriggerProps,
-  SelectionClick,
-  SelectionMode,
-  SelectionModifiers,
-  SelectionResult,
-} from "./table";
 export { ScopeSwitcher } from "./scope_switcher/ScopeSwitcher";
 export type { ScopeSelected, ScopeSwitcherProps } from "./scope_switcher/ScopeSwitcher";
 export { NativeBanner } from "./native/NativeBanner";

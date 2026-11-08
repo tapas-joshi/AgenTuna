@@ -76,9 +76,13 @@ pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound on the inode index used to recognise renames.
 const PATH_INDEX_CAPACITY: usize = 100_000;
+/// Debouncer tick cap, limiting default event delivery to one additional 300 ms tick.
+const MAX_DEBOUNCE_TICK: Duration = Duration::from_millis(300);
 
-/// How often the worker wakes without events to notice a stopped service or a returning root.
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Fallback interval for roots whose return is not reported by the active native watcher.
+/// Present roots are never statted on this timer; changes to missing roots remain event-driven
+/// where the backend reports their ancestor.
+const MISSING_ROOT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Debouncer type used by the service.
 type FsDebouncer = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -720,6 +724,7 @@ impl WatchService {
                 capacity,
                 counters: Counters::default(),
                 registry,
+                wake_sender: Mutex::new(None),
             }),
             run: Mutex::new(RunState::default()),
         }
@@ -802,6 +807,9 @@ impl WatchService {
             let handle = run.handle.take();
             let done = run.done.take();
             self.shared.stop.store(true, Ordering::SeqCst);
+            if let Some(sender) = lock(&self.shared.wake_sender).as_ref() {
+                let _ = sender.send(Ok(Vec::new()));
+            }
             (handle, done)
         };
         let Some(handle) = handle else {
@@ -877,6 +885,13 @@ impl WatchService {
             ignored: counters.ignored.load(Ordering::Relaxed),
         }
     }
+    #[cfg(test)]
+    fn idle_work_counts(&self) -> (u64, u64) {
+        (
+            self.shared.counters.index_seeds.load(Ordering::Relaxed),
+            self.shared.counters.root_checks.load(Ordering::Relaxed),
+        )
+    }
 }
 
 impl Drop for WatchService {
@@ -893,6 +908,7 @@ struct Shared {
     capacity: usize,
     counters: Counters,
     registry: Arc<RecentWrites>,
+    wake_sender: Mutex<Option<mpsc::Sender<DebounceEventResult>>>,
 }
 
 #[derive(Debug, Default)]
@@ -909,6 +925,10 @@ struct Counters {
     overflow: AtomicU64,
     errors: AtomicU64,
     ignored: AtomicU64,
+    #[cfg(test)]
+    index_seeds: AtomicU64,
+    #[cfg(test)]
+    root_checks: AtomicU64,
 }
 
 impl Shared {
@@ -975,9 +995,14 @@ fn run_worker(
     done: &SyncSender<()>,
 ) {
     let (tx, rx) = mpsc::channel::<DebounceEventResult>();
-    let mut debouncer = match new_debouncer(config.debounce, None, move |result| {
-        let _ = tx.send(result);
-    }) {
+    *lock(&shared.wake_sender) = Some(tx.clone());
+    let mut debouncer = match new_debouncer(
+        config.debounce,
+        Some(config.debounce.min(MAX_DEBOUNCE_TICK)),
+        move |result| {
+            let _ = tx.send(result);
+        },
+    ) {
         Ok(debouncer) => debouncer,
         Err(source) => {
             let _ = ready.send(Err(WatchError::Watcher(source)));
@@ -991,6 +1016,8 @@ fn run_worker(
     }
     let ignored = roots.ignore_rules(&config.ignored);
     let mut index = PathIndex::new(PATH_INDEX_CAPACITY);
+    #[cfg(test)]
+    shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
     index.seed(&roots, &ignored);
     let mut burst = BurstGuard::new(config.max_batch_paths, config.burst_quiet);
     let mut reseed = false;
@@ -1002,38 +1029,65 @@ fn run_worker(
         if shared.stop.load(Ordering::SeqCst) {
             break;
         }
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(result) => {
-                if reseed {
-                    let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
-                    fresh.seed(&roots, &ignored);
-                    index = fresh;
-                    reseed = false;
-                }
-                match result {
-                    Ok(events) => {
-                        let needs_rescan = process(
-                            events, shared, config, &ignored, &roots, &mut index, &mut burst,
-                        );
-                        reseed |= needs_rescan;
+        let received = if roots.has_missing() {
+            match rx.recv_timeout(MISSING_ROOT_RETRY_INTERVAL) {
+                Ok(result) => Some(result),
+                Err(RecvTimeoutError::Timeout) => {
+                    if roots.poll_missing(&mut debouncer, shared) {
+                        let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
+                        #[cfg(test)]
+                        shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
+                        fresh.seed(&roots, &ignored);
+                        index = fresh;
                     }
-                    Err(errors) => {
-                        shared
-                            .counters
-                            .errors
-                            .fetch_add(errors.len() as u64, Ordering::Relaxed);
-                        shared.force_rescan(OffsetDateTime::now_utc());
-                        reseed = true;
-                    }
+                    continue;
                 }
-                roots.poll(&mut debouncer, shared);
+                Err(RecvTimeoutError::Disconnected) => None,
             }
-            Err(RecvTimeoutError::Timeout) => {
-                roots.poll(&mut debouncer, shared);
+        } else {
+            rx.recv().ok()
+        };
+        let Some(result) = received else {
+            break;
+        };
+        if shared.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        if reseed {
+            let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
+            #[cfg(test)]
+            shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
+            fresh.seed(&roots, &ignored);
+            index = fresh;
+            reseed = false;
+        }
+        match result {
+            Ok(events) => {
+                let needs_rescan = process(
+                    events, shared, config, &ignored, &roots, &mut index, &mut burst,
+                );
+                reseed |= needs_rescan;
             }
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(errors) => {
+                shared
+                    .counters
+                    .errors
+                    .fetch_add(errors.len() as u64, Ordering::Relaxed);
+                shared.force_rescan(OffsetDateTime::now_utc());
+                reseed = true;
+            }
+        }
+        // Reconcile only after native events, including events delivered for an ancestor
+        // watched on behalf of a missing root.
+        if roots.poll(&mut debouncer, shared) {
+            let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
+            #[cfg(test)]
+            shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
+            fresh.seed(&roots, &ignored);
+            index = fresh;
         }
     }
+    *lock(&shared.wake_sender) = None;
     drop(debouncer);
     let _ = done.send(());
 }
@@ -1198,6 +1252,14 @@ impl Roots {
                     }
                 })
                 .or_insert(mode);
+            if runtime.root.kind.is_directory()
+                && let Some(parent) = runtime.root.path.parent()
+                && fs::symlink_metadata(parent).is_ok()
+            {
+                desired
+                    .entry(parent.to_path_buf())
+                    .or_insert(RecursiveMode::NonRecursive);
+            }
         }
         desired
     }
@@ -1236,10 +1298,34 @@ impl Roots {
         Ok(())
     }
 
-    /// Notices roots that disappeared or returned and moves the watches accordingly.
-    fn poll(&mut self, debouncer: &mut FsDebouncer, shared: &Shared) {
+    fn has_missing(&self) -> bool {
+        self.roots.iter().any(|runtime| !runtime.present)
+    }
+
+    /// Notices roots that disappeared or returned after a native event.
+    fn poll(&mut self, debouncer: &mut FsDebouncer, shared: &Shared) -> bool {
+        self.poll_state(debouncer, shared, false)
+    }
+
+    /// Retries only missing roots; a quiet, fully present watch set does no filesystem work.
+    fn poll_missing(&mut self, debouncer: &mut FsDebouncer, shared: &Shared) -> bool {
+        self.poll_state(debouncer, shared, true)
+    }
+
+    fn poll_state(
+        &mut self,
+        debouncer: &mut FsDebouncer,
+        shared: &Shared,
+        missing_only: bool,
+    ) -> bool {
         let mut changed = false;
+        let mut returned = false;
         for runtime in &mut self.roots {
+            if missing_only && runtime.present {
+                continue;
+            }
+            #[cfg(test)]
+            shared.counters.root_checks.fetch_add(1, Ordering::Relaxed);
             let exists = fs::symlink_metadata(&runtime.root.path).is_ok();
             if runtime.present && !exists {
                 runtime.present = false;
@@ -1250,11 +1336,13 @@ impl Roots {
                 runtime.present = true;
                 runtime.watch_path = desired_watch_path(&runtime.root, true);
                 changed = true;
+                returned = true;
             }
         }
         if changed && self.reconcile(debouncer, &shared.counters).is_err() {
             shared.counters.errors.fetch_add(1, Ordering::Relaxed);
         }
+        returned
     }
 }
 
@@ -1508,6 +1596,34 @@ mod tests {
             fs::create_dir_all(parent).expect("parent");
         }
         fs::write(path, b"x").expect("write");
+    }
+
+    #[test]
+    fn idle_worker_does_not_check_roots_or_reseed_the_index() {
+        let dir = TempDir::new().expect("temp");
+        let root = dir.path().join("store");
+        fs::create_dir_all(&root).expect("store");
+        std::thread::sleep(Duration::from_millis(2_500));
+        let service = WatchService::new(WatchConfig::new([WatchRoot::dir(
+            &root,
+            WatchRootKind::UserStore,
+        )]));
+
+        service.start().expect("start watcher");
+        let (seeds, root_checks) = service.idle_work_counts();
+        assert_eq!(seeds, 1, "the initial index is seeded once");
+        assert_eq!(root_checks, 0, "no root checks before any event");
+
+        assert!(
+            service.next_event(Duration::from_millis(750)).is_none(),
+            "an idle watcher must not emit an event"
+        );
+        assert_eq!(
+            service.idle_work_counts(),
+            (seeds, root_checks),
+            "idle shutdown ticks must not re-walk or stat roots"
+        );
+        service.stop().expect("stop watcher");
     }
 
     #[test]

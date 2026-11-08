@@ -26,6 +26,7 @@ import { applySkillEdit, applySkillUpdate, checkSkillSource, compareSkillCopies,
 import { publishRefusedOverwrite } from "../../overlays/dialogs/overwrite-commands";
 import { Modal } from "../../overlays/dialogs/Modal";
 import { SkillActionDialogs } from "../../overlays/dialogs/SkillActionDialogs";
+import { commandErrorMessage } from "../../lib/commandError";
 import type { SkillActionDialogRequest } from "../../overlays/dialogs/SkillActionDialogs";
 import { NativeSkillDetail } from "./NativeSkillDetail";
 
@@ -250,7 +251,7 @@ function SkillDetailContent({ detail, onRefresh, onDirtyChange, discardToken = 0
       app.toasts.show({
         kind: "error",
         title: "Could not keep copy",
-        message: String(cause),
+        message: commandErrorMessage(cause),
       });
     } finally {
       setKeeping(false);
@@ -293,7 +294,7 @@ function SkillDetailContent({ detail, onRefresh, onDirtyChange, discardToken = 0
       app.toasts.show({
         kind: "error",
         title: "Deployment not changed",
-        message: String(cause),
+        message: commandErrorMessage(cause),
       });
       onRefresh();
     } finally {
@@ -573,7 +574,7 @@ function SkillDetailContent({ detail, onRefresh, onDirtyChange, discardToken = 0
                       </span>
                       <Toggle
                         size="sm"
-                        label={`${labels} enabled`}
+                        label={`${detail.name}, ${labels}, ${enabled ? "enabled" : "disabled"}${detail.shadowed_by ? `, shadowed by ${detail.shadowed_by}` : ""}${!detail.editable ? ", native, read-only" : ""}${shared ? ", one shared folder" : ""}`}
                         labelPlacement="hidden"
                         checked={enabled}
                         disabled={agentBusy !== null || !detail.editable || detail.missing}

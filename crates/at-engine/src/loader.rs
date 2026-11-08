@@ -139,12 +139,14 @@ fn load_store(
     let manifest = match StoreManifest::load(layout) {
         Ok(loaded) => Some(loaded.manifest),
         Err(source) if manifest_is_missing(&source) => {
-            diagnostics.push(LoadDiagnostic {
-                scope: layout.scope(),
-                path: manifest_path.clone(),
-                code: "store_manifest_missing".to_owned(),
-                message: source.to_string(),
-            });
+            if layout.scope() != Scope::Local {
+                diagnostics.push(LoadDiagnostic {
+                    scope: layout.scope(),
+                    path: manifest_path.clone(),
+                    code: "store_manifest_missing".to_owned(),
+                    message: source.to_string(),
+                });
+            }
             None
         }
         Err(source) => {
@@ -574,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_store_directories_are_empty_diagnostic_layers() {
+    fn missing_local_store_is_an_empty_absent_layer_without_diagnostic() {
         let temp = tempfile::tempdir().expect("temporary root");
         let project = temp.path().join("project");
         fs::create_dir_all(project.join(".git")).expect("git work tree");
@@ -591,9 +593,16 @@ mod tests {
             loaded
                 .diagnostics
                 .iter()
+                .all(|entry| entry.scope != Scope::Local || entry.code != "store_manifest_missing"),
+            "an absent optional Local store is an empty layer, not a diagnostic"
+        );
+        assert_eq!(
+            loaded
+                .diagnostics
+                .iter()
                 .filter(|entry| entry.code == "store_manifest_missing")
-                .count()
-                >= 4
+                .count(),
+            3
         );
     }
 }

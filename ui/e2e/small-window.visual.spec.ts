@@ -394,3 +394,26 @@ for (const size of sizes) {
     }
   });
 }
+test("MCP table and headers fit at desktop widths", async ({ page }) => {
+  for (const width of [1440, 1280]) {
+    await page.setViewportSize({ width, height: 859 });
+    await page.goto("/");
+    await navigation(page, "MCP Servers").click();
+    const table = page.locator('[role="table"][aria-label="MCP Servers"]');
+    await expect(table).toBeVisible();
+    const geometry = await table.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const headers = [...element.querySelectorAll('[role="columnheader"]')];
+      return {
+        right: rect.right,
+        viewport: window.innerWidth,
+        clippedHeader: headers.some((header) => {
+          const headerRect = header.getBoundingClientRect();
+          return headerRect.right > window.innerWidth || header.scrollWidth > header.clientWidth + 1;
+        }),
+      };
+    });
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+    expect(geometry.clippedHeader).toBe(false);
+  }
+});

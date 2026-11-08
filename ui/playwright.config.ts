@@ -3,6 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
+  workers: process.env.CI ? 4 : undefined,
   snapshotPathTemplate: "{testDir}/snapshots/{projectName}/{arg}{ext}",
   // Keep attached screen captures in the HTML report; the custom reporter
   // merges expected/actual/diff into one image per failed comparison.

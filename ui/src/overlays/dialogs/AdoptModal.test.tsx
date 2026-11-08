@@ -107,4 +107,23 @@ describe("AdoptModal", () => {
     expect(onRescan).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  test("renders a typed command error message instead of object coercion", async () => {
+    MOCK_INVOKE.mockRejectedValueOnce({
+      code: "NotFound",
+      message: "The native item could not be found.",
+      remedy: "Rescan agent folders.",
+    });
+
+    render(
+      <AdoptModal
+        path="/sandbox/.codex/skills/codex-active"
+        onAdoptSuccess={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("The native item could not be found.")).toBeTruthy();
+    expect(screen.queryByText("[object Object]")).toBeNull();
+  });
 });

@@ -94,3 +94,44 @@ for (const state of Object.keys(fixtures) as ScopeVisualState[]) {
     });
   }
 }
+
+test("top-bar controls do not overlap and scope bounds stay stable at target widths", async ({ page }) => {
+  for (const width of [960, 1180, 1280, 1440, 1600]) {
+    await page.setViewportSize({ width, height: 900 });
+    let baselineScope: { x: number; y: number; width: number; height: number } | null = null;
+    for (const state of Object.keys(fixtures) as ScopeVisualState[]) {
+      await openState(page, fixtures[state], "dark");
+      const geometry = await page.locator('[data-slot="shell-topbar"]').evaluate((header) => {
+        const boxes = Array.from(header.children).map((element) => {
+          const { x, y, width: boxWidth, height } = element.getBoundingClientRect();
+          return { label: element.getAttribute("data-slot") ?? element.tagName, x, y, width: boxWidth, height };
+        }).filter((box) => box.width > 0 && box.height > 0);
+        const scope = header.querySelector('[role="radiogroup"][aria-label="Scope"]')?.getBoundingClientRect();
+        return {
+          boxes,
+          scope: scope === undefined ? null : { x: scope.x, y: scope.y, width: scope.width, height: scope.height },
+        };
+      });
+      expect(geometry.scope, `${width}px ${state}: scope switcher should be visible`).not.toBeNull();
+      if (baselineScope === null) baselineScope = geometry.scope;
+      else expect(geometry.scope, `${width}px ${state}: scope bounds`).toEqual(baselineScope);
+      for (const box of geometry.boxes) {
+        expect(box.x, `${width}px ${state}: ${box.label} left edge`).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width, `${width}px ${state}: ${box.label} right edge`).toBeLessThanOrEqual(width);
+      }
+      for (let first = 0; first < geometry.boxes.length; first += 1) {
+        for (let second = first + 1; second < geometry.boxes.length; second += 1) {
+          const a = geometry.boxes[first];
+          const b = geometry.boxes[second];
+          if (a === undefined || b === undefined) continue;
+          const overlaps =
+            a.x < b.x + b.width &&
+            a.x + a.width > b.x &&
+            a.y < b.y + b.height &&
+            a.y + a.height > b.y;
+          expect(overlaps, `${width}px ${state}: ${a.label} overlaps ${b.label}`).toBe(false);
+        }
+      }
+    }
+  }
+});

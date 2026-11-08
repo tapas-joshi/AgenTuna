@@ -34,6 +34,7 @@ fn item(copy: FixtureCopy, agent: AgentId) -> ScanItem {
         scope: Scope::User,
         content_hash: Some(copy.raw_hash),
         normalized_hash: Some(copy.normalized_hash),
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { commandErrorMessage } from "../../lib/commandError";
 import { StateView } from "../../components/states";
 
 export type LogLine = { readonly level: string; readonly target: string; readonly text: string };
@@ -21,7 +22,7 @@ export function LogViewer() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const reload = () => {
     setWorking(true); setError(null);
-    void invoke<LogTail>("logs_tail", { limit: 1000 }).then(setResult, (reason: unknown) => setError(String(reason))).finally(() => setWorking(false));
+    void invoke<LogTail>("logs_tail", { limit: 1000 }).then(setResult, (reason: unknown) => setError(commandErrorMessage(reason, "The current log could not be read."))).finally(() => setWorking(false));
   };
   useEffect(reload, []);
   useEffect(() => {
@@ -41,8 +42,8 @@ export function LogViewer() {
     <header className="flex items-start justify-between gap-16">
       <div><h1 className="m-0 text-22 font-semibold text-text">Logs & diagnostics</h1><p className="mt-4 break-all font-mono text-11 text-muted">{result.path}</p></div>
       <div className="flex gap-8">
-        <button type="button" className="rounded-6 border border-border px-10 py-8 text-12 text-text" onClick={() => { setActionError(null); void invoke("logs_reveal").catch((reason: unknown) => setActionError(String(reason))); }}>Reveal in Finder</button>
-        <button type="button" className="rounded-6 bg-accent-fill px-10 py-8 text-12 text-on-accent" onClick={() => { setActionError(null); setActionNotice(null); void invoke<unknown>("diagnostics_export").then(outcome => { if (outcome !== "cancelled") setActionNotice("Diagnostics exported"); }, (reason: unknown) => setActionError(String(reason))); }}>Export diagnostics</button>
+        <button type="button" className="rounded-6 border border-border px-10 py-8 text-12 text-text" onClick={() => { setActionError(null); void invoke("logs_reveal").catch((reason: unknown) => setActionError(commandErrorMessage(reason))); }}>Reveal in Finder</button>
+        <button type="button" className="rounded-6 bg-accent-fill px-10 py-8 text-12 text-on-accent" onClick={() => { setActionError(null); setActionNotice(null); void invoke<unknown>("diagnostics_export").then(outcome => { if (outcome !== "cancelled") setActionNotice("Diagnostics exported"); }, (reason: unknown) => setActionError(commandErrorMessage(reason))); }}>Export diagnostics</button>
       </div>
     </header>
     {actionError && <div role="alert" className="text-13 text-danger">{actionError}</div>}{actionNotice && <div role="status" className="text-13 text-success">{actionNotice}</div>}

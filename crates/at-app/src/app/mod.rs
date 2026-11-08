@@ -211,12 +211,25 @@ pub fn run() -> tauri::Result<()> {
             };
             app.manage(deep_link::DeepLinkRelay::default());
             app.manage(state);
+            // One process-wide policy: nothing reaches the network without its permission.
+            let jobs = jobs::JobsControl::default();
+            app.manage(jobs.clone());
+            if let Some(window) = app.get_webview_window("main") {
+                let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+                jobs.update_window(
+                    window.is_visible().unwrap_or(false),
+                    window.is_minimized().unwrap_or(false),
+                    window.is_focused().unwrap_or(false),
+                    now_ms as i64,
+                );
+            }
             if let Ok(database) = app.state::<AppState>().database_handle()
                 && let Err(error) = detection::start(
                     app.handle().clone(),
                     setup_paths.clone(),
                     Arc::clone(&database),
                     app.state::<AppState>().recent_writes(),
+                    jobs.clone(),
                 )
             {
                 tracing::warn!(%error, "agent filesystem detection watcher unavailable");
@@ -227,15 +240,13 @@ pub fn run() -> tauri::Result<()> {
                     setup_paths.clone(),
                     database,
                     app.state::<AppState>().recent_writes(),
+                    jobs.clone(),
                 );
                 app.manage(watcher);
             }
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore_window(&window, app.state::<AppState>().inner());
             }
-            // One process-wide policy: nothing reaches the network without its permission.
-            let jobs = jobs::JobsControl::default();
-            app.manage(jobs.clone());
             let network = NetworkState::new(
                 at_model::network::NetworkPolicy::default()
                     .with_updates_opt_in(setup_updates_opt_in),

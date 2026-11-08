@@ -33,6 +33,13 @@ describe("LogViewer", () => {
     expect(ipc.calls).toEqual(["logs_tail", "logs_tail"]);
   });
 
+  test("a rejected command object shows its message, never object coercion", async () => {
+    ipc.reply = () => Promise.reject({ code: "unavailable", message: "The log directory is unreadable." });
+    render(<LogViewer />);
+    expect(await screen.findByText("The log directory is unreadable.")).toBeTruthy();
+    expect(document.body.textContent ?? "").not.toContain("[object Object]");
+  });
+
   test("empty log directory shows the resolved path without an error", async () => {
     ipc.reply = () => Promise.resolve({ path: "/sandbox/logs/agentuna-*.log", lines: [] });
     render(<LogViewer />);

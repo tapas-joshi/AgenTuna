@@ -42,3 +42,45 @@ export function RecoverySheet({
     </div>
   );
 }
+
+/**
+ * Whether a recovery view lists anything a person must review.
+ *
+ * Every unclean exit produces a view, and the common case is an empty one: the process was
+ * killed with nothing half-written. The sheet is a full-window gate, so opening it for an empty
+ * view would cover the app and swallow every pointer event until someone pressed Continue.
+ *
+ * @param view Startup recovery view from the backend.
+ * @returns `true` when at least one operation, file, manual-review note or temp file is listed.
+ */
+export function recoveryNeedsReview(view: RecoverySheetView): boolean {
+  return view.operations.length > 0
+    || view.files.length > 0
+    || view.manual_review.length > 0
+    || view.temp_files.length > 0;
+}
+
+/** Properties of {@link RecoveryGate}. */
+export interface RecoveryGateProps {
+  /** Startup recovery view from the backend; `null` when the last exit was clean. */
+  readonly view: RecoverySheetView | null;
+  /** Called when the user continues past a sheet that had something to review. */
+  readonly onContinue: () => void;
+  /** Discards one interrupted operation's pending journal. */
+  readonly onDiscard: (operationId: string) => void;
+  /** Restores one affected file from its backup. */
+  readonly onRestore: (file: RecoverySheetView["files"][number]) => void;
+}
+
+/**
+ * Startup gate: shows {@link RecoverySheet} only when there is something to review.
+ *
+ * An empty view renders nothing, so an unclean exit that interrupted nothing never blocks the
+ * app. Use this instead of rendering {@link RecoverySheet} directly from the shell.
+ */
+export function RecoveryGate({ view, onContinue, onDiscard, onRestore }: RecoveryGateProps): JSX.Element | null {
+  if (view === null || !recoveryNeedsReview(view)) {
+    return null;
+  }
+  return <RecoverySheet recovery={view} onContinue={onContinue} onDiscard={onDiscard} onRestore={onRestore} />;
+}

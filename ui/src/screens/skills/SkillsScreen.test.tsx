@@ -5,6 +5,7 @@ import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
 import type { AppState } from "../../state/AppState";
 import type { SkillsListView } from "../../generated/SkillsListView";
+import type { SkillRowView } from "../../generated/SkillRowView";
 import { SkillsScreen } from "./SkillsScreen";
 
 const ipc = vi.hoisted(() => ({
@@ -189,7 +190,7 @@ describe("SkillsScreen (TS-028)", () => {
     };
     renderScreen();
 
-    const switchBtn = await screen.findByRole("switch", { name: "Codex: Linked" });
+    const switchBtn = await screen.findByRole("switch", { name: "code-review, Codex, enabled" });
     fireEvent.click(switchBtn);
 
     await waitFor(() => {
@@ -245,6 +246,107 @@ describe("SkillsScreen (TS-028)", () => {
     fireEvent.click(retryBtn);
 
     await screen.findByText("code-review");
+  });
+
+  test("Retry reissues skills_list through the command bridge and retains its error until the result arrives", async () => {
+    let calls = 0;
+    const retryResult = Promise.withResolvers<unknown>();
+    ipc.reply = (command) => {
+      if (command !== "skills_list") return Promise.resolve(undefined);
+      calls += 1;
+      if (calls === 1) return Promise.reject({ code: "unavailable", message: "Database offline" });
+      return retryResult.promise;
+    };
+    renderScreen();
+    await screen.findByText("Database offline");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(calls).toBe(2));
+    expect(ipc.calls.filter(({ command }) => command === "skills_list")).toHaveLength(2);
+    expect(screen.getByText("Database offline")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" }).getAttribute("aria-busy")).toBe("true");
+
+    retryResult.resolve(mockView());
+    await screen.findByText("code-review");
+    expect(screen.queryByText("Database offline")).toBeNull();
+  });
+});
+
+describe("SkillsScreen agent columns (design 02-skills)", () => {
+  /** A view whose second agent is not installed on this Mac. */
+  const viewWithInactive = (rows: readonly SkillRowView[]) =>
+    mockView({
+      rows,
+      agents: [
+        { id: "codex", label: "Codex", presence: "installed" },
+        { id: "cursor", label: "Cursor", presence: "not_installed" },
+      ],
+    });
+
+  test("a column holding a deployment survives hiding inactive agents", async () => {
+    // `conflict` is the skill list's wire name for a drifted deployment: losing
+    // this column would hide the drift with it.
+    const shipped = mockSkill({
+      item_id: "itm_drift",
+      name: "drifted-skill",
+      agents: [
+        { agent: "codex", state: "linked", enabled: true, config_path: "/sandbox/codex/skills/drifted-skill" },
+        { agent: "cursor", state: "conflict", enabled: true, config_path: "/sandbox/cursor/skills/drifted-skill" },
+      ],
+    });
+    ipc.reply = (command) => {
+      if (command === "skills_list") return Promise.resolve(viewWithInactive([shipped]));
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    expect(await screen.findByRole("columnheader", { name: "Cursor" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "drifted-skill, Cursor, enabled" })).toBeTruthy();
+  });
+
+  test("a per-agent shadowed cell reads as shadowed, not as absent", async () => {
+    const shadowed = mockSkill({
+      item_id: "itm_shadow",
+      name: "shadowed-for-cursor",
+      agents: [
+        { agent: "codex", state: "linked", enabled: true, config_path: "/sandbox/codex/skills/x" },
+        { agent: "cursor", state: "shadowed", enabled: false, config_path: null },
+      ],
+    });
+    ipc.reply = (command) => {
+      if (command === "skills_list") return Promise.resolve(viewWithInactive([shadowed]));
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    const table = await screen.findByRole("table", { name: "Skills" });
+    const cell = await within(table).findByText("Shadowed");
+    const group = cell.closest('[data-state="shadowed"]');
+    expect(group).toBeTruthy();
+    expect(group?.getAttribute("title")).toContain("Shadowed by a nearer scope");
+  });
+
+  test("Show all agents adds the empty inactive column and toggles back", async () => {
+    ipc.reply = (command) => {
+      if (command === "skills_list") return Promise.resolve(viewWithInactive([mockSkill()]));
+      return Promise.resolve(undefined);
+    };
+    renderScreen();
+
+    await screen.findByRole("table", { name: "Skills" });
+    expect(screen.queryByRole("columnheader", { name: "Cursor" })).toBeNull();
+
+    const toggle = screen.getByRole("button", { name: "Show all agents" });
+    expect(toggle.tagName).toBe("BUTTON");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+
+    expect(await screen.findByRole("columnheader", { name: "Cursor" })).toBeTruthy();
+    const hide = screen.getByRole("button", { name: "Hide inactive agents" });
+    expect(hide.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(hide);
+    expect(screen.queryByRole("columnheader", { name: "Cursor" })).toBeNull();
   });
 });
 
@@ -372,7 +474,9 @@ describe("SkillsScreen update badge (TS-040)", () => {
     });
     expect((await screen.findAllByText(/Ignored upstream bbbbbbbbbb for code-review/)).length).toBeGreaterThan(0);
     await waitFor(() => expect(listed).toBeGreaterThanOrEqual(2));
-    expect(screen.queryByRole("button", { name: "Update available for code-review" })).toBeNull();
+    // `listed` counts mock calls, not commits; the reload (and the badge's
+    // removal from the staged table) settles a tick later.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Update available for code-review" })).toBeNull());
   });
 });
 
@@ -534,7 +638,7 @@ describe("SkillsScreen STATUS column (design 02-skills)", () => {
     renderScreen();
 
     fireEvent.click(
-      await screen.findByRole("switch", { name: "Codex + omp: Linked, one shared folder" }),
+      await screen.findByRole("switch", { name: "code-review, Codex + omp, enabled, one shared folder" }),
     );
     const dialog = await screen.findByRole("dialog", { name: "Shared discovery root" });
     expect(within(dialog).getByText(/Codex and omp share/)).toBeTruthy();

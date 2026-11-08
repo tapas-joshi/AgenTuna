@@ -167,7 +167,7 @@ describe("McpListScreen row actions", () => {
           : undefined,
       );
     renderScreen();
-    const toggle = await screen.findByRole("switch", { name: "Claude Code: Locked" });
+    const toggle = await screen.findByRole("switch", { name: "Server, Claude Code, enabled, locked by Global · Approved version" });
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     const cell = toggle.closest('[role="group"]');
     expect(cell?.getAttribute("title")).toContain("Approved version");
@@ -237,7 +237,7 @@ describe("McpListScreen per-agent switches and health (design 06-mcp-servers)", 
     };
     renderScreen();
 
-    const toggle = await screen.findByRole("switch", { name: "omp: Off" });
+    const toggle = await screen.findByRole("switch", { name: "Server, omp, disabled" });
     await userEvent.setup().click(toggle);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/Enable Server for omp\?/)).toBeTruthy();
@@ -277,7 +277,7 @@ describe("McpListScreen per-agent switches and health (design 06-mcp-servers)", 
     expect(await screen.findByText("Enabled Server for omp")).toBeTruthy();
   });
 
-  test("an uninstalled agent column renders a disabled switch with the reason", async () => {
+  test("inactive agent columns appear after Show all agents is activated", async () => {
     ipc.reply = (command) => {
       if (command === "mcp_server_list") return Promise.resolve(list());
       if (command === "agents_list") {
@@ -288,8 +288,11 @@ describe("McpListScreen per-agent switches and health (design 06-mcp-servers)", 
       return Promise.resolve(undefined);
     };
     renderScreen();
-
-    const toggle = await screen.findByRole("switch", { name: "Cursor: Off" });
+    expect(screen.queryByRole("columnheader", { name: "Cursor" })).toBeNull();
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Show all agents" }));
+    const toggle = await screen.findByRole("switch", {
+      name: "Server, Cursor, disabled, Cursor is not installed on this Mac",
+    });
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(toggle.closest('[role="group"]')?.getAttribute("title")).toContain("not installed");
     expect(ipc.calls.filter((call) => call.command === "mcp_server_enable")).toHaveLength(0);

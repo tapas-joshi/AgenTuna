@@ -7,7 +7,7 @@
  * explanation, and a mount point for TC-025's Not in AgenTuna banner.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../../components/button";
 import { useCompactLayout } from "../../components/use-compact-layout";
@@ -15,9 +15,10 @@ import { Input } from "../../components/input";
 import { Badge } from "../../components/badge";
 import type { BadgeTone } from "../../components/badge";
 import { Chip } from "../../components/chip";
-import { PresetsScreen } from "../presets/PresetsScreen";
+import { LoadingState } from "../../components/states";
 import { SkillUpdateBadge } from "./SkillUpdateBadge";
 import { Modal } from "../../overlays/dialogs/Modal";
+import { commandErrorMessage } from "../../lib/commandError";
 import { DiffViewer } from "../../components/diff";
 import {
   DataTable,
@@ -51,6 +52,9 @@ import { showAdoptFirstToast } from "../../overlays/toasts/catalogue";
 import { useAppSnapshot, useAppState } from "../../state/context";
 
 export type FilterChip = "all" | "global" | "user" | "project" | "native" | "shadowed";
+
+/** Presets load on demand: the tab shares the route-level chunk with the Presets route. */
+const PresetsScreen = lazy(() => import("../presets/PresetsScreen").then((m) => ({ default: m.PresetsScreen })));
 
 const SCOPE_BADGE: Readonly<Record<string, string>> = {
   global: "bg-scope-global/15 text-scope-global",
@@ -249,10 +253,40 @@ function parseCommandError(cause: unknown): { code: string; message: string; ref
       refusal: value.refusal,
     };
   }
-  return { code: "error", message: String(cause) };
+  return { code: "error", message: commandErrorMessage(cause) };
 }
 function skillRowId(row: SkillRowView): string {
   return row.item_id !== "" ? row.item_id : `native:${row.native_path ?? row.name}`;
+}
+
+/**
+ * Applies the filter chip and the search query to a row set.
+ *
+ * One helper for every filtering call site so the table, the bulk bar's
+ * hidden-count and any future derivation cannot drift apart.
+ */
+export function applySkillFilters(
+  rows: readonly SkillRowView[],
+  chip: FilterChip,
+  query: string,
+): readonly SkillRowView[] {
+  let result = rows;
+  if (chip === "global") result = result.filter((r) => r.scope === "global");
+  else if (chip === "user") result = result.filter((r) => r.scope === "user");
+  else if (chip === "project") result = result.filter((r) => r.scope === "project");
+  else if (chip === "native") result = result.filter((r) => r.native);
+  else if (chip === "shadowed") result = result.filter((r) => Boolean(r.shadowed_by));
+
+  const needle = query.trim().toLowerCase();
+  if (needle !== "") {
+    result = result.filter((r) => {
+      return (
+        r.name.toLowerCase().includes(needle) ||
+        (r.description !== null && r.description.toLowerCase().includes(needle))
+      );
+    });
+  }
+  return result;
 }
 
 export function SkillsScreen(
@@ -277,6 +311,14 @@ export function SkillsScreen(
   }, [rowMenu.openRowId]);
 
   const [view, setView] = useState<SkillsListView | null>(null);
+  /**
+   * Table rows commit in a transition (TF-035): `view` updates the toolbar,
+   * chips, counts and summary urgently, then the 3,000-row TanStack models
+   * build at transition priority while the painted toolbar stays responsive.
+   * `null` until the first staged commit arrives; the table shows its loading
+   * state meanwhile.
+   */
+  const [tableRows, setTableRows] = useState<readonly SkillRowView[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"skills" | "presets">(
     app.getSnapshot().screenState["skills:tab"] === "presets" ? "presets" : "skills"
@@ -284,6 +326,7 @@ export function SkillsScreen(
   const [error, setError] = useState<string | null>(null);
 
   const [activeChip, setActiveChip] = useState<FilterChip>("all");
+  const [showAllAgents, setShowAllAgents] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [bannerHidden, setBannerHidden] = useState(false);
   const [adoptModalTarget, setAdoptModalTarget] = useState<SkillRowView | null>(null);
@@ -313,7 +356,6 @@ export function SkillsScreen(
 
   const load = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
       const [listResult, settingsResult] = await Promise.all([
         invoke<SkillsListView>("skills_list", {
@@ -322,6 +364,9 @@ export function SkillsScreen(
         invoke<Record<string, unknown>>("settings_load").catch(() => null),
       ]);
       setView(listResult);
+      // The staged second commit: row models derive after the toolbar paints.
+      startTransition(() => setTableRows(listResult.rows));
+      setError(null);
       if (settingsResult !== null) {
         setBannerHidden(settingsResult["native_banner_hidden.skill"] === true);
       }
@@ -353,25 +398,10 @@ export function SkillsScreen(
     };
   }, [allRows]);
 
-  const filteredRows = useMemo(() => {
-    let rows = allRows;
-    if (activeChip === "global") rows = rows.filter((r) => r.scope === "global");
-    else if (activeChip === "user") rows = rows.filter((r) => r.scope === "user");
-    else if (activeChip === "project") rows = rows.filter((r) => r.scope === "project");
-    else if (activeChip === "native") rows = rows.filter((r) => r.native);
-    else if (activeChip === "shadowed") rows = rows.filter((r) => Boolean(r.shadowed_by));
-
-    const query = searchQuery.trim().toLowerCase();
-    if (query !== "") {
-      rows = rows.filter((r) => {
-        return (
-          r.name.toLowerCase().includes(query) ||
-          (r.description !== null && r.description.toLowerCase().includes(query))
-        );
-      });
-    }
-    return rows;
-  }, [allRows, activeChip, searchQuery]);
+  const filteredRows = useMemo(
+    () => applySkillFilters(tableRows ?? [], activeChip, searchQuery),
+    [tableRows, activeChip, searchQuery],
+  );
   const selectedRows = useMemo(
     () => allRows.filter((row) => selectedIds.has(skillRowId(row))),
     [allRows, selectedIds],
@@ -390,15 +420,30 @@ export function SkillsScreen(
 
   const agents: readonly AgentDescriptor[] = useMemo(() => {
     if (!view?.agents) return [];
-    // The design shows the agents this Mac actually has: a missing agent has no
-    // row to render and an empty column would read as a broken deployment.
+    // The design shows the agents this Mac actually has, so a `not_installed`
+    // agent keeps its column only while one of its cells still carries a
+    // deployment the user must see (linked, off, conflict or native). Hiding a
+    // column would hide a drifted or disabled deployment with it; `none` and
+    // `not_installed` cells have nothing to show and wait for the toggle.
     return view.agents
-      .filter((agent) => agent.presence !== "not_installed")
+      .filter(
+        (agent) =>
+          showAllAgents ||
+          agent.presence !== "not_installed" ||
+          allRows.some((row) =>
+            row.agents.some(
+              (cell) =>
+                cell.agent === agent.id &&
+                cell.state !== "none" &&
+                cell.state !== "not_installed",
+            ),
+          ),
+      )
       .map((agent) => ({
         id: agent.id,
         label: agent.label,
       }));
-  }, [view?.agents]);
+  }, [view?.agents, allRows, showAllAgents]);
 
   /**
    * One folder block for agents that share a discovery root. Native cells always
@@ -654,6 +699,7 @@ export function SkillsScreen(
     };
 
     const agentCols = agentColumns<SkillRowView>({
+      getItemLabel: (row) => row.name,
       agents,
       getFolderGroups: folderGroupsFor,
       getState: (row, agent) => {
@@ -681,6 +727,12 @@ export function SkillsScreen(
             path: cell.config_path ?? row.native_path ?? "",
             readOnly: true,
           };
+        }
+        if (cell.state === "shadowed") {
+          // The row above names the winning scope when the whole row is shadowed;
+          // a cell that is shadowed on its own only proves a nearer copy wins, so
+          // say that instead of rendering the agent as `not present`.
+          return { kind: "shadowed", shadowedBy: row.shadowed_by ?? "a nearer scope" };
         }
         return { kind: "none" };
       },
@@ -944,19 +996,10 @@ export function SkillsScreen(
             </button>
           </div>
         </nav>
-        <PresetsScreen />
+        <Suspense fallback={<LoadingState title="Loading presets…" minHeight={400} />}>
+          <PresetsScreen />
+        </Suspense>
       </div>
-    );
-  }
-
-  if (loading && view === null) {
-    return (
-      <main aria-label="Skills" className="mx-auto flex max-w-[1200px] flex-col gap-16 p-24">
-        <header className="flex items-center justify-between">
-          <h1 className="m-0 text-22 font-semibold text-text">Skills</h1>
-        </header>
-        <p role="status" className="text-13 text-text-muted">Loading skills…</p>
-      </main>
     );
   }
 
@@ -968,8 +1011,19 @@ export function SkillsScreen(
         </header>
         <div role="alert" className="flex flex-col items-start gap-8 rounded-8 border border-danger/30 bg-danger/10 p-16 text-text">
           <p className="m-0">{error}</p>
-          <Button onClick={() => void load()}>Retry</Button>
+          <Button loading={loading} onClick={() => void load()}>Retry</Button>
         </div>
+      </main>
+    );
+  }
+
+  if (loading && view === null) {
+    return (
+      <main aria-label="Skills" className="mx-auto flex max-w-[1200px] flex-col gap-16 p-24">
+        <header className="flex items-center justify-between">
+          <h1 className="m-0 text-22 font-semibold text-text">Skills</h1>
+        </header>
+        <p role="status" className="text-13 text-text-muted">Loading skills…</p>
       </main>
     );
   }
@@ -1117,6 +1171,14 @@ export function SkillsScreen(
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-expanded={showAllAgents}
+          onClick={() => setShowAllAgents((value) => !value)}
+        >
+          {showAllAgents ? "Hide inactive agents" : "Show all agents"}
+        </Button>
       </div>
 
       {selectedRows.length > 0 && (
@@ -1227,7 +1289,7 @@ export function SkillsScreen(
         getColumnSpan={(row, columnId) => folderSpan(columnId, folderGroupsFor(row), agents)}
         getRowId={skillRowId}
         getRowLabel={(r) => r.name}
-        loading={loading}
+        loading={loading || tableRows === null}
         rowTone={(r) => (r.shadowed_by ? "dimmed" : "default")}
         rowTooltip={(r) =>
           r.shadowed_by

@@ -46,11 +46,11 @@ test("Import from apps screen (design 06b-mcp-import-from-apps)", async ({ page 
     mocks.commandOverrides.migrate_scan_start = "job_migrate_scan";
     mocks.commandOverrides.migrate_scan_result = {
       items: [
-        { kind: "mcp_server", name: "puppeteer", agents: ["claude_code"], path: "~/.claude.json", scope: "user", content_hash: "h1", parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "new" },
-        { kind: "mcp_server", name: "puppeteer", agents: ["omp"], path: "~/.omp/agent/mcp.json", scope: "user", content_hash: "h2", parse_error: null, store_link: false, state: "conflict", ownership: "conflict" },
-        { kind: "mcp_server", name: "context7", agents: ["claude_code"], path: "~/.claude.json", scope: "user", content_hash: "h3", parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "new" },
-        { kind: "mcp_server", name: "context7", agents: ["claude_code"], path: "./.mcp.json", scope: "project", content_hash: "h4", parse_error: null, store_link: false, state: "conflict", ownership: "conflict" },
-        { kind: "mcp_server", name: "sentry", agents: ["claude_code"], path: "~/.claude.json", scope: "user", content_hash: "h5", parse_error: null, store_link: false, state: "conflict", ownership: "managed_differs" },
+        { kind: "mcp_server", name: "puppeteer", agents: ["claude_code"], path: "~/.claude.json", scope: "user", content_hash: "h1", parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "new", mcp_summary: { transport: "stdio", command: "npx", argument_count: 2, url: null, env_names: [], header_names: [] } },
+        { kind: "mcp_server", name: "puppeteer", agents: ["omp"], path: "~/.omp/agent/mcp.json", scope: "user", content_hash: "h2", parse_error: null, store_link: false, state: "conflict", ownership: "conflict", mcp_summary: { transport: "stdio", command: "npx", argument_count: 2, url: null, env_names: ["PUPPETEER_TOKEN"], header_names: [] } },
+        { kind: "mcp_server", name: "context7", agents: ["claude_code"], path: "~/.claude.json", scope: "user", content_hash: "h3", parse_error: null, store_link: false, state: "not_in_agentuna", ownership: "new", mcp_summary: { transport: "http", command: null, argument_count: null, url: "mcp.context7.com/mcp", env_names: [], header_names: ["Authorization"] } },
+        { kind: "mcp_server", name: "context7", agents: ["claude_code"], path: "./.mcp.json", scope: "project", content_hash: "h4", parse_error: null, store_link: false, state: "conflict", ownership: "conflict", mcp_summary: { transport: "http", command: null, argument_count: null, url: "mcp.context7.com/mcp", env_names: [], header_names: [] } },
+        { kind: "mcp_server", name: "sentry", agents: ["claude_code"], path: "~/.claude.json", scope: "user", content_hash: "h5", parse_error: null, store_link: false, state: "conflict", ownership: "managed_differs", mcp_summary: { transport: "stdio", command: "npx", argument_count: 3, url: null, env_names: ["SENTRY_AUTH_TOKEN"], header_names: [] } },
       ],
       roots: [
         { path: "~/.claude.json", agents: ["claude_code"], new_items: 2, in_sync: 0 },
@@ -62,6 +62,7 @@ test("Import from apps screen (design 06b-mcp-import-from-apps)", async ({ page 
     };
   });
 
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto("/");
   await page.getByRole("button", { name: "MCP Servers", exact: true }).click();
   await page.getByRole("button", { name: "Import from apps" }).click();
@@ -70,6 +71,9 @@ test("Import from apps screen (design 06b-mcp-import-from-apps)", async ({ page 
   await expect(main.getByText("MCP Servers / Import from apps")).toBeVisible();
   await expect(main.getByRole("heading", { name: "Review before import" })).toBeVisible();
   await expect(main.getByText(/5 definitions across User, Project and Local sources/)).toBeVisible();
+  await expect(main.getByText(/npx · 2 args/).first()).toBeVisible();
+  await expect(main.getByText(/PUPPETEER_TOKEN/)).toBeVisible();
+  await expect(main).not.toContainText("sk-live-fixture-secret");
   await expect(page).toHaveScreenshot("06b-mcp-import-from-apps-screen.png", { animations: "disabled", caret: "hide" });
 });
 

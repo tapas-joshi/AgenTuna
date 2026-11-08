@@ -78,6 +78,8 @@ export interface AgentColumnOptions<TData extends RowData> {
   readonly agents: readonly AgentDescriptor[];
   /** Reads the state of one item in one agent. */
   readonly getState: (row: TData, agent: AgentDescriptor) => AgentCellState;
+  /** Names the row item in each switch's accessible name. */
+  readonly getItemLabel?: (row: TData) => string;
   /**
    * Reads the discovery folders shared by several agents for this row.
    * Returning nothing keeps every agent column separate.
@@ -113,6 +115,7 @@ export function agentColumns<TData extends RowData>(
         return (
           <SharedFolderCell
             agents={group.agents}
+            itemLabel={options.getItemLabel?.(row.original)}
             path={group.path}
             state={options.getState(row.original, first)}
             onToggle={
@@ -126,6 +129,7 @@ export function agentColumns<TData extends RowData>(
       return (
         <AgentCell
           agent={agent}
+          itemLabel={options.getItemLabel?.(row.original)}
           state={state}
           onToggle={
             options.onToggle === undefined
