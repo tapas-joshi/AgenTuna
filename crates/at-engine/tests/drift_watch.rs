@@ -610,9 +610,13 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
         if let Some(batch) = event.batch() {
             assert!(
                 !batch.contains(&path),
-                "an AgenTuna write must not reach a batch: {:?} (suppressed events: {})",
+                "an AgenTuna write must not reach a batch: {:?} (suppressed events: {}); all events: {:?}; on disk matches the write: {}",
                 batch.paths,
-                registry.suppressed_count()
+                registry.suppressed_count(),
+                events,
+                fs::read(&path)
+                    .map(|bytes| bytes == written)
+                    .unwrap_or(false)
             );
         }
         assert!(
