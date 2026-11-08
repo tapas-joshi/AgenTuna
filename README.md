@@ -6,12 +6,12 @@ Rust core + Tauri 2 shell (`crates/at-app`) + React/TypeScript frontend (`ui/`).
 
 ## Downloads
 
-No release is published yet. The release workflow ([docs/releasing.md](docs/releasing.md)) builds,
-for macOS arm64, a `.dmg` and a `.app.zip` plus the `agentuna` CLI; and for Linux x86_64, a
-portable tarball (with `scripts/install-linux.sh`), the `.deb`/`.AppImage` when the Tauri bundler
-succeeds, and the `agentuna` CLI. Windows is not built yet. macOS builds are ad-hoc signed unless
-the maintainers' Developer ID secrets are configured, so a downloaded dmg needs right-click →
-**Open** the first time.
+Builds are attached to each [GitHub release](https://github.com/tapas-joshi/AgenTuna/releases):
+macOS Apple Silicon (`.dmg`, `.app.zip`), Linux x86_64 (`.tar.gz`, `.deb`, `.AppImage`) and the
+`agentuna` CLI for both, with a `SHA256SUMS` file. What changed is in [CHANGELOG.md](CHANGELOG.md);
+how releases are built is in [docs/releasing.md](docs/releasing.md). Windows is not built yet.
+macOS builds are ad-hoc signed and not notarized (right-click the app and choose **Open** the
+first time); the Linux desktop app has not been launched by the maintainers yet.
 
 ## Try it (MVP-1)
 
