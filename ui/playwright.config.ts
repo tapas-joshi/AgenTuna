@@ -29,6 +29,13 @@ export default defineConfig({
     timeout: 300_000,
   },
   expect: {
-    toHaveScreenshot: { animations: "disabled", maxDiffPixelRatio: 0.001 },
+    // `toHaveScreenshot` waits for two identical consecutive frames before comparing; on the
+    // macOS Intel runner with four workers that can exceed the 5 s default even though no pixel
+    // differs (CI failures were "Timeout 5000ms exceeded", not diffs). The tolerance is unchanged.
+    toHaveScreenshot: {
+      animations: "disabled",
+      maxDiffPixelRatio: 0.001,
+      timeout: process.env.CI ? 20_000 : 5_000,
+    },
   },
 });
