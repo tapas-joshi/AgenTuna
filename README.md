@@ -14,6 +14,18 @@ macOS builds are ad-hoc signed and not notarized: on macOS 15 and later use **Sy
 Privacy & Security > Open Anyway** after the first blocked launch (macOS 13/14: right-click >
 **Open**), or run `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`; the Linux desktop app has not been launched by the maintainers yet.
 
+### Homebrew
+
+```sh
+brew tap tapas-joshi/agentuna
+brew install --cask agentuna     # the macOS Apple Silicon app + the `agentuna` command
+brew install agentuna-cli        # only the command-line tool (macOS Apple Silicon, Linux x86_64)
+```
+
+The cask verifies the download against its pinned SHA-256 and clears the quarantine flag, so the
+unnotarized preview opens without the Gatekeeper prompt. The tap lives in
+[tapas-joshi/homebrew-agentuna](https://github.com/tapas-joshi/homebrew-agentuna).
+
 ## Try it (MVP-1)
 
 Use a throwaway sandbox first: AgenTuna reads and edits real agent configuration (Claude Code, Codex, omp), so the first run should never point at your real home folder. Every path is injectable through environment variables, and every write is a reviewed, backed-up, undoable change.
