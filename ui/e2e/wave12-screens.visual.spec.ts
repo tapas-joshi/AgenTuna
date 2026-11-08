@@ -95,20 +95,20 @@ test("Migrate scan, resolve and plan steps render the designed stepper and panel
   const main = page.getByRole("main", { name: "Move into AgenTuna" });
   await expect(main.getByRole("complementary", { name: "Scanned folders" })).toBeVisible();
   await expect(main.getByRole("checkbox", { name: "Select Visual migration skill" })).toBeVisible();
-  await expect(page).toHaveScreenshot("migrate-scan-roots.png", { animations: "disabled", caret: "hide" });
+  await expect.soft(page).toHaveScreenshot("migrate-scan-roots.png", { animations: "disabled", caret: "hide" });
 
   await main.getByRole("checkbox", { name: "Select all items" }).check();
   await main.getByRole("button", { name: "Continue with 3" }).click();
   await expect(page.getByRole("heading", { name: "Resolve conflicts" })).toBeVisible();
   await page.getByLabel("Keep both").check();
-  await expect(page).toHaveScreenshot("migrate-resolve-design.png", { animations: "disabled", caret: "hide" });
+  await expect.soft(page).toHaveScreenshot("migrate-resolve-design.png", { animations: "disabled", caret: "hide" });
 
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Preview the exact changes" })).toBeVisible();
   await expect(page.getByText("3 items copied into the store")).toBeVisible();
   await expect(page.getByRole("region", { name: "Planned files" })).toBeVisible();
   await expect(page.getByText(/Back up original/)).toBeVisible();
-  await expect(page).toHaveScreenshot("migrate-plan-design.png", { animations: "disabled", caret: "hide" });
+  await expect.soft(page).toHaveScreenshot("migrate-plan-design.png", { animations: "disabled", caret: "hide" });
 });
 
 test("Effective config renders the table, filter and detail timeline", async ({ page }) => {

@@ -32,9 +32,9 @@ export function McpFilesThatWillChangePanel({
     && (!needsAcknowledgement || acknowledged);
 
   return (
-    <section aria-labelledby="mcp-files-heading" className="grid gap-8" data-slot="mcp-files-panel">
+    <section aria-labelledby="mcp-files-heading" className="grid gap-12 rounded-12 border border-border bg-raised p-24" data-slot="mcp-files-panel">
       <div className="flex items-center justify-between gap-8">
-        <h2 id="mcp-files-heading" className="text-13 font-semibold text-text">Files that will change</h2>
+        <h2 id="mcp-files-heading" className="m-0 text-16 font-semibold text-text">Files that will change</h2>
         <span className="text-11 text-text-muted">{preview.files.length} files</span>
       </div>
       <p className="text-11 text-text-secondary">Backup created before files are replaced.</p>

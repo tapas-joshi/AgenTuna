@@ -25,7 +25,7 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
   await expect(page.getByRole("region", { name: "review-helper differing lines" })).toContainText("old copy");
   await expect(page.getByRole("region", { name: "review-helper differing lines" })).toContainText("new copy");
   await expect(page.getByText("sha aaaaaaaa")).toBeVisible();
-  await expect(page).toHaveScreenshot("migrate-resolve-inline-diff.png", { animations: "disabled", caret: "hide" });
+  await expect.soft(page).toHaveScreenshot("migrate-resolve-inline-diff.png", { animations: "disabled", caret: "hide" });
   await page.getByLabel("Keep both").check();
   await page.getByRole("button", { name: "Continue" }).click();
 
@@ -34,7 +34,7 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
   await expect(page.getByText("3 items copied into the store")).toBeVisible();
   await expect(page.getByRole("region", { name: "Planned files" })).toBeVisible();
   await expect(page.getByText(/Back up original/)).toBeVisible();
-  await expect(page).toHaveScreenshot("migrate-preview-file-first.png", { animations: "disabled", caret: "hide" });
+  await expect.soft(page).toHaveScreenshot("migrate-preview-file-first.png", { animations: "disabled", caret: "hide" });
 
   // 4. Apply confirmation modal
   await page.getByRole("button", { name: "Apply 3 items" }).click();
@@ -55,7 +55,7 @@ test("Migrate complete flow: scan -> resolve -> plan -> apply -> done -> undo", 
   await expect(page.getByText(/3 items copied into the Project store/)).toBeVisible();
   const undoBtn = page.getByRole("button", { name: /Undo migration/ });
   await expect(undoBtn).toBeVisible();
-  await expect(page).toHaveScreenshot("migrate-done-success.png", { animations: "disabled", caret: "hide" });
+  await expect.soft(page).toHaveScreenshot("migrate-done-success.png", { animations: "disabled", caret: "hide" });
 
   // 6. Undo flow (success)
   await undoBtn.click();

@@ -263,6 +263,26 @@ export function MigrateScanScreen() {
 
   const stepIndex = step === "scan" ? 0 : step === "resolve" ? 1 : step === "plan" ? 2 : 3;
 
+  const migrationSteps = (
+    <nav aria-label="Migration steps" className="mt-16 flex items-center gap-8">
+      {STEPS.map((entry, index) => {
+        const active = index === stepIndex;
+        const complete = index < stepIndex;
+        return (
+          <div key={entry.id} className="flex items-center gap-8">
+            {index > 0 && <span aria-hidden="true" className={`h-px w-32 ${complete || active ? "bg-success" : "bg-border"}`} />}
+            <span className={`inline-flex items-center gap-8 text-13 ${active ? "font-semibold text-text" : complete ? "text-text" : "text-text-muted"}`} aria-current={active ? "step" : undefined}>
+              <span aria-hidden="true" className={`grid h-24 w-24 shrink-0 place-items-center rounded-full border text-11 ${active ? "border-accent-fill text-text" : complete ? "border-success bg-success text-on-accent" : "border-border text-text-muted"}`}>
+                {complete ? "✓" : index + 1}
+              </span>
+              {entry.label}
+            </span>
+          </div>
+        );
+      })}
+    </nav>
+  );
+
   return (
     <main aria-label="Move into AgenTuna" className={`mx-auto flex max-w-[1180px] flex-col gap-16 p-24 ${step === "plan" ? "h-full min-h-0" : "min-h-full"}`}>
       {step !== "scan" ? null : (
@@ -270,7 +290,7 @@ export function MigrateScanScreen() {
           <p className="m-0 text-12 uppercase tracking-wide text-text-muted">
             {kindFilter === "mcp_server" ? "MCP Servers / Import from apps" : "Migrate to AgenTuna"}
           </p>
-          <h1 className="m-0 text-26 font-semibold text-text">
+          <h1 className={kindFilter === "mcp_server" ? "m-0 text-26 font-semibold text-text" : "m-0 font-mono text-26 font-semibold text-text"}>
             {kindFilter === "mcp_server"
               ? "Review before import"
               : items.length === 0
@@ -285,40 +305,11 @@ export function MigrateScanScreen() {
         </header>
       )}
 
-      {!(kindFilter === "mcp_server" && step === "scan") && <nav aria-label="Migration steps" className="flex items-center gap-8">
-        {STEPS.map((entry, index) => {
-          const active = index === stepIndex;
-          const complete = index < stepIndex;
-          return (
-            <div key={entry.id} className="flex items-center gap-8">
-              {index > 0 && <span aria-hidden="true" className="h-px w-24 bg-border" />}
-              <span
-                className={`inline-flex items-center gap-6 text-13 ${
-                  active ? "text-text" : complete ? "text-success" : "text-text-muted"
-                }`}
-                aria-current={active ? "step" : undefined}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`grid h-24 w-24 shrink-0 place-items-center rounded-full border text-11 ${
-                    active
-                      ? "border-accent-fill bg-accent-fill text-on-accent"
-                      : complete
-                        ? "border-success/60 bg-success/15 text-success"
-                        : "border-border text-text-muted"
-                  }`}
-                >
-                  {complete ? "✓" : index + 1}
-                </span>
-                {entry.label}
-              </span>
-            </div>
-          );
-        })}
-      </nav>}
+      {(step === "done" || (step === "scan" && kindFilter !== "mcp_server")) && migrationSteps}
 
       {step === "resolve" ? (
         <MigrateResolveScreen
+          steps={migrationSteps}
           projectId={activeProject}
           selectedPaths={selectedPaths}
           choices={choices}
@@ -357,6 +348,7 @@ export function MigrateScanScreen() {
         />
       ) : step === "plan" ? (
         <MigratePlanScreen
+          steps={migrationSteps}
           plan={plan}
           strategy={strategy}
           busy={busy}
@@ -666,7 +658,7 @@ export function MigrateScanScreen() {
             </section>}
           </div>
 
-          <footer className="mt-auto flex items-center justify-end gap-12 border-t border-border pt-16">
+          <footer className="sticky bottom-0 z-20 -mx-24 -mb-24 mt-auto flex shrink-0 items-center justify-end gap-12 border-t border-border bg-surface px-24 py-16">
             <Button
               variant="ghost"
               onClick={() => {
