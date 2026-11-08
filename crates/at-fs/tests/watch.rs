@@ -360,7 +360,9 @@ fn deleting_a_watched_store_yields_path_gone_and_resumes_when_it_returns() {
 
     fs::remove_dir_all(&store).expect("delete store");
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Fifteen seconds covers the worker's stat-only recheck several times over: the report must
+    // not depend on FSEvents delivering the removal of a watched root.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut gone = false;
     while Instant::now() < deadline {
         match service.next_event(Duration::from_millis(100)) {
@@ -369,7 +371,7 @@ fn deleting_a_watched_store_yields_path_gone_and_resumes_when_it_returns() {
                 gone = true;
                 break;
             }
-            // A quiet 100 ms slice is not the end: FSEvents can deliver late on a loaded machine.
+            // A quiet 100 ms slice is not the end: a platform can deliver late on a loaded machine.
             Some(_) | None => continue,
         }
     }
@@ -392,6 +394,63 @@ fn deleting_a_watched_store_yields_path_gone_and_resumes_when_it_returns() {
     }
     let (returned, batch) =
         seen.expect("the re-attached watch reports changes inside the returned store");
+    assert!(batch.contains(&returned), "{:?}", batch.paths);
+
+    service.stop().expect("stop");
+}
+
+#[test]
+fn a_store_deleted_with_its_parent_is_still_reported_gone() {
+    let home = TempDir::new().expect("temp");
+    let base = fs::canonicalize(home.path()).expect("canonical temp");
+    let project = base.join("acme");
+    let store = project.join(".agentuna");
+    fs::create_dir_all(&store).expect("store");
+    fs::write(store.join("store.json"), b"{}").expect("seed");
+    let service = WatchService::new(WatchConfig::new([WatchRoot::dir(
+        &store,
+        WatchRootKind::ProjectStore,
+    )]));
+    settle_fixture();
+    service.start().expect("start");
+
+    // The whole project goes, so the parent watch that normally reports the removal goes with it.
+    // The service must still notice: on the arm64 CI runner FSEvents delivered nothing at all while
+    // a watched store was missing, which is exactly this failure mode.
+    fs::remove_dir_all(&project).expect("delete the project");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut gone = false;
+    while Instant::now() < deadline {
+        match service.next_event(Duration::from_millis(100)) {
+            Some(WatchEvent::PathGone { path, .. }) => {
+                assert_eq!(path, store);
+                gone = true;
+                break;
+            }
+            Some(_) | None => continue,
+        }
+    }
+    assert!(
+        gone,
+        "a store that disappears with its parent still yields PathGone"
+    );
+
+    // The watch recovers from the nearest existing ancestor: recreating the tree re-attaches the
+    // recursive watch before later writes are reported.
+    fs::create_dir_all(&store).expect("recreate store");
+    let mut seen = None;
+    for attempt in 0..5 {
+        let returned = store.join(format!("back-{attempt}.json"));
+        fs::write(&returned, b"{}").expect("write");
+        if let Some(batch) = next_batch(&service, Duration::from_secs(10))
+            && batch.contains(&returned)
+        {
+            seen = Some((returned, batch));
+            break;
+        }
+    }
+    let (returned, batch) = seen.expect("the re-attached watch reports the returned store");
     assert!(batch.contains(&returned), "{:?}", batch.paths);
 
     service.stop().expect("stop");

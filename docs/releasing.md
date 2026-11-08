@@ -131,13 +131,35 @@ The job wires the Apple-ID notarization method. `scripts/notarize.sh` also accep
 `NOTARY_ISSUER_ID` (an App Store Connect API key); using either means adding those to the job's
 `env:` and storing the key material as a secret.
 
+## Homebrew tap
+
+The tap [tapas-joshi/homebrew-agentuna](https://github.com/tapas-joshi/homebrew-agentuna) holds
+`Casks/agentuna.rb` (the macOS Apple Silicon app plus the `agentuna` command inside the bundle) and
+`Formula/agentuna-cli.rb` (the CLI alone for macOS Apple Silicon and Linux x86_64). Both files are
+generated from a release's `SHA256SUMS` by `scripts/homebrew-tap.sh` and pin each download's
+SHA-256.
+
+- **Automatic:** `.github/workflows/homebrew-tap.yml` runs when a release is **published** (a draft's
+  assets are not downloadable, so the tap waits) and pushes the regenerated files. It needs the
+  repository secret `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token restricted to the
+  tap repository with *Contents: read and write*. Without the secret the job only prints the files.
+  Pre-release tags (`v0.2.0-rc.1`) are skipped.
+- **Manual:** `gh release download vX.Y.Z --pattern SHA256SUMS`, then
+  `scripts/homebrew-tap.sh --version X.Y.Z --sums SHA256SUMS --out <tap checkout>`, commit, push.
+  Or run the workflow from the Actions tab with the tag.
+- **Checks before pushing by hand:** `brew style <tap>` and
+  `brew audit --strict --cask <tap>/agentuna` / `brew audit --strict <tap>/agentuna-cli`.
+- The cask removes the quarantine attribute in `postflight_steps` because the app is not
+  notarized; delete that stanza once releases are notarized with a Developer ID.
+
 ## Known limits
 
 - **Unsigned builds trigger Gatekeeper.** A dmg built without the Apple secrets carries an
-  ad-hoc signature, so macOS blocks the first launch of a downloaded copy. The user must
-  right-click → **Open** or run
+  ad-hoc signature, so macOS blocks the first launch of a downloaded copy. On macOS 15 and later
+  the user must open **System Settings > Privacy & Security** and click **Open Anyway** (the
+  right-click → **Open** override only works on macOS 13 and 14), or run
   `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`. Only a Developer ID signed and
-  notarized build avoids that.
+  notarized build avoids that; it requires the paid Apple Developer Program membership.
 - **The Linux GUI is unverified.** No CI job has built the Linux app before: `ci.yml` compiles
   the workspace on macOS and only `at-store` on Linux, so the release workflow is the first Linux
   build. Nothing starts the window, and the `.deb`/`.AppImage` from the Tauri bundler have never

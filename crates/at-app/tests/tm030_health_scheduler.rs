@@ -142,19 +142,45 @@ fn due_now(scheduler: &mut HealthScheduler, target: &HealthTarget) -> at_app::ap
         .expect("fixture target is due after the base interval")
 }
 
-/// Reads `pid=` / `child=` from a fixture report.
-fn read_report(path: &Path) -> (i32, Option<i32>) {
-    let text = fs::read_to_string(path).expect("fixture report exists");
+/// How long a spawned fixture gets to write its report.
+///
+/// The fixture writes the report before it starts serving, so this bound only expires when the
+/// fixture never ran; it is deliberately generous because a loaded runner schedules the child
+/// tens of milliseconds late.
+const REPORT_WAIT: Duration = Duration::from_secs(15);
+
+/// The report's `pid=` and `child=` lines, once the file holds a parseable pid.
+fn parse_report(path: &Path) -> Option<(i32, Option<i32>)> {
+    let text = fs::read_to_string(path).ok()?;
     let mut pid = None;
     let mut child = None;
     for line in text.lines() {
         if let Some(value) = line.strip_prefix("pid=") {
-            pid = value.parse().ok();
+            pid = value.trim().parse().ok();
         } else if let Some(value) = line.strip_prefix("child=") {
-            child = value.parse().ok();
+            child = value.trim().parse().ok();
         }
     }
-    (pid.expect("fixture wrote its pid"), child)
+    Some((pid?, child))
+}
+
+/// Describes a report file for a failure message.
+fn describe_report(path: &Path) -> String {
+    match fs::read_to_string(path) {
+        Ok(text) => format!("contents {text:?}"),
+        Err(error) => format!("unreadable: {error}"),
+    }
+}
+
+/// Reads `pid=` / `child=` from a fixture report that [`wait_for_report`] already observed.
+fn read_report(path: &Path) -> (i32, Option<i32>) {
+    parse_report(path).unwrap_or_else(|| {
+        panic!(
+            "fixture report {} has no pid line: {}",
+            path.display(),
+            describe_report(path)
+        )
+    })
 }
 
 fn alive(pid: i32) -> bool {
@@ -189,16 +215,27 @@ async fn wait_until_gone(pid: i32, what: &str) {
     panic!("{what} process {pid} is still alive");
 }
 
-/// Waits for the fixture to write its report (it is alive by then).
+/// Waits until the fixture has written a complete report (it is alive by then).
+///
+/// The report file is created before it is filled in, so watching for the path alone races the
+/// `pid=` line: a create can be delivered while the file is still empty, and a shutdown that
+/// lands in that window kills the fixture before it ever writes. Waiting for the parsed content
+/// removes the race instead of widening it.
 async fn wait_for_report(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let began = Instant::now();
+    let deadline = began + REPORT_WAIT;
     while Instant::now() < deadline {
-        if path.exists() {
+        if parse_report(path).is_some() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("fixture never wrote its report at {}", path.display());
+    panic!(
+        "the fixture wrote no pid within {REPORT_WAIT:?} (waited {:?}) at {}: {}",
+        began.elapsed(),
+        path.display(),
+        describe_report(path)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -301,7 +338,9 @@ async fn a_hung_fixture_is_cancelled_at_the_deadline_and_the_next_server_still_r
         "{latest:?}"
     );
 
-    // The hung process tree is gone once the deadline drops the session.
+    // The hung process tree is gone once the deadline drops the session. The report names it and
+    // is written before the fixture blocks, so wait for it rather than assume it landed.
+    wait_for_report(&hung_report).await;
     let (pid, child) = read_report(&hung_report);
     wait_until_gone(pid, "hung fixture").await;
     if let Some(child) = child {

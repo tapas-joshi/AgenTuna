@@ -18,8 +18,9 @@ env:
 jobs:
   rust:
     name: rust
-    runs-on: macos-15-intel
-    # A cold cache on this Intel image spends ~18 min in tests, ~9 in clippy and over 14 in the
+    runs-on: macos-15
+    # Apple Silicon image (the platform the app ships for). Timings below were measured on the Intel
+    # image: a cold cache spent ~18 min in tests, ~9 in clippy and over 14 in the
     # release build with the embedded frontend, so 45 minutes cancelled the job mid-build. 70
     # leaves headroom for the whole sequence without hiding a genuine hang.
     timeout-minutes: 70
@@ -211,13 +212,14 @@ jobs:
   visual:
     name: visual (${{ matrix.shard }}/3)
     # TU-025. Informational: the required checks stay `rust`, `frontend` and `supply-chain`.
-    # The goldens were captured with Chromium on macOS and macOS/Linux font rasterisation differs
-    # by more than the 0.1% pixel budget, so this runs on the same macOS image as `rust`.
+    # The goldens were captured with Chromium on Apple Silicon macOS and macOS/Linux font
+    # rasterisation differs by more than the 0.1% pixel budget, so this runs on the same macOS
+    # image as `rust` (Apple Silicon, like the machine that produced the goldens).
     #
     # Three shards keep each one inside the story's 180-second budget: the whole suite took 479 s
     # on this image, so one job could never fit. `fail-fast: false` keeps every shard's failures
     # visible instead of cancelling the others.
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 15
     strategy:
       fail-fast: false
