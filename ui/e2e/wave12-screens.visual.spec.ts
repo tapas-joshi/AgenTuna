@@ -104,9 +104,9 @@ test("Migrate scan, resolve and plan steps render the designed stepper and panel
   await expect(page).toHaveScreenshot("migrate-resolve-design.png", { animations: "disabled", caret: "hide" });
 
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "Plan the move" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Preview the exact changes" })).toBeVisible();
   await expect(page.getByText("3 items copied into the store")).toBeVisible();
-  await page.getByRole("button", { name: "Show file list" }).click();
+  await expect(page.getByRole("region", { name: "Planned files" })).toBeVisible();
   await expect(page.getByText(/Back up original/)).toBeVisible();
   await expect(page).toHaveScreenshot("migrate-plan-design.png", { animations: "disabled", caret: "hide" });
 });

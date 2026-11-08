@@ -221,6 +221,7 @@ impl From<RemoteError> for BackupError {
             {
                 Self::Offline
             }
+            RemoteError::Denied(denied) => Self::Denied(denied),
             RemoteError::NonFastForward => Self::Conflict,
             other => Self::Git(other),
         }
@@ -398,6 +399,7 @@ pub fn push_backup(request: &mut BackupRequest<'_>) -> Result<BackupOutcome, Bac
                 {
                     "offline"
                 }
+                RemoteError::Denied(_) => "network_denied",
                 _ => "git",
             };
             let _ = persist_error(request.db, &RemoteBackupStatus::Error, Some(kind));
@@ -448,6 +450,7 @@ pub fn push_backup(request: &mut BackupRequest<'_>) -> Result<BackupOutcome, Bac
                     {
                         "offline"
                     }
+                    RemoteError::Denied(_) => "network_denied",
                     _ => "git",
                 };
                 let _ = persist_error(request.db, &RemoteBackupStatus::Error, Some(kind));

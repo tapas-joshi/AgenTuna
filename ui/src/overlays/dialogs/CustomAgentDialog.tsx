@@ -5,6 +5,7 @@ import type { AgentCardView } from "../../generated/AgentCardView";
 import type { CustomAgentPreviewView } from "../../generated/CustomAgentPreviewView";
 import type { CustomAgentSpecRequest } from "../../generated/CustomAgentSpecRequest";
 import { Modal } from "./Modal";
+import { commandErrorMessage } from "../../lib/commandError";
 
 export interface CustomAgentDialogProps {
   /** Whether the dialog is visible. */
@@ -63,7 +64,7 @@ export function CustomAgentDialog({ open, onClose, onCreated, onOpenExisting }: 
         .catch((cause: unknown) => {
           if (requestVersion.current === version) {
             setPreview(null);
-            setPreviewError(cause instanceof Error ? cause.message : String(cause));
+            setPreviewError(commandErrorMessage(cause));
           }
         })
         .finally(() => {
@@ -86,7 +87,7 @@ export function CustomAgentDialog({ open, onClose, onCreated, onOpenExisting }: 
       });
       if (selected !== null) patch({ root: selected });
     } catch (cause) {
-      setSaveError(cause instanceof Error ? cause.message : String(cause));
+      setSaveError(commandErrorMessage(cause));
     }
   }
 
@@ -99,7 +100,7 @@ export function CustomAgentDialog({ open, onClose, onCreated, onOpenExisting }: 
       await onCreated(agent);
       onClose();
     } catch (cause) {
-      setSaveError(cause instanceof Error ? cause.message : String(cause));
+      setSaveError(commandErrorMessage(cause));
     } finally {
       setSaving(false);
     }

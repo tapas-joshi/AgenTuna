@@ -53,6 +53,22 @@ describe("text contrast", () => {
   test.each(MODES)("%s: every text-on-surface pair reaches 4.5:1", (mode) => {
     expect(report(mode)).toBe("");
   });
+  test.each(MODES)("%s: body, muted, badge and scope token pairs meet WCAG thresholds", (mode) => {
+    const tokens = ThemeTokens[mode];
+    const textPairs: Array<[string, string, string]> = [
+      ...surfaces(tokens).map(([name, surface]) => [`body on ${name}`, tokens.color.text.primary, surface] as [string, string, string]),
+      ...surfaces(tokens).map(([name, surface]) => [`muted on ${name}`, tokens.color.text.muted, surface] as [string, string, string]),
+      ...(["success", "warning", "danger"] as const).flatMap((tone) =>
+        surfaces(tokens).map(([name, surface]) => [`${tone} badge on ${name}`, tokens.color[tone], surface] as [string, string, string]),
+      ),
+      ...(["global", "user", "project", "local"] as const).flatMap((scope) =>
+        surfaces(tokens).map(([name, surface]) => [`${scope} scope on ${name}`, tokens.color.scope[scope], surface] as [string, string, string]),
+      ),
+    ];
+    for (const [pair, foreground, background] of textPairs) {
+      expect(contrastRatio(foreground, background), `${mode}: ${pair}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
   test.each(MODES)("%s: on-accent text reaches 4.5:1 on accent fills", (mode) => {
     const tokens = ThemeTokens[mode];
     expect(contrastRatio(tokens.color.onAccent, tokens.color.accentFill), mode).toBeGreaterThanOrEqual(4.5);

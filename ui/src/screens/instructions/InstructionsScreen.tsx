@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Badge, Button, MarkdownEditor } from "../../components";
-import type { MarkdownEditorHandle, MarkdownEditorMode } from "../../components";
+import { Badge, Button } from "../../components";
+import { MarkdownEditor } from "../../components/editor/markdown-editor";
+import type { MarkdownEditorHandle, MarkdownEditorMode } from "../../components/editor/markdown-editor";
 import { DiffViewer } from "../../components/diff/diff-viewer";
 import type { InstructionConflictView } from "../../generated/InstructionConflictView";
 import type { InstructionFileView } from "../../generated/InstructionFileView";
@@ -12,6 +13,7 @@ import { Modal } from "../../overlays";
 import { NewRuleDialog } from "../../overlays/dialogs/NewRuleDialog";
 import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot, useAppState } from "../../state/context";
+import { commandErrorMessage } from "../../lib/commandError";
 
 const SCOPE_LABEL: Readonly<Record<string, string>> = {
   global: "Global",
@@ -143,7 +145,7 @@ export function InstructionsScreen() {
         return requested?.path ?? (result.some((file) => file.path === old) ? old : (result[0]?.path ?? null));
       });
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
     } finally {
       setLoading(false);
     }
@@ -171,7 +173,7 @@ export function InstructionsScreen() {
       }
       setExternalReloadOpen(false);
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -253,8 +255,8 @@ export function InstructionsScreen() {
         await load();
       }
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Instruction file not saved" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Instruction file not saved" });
     } finally {
       setBusy(false);
     }
@@ -275,8 +277,8 @@ export function InstructionsScreen() {
         await load();
       }
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Instruction file not saved" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Instruction file not saved" });
     } finally {
       setBusy(false);
     }

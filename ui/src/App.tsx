@@ -1,49 +1,62 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import type { JSX } from "react";
 import type { AppInfo } from "./generated/AppInfo";
 import type { AgentCardView } from "./generated/AgentCardView";
 import type { InstructionCreateOptions } from "./generated/InstructionCreateOptions";
 import type { ProjectView } from "./generated/ProjectView";
 import type { SourceKind } from "./generated/SourceKind";
 import { ScopeSwitcher } from "./components/scope_switcher/ScopeSwitcher";
+import { LoadingState } from "./components/states";
 import type { StateRouteId } from "./components/states";
 import { Modal, ModalHost, OverlayStackProvider } from "./overlays";
 import { ToastProvider } from "./overlays/toasts";
 import { createAppState } from "./state/AppState";
-import { AppStateProvider, useAppSnapshot } from "./state/context";
+import { AppStateProvider } from "./state/context";
 import { Shell } from "./shell";
+import { RouteErrorBoundary } from "./shell/RouteErrorBoundary";
 import { shellAgentStatus } from "./shell/agents";
+import { commandErrorMessage } from "./lib/commandError";
 import { parseItemDeepLink, SHELL_SECTION_LABEL, sectionForRoute } from "./shell/routes";
 
-import { EffectiveScreen } from "./screens/effective/EffectiveScreen";
-import { MigrateScanScreen } from "./screens/migrate/MigrateScanScreen";
 import { AppOverlays } from "./overlays/AppOverlays";
 import { OverviewScreen } from "./screens/overview/OverviewScreen";
-import { AddSkillWizard } from "./screens/add_skill/AddSkillWizard";
-import { SecretInventoryScreen } from "./screens/secrets/SecretInventoryScreen";
-import { SkillDetailScreen } from "./screens/skill_detail/SkillDetailScreen";
-import { PreferencesScreen } from "./screens/preferences/PreferencesScreen";
-import { InstructionsScreen } from "./screens/instructions/InstructionsScreen";
-import { AgentsScreen } from "./screens/agents/AgentsScreen";
-import { PresetsScreen } from "./screens/presets/PresetsScreen";
-import { AddMcpServerForm } from "./screens/mcp_form";
-import { McpListScreen } from "./screens/mcp_list/McpListScreen";
-import { SkillsScreen } from "./screens/skills/SkillsScreen";
-import { McpDetailScreen } from "./screens/mcp_detail/McpDetailScreen";
-import { DriftScreen } from "./screens/drift/DriftScreen";
 import { DriftBanner } from "./screens/drift/DriftBanner";
 import { ToastEventBridge } from "./overlays/toasts/ToastEventBridge";
-import type { AddMcpServerDraft, McpServerFormInitialState } from "./screens/mcp_form";
-import type { McpServerDetailView } from "./generated/McpServerDetailView";
-import type { McpChangeSetPreviewView } from "./generated/McpChangeSetPreviewView";
-import type { McpLaunchApproval } from "./generated/McpLaunchApproval";
-import type { McpLaunchApprovalView } from "./generated/McpLaunchApprovalView";
-import type { McpPlanPreviewRequest } from "./generated/McpPlanPreviewRequest";
-import type { McpSaveRequest } from "./generated/McpSaveRequest";
-import type { McpSaveResultView } from "./generated/McpSaveResultView";
-import type { McpTestResultView } from "./generated/McpTestResultView";
 import type { ScopeToken } from "./theme";
+
+const loadSkillsScreen = () => import("./screens/skills/SkillsScreen");
+const loadMcpListScreen = () => import("./screens/mcp_list/McpListScreen");
+
+/**
+ * Routed screens load on demand (route-level code splitting, TF-035). The
+ * frequently used list routes are fetched after the shell paints so the first
+ * click can use the browser's module cache without inflating the entry chunk.
+ */
+const EffectiveScreen = lazy(() => import("./screens/effective/EffectiveScreen").then((m) => ({ default: m.EffectiveScreen })));
+const MigrateScanScreen = lazy(() => import("./screens/migrate/MigrateScanScreen").then((m) => ({ default: m.MigrateScanScreen })));
+const AddSkillWizard = lazy(() => import("./screens/add_skill/AddSkillWizard").then((m) => ({ default: m.AddSkillWizard })));
+const SecretInventoryScreen = lazy(() => import("./screens/secrets/SecretInventoryScreen").then((m) => ({ default: m.SecretInventoryScreen })));
+const SkillDetailScreen = lazy(() => import("./screens/skill_detail/SkillDetailScreen").then((m) => ({ default: m.SkillDetailScreen })));
+const PreferencesScreen = lazy(() => import("./screens/preferences/PreferencesScreen").then((m) => ({ default: m.PreferencesScreen })));
+const InstructionsScreen = lazy(() => import("./screens/instructions/InstructionsScreen").then((m) => ({ default: m.InstructionsScreen })));
+const AgentsScreen = lazy(() => import("./screens/agents/AgentsScreen").then((m) => ({ default: m.AgentsScreen })));
+const PresetsScreen = lazy(() => import("./screens/presets/PresetsScreen").then((m) => ({ default: m.PresetsScreen })));
+const McpFormRoute = lazy(() => import("./screens/mcp_form/McpFormRoute").then((m) => ({ default: m.McpFormRoute })));
+const McpListScreen = lazy(() => loadMcpListScreen().then((m) => ({ default: m.McpListScreen })));
+const SkillsScreen = lazy(() => loadSkillsScreen().then((m) => ({ default: m.SkillsScreen })));
+const McpDetailScreen = lazy(() => import("./screens/mcp_detail/McpDetailScreen").then((m) => ({ default: m.McpDetailScreen })));
+const DriftScreen = lazy(() => import("./screens/drift/DriftScreen").then((m) => ({ default: m.DriftScreen })));
+
+/** Suspense fallback for a route chunk still loading; the StateView loading state. */
+function RouteSuspenseFallback(): JSX.Element {
+  return (
+    <div className="mx-auto flex w-full max-w-[1200px] flex-col p-24" role="presentation">
+      <LoadingState title="Loading screen…" skeletonRows={8} minHeight={600} />
+    </div>
+  );
+}
 
 /**
  * Subscribes to a Tauri event and returns the cleanup for `useEffect`.
@@ -67,92 +80,7 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
     unlisten?.();
   };
 }
-/** Maps the form draft onto the typed planner request; preview and draft test share this shape. */
-function draftRequest(draft: AddMcpServerDraft, projectId: string | null, itemId: string | null): McpPlanPreviewRequest {
-  return {
-    name: draft.name,
-    transport: draft.transport,
-    command: draft.command,
-    args: [...draft.args],
-    url: draft.url,
-    headers: draft.headers.map(({ name, value }) => ({ name, value })),
-    env: draft.env.map(({ name, value }) => ({ name, value })),
-    scope: draft.scope,
-    agents: [...draft.agents],
-    project_id: projectId,
-    item_id: itemId,
-  };
-}
-
-/** Add/edit MCP form route; a selected item id loads the canonical server for editing. */
-function McpFormRoute({ onClose, projectId }: { readonly onClose: () => void; readonly projectId: string | null }) {
-  const snapshot = useAppSnapshot();
-  const selectedId = snapshot.selections["mcp-form"]?.[0] ?? null;
-  const [initialState, setInitialState] = useState<McpServerFormInitialState | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(selectedId === null);
-  const [globalAllowed, setGlobalAllowed] = useState(false);
-  useEffect(() => {
-    let live = true;
-    void invoke<{ readonly global_store?: { readonly status?: string } }>("overview_load", { activeScope: "global" }).then((overview) => {
-      const status = overview?.global_store?.status;
-      if (live && typeof status === "string") setGlobalAllowed(status === "available");
-    }, () => {
-      if (live) setGlobalAllowed(false);
-    });
-    return () => { live = false; };
-  }, []);
-
-  useEffect(() => {
-    if (selectedId === null) { setLoaded(true); return; }
-    let live = true;
-    invoke<McpServerDetailView>("mcp_server_detail", {
-      request: { item_id: selectedId, scope: snapshot.scope, project_id: snapshot.activeProject },
-    }).then((detail) => {
-      if (!live) return;
-      const transport: "stdio" | "http" = detail.transport === "http" ? "http" : "stdio";
-      const rows = detail.env.map((row) => ({ name: row.key, value: row.is_secret ? (row.keychain_account ?? "") : row.value }));
-      setInitialState({
-        id: detail.item_id,
-        name: detail.name,
-        transport,
-        command: detail.command ?? "",
-        args: [...detail.args],
-        url: detail.url ?? "",
-        headers: transport === "http" ? rows : [],
-        env: transport === "stdio" ? rows.map((row) => ({ ...row, kind: detail.env.find((entry) => entry.key === row.name)?.is_secret === true ? "secret" as const : "literal" as const })) : [],
-        scope: detail.scope as AddMcpServerDraft["scope"],
-        agents: detail.agents.filter((agent) => agent.enabled).map((agent) => agent.id as AddMcpServerDraft["agents"][number]),
-      });
-    }).catch((cause: unknown) => {
-      if (!live) return;
-      const message = typeof cause === "object" && cause !== null && "message" in cause && typeof cause.message === "string"
-        ? cause.message
-        : "The MCP server could not be loaded.";
-      setLoadError(message);
-    }).finally(() => { if (live) setLoaded(true); });
-    return () => { live = false; };
-  }, [selectedId, snapshot.scope, snapshot.activeProject]);
-
-  if (loadError !== null) return <p role="alert" className="mx-auto max-w-[960px] p-24 text-13 text-danger">{loadError}</p>;
-  if (!loaded) return <p role="status" className="mx-auto max-w-[960px] p-24 text-13 text-muted">Loading MCP server…</p>;
-  return <AddMcpServerForm
-    mode={initialState === null ? "add" : "edit"}
-    initialState={initialState ?? undefined}
-    initialScope={snapshot.scope}
-    globalAllowed={globalAllowed}
-    onCancel={onClose}
-    onPlan={(draft: AddMcpServerDraft, itemId?: string) => invoke<McpChangeSetPreviewView>("mcp_plan_preview", { request: draftRequest(draft, projectId, itemId ?? null) })}
-    onSave={async (previewId, selectedAgents, acknowledgeUnsupported) => {
-      const request: McpSaveRequest = { preview_id: previewId, selected_agents: [...selectedAgents], acknowledge_unsupported: acknowledgeUnsupported };
-      await invoke<McpSaveResultView>("mcp_save", { request });
-    }}
-    onPrepareLaunch={(draft: AddMcpServerDraft) => invoke<McpLaunchApprovalView>("mcp_launch_prepare", { request: draftRequest(draft, projectId, null) })}
-    onTest={(draft: AddMcpServerDraft, approval: McpLaunchApproval) => invoke<McpTestResultView>("mcp_test_draft", { request: { draft: draftRequest(draft, projectId, null), approval } })}
-  />;
-}
-
-/** Placeholder routed body; real screen contents are supplied by their stories. */
+/** Routed body; each screen is a lazy chunk loaded on first visit (TF-035). */
 function RouteBody({
   route,
   onClose,
@@ -231,7 +159,19 @@ export function App() {
     : null;
 
   useEffect(() => {
-    invoke<AppInfo>("app_info").then(setInfo, (e: unknown) => setError(String(e)));
+    const preload = () => {
+      void loadSkillsScreen().catch(() => undefined);
+      void loadMcpListScreen().catch(() => undefined);
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const handle = window.requestIdleCallback(preload);
+      return () => window.cancelIdleCallback(handle);
+    }
+    const timer = globalThis.setTimeout(preload, 0);
+    return () => globalThis.clearTimeout(timer);
+  }, []);
+  useEffect(() => {
+    invoke<AppInfo>("app_info").then(setInfo, (e: unknown) => setError(commandErrorMessage(e)));
   }, []);
   useEffect(() => {
     let active = true;
@@ -261,7 +201,7 @@ export function App() {
       setBootstrapped(true);
     }, (cause: unknown) => {
       if (!active) return;
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
       appState.restore(null, "user");
       setBootstrapped(true);
     });
@@ -371,31 +311,35 @@ export function App() {
               overlays={overlaySlots.overlays}
             >
               {error === null ? (
-                <RouteBody
-                  route={route}
-                  onClose={() => {
-                    if (appSnapshot.routeStack.length > 1) {
-                      appState.back("discard");
-                    } else {
-                      appState.navigate("mcp-list", "discard");
-                    }
-                  }}
-                  projectId={appSnapshot.activeProject}
-                  projectName={projects.find((project) => project.id === appSnapshot.activeProject)?.name ?? null}
-                  scope={appSnapshot.scope}
-                  localEnabled={currentScopeAvailability?.local_available ?? false}
-                  globalLocked={currentScopeAvailability !== null && !currentScopeAvailability.global_writable}
-                  initialSkillSource={
-                    appSnapshot.screenState["add-skill:source"] === "git" ||
-                    appSnapshot.screenState["add-skill:source"] === "new" ||
-                    appSnapshot.screenState["add-skill:source"] === "library" ||
-                    appSnapshot.screenState["add-skill:source"] === "marketplace" ||
-                    appSnapshot.screenState["add-skill:source"] === "folder" ||
-                    appSnapshot.screenState["add-skill:source"] === "zip"
-                      ? (appSnapshot.screenState["add-skill:source"] as SourceKind)
-                      : null
-                  }
-                />
+                <RouteErrorBoundary>
+                  <Suspense fallback={<RouteSuspenseFallback />}>
+                    <RouteBody
+                      route={route}
+                      onClose={() => {
+                        if (appSnapshot.routeStack.length > 1) {
+                          appState.back("discard");
+                        } else {
+                          appState.navigate("mcp-list", "discard");
+                        }
+                      }}
+                      projectId={appSnapshot.activeProject}
+                      projectName={projects.find((project) => project.id === appSnapshot.activeProject)?.name ?? null}
+                      scope={appSnapshot.scope}
+                      localEnabled={currentScopeAvailability?.local_available ?? false}
+                      globalLocked={currentScopeAvailability !== null && !currentScopeAvailability.global_writable}
+                      initialSkillSource={
+                        appSnapshot.screenState["add-skill:source"] === "git" ||
+                        appSnapshot.screenState["add-skill:source"] === "new" ||
+                        appSnapshot.screenState["add-skill:source"] === "library" ||
+                        appSnapshot.screenState["add-skill:source"] === "marketplace" ||
+                        appSnapshot.screenState["add-skill:source"] === "folder" ||
+                        appSnapshot.screenState["add-skill:source"] === "zip"
+                          ? (appSnapshot.screenState["add-skill:source"] as SourceKind)
+                          : null
+                      }
+                    />
+                  </Suspense>
+                </RouteErrorBoundary>
               ) : (
                 <div className="p-24 text-danger">Backend error: {error}</div>
               )}

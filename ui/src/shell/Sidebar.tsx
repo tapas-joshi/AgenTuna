@@ -168,6 +168,14 @@ export function Sidebar({
                   data-section={section}
                   aria-current={active ? "page" : undefined}
                   tabIndex={0}
+                  onMouseEnter={() => {
+                    if (section === "skills") void import("../screens/skills/SkillsScreen").catch(() => undefined);
+                    if (section === "mcp") void import("../screens/mcp_list/McpListScreen").catch(() => undefined);
+                  }}
+                  onFocus={() => {
+                    if (section === "skills") void import("../screens/skills/SkillsScreen").catch(() => undefined);
+                    if (section === "mcp") void import("../screens/mcp_list/McpListScreen").catch(() => undefined);
+                  }}
                   onClick={() => onNavigate(SHELL_SECTION_ROUTE[section])}
                   className={cn(
                     NAV_ITEM_BASE,

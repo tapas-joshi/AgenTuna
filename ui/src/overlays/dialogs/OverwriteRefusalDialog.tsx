@@ -2,8 +2,9 @@ import { useRef, useState } from "react";
 import type { JSX } from "react";
 import type { AdoptApplyView } from "../../generated/AdoptApplyView";
 import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
-import type { ErrorReportView } from "../../components/states";
+import { ErrorReportView } from "../../components/states";
 import { Button } from "../../components/button";
+import { commandErrorMessage } from "../../lib/commandError";
 import { Modal } from "./Modal";
 
 /** How an adopted item's native original is handled. */
@@ -103,7 +104,7 @@ export function OverwriteRefusalDialog({
       setResult({ ...(await onMoveAside()), remedy: "move" });
       setStatus("done");
     } catch (reason) {
-      setError(String(reason));
+      setError(commandErrorMessage(reason));
       setStatus("error");
     } finally {
       setPending(null);
@@ -118,7 +119,7 @@ export function OverwriteRefusalDialog({
       setPreview(await onAdoptPreview(handling));
       setStatus("reviewing");
     } catch (reason) {
-      setError(String(reason));
+      setError(commandErrorMessage(reason));
       setStatus("error");
     } finally {
       setPending(null);
@@ -139,7 +140,7 @@ export function OverwriteRefusalDialog({
       });
       setStatus("done");
     } catch (reason) {
-      setError(String(reason));
+      setError(commandErrorMessage(reason));
       setStatus("error");
     } finally {
       setPending(null);
@@ -152,7 +153,7 @@ export function OverwriteRefusalDialog({
       await undoHandler(result.operationId);
       onClose();
     } catch (reason) {
-      setError(String(reason));
+      setError(commandErrorMessage(reason));
       setUndoing(false);
     }
   };

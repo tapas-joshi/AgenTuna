@@ -18,6 +18,7 @@ import type { SkillTransferPreviewRequest } from "../../generated/SkillTransferP
 import type { SkillTransferPreviewView } from "../../generated/SkillTransferPreviewView";
 import type { SkillTransferBulkApplyRequest } from "../../generated/SkillTransferBulkApplyRequest";
 import type { SkillTransferBulkApplyView } from "../../generated/SkillTransferBulkApplyView";
+import { commandErrorMessage } from "../../lib/commandError";
 import type { SkillTransferBulkPreviewRequest } from "../../generated/SkillTransferBulkPreviewRequest";
 import type { SkillTransferBulkPreviewView } from "../../generated/SkillTransferBulkPreviewView";
 import { Modal } from "./Modal";
@@ -653,8 +654,5 @@ function SkillDisableInRepoDialog({
 }
 
 function errorMessage(cause: unknown): string {
-  if (typeof cause === "object" && cause !== null && "message" in cause) {
-    return String(cause.message);
-  }
-  return String(cause);
+  return commandErrorMessage(cause);
 }

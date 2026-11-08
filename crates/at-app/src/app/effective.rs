@@ -88,13 +88,24 @@ pub fn effective_query(
     state: State<'_, AppState>,
     request: EffectiveQueryRequest,
 ) -> Result<EffectiveQueryView, CommandError> {
+    effective_query_inner(&state, request)
+}
+
+/// Queries effective configuration without requiring a Tauri state wrapper.
+///
+/// # Errors
+/// Returns [`CommandError`] if active scopes, locks or database records cannot be resolved.
+pub fn effective_query_inner(
+    state: &AppState,
+    request: EffectiveQueryRequest,
+) -> Result<EffectiveQueryView, CommandError> {
     let scope = parse_scope(&request.scope)?;
     let kind = request.kind.as_deref().map(parse_kind).transpose()?;
     let agent_filter = request.agent.as_deref().map(parse_agent).transpose()?;
-    let (loaded, active_project, project_id) = active_scopes(&state)?;
-    let locks = load_locks(&state)?;
-    let environment = adapter_environment(&state, active_project.as_deref())?;
-    let observations = observe_effective_agents(&state, &environment)?;
+    let (loaded, active_project, project_id) = active_scopes(state)?;
+    let locks = load_locks(state)?;
+    let environment = adapter_environment(state, active_project.as_deref())?;
+    let observations = observe_effective_agents(state, &environment)?;
     let mut agents = Vec::with_capacity(observations.len());
     let database = state.database().map_err(CommandError::unavailable)?;
     agents.extend(
@@ -407,6 +418,16 @@ pub struct EffectiveCountsView {
 #[tauri::command]
 pub fn effective_counts(
     state: tauri::State<'_, super::state::AppState>,
+) -> Result<EffectiveCountsView, super::commands::CommandError> {
+    effective_counts_inner(&state)
+}
+
+/// Counts indexed items per kind without requiring a Tauri state wrapper.
+///
+/// # Errors
+/// Returns [`CommandError`] if the database cannot be accessed.
+pub fn effective_counts_inner(
+    state: &super::state::AppState,
 ) -> Result<EffectiveCountsView, super::commands::CommandError> {
     let database = state
         .database()

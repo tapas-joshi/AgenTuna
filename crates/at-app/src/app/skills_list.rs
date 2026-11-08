@@ -210,7 +210,11 @@ pub(crate) fn skills_list_inner(
                     .cloned()
                     .or_else(|| row.native_path.clone()),
             };
-            let (state, enabled) = deployment_cell(*deployment_state);
+            let (state, enabled) = if native && *deployment_state == DeploymentState::Native {
+                ("native", true)
+            } else {
+                deployment_cell(*deployment_state)
+            };
             cells.push(SkillAgentCellView {
                 agent: agent_id.to_string(),
                 state: state.to_owned(),

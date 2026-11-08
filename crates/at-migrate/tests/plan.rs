@@ -167,6 +167,7 @@ fn scanned_item(path: PathBuf, name: &str) -> ScanItem {
         scope: Scope::User,
         content_hash: None,
         normalized_hash: None,
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,

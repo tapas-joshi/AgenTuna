@@ -95,7 +95,7 @@ test("keyboard-only project and scope switching, skill bulk actions, and dialogs
   }, { rows: managedRows, agents: managedAgents });
   await page.keyboard.press("Meta+2");
   const skills = page.getByRole("main", { name: "Skills" });
-  await expect(skills.getByText("code-review")).toBeVisible();
+  await expect(skills.getByText("code-review", { exact: true })).toBeVisible();
   const selectSkill = skills.getByRole("checkbox", { name: "Select code-review" });
   const checkboxTabs = await tabTo(page, selectSkill, "the code-review selection checkbox");
   await page.keyboard.press("Space");
@@ -147,7 +147,7 @@ test("keyboard-only MCP list, detail and form editing", async ({ page }) => {
   await gotoShell(page);
   await page.keyboard.press("Meta+3");
   const list = page.getByRole("main", { name: "MCP Servers" });
-  await expect(list.getByText("Visual server")).toBeVisible();
+  await expect(list.getByText("Visual server", { exact: true })).toBeVisible();
   const rowActions = page.getByRole("button", { name: "Actions for Visual server" });
   const actionTabs = await tabTo(page, rowActions, "the Visual server actions button");
   await page.keyboard.press("Enter");
@@ -236,8 +236,9 @@ test("keyboard-only drift review and four-step migration", async ({ page }) => {
   const continueResolve = page.getByRole("button", { name: "Continue" });
   const resolveContinueTabs = await tabTo(page, continueResolve, "the Resolve Continue button");
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "Plan the move" })).toBeVisible();
-  steps.push({ step: "Resolve migration conflict and continue", keystrokes: `Tab × ${resolveTabs}; ArrowRight × 2; Tab × ${resolveContinueTabs}; Enter`, expectedFocus: "Plan the move step opens", observed: "Plan the move heading visible", result: "pass" });
+  await expect(page.getByRole("heading", { name: "Preview the exact changes" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Planned files" })).toBeVisible();
+  steps.push({ step: "Resolve migration conflict and continue", keystrokes: `Tab × ${resolveTabs}; ArrowRight × 2; Tab × ${resolveContinueTabs}; Enter`, expectedFocus: "Preview step opens with the reviewed file list", observed: "Preview the exact changes heading and Planned files region visible", result: "pass" });
 
   const apply = page.getByRole("button", { name: "Apply 3 items" });
   const applyTabs = await tabTo(page, apply, "the Apply migration button");

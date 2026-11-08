@@ -12,6 +12,7 @@
 import type { JobError } from "../../generated/JobError";
 import type { JobFinishedEvent } from "../../generated/JobFinishedEvent";
 import type { MigrateApplyResultView } from "../../generated/MigrateApplyResultView";
+import { commandErrorMessage } from "../../lib/commandError";
 
 /** What the wait needs from the bridge, so tests can supply a fake. */
 export interface ApplyJobBridge {
@@ -63,10 +64,10 @@ export function failureFromCommandError(cause: unknown): ApplyFailure {
   if (typeof cause === "object" && cause !== null) {
     const code = "code" in cause && typeof cause.code === "string" ? cause.code : "";
     const message =
-      "message" in cause && typeof cause.message === "string" ? cause.message : String(cause);
+      "message" in cause && typeof cause.message === "string" ? cause.message : commandErrorMessage(cause);
     return { code, message, remedy: null };
   }
-  return { code: "", message: String(cause), remedy: null };
+  return { code: "", message: commandErrorMessage(cause), remedy: null };
 }
 
 /** One line combining the backend's explanation and its remedy. */
@@ -78,9 +79,8 @@ export function describeFailure(failure: ApplyFailure): string {
 /**
  * Describes any command rejection for display.
  *
- * A Tauri command rejects with the serialized error value, not an `Error`, so `String(cause)`
- * prints `[object Object]` and hides the backend's message. Every migrate screen renders this
- * instead, so a refusal always shows the backend's own explanation and remedy.
+ * A Tauri command rejects with a serialized error value; the shared formatter extracts its
+ * human-readable message instead of coercing an object to `[object Object]`.
  */
 export function describeCause(cause: unknown): string {
   return describeFailure(failureFromCommandError(cause));

@@ -77,10 +77,12 @@ pub struct DriftPreviewView {
     pub path: String,
     /// Canonical store path, when the item remains available.
     pub canonical_path: Option<String>,
-    /// Whether current canonical bytes still match the recorded baseline hash.
+    /// Whether verified baseline bytes are available from the canonical store or a retained backup.
     pub previous_version_available: bool,
-    /// Unified diff when the previous-version bytes are still available.
+    /// Unified diff from verified baseline bytes to the current on-disk file.
     pub diff: String,
+    /// Why the baseline cannot be shown when its bytes were not retained.
+    pub baseline_unavailable_reason: Option<String>,
     /// Current on-disk UTF-8 content when it can be shown without a fabricated diff.
     pub on_disk_content: Option<String>,
     /// Whether displayed content was redacted through the process secret redactor.
@@ -283,17 +285,28 @@ pub fn drift_preview_inner(
             .map(|hash| hash.to_string()),
         _ => None,
     };
-    let previous_version_available =
-        baseline_matches(event.expected_hash.as_deref(), canonical_hash.as_deref());
-    let diff = if previous_version_available {
-        at_fs::diff::unified(
-            &disk_path.display().to_string(),
-            store_bytes.as_deref(),
-            disk_bytes.as_deref().unwrap_or_default(),
-        )
-    } else {
-        String::new()
-    };
+    let paths = state
+        .paths()
+        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
+    let (baseline_bytes, baseline_unavailable_reason) = recover_drift_baseline(
+        database.connection(),
+        paths,
+        &event,
+        target.content,
+        store_bytes.as_deref(),
+        canonical_hash.as_deref(),
+    )?;
+    let previous_version_available = baseline_bytes.is_some();
+    let diff = baseline_bytes
+        .as_deref()
+        .map(|baseline| {
+            at_fs::diff::unified(
+                &disk_path.display().to_string(),
+                Some(baseline),
+                disk_bytes.as_deref().unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
     let (diff, diff_redacted) = redact(state, diff);
     let (on_disk_content, content_redacted) = match disk_bytes {
         Some(bytes) => match String::from_utf8(bytes) {
@@ -311,6 +324,7 @@ pub fn drift_preview_inner(
         canonical_path: canonical_path.map(|path| path.display().to_string()),
         previous_version_available,
         diff,
+        baseline_unavailable_reason,
         on_disk_content,
         redacted: diff_redacted || content_redacted,
     })
@@ -1433,16 +1447,157 @@ fn open_in_text_editor(path: &Path) -> Result<(), CommandError> {
 
     Ok(())
 }
+fn recover_drift_baseline(
+    connection: &rusqlite::Connection,
+    paths: &at_store::paths::AppPaths,
+    event: &DriftEvent,
+    content: DriftContent,
+    canonical_bytes: Option<&[u8]>,
+    canonical_hash: Option<&str>,
+) -> Result<(Option<Vec<u8>>, Option<String>), CommandError> {
+    if baseline_matches(event.expected_hash.as_deref(), canonical_hash)
+        && let Some(bytes) = canonical_bytes
+    {
+        return Ok((Some(bytes.to_vec()), None));
+    }
+    let Some(expected_hash) = event.expected_hash.as_deref() else {
+        return Ok((
+            None,
+            Some(String::from(
+                "No baseline hash was recorded for this drift event.",
+            )),
+        ));
+    };
+    if !matches!(content, DriftContent::File | DriftContent::RuleFile) {
+        return Ok((
+            None,
+            Some(String::from(
+                "The retained baseline is not recoverable as one file.",
+            )),
+        ));
+    }
+    let backups =
+        at_db::backups::backups_for_path(connection, &event.path, Some(BACKUP_LIST_LIMIT))
+            .map_err(|_| CommandError::internal("could not query drift baseline backups"))?;
+    let mut matching_backup_found = false;
+    for backup in backups {
+        if backup.content_hash.as_deref() != Some(expected_hash) {
+            continue;
+        }
+        matching_backup_found = true;
+        let Ok(bytes) = backup_payload(paths, &backup) else {
+            continue;
+        };
+        let recovered_hash = match content {
+            DriftContent::File => at_store::hash_bytes(&bytes).to_string(),
+            DriftContent::RuleFile => at_store::hash_rule_bytes(&bytes).to_string(),
+            _ => continue,
+        };
+        if recovered_hash == expected_hash {
+            return Ok((Some(bytes), None));
+        }
+    }
+    let reason = if matching_backup_found {
+        "A matching backup is unavailable or failed its integrity check."
+    } else {
+        "No retained backup matches the recorded baseline hash."
+    };
+    Ok((None, Some(String::from(reason))))
+}
+
 fn baseline_matches(expected_hash: Option<&str>, current_hash: Option<&str>) -> bool {
     expected_hash.is_some_and(|expected| current_hash == Some(expected))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::baseline_matches;
+    use super::{baseline_matches, recover_drift_baseline};
+    use at_model::{Agent, AgentId, Scope};
 
     #[test]
-    fn a_previous_version_is_available_only_when_current_canonical_bytes_match_the_recorded_hash() {
+    fn baseline_content_recovers_from_a_verified_backup_when_the_canonical_copy_has_changed() {
+        let temporary = tempfile::tempdir().expect("temporary sandbox");
+        let paths = at_store::paths::AppPaths::resolve(&at_store::paths::PathEnvironment {
+            home: at_store::paths::HomeSource::Injected(temporary.path().to_path_buf()),
+            overrides: at_store::paths::PathOverrides {
+                home: Some(temporary.path().join("support")),
+                ..Default::default()
+            },
+            project_root: None,
+        })
+        .expect("sandbox paths");
+        paths.create_dirs().expect("sandbox directories");
+        let database = at_db::Database::open_in_memory().expect("database");
+        let agent = AgentId::ClaudeCode;
+        at_db::agents::upsert_agent(
+            database.connection(),
+            &Agent {
+                id: agent.clone(),
+                display_name: String::from("Claude Code"),
+                detected: true,
+                version: None,
+            },
+        )
+        .expect("registered agent");
+
+        let original_path = temporary.path().join("native.json");
+        let original_path_text = original_path.to_string_lossy().into_owned();
+        let baseline = br#"{"mcpServers":{"github":{}}"#;
+        let baseline_hash = at_store::hash_bytes(baseline).to_string();
+        let backup_path = paths.backup_dir().join("baseline.json");
+        let backup_path_text = backup_path.to_string_lossy().into_owned();
+        std::fs::write(&backup_path, baseline).expect("baseline backup");
+        at_db::backups::record_backup(
+            database.connection(),
+            &at_db::backups::NewBackup::new(&original_path_text, &backup_path_text)
+                .with_content(Some(&baseline_hash), Some(baseline.len() as i64)),
+        )
+        .expect("catalogued backup");
+        let event_id = at_db::drift::record_drift(
+            database.connection(),
+            &at_db::drift::NewDriftEvent::new(&agent, Scope::User, &original_path_text)
+                .with_hashes(Some(&baseline_hash), Some("external")),
+        )
+        .expect("drift event");
+        let event = at_db::drift::drift_event(database.connection(), event_id)
+            .expect("drift query")
+            .expect("drift event exists");
+        let changed_canonical = br#"{"mcpServers":{"github":{"new":true}}}"#;
+
+        let (recovered, reason) = recover_drift_baseline(
+            database.connection(),
+            &paths,
+            &event,
+            at_engine::drift::DriftContent::File,
+            Some(changed_canonical),
+            Some(&at_store::hash_bytes(changed_canonical).to_string()),
+        )
+        .expect("baseline recovery");
+
+        assert_eq!(recovered.as_deref(), Some(baseline.as_slice()));
+        assert_eq!(reason, None);
+        database
+            .connection()
+            .execute("DELETE FROM backups", [])
+            .expect("remove retained baseline");
+        let (unavailable, reason) = recover_drift_baseline(
+            database.connection(),
+            &paths,
+            &event,
+            at_engine::drift::DriftContent::File,
+            Some(changed_canonical),
+            Some(&at_store::hash_bytes(changed_canonical).to_string()),
+        )
+        .expect("baseline availability");
+        assert_eq!(unavailable, None);
+        assert_eq!(
+            reason.as_deref(),
+            Some("No retained backup matches the recorded baseline hash.")
+        );
+    }
+
+    #[test]
+    fn baseline_hash_matches_only_exact_recorded_content() {
         assert!(baseline_matches(Some("baseline"), Some("baseline")));
         assert!(!baseline_matches(Some("baseline"), Some("newer")));
         assert!(!baseline_matches(Some("baseline"), None));

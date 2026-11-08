@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../../components/button";
 import type { AdoptApplyView } from "../../generated/AdoptApplyView";
 import type { AdoptPreviewView } from "../../generated/AdoptPreviewView";
+import { commandErrorMessage } from "../../lib/commandError";
 import { Modal } from "./Modal";
 
 export interface AdoptModalProps {
@@ -52,7 +53,7 @@ export function AdoptModal({
       })
       .catch((err: unknown) => {
         if (!active) return;
-        const msg = String(err);
+        const msg = commandErrorMessage(err, "The adoption review could not be loaded.");
         setError(msg);
         if (msg.toLowerCase().includes("stale") || msg.includes("StaleScanRecord")) {
           setIsStale(true);
@@ -80,7 +81,7 @@ export function AdoptModal({
       onAdoptSuccess(outcome);
       onClose();
     } catch (err: unknown) {
-      const msg = String(err);
+      const msg = commandErrorMessage(err, "The native item could not be adopted.");
       setError(msg);
       if (msg.toLowerCase().includes("stale") || msg.includes("StaleScanRecord")) {
         setIsStale(true);

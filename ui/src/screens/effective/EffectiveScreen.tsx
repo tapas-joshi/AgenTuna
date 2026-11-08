@@ -13,6 +13,7 @@ import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot, useAppState } from "../../state/context";
 import type { McpActionPreviewView } from "../../generated/McpActionPreviewView";
 import type { McpServerActionOutcome } from "../../generated/McpServerActionOutcome";
+import { commandErrorMessage } from "../../lib/commandError";
 
 type Kind = "skill" | "mcp_server" | "rule";
 
@@ -105,9 +106,12 @@ export function EffectiveScreen() {
   } | null>(null);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoError, setRepoError] = useState<string | null>(null);
-  const detailRef = useRef<HTMLElement | null>(null);
+  const detailRef = useRef<HTMLElement>(null);
+  const traceRequestRef = useRef(0);
+  const queryRequestRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const requestId = ++queryRequestRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -118,6 +122,7 @@ export function EffectiveScreen() {
         }),
         invoke<EffectiveCountsView>("effective_counts"),
       ]);
+      if (requestId !== queryRequestRef.current) return;
       setGlobalWritable(overview.global_store.status === "available");
       setGlobalReason(overview.global_store.reason ?? "Global store is read-only");
       setRows(result.items);
@@ -131,9 +136,10 @@ export function EffectiveScreen() {
           : (result.items[0]?.logical_id ?? result.disabled_here[0]?.logical_id ?? null),
       );
     } catch (cause) {
-      setError(String(cause));
+      if (requestId !== queryRequestRef.current) return;
+      setError(commandErrorMessage(cause));
     } finally {
-      setLoading(false);
+      if (requestId === queryRequestRef.current) setLoading(false);
     }
   }, [scope, tab]);
 
@@ -170,13 +176,17 @@ export function EffectiveScreen() {
 
   const loadTrace = useCallback(
     async (itemId: string, agent: string) => {
+      const requestId = ++traceRequestRef.current;
       setTraceError(null);
       setTraceAgent(agent);
+      setTrace(null);
       try {
-        setTrace(await invoke<WhyTraceView>("why_trace", { request: { item_id: itemId, scope, agent } }));
+        const result = await invoke<WhyTraceView>("why_trace", { request: { item_id: itemId, scope, agent } });
+        if (requestId === traceRequestRef.current) setTrace(result);
       } catch (cause) {
+        if (requestId !== traceRequestRef.current) return;
         setTrace(null);
-        setTraceError(String(cause));
+        setTraceError(commandErrorMessage(cause));
       }
     },
     [scope],
@@ -184,6 +194,7 @@ export function EffectiveScreen() {
 
   useEffect(() => {
     if (selectedItemId === null) {
+      traceRequestRef.current += 1;
       setTrace(null);
       setTraceAgent(null);
       return;
@@ -192,6 +203,7 @@ export function EffectiveScreen() {
       ? selected.agents.find((agent) => agent.loads)?.agent ?? selected.agents[0]?.agent
       : undefined;
     if (firstAgent === undefined) {
+      traceRequestRef.current += 1;
       setTrace(null);
       setTraceAgent(null);
       return;
@@ -220,7 +232,7 @@ export function EffectiveScreen() {
       closeLockDialog();
       await refresh();
     } catch (cause) {
-      toast.warning(String(cause), { title: "Lock change failed" });
+      toast.warning(commandErrorMessage(cause), { title: "Lock change failed" });
     } finally {
       setLockBusy(false);
     }
@@ -259,7 +271,7 @@ export function EffectiveScreen() {
         setRepoDisable({ preview: outcome.preview, itemId: item.item_id, scope: item.winner_scope, name: item.name });
       }
     } catch (cause) {
-      setRepoError(String(cause));
+      setRepoError(commandErrorMessage(cause));
     } finally {
       setRepoBusy(false);
     }
@@ -286,7 +298,7 @@ export function EffectiveScreen() {
       setRepoDisable(null);
       await refresh();
     } catch (cause) {
-      setRepoError(String(cause));
+      setRepoError(commandErrorMessage(cause));
       setRepoDisable(null);
     } finally {
       setRepoBusy(false);

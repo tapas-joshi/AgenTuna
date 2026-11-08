@@ -182,7 +182,7 @@ describe("AgentsScreen", () => {
     renderScreen();
     await screen.findByRole("switch", { name: "Let AgenTuna manage this agent" });
     fireEvent.click(screen.getByRole("button", { name: "Rescan all agents" }));
-    expect(await screen.findByText(/Rescan failed: Error: detection failed/)).toBeTruthy();
+    expect(await screen.findByText(/Rescan failed: detection failed/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(scans).toBe(2));
   });

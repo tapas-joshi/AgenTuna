@@ -285,10 +285,14 @@ describe("top bar", () => {
     expect(pickerIdx).toBeLessThan(scopeIdx);
     expect(scopeIdx).toBeLessThan(paletteIdx);
 
-    // Controls are in-flow elements, none positioned absolute
+    // Controls are in-flow elements, none positioned absolute. The scope slot
+    // keeps a fixed 420px width in the flow (TU-040): identical bounds in every
+    // state without centering over the search or reflowing the row.
     for (const el of [backBtn, title as Element, picker, scopeContainer as Element, palette]) {
       expect(el.className).not.toContain("absolute");
+      expect(el.className).not.toContain("fixed");
     }
+    expect((scopeContainer as Element).className).toContain("w-[420px]");
   });
 });
 

@@ -8,6 +8,7 @@ import type { PresetView } from "../../generated/PresetView";
 import { Modal } from "../../overlays";
 import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot } from "../../state/context";
+import { commandErrorMessage } from "../../lib/commandError";
 
 const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$/;
 
@@ -51,7 +52,7 @@ export function PresetsScreen() {
         rows.some((row) => row.id === old) ? old : (rows[0]?.id ?? null),
       );
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
     } finally {
       setLoading(false);
     }
@@ -83,8 +84,8 @@ export function PresetsScreen() {
       await action();
       await load();
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Preset action failed" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Preset action failed" });
     } finally {
       setBusy(null);
     }
@@ -110,7 +111,7 @@ export function PresetsScreen() {
       setSelectedId(id);
       toast.success(`Preset “${name}” created`);
     } catch (cause) {
-      setNameError(String(cause));
+      setNameError(commandErrorMessage(cause));
     } finally {
       setBusy(null);
     }
@@ -137,8 +138,8 @@ export function PresetsScreen() {
       );
       for (const warning of result.warnings) toast.warning(warning);
     } catch (cause) {
-      toast.warning(String(cause), { title: "Preset action failed" });
-      setError(String(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Preset action failed" });
+      setError(commandErrorMessage(cause));
     } finally {
       setBusy(null);
     }
@@ -157,8 +158,8 @@ export function PresetsScreen() {
           : "Nothing needed to be reverted",
       );
     } catch (cause) {
-      toast.warning(String(cause), { title: "Preset action failed" });
-      setError(String(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Preset action failed" });
+      setError(commandErrorMessage(cause));
     } finally {
       setBusy(null);
     }

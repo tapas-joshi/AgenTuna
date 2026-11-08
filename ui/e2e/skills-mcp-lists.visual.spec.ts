@@ -5,7 +5,7 @@ test("Skills list renders populated table, filter chips, native banner and shado
   await page.getByRole("button", { name: "Skills", exact: true }).click();
   const main = page.getByRole("main", { name: "Skills" });
 
-  await expect(main.getByText("code-review")).toBeVisible();
+  await expect(main.getByText("code-review", { exact: true })).toBeVisible();
   await expect(main.getByText("native-helper", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Unmanaged skills banner" })).toBeVisible();
   await expect(page).toHaveScreenshot("skills-populated.png", { animations: "disabled", caret: "hide" });
@@ -14,7 +14,7 @@ test("Skills list renders populated table, filter chips, native banner and shado
   const filterGroup = page.getByRole("group", { name: "Filter chips" });
   await filterGroup.getByText("Project").click();
   await expect(main.getByText("native-helper", { exact: true })).toBeVisible();
-  await expect(main.getByText("code-review")).toBeHidden();
+  await expect(main.getByText("code-review", { exact: true })).toBeHidden();
   await expect(page).toHaveScreenshot("skills-filtered.png", { animations: "disabled", caret: "hide" });
 });
 
@@ -70,7 +70,7 @@ test("Skills STATUS column names locked and shadowed rows", async ({ page }) => 
   await page.goto("/");
   await page.getByRole("button", { name: "Skills", exact: true }).click();
   const main = page.getByRole("main", { name: "Skills" });
-  await expect(main.getByText("policy-skill")).toBeVisible();
+  await expect(main.getByText("policy-skill", { exact: true })).toBeVisible();
   await expect(main.getByText("Locked by Global")).toBeVisible();
   await expect(main.getByTitle("Pinned by policy")).toBeVisible();
   await expect(main.getByText("Shadowed by Project")).toBeVisible();
@@ -85,8 +85,8 @@ test("MCP list renders servers matrix and filter chips", async ({ page }) => {
   await page.getByRole("button", { name: "MCP Servers", exact: true }).click();
   const main = page.getByRole("main", { name: "MCP Servers" });
 
-  await expect(main.getByText("Visual server")).toBeVisible();
-  await expect(main.getByText("Native server")).toBeVisible();
+  await expect(main.getByText("Visual server", { exact: true })).toBeVisible();
+  await expect(main.getByText("Native server", { exact: true })).toBeVisible();
   await expect(main.getByRole("columnheader", { name: "OMP" })).toBeVisible();
   const visualRow = main.getByRole("row").filter({ hasText: "Visual server" });
   await expect(visualRow.getByRole("group", { name: "omp" }).getByRole("switch")).toBeEnabled();

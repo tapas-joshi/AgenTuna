@@ -260,12 +260,17 @@ struct DetectionEvent {
     skipped_unmanaged: Vec<String>,
 }
 
+fn now_ms() -> i64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
+
 /// Starts an initial agent scan and keeps the index current as native files change.
 pub fn start(
     app: AppHandle,
     paths: AppPaths,
     database: Arc<Mutex<Database>>,
     registry: Arc<RecentWrites>,
+    jobs: super::jobs::JobsControl,
 ) -> Result<(), WatchError> {
     let adapters = Arc::new(AgentAdapterRegistry::register());
     let environment = at_engine::refresh::agent_environment(&paths);
@@ -284,11 +289,27 @@ pub fn start(
     let schedule: Arc<DetectionSchedule> =
         Arc::new((Mutex::new(PendingDetection::default()), Condvar::new()));
     let scan_schedule = Arc::clone(&schedule);
+    let scan_jobs = jobs.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // Keep the initial pass on the same worker so watcher requests cannot overlap it.
+        if scan_jobs.window_is_paused(now_ms()) {
+            scan_jobs.wait_until_window_active();
+        }
         detect_and_persist(&app, &adapters, &environment, &database);
+        let mut deferred_while_hidden = false;
         loop {
-            let refresh = wait_for_detection(&scan_schedule);
+            let mut refresh = wait_for_detection(&scan_schedule);
+            if scan_jobs.window_is_paused(now_ms()) {
+                deferred_while_hidden = true;
+                scan_jobs.wait_until_window_active();
+            }
+            if deferred_while_hidden {
+                refresh = ExternalRefreshEvent {
+                    paths: Vec::new(),
+                    full_rescan: true,
+                };
+                deferred_while_hidden = false;
+            }
             detect_and_persist(&app, &adapters, &environment, &database);
             if let Err(error) = app.emit(EVENT_EXTERNAL_REFRESH, refresh) {
                 tracing::warn!(%error, "external refresh event emission failed");

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { commandErrorMessage } from "../../lib/commandError";
 import type { JobFinishedEvent } from "../../generated/JobFinishedEvent";
 import type { JobId } from "../../generated/JobId";
 import type { JobProgressEvent } from "../../generated/JobProgressEvent";
@@ -177,7 +178,7 @@ export function RemoteBackupSection({ onShowOfflineMode, reloadKey = 0 }: { onSh
     try {
       setConflicts(await invoke<RemoteBackupConflictGroupView[]>("conflicts_list"));
     } catch (reason) {
-      setConflictsError(String(reason));
+      setConflictsError(commandErrorMessage(reason, "Unresolved conflicts could not be loaded."));
     } finally {
       setConflictsLoading(false);
     }
@@ -207,15 +208,15 @@ export function RemoteBackupSection({ onShowOfflineMode, reloadKey = 0 }: { onSh
       setDeviceName(settingsResult.value.device_name);
       setRepoUrl(settingsResult.value.repo_url ?? "");
     } else {
-      setSettingsError(String(settingsResult.reason));
+      setSettingsError(commandErrorMessage(settingsResult.reason, "Remote backup settings could not be loaded."));
     }
     if (statusResult.status === "fulfilled") setStatus(statusResult.value);
-    else setStatusError(String(statusResult.reason));
+    else setStatusError(commandErrorMessage(statusResult.reason, "Backup status could not be loaded."));
     if (conflictsResult.status === "fulfilled") {
       setConflicts(conflictsResult.value);
       setConflictsError(null);
     } else {
-      setConflictsError(String(conflictsResult.reason));
+      setConflictsError(commandErrorMessage(conflictsResult.reason, "Unresolved conflicts could not be loaded."));
     }
     setRefreshing(false);
   }, []);

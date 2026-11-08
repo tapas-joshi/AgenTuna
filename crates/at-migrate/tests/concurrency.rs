@@ -83,6 +83,7 @@ fn a_source_changed_between_plan_and_apply_aborts_before_any_backup() -> Result<
         scope: Scope::User,
         content_hash: Some(sha256_hex(b"# Sample\nreviewed\n")),
         normalized_hash: Some(normalized),
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,

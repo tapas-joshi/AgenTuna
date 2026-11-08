@@ -109,6 +109,16 @@ describe("OverwriteRefusalDialog", () => {
     expect(props.onAdoptApply).not.toHaveBeenCalled();
     expect(screen.queryByText(preview.store_destination)).toBeNull();
   });
+  it("renders a rejected command object as its message, never object coercion", async () => {
+    const user = userEvent.setup();
+    renderDialog({
+      onMoveAside: vi.fn().mockRejectedValue({ code: "busy", message: "Another AgenTuna window is writing this item." }),
+    });
+    await user.click(screen.getByRole("button", { name: "Move aside" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByText("Another AgenTuna window is writing this item.")).toBeTruthy();
+    expect(document.body.textContent ?? "").not.toContain("[object Object]");
+  });
   it("moves aside, shows the destination and undoes through the move journal", async () => {
     const user = userEvent.setup();
     const props = renderDialog({

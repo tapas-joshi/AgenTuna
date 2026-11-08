@@ -26,7 +26,7 @@ import { shellAgentStatus } from "../shell/agents";
 import type { SkillsListRequest } from "../generated/SkillsListRequest";
 import type { McpServerListRequest } from "../generated/McpServerListRequest";
 import type { ExternalRefreshEvent } from "../generated/ExternalRefreshEvent";
-import { RecoverySheet } from "./recovery/RecoverySheet";
+import { RecoveryGate } from "./recovery/RecoverySheet";
 import { Modal } from "./dialogs/Modal";
 import { WhyTraceDialog } from "./dialogs/WhyTraceDialog";
 import type { AccountMenuAction } from "./menus/AccountMenu";
@@ -37,6 +37,7 @@ import { isAppActionId } from "../shell/actions";
 import { OverwriteRefusalDialog, refusedOverwriteDetails } from "./dialogs/OverwriteRefusalDialog";
 import { parseRouteId } from "../shell/routes";
 import type { RefusedOverwriteDetails } from "./dialogs/OverwriteRefusalDialog";
+import { commandErrorMessage } from "../lib/commandError";
 import { applyAdoption, moveRefusedItemAside, previewAdoption, undoMoveAside } from "./dialogs/overwrite-commands";
 function projectRow(project: ProjectView): ProjectPickerProject {
   const pathParts = project.path.split(/[\\/]+/).filter(Boolean);
@@ -149,7 +150,7 @@ export function AppOverlays({
       setProjects(rows.map(projectRow));
       setProjectError(null);
     } catch (error) {
-      setProjectError(String(error));
+      setProjectError(commandErrorMessage(error));
     }
   };
   const openProjects = () => {
@@ -168,11 +169,7 @@ export function AppOverlays({
       }
     });
   };
-  const cliErrorMessage = (error: unknown): string => {
-    if (error instanceof Error) return error.message;
-    if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") return error.message;
-    return String(error);
-  };
+  const cliErrorMessage = (error: unknown): string => commandErrorMessage(error, "The CLI status could not be loaded.");
   const loadCliStatus = () => {
     setCliError(null);
     setLoadingCliStatus(true);
@@ -247,7 +244,7 @@ export function AppOverlays({
     }
     if (id === ACTION_IDS.docs) { setAccountDialog("documentation"); return; }
     if (id === ACTION_IDS.rescan) {
-      void invoke<string>("projects_scan").then(setScanJob, (error: unknown) => setProjectError(String(error)));
+      void invoke<string>("projects_scan").then(setScanJob, (error: unknown) => setProjectError(commandErrorMessage(error)));
       // Detection can change between scans; the sidebar shows the same command's answer.
       void invoke<AgentCardView[]>("agents_rescan").then(
         (cards) => {
@@ -267,7 +264,7 @@ export function AppOverlays({
     }
     if (id === ACTION_IDS.doctor) {
       setDoctorReport(null);
-      void invoke<string>("diagnostics_report_copy").then(setDoctorReport, (error: unknown) => state.toasts.show({ kind: "error", title: "Diagnostics unavailable", message: String(error) }));
+      void invoke<string>("diagnostics_report_copy").then(setDoctorReport, (error: unknown) => state.toasts.show({ kind: "error", title: "Diagnostics unavailable", message: commandErrorMessage(error) }));
       return;
     }
     const target = routeForAction(id);
@@ -373,7 +370,7 @@ export function AppOverlays({
       });
     }, (error: unknown) => {
       if (!active) return;
-      setPaletteError(String(error));
+      setPaletteError(commandErrorMessage(error));
     }).finally(() => {
       if (active) setPaletteLoading(false);
     });
@@ -447,7 +444,7 @@ export function AppOverlays({
   }, []);
   useEffect(() => {
     void invoke("app_menu_set_add_skill_enabled", { enabled: !modalOpen }).catch((error: unknown) => {
-      state.toasts.show({ kind: "error", title: "Native menu unavailable", message: String(error) });
+      state.toasts.show({ kind: "error", title: "Native menu unavailable", message: commandErrorMessage(error) });
     });
   }, [modalOpen, state]);
 
@@ -471,7 +468,7 @@ export function AppOverlays({
   useEffect(() => {
     void invoke<RecoverySheetView | null>("recovery_sheet").then(
       setRecovery,
-      (error: unknown) => state.toasts.show({ kind: "error", title: "Recovery status unavailable", message: String(error) }),
+      (error: unknown) => state.toasts.show({ kind: "error", title: "Recovery status unavailable", message: commandErrorMessage(error) }),
     );
   }, [state]);
   useEffect(() => {
@@ -499,9 +496,9 @@ export function AppOverlays({
     <ProjectPicker open={projectOpen} projects={projects} currentProjectId={state.getSnapshot().activeProject} error={projectError} scanning={scanJob !== null} onClose={() => { setProjectOpen(false); setRequiredProjectRoute(null); setRequiredProjectItemId(null); }} onSelect={(project) => selectProject(project.id)} onAddFolder={() => {
       void invoke<ProjectView | null>("projects_choose_folder").then((project) => {
         if (project) { setProjects((current) => [...current.filter((item) => item.id !== project.id), projectRow(project)]); selectProject(project.id); }
-      }, (error: unknown) => setProjectError(String(error)));
+      }, (error: unknown) => setProjectError(commandErrorMessage(error)));
     }} onScan={() => {
-      void invoke<string>("projects_scan").then(setScanJob, (error: unknown) => setProjectError(String(error)));
+      void invoke<string>("projects_scan").then(setScanJob, (error: unknown) => setProjectError(commandErrorMessage(error)));
     }} onCancelScan={() => {
       if (scanJob) void invoke("jobs_cancel", { jobId: scanJob }).finally(() => setScanJob(null));
     }} />
@@ -517,7 +514,7 @@ export function AppOverlays({
             message: "The unmanaged item was preserved outside the agent folder.",
             action: { label: "Undo", run: () => { void undoMoveAside(operationId).then(
               () => state.toasts.show({ kind: "success", title: "Move undone", message: "The original item is back at its path." }),
-              (error: unknown) => state.toasts.show({ kind: "error", title: "Undo failed", message: String(error) }),
+              (error: unknown) => state.toasts.show({ kind: "error", title: "Undo failed", message: commandErrorMessage(error) }),
             ); } },
           });
         }
@@ -538,7 +535,7 @@ export function AppOverlays({
           message: applied.summary,
           action: { label: "Undo", run: () => { void invoke("operation_undo", { operationId }).then(
             () => state.toasts.show({ kind: "success", title: "Adoption undone", message: "The original tree was restored from its backup." }),
-            (error: unknown) => state.toasts.show({ kind: "error", title: "Undo failed", message: String(error) }),
+            (error: unknown) => state.toasts.show({ kind: "error", title: "Undo failed", message: commandErrorMessage(error) }),
           ); } },
         });
         return applied;
@@ -561,14 +558,14 @@ export function AppOverlays({
         onOpenEffective={() => state.navigate("effective")}
       />
     )}
-    {recovery ? <RecoverySheet recovery={recovery} onContinue={() => setRecovery(null)} onDiscard={(operationId) => {
-      void invoke("recovery_discard", { operationId }).then(() => setRecovery((current) => current ? { ...current, operations: current.operations.filter((operation) => operation.id !== operationId), files: current.files.filter((file) => file.operation_id !== operationId) } : null), (error: unknown) => state.toasts.show({ kind: "error", title: "Could not discard pending changes", message: String(error) }));
+    <RecoveryGate view={recovery} onContinue={() => setRecovery(null)} onDiscard={(operationId) => {
+      void invoke("recovery_discard", { operationId }).then(() => setRecovery((current) => current ? { ...current, operations: current.operations.filter((operation) => operation.id !== operationId), files: current.files.filter((file) => file.operation_id !== operationId) } : null), (error: unknown) => state.toasts.show({ kind: "error", title: "Could not discard pending changes", message: commandErrorMessage(error) }));
     }} onRestore={(file) => {
       void invoke("recovery_restore", { operationId: file.operation_id, path: file.path }).then(
         () => invoke<RecoverySheetView | null>("recovery_sheet").then(setRecovery),
-        (error: unknown) => state.toasts.show({ kind: "error", title: "Could not restore file", message: String(error) }),
+        (error: unknown) => state.toasts.show({ kind: "error", title: "Could not restore file", message: commandErrorMessage(error) }),
       );
-    }} /> : null}
+    }} />
     <Modal open={state.getSnapshot().overlay === "keyboard-shortcuts"} onOpenChange={(open) => { if (!open) state.setOverlay(null); }} title="Keyboard shortcuts" description="Shortcuts are generated from the same registry used by the command dispatcher." size="md">
       <div className="flex flex-col gap-8">{SHORTCUTS.map((item) => (
         <div key={item.action} className="flex items-center justify-between gap-16 text-13">

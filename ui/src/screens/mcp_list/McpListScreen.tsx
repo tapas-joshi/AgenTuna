@@ -28,6 +28,7 @@ import { McpServerActions } from "../../overlays/menus";
 import type { McpServerAction } from "../../overlays/menus";
 import { useToast } from "../../overlays/toasts";
 import { useAppSnapshot, useAppState } from "../../state/context";
+import { commandErrorMessage } from "../../lib/commandError";
 
 /** A command rejection as the toast service needs it. */
 function commandError(cause: unknown): { code: string; message: string } {
@@ -35,7 +36,7 @@ function commandError(cause: unknown): { code: string; message: string } {
     const value = cause as { code: unknown; message: unknown };
     return { code: String(value.code), message: String(value.message) };
   }
-  return { code: "error", message: String(cause) };
+  return { code: "error", message: commandErrorMessage(cause) };
 }
 
 export type McpFilterChip = "all" | "global" | "user" | "project" | "native" | "failing";
@@ -111,6 +112,7 @@ export function McpListScreen({
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [why, setWhy] = useState<{ itemId: string; agent: string } | null>(null);
+  const [showAllAgents, setShowAllAgents] = useState(false);
   /** Below the breakpoint the Health column leaves the model. */
   const compactLayout = useCompactLayout();
 
@@ -377,19 +379,24 @@ export function McpListScreen({
     return servers;
   }, [allServers, activeChip, searchQuery]);
 
-  // Columns come from detection, so an installed agent always gets a switch even when no
-  // server currently targets it. Row cells fill in the rest for agents detection missed.
+  // Installed/managed agents and agents with deployments get columns by default;
+  // inactive built-ins and empty custom agents are available on demand.
   const detectedAgents = useMemo<readonly AgentDescriptor[]>(() => {
     const ids = new Set<string>();
-    const installed = agentCards.filter((c) => c.installed || c.managed || c.presence !== "not_installed");
-    const pool = installed.length > 0 ? installed : agentCards;
-    for (const card of pool) ids.add(card.id);
+    for (const card of agentCards) {
+      if (
+        showAllAgents ||
+        card.installed ||
+        card.managed ||
+        card.presence !== "not_installed"
+      ) ids.add(card.id);
+    }
     for (const server of allServers) {
       for (const cell of server.agents) {
         if (cell.state !== "not_installed" && cell.state !== "none") ids.add(cell.agent);
       }
     }
-    if (ids.size === 0) for (const id of AGENT_ORDER) ids.add(id);
+    if (showAllAgents && ids.size === 0) for (const id of AGENT_ORDER) ids.add(id);
     const ordered = AGENT_ORDER.filter((id) => ids.has(id));
     for (const id of ids) {
       if (!ordered.includes(id)) ordered.push(id);
@@ -398,7 +405,7 @@ export function McpListScreen({
       id,
       label: AGENT_LABEL[id] ?? agentCards.find((card) => card.id === id)?.name ?? id,
     }));
-  }, [agentCards, allServers]);
+  }, [agentCards, allServers, showAllAgents]);
 
   /**
    * Maps one MCP agent cell onto the shared cell vocabulary.
@@ -561,6 +568,7 @@ export function McpListScreen({
 
     const agentCols = agentColumns<McpServerRowView>({
       agents: detectedAgents,
+      getItemLabel: (row) => row.name,
       getState: agentStateFor,
       // Design 06 gives the three agent columns ~150px so a full config path
       // fits; the compact set cannot afford that and ellipsizes the path.
@@ -736,6 +744,16 @@ export function McpListScreen({
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-expanded={showAllAgents}
+          onClick={() => setShowAllAgents((value) => !value)}
+        >
+          {showAllAgents ? "Hide inactive agents" : "Show all agents"}
+        </Button>
+      </div>
       </div>
 
       {/* Table via TU-003 component */}

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 import type { UpdateInstallGate } from "../../generated/UpdateInstallGate";
 import type { UpdateInstallStatus } from "../../generated/UpdateInstallStatus";
+import { commandErrorMessage } from "../../lib/commandError";
 
 interface AppInfo {
   readonly name: string;
@@ -27,7 +28,7 @@ export function AppUpdatesSection() {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(() => {
-    void invoke<UpdateInstallGate>("app_update_status").then(setGate, (error: unknown) => setFailure(String(error)));
+    void invoke<UpdateInstallGate>("app_update_status").then(setGate, (error: unknown) => setFailure(commandErrorMessage(error)));
   }, []);
 
   useEffect(() => {
@@ -48,14 +49,14 @@ export function AppUpdatesSection() {
   useEffect(() => {
     if (statusState !== "queued") return;
     const timer = window.setInterval(() => {
-      void invoke<UpdateInstallGate>("app_update_install_resume", { editorDirty: false, modalOpen: false }).then(setGate, (error: unknown) => setFailure(String(error)));
+      void invoke<UpdateInstallGate>("app_update_install_resume", { editorDirty: false, modalOpen: false }).then(setGate, (error: unknown) => setFailure(commandErrorMessage(error)));
     }, 2000);
     return () => window.clearInterval(timer);
   }, [statusState]);
 
   const run = async (action: () => Promise<UpdateInstallGate>) => {
     setBusy(true); setFailure(null);
-    try { setGate(await action()); } catch (error) { setFailure(String(error)); }
+    try { setGate(await action()); } catch (error) { setFailure(commandErrorMessage(error)); }
     finally { setBusy(false); }
   };
 

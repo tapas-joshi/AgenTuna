@@ -4,7 +4,7 @@
 //! without wall-clock sleeps, network access, or child processes.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::app::network::NetworkState;
@@ -682,6 +682,7 @@ impl HealthScheduler {
 pub struct JobsControl {
     cancellation: tokio_util::sync::CancellationToken,
     visibility: Arc<Mutex<Visibility>>,
+    state_changed: Arc<Condvar>,
 }
 
 #[derive(Clone, Copy)]
@@ -690,6 +691,14 @@ struct Visibility {
     minimized: bool,
     focused: bool,
     inactive_since_ms: Option<i64>,
+}
+
+fn system_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(i64::MAX as u128) as i64
+        })
 }
 
 impl Default for JobsControl {
@@ -702,6 +711,7 @@ impl Default for JobsControl {
                 focused: true,
                 inactive_since_ms: None,
             })),
+            state_changed: Arc::new(Condvar::new()),
         }
     }
 }
@@ -738,6 +748,40 @@ impl JobsControl {
             state.inactive_since_ms = None;
         }
         state.focused = focused;
+        let paused = !state.visible
+            || state.minimized
+            || state
+                .inactive_since_ms
+                .is_some_and(|since| now_ms.saturating_sub(since) > 60_000);
+        drop(state);
+        self.state_changed.notify_all();
+        paused
+    }
+    /// Blocks without polling while the app is hidden, minimized or inactive past the idle grace.
+    pub fn wait_until_window_active(&self) {
+        let mut state = self
+            .visibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.visible
+            || state.minimized
+            || state
+                .inactive_since_ms
+                .is_some_and(|since| system_now_ms().saturating_sub(since) > 60_000)
+        {
+            state = self
+                .state_changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+    /// Whether the window is currently hidden, minimized or inactive beyond the idle grace period.
+    #[must_use]
+    pub fn window_is_paused(&self, now_ms: i64) -> bool {
+        let state = self
+            .visibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         !state.visible
             || state.minimized
             || state
@@ -766,15 +810,45 @@ impl JobsControl {
 
 #[cfg(test)]
 #[test]
+fn hidden_workers_wait_for_window_resume_without_polling() {
+    let control = JobsControl::default();
+    control.update_window(false, false, false, 1);
+
+    let waiting = control.clone();
+    let (resumed_tx, resumed_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        waiting.wait_until_window_active();
+        let _ = resumed_tx.send(());
+    });
+
+    assert!(
+        resumed_rx.recv_timeout(Duration::from_millis(600)).is_err(),
+        "a hidden window must keep its worker asleep"
+    );
+    control.update_window(true, false, true, 601);
+    assert!(
+        resumed_rx.recv_timeout(Duration::from_secs(1)).is_ok(),
+        "visible state wakes the paused worker"
+    );
+    handle.join().expect("worker exits after visibility update");
+}
+
+#[cfg(test)]
+#[test]
 fn jobs_control_pauses_for_hidden_minimized_and_sixty_seconds_inactive() {
     let control = JobsControl::default();
     assert!(!control.update_window(true, false, true, 0));
+    assert!(!control.window_is_paused(0));
     assert!(control.update_window(false, false, false, 1));
+    assert!(control.window_is_paused(1));
     assert!(!control.update_window(true, false, true, 2));
+    assert!(!control.window_is_paused(2));
     assert!(control.update_window(true, true, true, 3));
+    assert!(control.window_is_paused(3));
     assert!(!control.update_window(true, false, true, 4));
     assert!(!control.update_window(true, false, false, 5));
-    assert!(!control.update_window(true, false, false, 60_005));
+    assert!(!control.window_is_paused(60_005));
+    assert!(control.window_is_paused(60_006));
     assert!(control.update_window(true, false, false, 60_006));
 }
 

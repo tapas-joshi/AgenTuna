@@ -14,6 +14,7 @@ import type { BadgeTone } from "../../components";
 import type { WhyTraceView } from "../../generated/WhyTraceView";
 import { useToast } from "../toasts";
 import { Modal } from "./Modal";
+import { commandErrorMessage } from "../../lib/commandError";
 
 export interface WhyTraceDialogProps {
   readonly open?: boolean;
@@ -97,7 +98,7 @@ export function WhyTraceDialog({
       });
       setTrace(result);
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
     } finally {
       setLoading(false);
     }
@@ -130,7 +131,7 @@ export function WhyTraceDialog({
     try {
       await invoke<void>("reveal_item", { itemId });
     } catch (cause) {
-      toast.warning(String(cause), { title: "Could not open file" });
+      toast.warning(commandErrorMessage(cause), { title: "Could not open file" });
     }
   }
 
@@ -140,7 +141,7 @@ export function WhyTraceDialog({
       await navigator.clipboard.writeText(recordedPath);
       toast.success("Path copied to clipboard", { title: recordedPath });
     } catch (cause) {
-      toast.warning(String(cause), { title: "Could not copy path" });
+      toast.warning(commandErrorMessage(cause), { title: "Could not copy path" });
     }
   }
 

@@ -373,7 +373,8 @@ test("Add MCP server form starts in the active scope", async () => {
   await screen.findByRole("navigation", { name: "Workspace" });
   await userEvent.click(await screen.findByRole("button", { name: "Add" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: /Add MCP server/ }));
-  const form = screen.getByRole("main", { name: "Add MCP server" });
+  // The form is a lazy route chunk; await its mount instead of querying sync.
+  const form = await screen.findByRole("main", { name: "Add MCP server" });
   const projectScope = within(form).getByRole("radio", { name: "Project" });
   expect(projectScope instanceof HTMLInputElement && projectScope.checked).toBe(true);
 });

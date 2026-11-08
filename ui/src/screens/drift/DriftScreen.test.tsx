@@ -75,7 +75,7 @@ describe("DriftScreen", () => {
         watched_count: 3,
         watcher: { status: "active", path: null, error: null },
       };
-      if (command === "drift_preview") return { event_id: (args as { eventId: number }).eventId, path: driftRow.path, canonical_path: "/sandbox/project/.agentuna/skills/review-checklist", previous_version_available: true, diff, on_disk_content: null, redacted: false };
+      if (command === "drift_preview") return { event_id: (args as { eventId: number }).eventId, path: driftRow.path, canonical_path: "/sandbox/project/.agentuna/skills/review-checklist", previous_version_available: true, diff, baseline_unavailable_reason: null, on_disk_content: null, redacted: false };
       if (command === "drift_adopt") { resolved = true; return null; }
       return null;
     };
@@ -112,6 +112,7 @@ describe("DriftScreen", () => {
         canonical_path: "/sandbox/project/.agentuna/skills/review-checklist",
         previous_version_available: false,
         diff: "",
+        baseline_unavailable_reason: "No retained backup matches the recorded baseline hash.",
         on_disk_content: "current on-disk content\n",
         redacted: false,
       };
@@ -119,7 +120,7 @@ describe("DriftScreen", () => {
     };
     renderScreen();
 
-    expect(await screen.findByText("Previous version unavailable. Only AgenTuna's baseline hash was retained.")).toBeTruthy();
+    expect(await screen.findByText("Baseline content not retained: No retained backup matches the recorded baseline hash.")).toBeTruthy();
     expect(screen.getByLabelText("Current on-disk content").textContent).toBe("current on-disk content\n");
     expect(screen.queryByText("old version")).toBeNull();
     expect((screen.getByRole("button", { name: "Adopt on-disk" }) as HTMLButtonElement).disabled).toBe(false);
@@ -146,6 +147,7 @@ describe("DriftScreen", () => {
         canonical_path: "/sandbox/project/.agentuna/skills/review-checklist",
         previous_version_available: true,
         diff,
+        baseline_unavailable_reason: null,
         on_disk_content: null,
         redacted: false,
       };

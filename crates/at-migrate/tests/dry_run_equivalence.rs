@@ -52,6 +52,7 @@ fn fixture() -> Fixture {
                 .expect("skill hash")
                 .to_string(),
         ),
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
@@ -68,6 +69,7 @@ fn fixture() -> Fixture {
         scope: Scope::User,
         content_hash: Some(at_fs::sha256_hex(mcp_bytes)),
         normalized_hash: Some(at_fs::sha256_hex(mcp_bytes)),
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
@@ -84,6 +86,7 @@ fn fixture() -> Fixture {
         scope: Scope::User,
         content_hash: Some(at_fs::sha256_hex(rule_bytes)),
         normalized_hash: Some(at_fs::sha256_hex(rule_bytes)),
+        mcp_summary: None,
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,

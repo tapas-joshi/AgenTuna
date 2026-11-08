@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button, RadioCardGroup } from "../../components";
+import { commandErrorMessage } from "../../lib/commandError";
 import { Modal } from "../dialogs/Modal";
 import { useToast } from "../toasts";
 import type { InstructionCreateOptions } from "../../generated/InstructionCreateOptions";
@@ -80,7 +81,7 @@ export function NewRuleDialog({ open, project, initialScope, onClose, onCreated 
         if (!cancelled) setOptions(result);
       })
       .catch((cause) => {
-        if (!cancelled) setError(String(cause));
+        if (!cancelled) setError(commandErrorMessage(cause));
       });
     return () => {
       cancelled = true;
@@ -103,7 +104,7 @@ export function NewRuleDialog({ open, project, initialScope, onClose, onCreated 
         }
       })
       .catch((cause) => {
-        if (!cancelled) setError(String(cause));
+        if (!cancelled) setError(commandErrorMessage(cause));
       })
       .finally(() => {
         if (!cancelled) setPreviewBusy(false);
@@ -157,8 +158,8 @@ export function NewRuleDialog({ open, project, initialScope, onClose, onCreated 
       toast.success(`${fileType} created`, { title: created });
       await onCreated(created, fileType);
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Rule file not created" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Rule file not created" });
     } finally {
       setCreateBusy(false);
     }

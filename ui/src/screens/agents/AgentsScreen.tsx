@@ -7,6 +7,7 @@ import { CustomAgentDialog } from "../../overlays/dialogs/CustomAgentDialog";
 import { useToast } from "../../overlays/toasts";
 import { useAppState } from "../../state/context";
 import { shellAgentStatus } from "../../shell/agents";
+import { commandErrorMessage } from "../../lib/commandError";
 
 const INITIALS: Readonly<Record<string, string>> = {
   claude_code: "CL",
@@ -75,7 +76,7 @@ export function AgentsScreen() {
     try {
       publish(await invoke<AgentCardView[]>("agents_list"));
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
     } finally {
       setLoading(false);
     }
@@ -102,7 +103,7 @@ export function AgentsScreen() {
     try {
       publish(await invoke<AgentCardView[]>("agents_rescan"));
     } catch (cause) {
-      setRescanError(String(cause));
+      setRescanError(commandErrorMessage(cause));
     } finally {
       setBusy(null);
     }
@@ -126,8 +127,8 @@ export function AgentsScreen() {
         );
       }
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Agent change failed" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Agent change failed" });
     } finally {
       setBusy(null);
     }
@@ -146,8 +147,8 @@ export function AgentsScreen() {
         );
       }
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Agent change failed" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Agent change failed" });
     } finally {
       setBusy(null);
     }
@@ -358,7 +359,7 @@ export function AgentsScreen() {
             void invoke<AgentCardView[]>("agents_list").then((next) => {
               setAgents(next);
               window.requestAnimationFrame(openCard);
-            }).catch((cause: unknown) => setError(String(cause)));
+            }).catch((cause: unknown) => setError(commandErrorMessage(cause)));
           }
         }}
       />

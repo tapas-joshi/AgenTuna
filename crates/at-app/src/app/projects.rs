@@ -45,6 +45,14 @@ impl From<at_db::projects::ProjectSummary> for ProjectView {
 /// Lists visible registered projects, with item counts from the database summary query.
 #[tauri::command]
 pub fn projects_list(state: State<'_, AppState>) -> Result<Vec<ProjectView>, CommandError> {
+    projects_list_inner(&state)
+}
+
+/// Lists registered projects without requiring a Tauri state wrapper.
+///
+/// # Errors
+/// Returns [`CommandError`] if the project database is unavailable.
+pub fn projects_list_inner(state: &AppState) -> Result<Vec<ProjectView>, CommandError> {
     let database = state
         .database()
         .map_err(|_| CommandError::unavailable("project database is unavailable"))?;

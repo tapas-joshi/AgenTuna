@@ -47,6 +47,7 @@ test("axe audits every built screen, migration step, picker and modal", async ({
 
   await check("Overview");
   await page.getByRole("button", { name: "Skills", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Skills", level: 1 })).toBeVisible();
   await check("Skills");
   await page.getByRole("tab", { name: "Presets" }).click();
   await expect(page.getByRole("heading", { name: "Presets", exact: true })).toBeVisible();
@@ -78,10 +79,13 @@ test("axe audits every built screen, migration step, picker and modal", async ({
   await expect(page.getByRole("main", { name: "Instructions" })).toBeVisible();
   await check("Instructions");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
   await check("Agents");
   await page.getByRole("button", { name: "Effective config", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Effective config", level: 1 })).toBeVisible();
   await check("Effective config");
   await page.getByRole("button", { name: "Sync & drift", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Sync & drift", level: 1 })).toBeVisible();
   await check("Drift");
 
   await openMigration(page);
@@ -93,7 +97,7 @@ test("axe audits every built screen, migration step, picker and modal", async ({
   await check("Migrate resolve");
   await page.getByLabel("Keep both").check();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "Plan the move" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Preview the exact changes" })).toBeVisible();
   await check("Migrate plan");
   await page.getByRole("button", { name: "Apply 3 items" }).click();
   await check("Migrate confirmation dialog");

@@ -191,6 +191,188 @@ fn adopting_refuses_a_source_that_changed_after_the_preview() -> TestResult<()> 
     );
     Ok(())
 }
+#[test]
+fn codex_native_skill_can_be_previewed_for_adoption() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::Codex)?;
+    let skills_dir = sandbox.home.join(".codex/skills");
+    let target = skills_dir.join("codex-active");
+    fs::create_dir_all(&target)?;
+    fs::write(
+        target.join("SKILL.md"),
+        b"---\nname: codex-active\ndescription: native Codex skill\n---\n\nNative skill.\n",
+    )?;
+    let state = sandbox.state()?;
+
+    let preview = at_app::app::overwrite::adopt_preview_inner(
+        &state,
+        target.to_str().expect("utf-8 target"),
+        None,
+        None,
+        None,
+    )?;
+
+    assert_eq!(preview.native_name, "codex-active");
+    assert_eq!(preview.current, "present");
+    assert!(!preview.hash.is_empty());
+    Ok(())
+}
+#[test]
+fn shared_project_skill_can_be_adopted_backed_up_and_undone() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let mut database = sandbox.database()?;
+    sandbox.register_project(&mut database)?;
+    for agent in [AgentId::Codex, AgentId::Omp] {
+        sandbox.register_agent(&database, agent.clone())?;
+    }
+    let shared_root = sandbox.project.join(".agents/skills");
+    fs::create_dir_all(&shared_root)?;
+    for agent in [AgentId::Codex, AgentId::Omp] {
+        at_db::agents::upsert_agent_path(
+            database.connection(),
+            &AgentPathSpec {
+                agent: &agent,
+                scope: Scope::Project,
+                kind: AgentPathKind::SkillsDir,
+                path: &shared_root,
+                format: Some(AgentPathFormat::Dir),
+                is_primary: true,
+                exists: true,
+            },
+        )?;
+    }
+    let target = shared_root.join("release-notes");
+    fs::create_dir_all(&target)?;
+    let original =
+        b"---\nname: release-notes\ndescription: shared native skill\n---\n\nRelease notes.\n";
+    fs::write(target.join("SKILL.md"), original)?;
+    let path = target.to_string_lossy().into_owned();
+    let state = sandbox.project_state()?;
+
+    let preview = at_app::app::overwrite::adopt_preview_inner(
+        &state,
+        &path,
+        None,
+        Some("link".to_owned()),
+        None,
+    )?;
+    assert_eq!(preview.native_name, "release-notes");
+    assert!(preview.backup_dir.contains("backup"));
+    assert_eq!(preview.agents.len(), 2);
+    let applied = at_app::app::overwrite::adopt_apply_inner(
+        &state,
+        &path,
+        Some(preview.hash),
+        Some("link".to_owned()),
+        None,
+    )?;
+    let backup = sandbox.support.join("backups");
+    assert!(backup.exists(), "adoption creates its backup root");
+    at_app::app::overwrite::operation_undo_inner(&state, &applied.operation_id, false)?;
+    assert_eq!(fs::read(target.join("SKILL.md"))?, original);
+    Ok(())
+}
+
+#[test]
+fn a_project_skill_root_authorizes_adoption_without_any_agent_path_row() -> TestResult<()> {
+    // Codex and omp both read `<project>/.agents/skills`; the adapters declare that root, so a
+    // scan finds the item and the refusal dialog offers Adopt before any agent row records it.
+    let sandbox = Sandbox::new()?;
+    let mut database = sandbox.database()?;
+    sandbox.register_project(&mut database)?;
+    let shared_root = sandbox.project.join(".agents/skills");
+    let target = shared_root.join("shared-notes");
+    fs::create_dir_all(&target)?;
+    fs::write(
+        target.join("SKILL.md"),
+        b"---\nname: shared-notes\ndescription: shared native skill\n---\n\nBody.\n",
+    )?;
+    let state = sandbox.project_state()?;
+
+    let preview = at_app::app::overwrite::adopt_preview_inner(
+        &state,
+        target.to_str().expect("utf-8 target"),
+        None,
+        None,
+        None,
+    )?;
+
+    assert_eq!(preview.native_name, "shared-notes");
+    assert_eq!(preview.current, "present");
+    assert_eq!(
+        Some(preview.hash.as_str()),
+        at_fs::changeset::hash_node(&target)?.as_deref(),
+        "the preview digest is the representation the apply re-checks"
+    );
+    Ok(())
+}
+
+#[test]
+fn adopt_refuses_a_project_path_outside_the_shared_skill_root() -> TestResult<()> {
+    // The shared root is `.agents/skills`, not `.agents` or the project root: a neighbouring
+    // folder in the same project stays refused even though the scan can read it.
+    let sandbox = Sandbox::new()?;
+    let mut database = sandbox.database()?;
+    sandbox.register_project(&mut database)?;
+    let sibling = sandbox.project.join(".agents/notes/loose");
+    fs::create_dir_all(&sibling)?;
+    fs::write(sibling.join("SKILL.md"), b"---\nname: loose\n---\n")?;
+    let state = sandbox.project_state()?;
+
+    let error = at_app::app::overwrite::adopt_preview_inner(
+        &state,
+        sibling.to_str().expect("utf-8 target"),
+        None,
+        None,
+        None,
+    )
+    .expect_err("a path outside every registered root is refused");
+
+    assert_eq!(
+        error.code,
+        at_app::app::commands::CommandErrorCode::InvalidArgument
+    );
+    assert!(
+        error.message.contains("outside registered agent paths"),
+        "the refusal names the rule: {error:?}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_skill_that_escapes_its_root_is_refused() -> TestResult<()> {
+    let sandbox = Sandbox::new()?;
+    let mut database = sandbox.database()?;
+    sandbox.register_project(&mut database)?;
+    let shared_root = sandbox.project.join(".agents/skills");
+    let outside = sandbox.project.join("outside");
+    fs::create_dir_all(&shared_root)?;
+    fs::create_dir_all(&outside)?;
+    fs::write(
+        outside.join("SKILL.md"),
+        b"---\nname: escaped\n---\n\nOutside the root.\n",
+    )?;
+    let target = shared_root.join("escaped");
+    std::os::unix::fs::symlink(&outside, &target)?;
+    let state = sandbox.project_state()?;
+
+    let error = at_app::app::overwrite::adopt_preview_inner(
+        &state,
+        target.to_str().expect("utf-8 target"),
+        None,
+        None,
+        None,
+    )
+    .expect_err("a symlink that leaves the root is refused");
+
+    assert_eq!(
+        error.code,
+        at_app::app::commands::CommandErrorCode::InvalidArgument
+    );
+    Ok(())
+}
 
 #[test]
 fn adopt_authorized_roots_authorizes_backup_dir_outside_home() -> TestResult<()> {

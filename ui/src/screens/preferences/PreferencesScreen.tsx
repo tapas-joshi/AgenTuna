@@ -8,6 +8,7 @@ import { LogViewer } from "../logs/LogViewer";
 import { RemoteBackupSection } from "./RemoteBackupSection";
 import { AppUpdatesSection } from "./AppUpdatesSection";
 import { useToast } from "../../overlays/toasts";
+import { commandErrorMessage } from "../../lib/commandError";
 
 export type PreferencesSectionKey =
   | "general"
@@ -85,7 +86,7 @@ export function PreferencesScreen({
     setFailure(null);
     void Promise.all([invoke<SettingsDocument>("settings_load"), invoke<NetworkPolicyView>("network_policy"), invoke<AppPathsView>("app_paths")]).then(([document, nextPolicy, nextPaths]) => {
       setValue(decodeDocument(document)); setPolicy(nextPolicy); setPaths(nextPaths);
-    }, (error: unknown) => setFailure(String(error)));
+    }, (error: unknown) => setFailure(commandErrorMessage(error)));
   };
   const setOffline = async (offline: boolean) => {
     if (policy === null) return;
@@ -94,7 +95,7 @@ export function PreferencesScreen({
     try {
       setPolicy(await invoke<NetworkPolicyView>("network_set_offline", { offline }));
       setOfflineReloadKey(key => key + 1);
-    } catch (error) { setOfflineFailure(String(error)); }
+    } catch (error) { setOfflineFailure(commandErrorMessage(error)); }
     finally { setOfflineSaving(false); }
   };
   const showOfflineSwitch = () => { offlineSwitchRef.current?.focus(); offlineSwitchRef.current?.scrollIntoView?.({ block: "center" }); };
@@ -114,8 +115,8 @@ export function PreferencesScreen({
       toast.success("Preferences saved");
     } catch (error) {
       setValue(previous);
-      setFailure(String(error));
-      toast.warning(String(error), { title: "Preferences save failed" });
+      setFailure(commandErrorMessage(error));
+      toast.warning(commandErrorMessage(error), { title: "Preferences save failed" });
     }
     finally { setSaving(null); }
   };
@@ -130,8 +131,8 @@ export function PreferencesScreen({
       setNotice("Preferences reset to defaults");
       toast.success("Preferences reset to defaults");
     } catch (error) {
-      setFailure(String(error));
-      toast.warning(String(error), { title: "Reset failed" });
+      setFailure(commandErrorMessage(error));
+      toast.warning(commandErrorMessage(error), { title: "Reset failed" });
     }
     finally { setSaving(null); }
   };
@@ -217,11 +218,11 @@ export function PreferencesScreen({
       {row("Marketplace access", <button type="button" role="switch" data-testid="marketplace-toggle" aria-checked={value.marketplace_enabled} aria-label="Marketplace access" disabled={saving === "network.marketplace_enabled"} className="rounded-6 border border-border px-12 py-8 text-13 text-text" onClick={() => void update("network.marketplace_enabled", !value.marketplace_enabled)}>{value.marketplace_enabled ? "On" : "Off"}</button>)}
       {row("Network policy", <div className="flex flex-col gap-4 text-13 text-secondary"><span>{policy?.statement ?? "No automatic network call occurs. Offline mode disables network actions."}</span><span>No automatic network call occurs. Offline mode disables network actions.</span>{policy?.offline && <strong className="text-warning">Offline</strong>}</div>)}
       {policy && <div className="mt-12 space-y-8">{policy.actions.map(action => <div key={action.action} className="flex items-center justify-between gap-12 rounded-6 bg-raised px-12 py-8 text-13"><span>{action.label}</span><span className={action.state === "blocked" ? "text-warning" : "text-secondary"}>{action.state.replaceAll("_", " ")}{action.reason ? ` — ${action.reason}` : ""}</span></div>)}</div>}
-      {policy?.events.length ? <section aria-label="Recent network events" className="mt-16"><div className="flex items-center justify-between gap-12"><h3 className="m-0 text-13 font-medium text-text">Recent network activity</h3><Button variant="secondary" size="sm" onClick={() => { void invoke<NetworkPolicyView>("network_clear_events").then(setPolicy, (error: unknown) => setFailure(String(error))); }}>Clear</Button></div>{policy.events.map((event, index) => <div key={`${event.at}-${event.action}-${index}`} className="flex justify-between gap-8 border-t border-border py-6 text-11 text-secondary"><span>{event.action} · {event.host ?? "host unavailable"}</span><span>{event.at} · {event.bytes} bytes</span></div>)}</section> : null}
+      {policy?.events.length ? <section aria-label="Recent network events" className="mt-16"><div className="flex items-center justify-between gap-12"><h3 className="m-0 text-13 font-medium text-text">Recent network activity</h3><Button variant="secondary" size="sm" onClick={() => { void invoke<NetworkPolicyView>("network_clear_events").then(setPolicy, (error: unknown) => setFailure(commandErrorMessage(error))); }}>Clear</Button></div>{policy.events.map((event, index) => <div key={`${event.at}-${event.action}-${index}`} className="flex justify-between gap-8 border-t border-border py-6 text-11 text-secondary"><span>{event.action} · {event.host ?? "host unavailable"}</span><span>{event.at} · {event.bytes} bytes</span></div>)}</section> : null}
     </>)}
     {renderSection("storage", "Storage", row("Global store path", <code className="break-all text-12 text-secondary">{paths?.global_store ?? "Unavailable"}</code>))}
     {renderSection("reset", "Reset", row("Reset preferences", <Button variant="destructive" loading={saving === "reset"} onClick={() => void reset()}>Reset settings</Button>))}
-    {renderSection("window", "Window", row("Window layout", <Button variant="secondary" onClick={() => void invoke("window_state_reset").then(() => { setNotice("Window layout reset"); toast.success("Window layout reset"); }, error => setFailure(String(error)))}>Reset Window Layout</Button>, "Restore the default size and position."))}
+    {renderSection("window", "Window", row("Window layout", <Button variant="secondary" onClick={() => void invoke("window_state_reset").then(() => { setNotice("Window layout reset"); toast.success("Window layout reset"); }, error => setFailure(commandErrorMessage(error)))}>Reset Window Layout</Button>, "Restore the default size and position."))}
     <details className="rounded-10 border border-border bg-surface p-16"><summary className="cursor-pointer text-15 font-semibold text-text">Logs & diagnostics</summary><LogViewer /></details>
   </main>;
 }

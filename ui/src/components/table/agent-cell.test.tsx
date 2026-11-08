@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { AgentCell } from "./agent-cell";
+import { AgentCell, SharedFolderCell } from "./agent-cell";
 import type { AgentCellState, AgentDescriptor } from "./types";
 
 afterEach(cleanup);
@@ -19,7 +19,7 @@ const STATES: ReadonlyArray<[AgentCellState["kind"], AgentCellState]> = [
 ];
 
 function renderCell(state: AgentCellState, onToggle?: (next: boolean) => void) {
-  return render(<AgentCell agent={CLAUDE} state={state} onToggle={onToggle} />);
+  return render(<AgentCell agent={CLAUDE} itemLabel="Review checklist" state={state} onToggle={onToggle} />);
 }
 
 /**
@@ -35,9 +35,7 @@ function accessibilityProjection(cell: Element): string {
 
   const toggle = cell.querySelector("[role='switch']");
   if (toggle !== null) {
-    lines.push(
-      `switch: name=${toggle.getAttribute("aria-labelledby") === null ? "(none)" : "labelled"} checked=${toggle.getAttribute("aria-checked")} disabled=${toggle.hasAttribute("disabled")}`,
-    );
+    lines.push(`switch: name=${toggle.getAttribute("aria-labelledby") === null ? "(none)" : cell.querySelector(`#${toggle.getAttribute("aria-labelledby")}`)?.textContent ?? "(empty)"} checked=${toggle.getAttribute("aria-checked")} disabled=${toggle.hasAttribute("disabled")}`);
   }
   for (const badge of cell.querySelectorAll("[data-slot='badge']")) {
     lines.push(`badge: ${badge.textContent ?? ""}`);
@@ -70,7 +68,7 @@ describe("AgentCell", () => {
       <>
         {STATES.map(([kind, state]) => (
           <div key={kind} data-fixture={kind}>
-            <AgentCell agent={CLAUDE} state={state} onToggle={() => undefined} />
+            <AgentCell agent={CLAUDE} itemLabel="Review checklist" state={state} onToggle={() => undefined} />
           </div>
         ))}
       </>,
@@ -121,7 +119,7 @@ describe("AgentCell", () => {
       <>
         {STATES.map(([kind, state]) => (
           <div key={kind} data-fixture={kind}>
-            <AgentCell agent={CLAUDE} state={state} onToggle={() => undefined} />
+            <AgentCell agent={CLAUDE} itemLabel="Review checklist" state={state} onToggle={() => undefined} />
           </div>
         ))}
       </>,
@@ -133,11 +131,11 @@ describe("AgentCell", () => {
     });
 
     expect(projection).toEqual([
-      "linked\ngroup: Claude Code\ntooltip: Deployed to this agent by AgenTuna and unchanged since the last write.\nswitch: name=labelled checked=true disabled=false\nlabel: Linked",
-      "off\ngroup: Claude Code\ntooltip: Not deployed to this agent.\nswitch: name=labelled checked=false disabled=false\nlabel: Off",
+      "linked\ngroup: Claude Code\ntooltip: Deployed to this agent by AgenTuna and unchanged since the last write.\nswitch: name=Review checklist, Claude Code, enabled checked=true disabled=false\nlabel: Linked",
+      "off\ngroup: Claude Code\ntooltip: Not deployed to this agent.\nswitch: name=Review checklist, Claude Code, disabled checked=false disabled=false\nlabel: Off",
       "native\ngroup: Claude Code\ntooltip: .claude/skills/research · read-only\nbadge: native\npath: .claude/skills",
       "none\ngroup: Claude Code\ntooltip: Not present in this agent\ndash: present",
-      "locked\ngroup: Claude Code\ntooltip: Locked by Global\nswitch: name=labelled checked=true disabled=true\nglyph: locked\nlabel: Locked",
+      "locked\ngroup: Claude Code\ntooltip: Locked by Global\nswitch: name=Review checklist, Claude Code, enabled, locked by Global checked=true disabled=true\nglyph: locked\nlabel: Locked",
       "shadowed\ngroup: Claude Code\ntooltip: Shadowed by Project\nstatus: Shadowed",
     ]);
   });
@@ -159,7 +157,7 @@ describe("AgentCell", () => {
     const onToggle = vi.fn();
     renderCell({ kind: "off" }, onToggle);
 
-    const toggle = screen.getByRole("switch", { name: "Claude Code: Off" });
+    const toggle = screen.getByRole("switch", { name: "Review checklist, Claude Code, disabled" });
     await user.click(toggle);
 
     expect(onToggle).toHaveBeenCalledWith(true);
@@ -170,11 +168,11 @@ describe("AgentCell", () => {
     const { rerender } = renderCell({ kind: "linked" });
     expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true);
 
-    rerender(<AgentCell agent={CLAUDE} state={{ kind: "linked", pending: true }} onToggle={() => undefined} />);
+    rerender(<AgentCell agent={CLAUDE} itemLabel="Review checklist" state={{ kind: "linked", pending: true }} onToggle={() => undefined} />);
     expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("group").getAttribute("aria-busy")).toBe("true");
 
-    rerender(<AgentCell agent={CLAUDE} state={{ kind: "off", readOnly: true }} onToggle={() => undefined} />);
+    rerender(<AgentCell agent={CLAUDE} itemLabel="Review checklist" state={{ kind: "off", readOnly: true }} onToggle={() => undefined} />);
     expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true);
   });
 
@@ -183,7 +181,7 @@ describe("AgentCell", () => {
     const onToggle = vi.fn();
     renderCell({ kind: "locked", lockedBy: "Global" }, onToggle);
 
-    const toggle = screen.getByRole("switch", { name: "Claude Code: Locked" }) as HTMLButtonElement;
+    const toggle = screen.getByRole("switch", { name: "Review checklist, Claude Code, enabled, locked by Global" }) as HTMLButtonElement;
     await user.click(toggle);
 
     expect(toggle.disabled).toBe(true);
@@ -201,7 +199,7 @@ describe("AgentCell", () => {
       onToggle,
     );
 
-    const toggle = screen.getByRole("switch", { name: "Claude Code: Off" }) as HTMLButtonElement;
+    const toggle = screen.getByRole("switch", { name: "Review checklist, Claude Code, disabled, agent claude-code does not support MCP configuration" }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(true);
     expect(toggle.getAttribute("aria-checked")).toBe("false");
 
@@ -210,5 +208,19 @@ describe("AgentCell", () => {
 
     await user.click(toggle);
     expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  test("shared-root toggle announces item, all agents, state and coupling", () => {
+    render(
+      <SharedFolderCell
+        itemLabel="Review checklist"
+        agents={[{ id: "codex", label: "Codex" }, { id: "omp", label: "omp" }]}
+        path="/sandbox/project/.agents/skills/review-checklist"
+        state={{ kind: "linked" }}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("switch", { name: "Review checklist, Codex + omp, enabled, one shared folder" })).toBeTruthy();
   });
 });

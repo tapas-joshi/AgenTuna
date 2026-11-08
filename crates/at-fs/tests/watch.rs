@@ -375,9 +375,8 @@ fn deleting_a_watched_store_yields_path_gone_and_resumes_when_it_returns() {
     assert!(gone, "deleting the watched store yields PathGone");
     assert!(service.is_running(), "PathGone must not stop the service");
 
-    // The store returns; the service re-attaches and reports what changes inside it. The
-    // worker polls the root every 50 ms, so a write can land before the new stream starts;
-    // retry with a fresh file instead of guessing how long the re-attach takes.
+    // The parent watch reports the root's return; the worker re-attaches recursively before
+    // processing later changes inside the recreated store. Retry writes across platform batches.
     fs::create_dir_all(&store).expect("recreate store");
     let mut seen = None;
     for attempt in 0..5 {

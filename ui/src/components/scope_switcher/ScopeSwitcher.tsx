@@ -74,6 +74,7 @@ export function ScopeSwitcher({
       }
     }
   }
+  // Reserve the four-scope width in every state so the top bar does not jump.
 
   return (
     <div
@@ -81,7 +82,7 @@ export function ScopeSwitcher({
       aria-label="Scope"
       data-slot="scope-switcher"
       data-theme={theme}
-      className="inline-flex min-w-0 items-center gap-2 rounded-10 border border-border bg-surface p-2"
+      className="flex w-[420px] min-w-0 items-center gap-2 rounded-10 border border-border bg-surface p-2"
     >
       {options.map((option, index) => {
         const disabled = unavailableScopes.has(option.value);

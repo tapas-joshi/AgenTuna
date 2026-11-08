@@ -575,13 +575,17 @@ fn lock_store_for_write(
         .write(true)
         .open(&path)
         .map_err(|error| ChangeSetApplyError::Journal(error.to_string()))?;
-    let deadline = Instant::now() + wait;
+    let started = Instant::now();
+    let deadline = started + wait;
     loop {
         match FileExt::try_lock(&file) {
             Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
-                    return Err(ChangeSetApplyError::StoreBusy { path, waited: wait });
+                    return Err(ChangeSetApplyError::StoreBusy {
+                        path,
+                        waited: started.elapsed(),
+                    });
                 }
                 thread::sleep(STORE_LOCK_POLL);
             }
@@ -2349,6 +2353,7 @@ mod tests {
             backup: false,
         }]);
         let (held, holding) = std::sync::mpsc::channel();
+        let (release, release_holder) = std::sync::mpsc::channel();
         let holder_root = root.clone();
         let holder = std::thread::spawn(move || {
             let path = store_write_lock_path(&holder_root);
@@ -2362,32 +2367,54 @@ mod tests {
                 .expect("lock file");
             FileExt::lock(&file).expect("hold the store lock");
             held.send(()).expect("signal the holder");
-            std::thread::sleep(Duration::from_millis(600));
+            release_holder.recv().expect("release signal");
             FileExt::unlock(&file).expect("release the store lock");
         });
         holding.recv().expect("holder acquired the lock");
 
-        let started = Instant::now();
-        let mut recorder = Recorder::default();
-        {
-            let mut context = ApplyContext {
-                store_root: &root,
-                backup_folder: &backup_root,
-                recorder: &mut recorder,
+        let (attempting, started_apply) = std::sync::mpsc::channel();
+        let (completed, apply_result) = std::sync::mpsc::channel();
+        let apply_root = root.clone();
+        let apply_backup_root = backup_root.clone();
+        let apply_set = set.clone();
+        let apply_thread = std::thread::spawn(move || {
+            let mut recorder = Recorder::default();
+            let result = {
+                let mut context = ApplyContext {
+                    store_root: &apply_root,
+                    backup_folder: &apply_backup_root,
+                    recorder: &mut recorder,
+                };
+                attempting.send(()).expect("signal apply attempt");
+                apply(&apply_set, &mut context)
             };
-            apply(&set, &mut context).expect("apply waits for the lock instead of failing");
-        }
-        let elapsed = started.elapsed();
-        holder.join().expect("holder");
+            completed
+                .send((result, recorder.starts))
+                .expect("send apply result");
+        });
+        started_apply.recv().expect("apply started");
         assert!(
-            elapsed >= Duration::from_millis(500),
-            "apply had to wait for the holder, not skip it: {elapsed:?}"
+            apply_result
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "apply must remain blocked while the lock is held"
         );
+        assert!(
+            !root.join("fresh.txt").exists(),
+            "nothing is written before the lock is released"
+        );
+        release.send(()).expect("release the store lock");
+        let (result, starts) = apply_result
+            .recv_timeout(Duration::from_secs(2))
+            .expect("apply completes after lock release");
+        result.expect("apply waits for the lock instead of failing");
+        apply_thread.join().expect("apply thread");
+        holder.join().expect("holder");
         assert_eq!(
             fs::read(root.join("fresh.txt")).expect("written target"),
             b"written"
         );
-        assert_eq!(recorder.starts, 1, "exactly one operation was recorded");
+        assert_eq!(starts, 1, "exactly one operation was recorded");
     }
 
     /// A lock held for the whole wait window is a typed, actionable failure: nothing is written,
@@ -2430,16 +2457,24 @@ mod tests {
         let elapsed = started.elapsed();
         FileExt::unlock(&held).expect("release the store lock");
 
-        match error {
+        let reported_elapsed = match error {
             ChangeSetApplyError::StoreBusy {
                 path,
                 waited: reported,
             } => {
                 assert_eq!(path, lock_path, "the error names the contended lock file");
-                assert_eq!(reported, wait, "the error reports the wait policy it used");
+                assert!(
+                    reported >= wait,
+                    "the error reports actual elapsed time, at least the wait window: {reported:?}"
+                );
+                reported
             }
             other => panic!("expected StoreBusy, got {other:?}"),
-        }
+        };
+        assert!(
+            reported_elapsed <= elapsed,
+            "reported elapsed time cannot exceed total observed call time"
+        );
         assert!(
             elapsed >= wait,
             "the acquisition retried for the whole window: {elapsed:?}"

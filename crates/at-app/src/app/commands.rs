@@ -570,6 +570,14 @@ fn installer(state: &AppState) -> Result<&CliInstaller, CommandError> {
 /// Loads the durable settings document from the shared application database.
 #[tauri::command]
 pub fn settings_load(state: State<'_, AppState>) -> Result<serde_json::Value, CommandError> {
+    settings_load_inner(&state)
+}
+
+/// Loads the durable settings document without requiring a Tauri state wrapper.
+///
+/// # Errors
+/// Returns [`CommandError`] if the database cannot be opened or exported.
+pub fn settings_load_inner(state: &AppState) -> Result<serde_json::Value, CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
     let document = at_db::settings::export(database.connection())
         .map_err(|error| CommandError::internal(error.to_string()))?;

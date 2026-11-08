@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { commandErrorMessage } from "../../lib/commandError";
 import { Button, Input } from "../../components";
 import type { AgentCardView } from "../../generated/AgentCardView";
 import type { AgentPathCandidateView } from "../../generated/AgentPathCandidateView";
@@ -67,7 +68,7 @@ export function ConnectAgentDialog({ agent, onClose, onSaved }: ConnectAgentDial
         if (!cancelled) setCandidates(result);
       })
       .catch((cause) => {
-        if (!cancelled) setError(String(cause));
+        if (!cancelled) setError(commandErrorMessage(cause));
       });
     return () => {
       cancelled = true;
@@ -87,7 +88,7 @@ export function ConnectAgentDialog({ agent, onClose, onSaved }: ConnectAgentDial
         if (requestId.current === current) setValidation(result);
       })
       .catch((cause) => {
-        if (requestId.current === current) setError(String(cause));
+        if (requestId.current === current) setError(commandErrorMessage(cause));
       })
       .finally(() => {
         if (requestId.current === current) setValidateBusy(false);
@@ -101,7 +102,7 @@ export function ConnectAgentDialog({ agent, onClose, onSaved }: ConnectAgentDial
       });
       if (selected !== null) setPathValue(selected);
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause));
     }
   }, [agent?.name]);
 
@@ -126,8 +127,8 @@ export function ConnectAgentDialog({ agent, onClose, onSaved }: ConnectAgentDial
       });
       if (updated !== null) await onSaved(updated);
     } catch (cause) {
-      setError(String(cause));
-      toast.warning(String(cause), { title: "Path not saved" });
+      setError(commandErrorMessage(cause));
+      toast.warning(commandErrorMessage(cause), { title: "Path not saved" });
     } finally {
       setSaveBusy(false);
     }

@@ -14,6 +14,7 @@ import { Modal } from "../../overlays/dialogs/Modal";
 import { useToast } from "../../overlays/toasts/ToastProvider";
 import { showBackupRestoredToast } from "../../overlays/toasts/catalogue";
 import { useAppState } from "../../state/context";
+import { commandErrorMessage } from "../../lib/commandError";
 
 type Tab = "drift" | "backups";
 type DriftAction = "adopt" | "restore";
@@ -37,7 +38,7 @@ function failureMessage(cause: unknown): string {
   if (typeof cause === "object" && cause !== null && "message" in cause && typeof cause.message === "string") {
     return cause.message;
   }
-  return String(cause);
+  return commandErrorMessage(cause);
 }
 
 function formattedTime(value: string): string {
@@ -295,7 +296,7 @@ export function DriftScreen(): JSX.Element {
             {preview ? preview.previous_version_available
               ? <DiffViewer diff={preview.diff} displayPath={preview.path} mode="side-by-side" />
               : <section aria-label="On-disk content" className="grid min-h-0 flex-1 content-start gap-8 overflow-auto">
-                <p role="status" className="m-0 rounded-8 border border-warning/30 bg-warning/10 p-10 text-12 text-warning">Previous version unavailable. Only AgenTuna&apos;s baseline hash was retained.</p>
+                <p role="status" className="m-0 rounded-8 border border-warning/30 bg-warning/10 p-10 text-12 text-warning">Baseline content not retained: {preview.baseline_unavailable_reason ?? "No recovery reason was provided."}</p>
                 <h3 className="m-0 text-13 font-semibold text-text">On-disk content</h3>
                 {preview.on_disk_content !== null ? <pre aria-label="Current on-disk content" className="m-0 whitespace-pre-wrap rounded-8 border border-border bg-surface p-12 font-mono text-12 text-text">{preview.on_disk_content}</pre> : <p className="m-0 text-12 text-text-muted">No UTF-8 content is available for preview.</p>}
               </section>
@@ -337,7 +338,7 @@ export function DriftScreen(): JSX.Element {
         {confirmation?.kind === "drift" && preview && (preview.previous_version_available
           ? <DiffViewer diff={preview.diff} displayPath={preview.path} mode="side-by-side" />
           : <section aria-label="On-disk content" className="grid gap-8">
-            <p role="status" className="m-0 rounded-8 border border-warning/30 bg-warning/10 p-10 text-12 text-warning">Previous version unavailable. Only AgenTuna&apos;s baseline hash was retained.</p>
+            <p role="status" className="m-0 rounded-8 border border-warning/30 bg-warning/10 p-10 text-12 text-warning">Baseline content not retained: {preview.baseline_unavailable_reason ?? "No recovery reason was provided."}</p>
             {preview.on_disk_content !== null ? <pre aria-label="Current on-disk content" className="m-0 whitespace-pre-wrap rounded-8 border border-border bg-surface p-12 font-mono text-12 text-text">{preview.on_disk_content}</pre> : <p className="m-0 text-12 text-text-muted">No UTF-8 content is available for preview.</p>}
           </section>)}
       </div>

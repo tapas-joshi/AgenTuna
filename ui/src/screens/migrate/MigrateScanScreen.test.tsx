@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
 import { ToastProvider } from "../../overlays/toasts";
+import type { McpDefinitionSummaryView } from "../../generated/McpDefinitionSummaryView";
 import { MigrateScanScreen } from "./MigrateScanScreen";
 
 const ipc = vi.hoisted(() => ({
@@ -46,6 +47,7 @@ const item = (
     store_link: boolean;
     state: string;
     ownership: string;
+    mcp_summary: McpDefinitionSummaryView;
   }>,
 ) => ({
   kind: "skill",
@@ -73,6 +75,7 @@ const scan = {
       content_hash: "b".repeat(64),
       state: "conflict",
       ownership: "conflict",
+      mcp_summary: { transport: "stdio", command: "node", argument_count: 3, url: null, env_names: ["API_TOKEN"], header_names: [] },
     }),
     item({
       name: "in-sync",
@@ -195,7 +198,7 @@ async function reachPlan() {
   fireEvent.click(screen.getByRole("button", { name: "Continue with 3" }));
   await screen.findByRole("heading", { name: "Resolve conflicts" });
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-  await screen.findByRole("heading", { name: "Plan the move" });
+  await screen.findByRole("heading", { name: "Preview the exact changes" });
 }
 
 /** Confirms the reviewed plan through the confirmation modal. */
@@ -430,7 +433,7 @@ describe("MigrateScanScreen", () => {
     await openResolve();
     fireEvent.click(screen.getByRole("button", { name: "Keep A for unresolved" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    expect(await screen.findByRole("heading", { name: "Plan the move" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Preview the exact changes" })).toBeTruthy();
     await waitFor(() => expect(ipc.calls.some((call) => call.command === "migrate_plan")).toBe(true));
     const args = ipc.calls.find((call) => call.command === "migrate_plan")?.args;
     if (typeof args !== "object" || args === null || !("request" in args)) {
@@ -445,8 +448,8 @@ describe("MigrateScanScreen", () => {
       { name: "review-helper", choice: "keep_a", names: [] },
     ]);
     expect(await screen.findByText("2 items copied into the store")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Show file list" }));
     expect(await screen.findByText(/Back up original/)).toBeTruthy();
+    expect(screen.getByLabelText("Planned files")).toBeTruthy();
   });
 
   test("a finished apply is read from the retained job result and lands on the done step", async () => {
@@ -571,5 +574,31 @@ describe("MigrateScanScreen", () => {
     expect(await screen.findByRole("heading", { name: "Migration rolled back" })).toBeTruthy();
     expect(screen.getByText(/No completed migration apply was recorded/)).toBeTruthy();
     expect(screen.queryByText(/timed out/i)).toBeNull();
+  });
+
+  test("MCP import review filters skills, counts selections, labels conflicts, and enters shared resolution", async () => {
+    appState.setScreenState("migrate:kind", "mcp_server");
+    ipc.reply = scanReply(scan, (command) => {
+      if (command === "migrate_conflicts") return { conflicts: [] };
+      if (command === "migrate_plan") return plan;
+      return undefined;
+    });
+    renderScreen();
+
+    expect(await screen.findByRole("heading", { name: "Review before import" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Found in agent apps" }).textContent).toContain("context7");
+    expect(screen.queryByText("pdf-extract")).toBeNull();
+    expect(screen.getByText(/node · 3 args/)).toBeTruthy();
+    expect(screen.getByText(/env · API_TOKEN/)).toBeTruthy();
+    expect(screen.queryByText(/fixture-secret|sk-live/)).toBeNull();
+    const selection = screen.getByRole("checkbox", { name: "Select context7" });
+    fireEvent.click(selection);
+    expect(screen.getByText(/1 definitions · 1 selected · nothing written/)).toBeTruthy();
+    expect(screen.getByText(/Same name · resolve before import/)).toBeTruthy();
+    expect(screen.getByText("Differs")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Import 1 servers" }));
+    expect(await screen.findByRole("heading", { name: "Resolve conflicts" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("heading", { name: "Preview the exact changes" })).toBeTruthy();
   });
 });
