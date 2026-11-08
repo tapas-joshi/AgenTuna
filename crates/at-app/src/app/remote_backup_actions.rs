@@ -561,9 +561,8 @@ pub fn conflicts_resolve_apply(
             "The target store changed; reopen the conflict and review current copies.",
         ));
     }
-    let change_set = plan.change_set.clone();
-    let outcome = apply_conflict_plan(&store, &mut database, plan)?;
-    state.record_writes(&change_set, store.root());
+    let outcome =
+        apply_conflict_plan_with_registry(&store, &mut database, plan, &state.recent_writes())?;
     Ok(RemoteBackupConflictApplyView {
         operation_id: outcome.operation_id,
         files_changed: outcome.completed,
@@ -1671,10 +1670,20 @@ struct ConflictApplyOutcome {
     completed: usize,
 }
 
+#[cfg(test)]
 fn apply_conflict_plan(
     store: &StoreLayout,
     database: &mut Database,
     plan: CachedConflictPlan,
+) -> Result<ConflictApplyOutcome, CommandError> {
+    apply_conflict_plan_with_registry(store, database, plan, &at_fs::RecentWrites::new())
+}
+
+fn apply_conflict_plan_with_registry(
+    store: &StoreLayout,
+    database: &mut Database,
+    plan: CachedConflictPlan,
+    registry: &at_fs::RecentWrites,
 ) -> Result<ConflictApplyOutcome, CommandError> {
     if store.root() != plan.store_root {
         return Err(CommandError::new(
@@ -1702,15 +1711,15 @@ fn apply_conflict_plan(
         backup_folder: &store.backups_dir(),
         recorder: &mut recorder,
     };
-    let outcome = at_fs::apply_with_roots(&plan.change_set, &mut context, &roots).map_err(
-        |error| match error {
-            at_fs::ChangeSetApplyError::Stale(_) => CommandError::new(
-                CommandErrorCode::Conflict,
-                "Conflict contents changed; reopen the conflict and review current copies.",
-            ),
-            _ => CommandError::internal("could not apply the reviewed conflict resolution"),
-        },
-    )?;
+    let outcome =
+        at_fs::apply_with_roots_and_registry(&plan.change_set, &mut context, &roots, registry)
+            .map_err(|error| match error {
+                at_fs::ChangeSetApplyError::Stale(_) => CommandError::new(
+                    CommandErrorCode::Conflict,
+                    "Conflict contents changed; reopen the conflict and review current copies.",
+                ),
+                _ => CommandError::internal("could not apply the reviewed conflict resolution"),
+            })?;
     Ok(ConflictApplyOutcome {
         operation_id: outcome.operation_id,
         completed: outcome.completed,

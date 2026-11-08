@@ -32,6 +32,7 @@
 //! yields the global flag. Per-item `On` beats a sibling row's `Off` when a
 //! data anomaly ever produces two live rows for one item.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use at_model::{ItemId, ParseWireError};
@@ -470,6 +471,42 @@ pub fn source_for(connection: &Connection, item_id: &ItemId) -> Result<Option<So
         .query_row([item_id.to_string()], source_row_from_row)
         .optional()?;
     row.map(|raw| raw.try_into()).transpose()
+}
+
+/// The live (non-archived) source row of every item, keyed by item id.
+///
+/// [`source_for`] runs one prepared statement per item; a list projection that shows the
+/// origin columns of thousands of rows pays for thousands of statements. This reads the same
+/// rows with one statement, keeping the newest row per item exactly like [`source_for`].
+///
+/// # Errors
+/// A SQLite failure, an unknown stored `kind`/`auto_update` value or an unreadable item id.
+pub fn live_sources_by_item(
+    connection: &Connection,
+) -> Result<HashMap<ItemId, SourceRow>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT id, item_id, kind, url, subpath, commit_sha, git_ref, version, \
+                content_hash, marketplace_id, install_count, etag, remote_sha, \
+                ignored_sha, local_modified, auto_update, deleted_at, installed_at, \
+                last_checked_at, update_available, license \
+           FROM sources WHERE deleted_at IS NULL ORDER BY item_id, rowid DESC",
+    )?;
+    let rows = statement.query_map([], source_row_from_row)?;
+    let mut sources: HashMap<ItemId, SourceRow> = HashMap::new();
+    for row in rows {
+        let source = SourceRow::try_from(row?)?;
+        let Some(item_id) = source.item_id.as_deref() else {
+            continue;
+        };
+        let item_id = item_id
+            .parse::<ItemId>()
+            .map_err(|error| DbError::InvalidValue {
+                field: "sources.item_id",
+                reason: error.to_string(),
+            })?;
+        sources.entry(item_id).or_insert(source);
+    }
+    Ok(sources)
 }
 
 /// Every source row ever recorded for `item_id`, archived included, newest

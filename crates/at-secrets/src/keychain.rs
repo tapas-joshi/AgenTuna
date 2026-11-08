@@ -1,9 +1,9 @@
-//! macOS Keychain implementation over `keyring` 4.x.
+//! OS credential-store implementation over `keyring` 4.x.
 //!
-//! The production backend calls `keyring::Entry` for the configured service and
-//! account. Operations are serialized inside one [`KeychainStore`] so the scheduler
-//! and UI threads never race on the same credential. Tests replace the backend with
-//! the `keyring-core` mock store; no test opens the real Keychain.
+//! The production backend uses the platform store selected by `keyring` (macOS Keychain,
+//! Linux Secret Service, or the Windows credential store). Operations are serialized inside
+//! one [`KeychainStore`] so scheduler and UI threads never race on the same credential. Tests
+//! replace the backend with the `keyring-core` mock store; no test opens the real OS store.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -128,7 +128,15 @@ fn map(id: &KeychainId, error: keyring::Error) -> SecretsError {
 
     match error {
         Error::NoEntry => id.not_found(),
-        Error::NoStorageAccess(_) | Error::PlatformFailure(_) => SecretsError::KeychainDenied {
+        Error::NoStorageAccess(_) => SecretsError::KeychainDenied {
+            service: id.service().to_owned(),
+        },
+        #[cfg(target_os = "linux")]
+        Error::PlatformFailure(_) => SecretsError::KeychainUnavailable {
+            service: id.service().to_owned(),
+        },
+        #[cfg(not(target_os = "linux"))]
+        Error::PlatformFailure(_) => SecretsError::KeychainDenied {
             service: id.service().to_owned(),
         },
         Error::BadEncoding(_) | Error::BadDataFormat(..) => SecretsError::CorruptSecret {
@@ -182,17 +190,45 @@ mod tests {
         let missing = map(&id, keyring::Error::NoEntry);
         assert!(matches!(missing, SecretsError::NotFound { .. }));
 
-        for error in [
+        let denied = map(
+            &id,
             keyring::Error::NoStorageAccess(Box::new(io::Error::other("locked"))),
-            keyring::Error::PlatformFailure(Box::new(io::Error::other(
-                "errSecInteractionNotAllowed",
-            ))),
-        ] {
-            let denied = map(&id, error);
+        );
+        assert!(matches!(denied, SecretsError::KeychainDenied { .. }));
+
+        #[cfg(target_os = "linux")]
+        assert!(
+            denied.to_string().contains("Secret Service provider"),
+            "{}",
+            denied
+        );
+        assert!(denied.to_string().contains(KEYCHAIN_SERVICE));
+
+        #[cfg(target_os = "linux")]
+        {
+            let unavailable = map(
+                &id,
+                keyring::Error::PlatformFailure(Box::new(io::Error::other("no session bus"))),
+            );
+            assert!(matches!(
+                unavailable,
+                SecretsError::KeychainUnavailable { .. }
+            ));
+            let remedy = unavailable.to_string();
+            assert!(remedy.contains("Secret Service"), "{remedy}");
+            assert!(remedy.contains("never writes secrets to disk"), "{remedy}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let denied = map(
+                &id,
+                keyring::Error::PlatformFailure(Box::new(io::Error::other(
+                    "errSecInteractionNotAllowed",
+                ))),
+            );
             assert!(matches!(denied, SecretsError::KeychainDenied { .. }));
-            let text = denied.to_string();
-            assert!(text.contains("Keychain Access"), "{text}");
-            assert!(text.contains(KEYCHAIN_SERVICE), "{text}");
+            #[cfg(target_os = "macos")]
+            assert!(denied.to_string().contains("Keychain Access"));
         }
 
         let corrupt = map(
@@ -207,6 +243,13 @@ mod tests {
             unavailable,
             SecretsError::KeychainUnavailable { .. }
         ));
+        let remedy = unavailable.to_string();
+        #[cfg(target_os = "linux")]
+        assert!(remedy.contains("Secret Service"), "{remedy}");
+        #[cfg(not(target_os = "linux"))]
+        assert!(remedy.contains("platform credential store"), "{remedy}");
+        assert!(remedy.contains("never writes secrets to disk"), "{remedy}");
+        assert!(remedy.contains(KEYCHAIN_SERVICE), "{remedy}");
     }
 
     #[test]
@@ -327,7 +370,12 @@ mod tests {
         let err = store.read(&id()).unwrap_err();
         assert!(matches!(err, SecretsError::KeychainDenied { .. }));
         let text = err.to_string();
+        #[cfg(target_os = "macos")]
         assert!(text.contains("Keychain Access"), "{text}");
+        #[cfg(target_os = "linux")]
+        assert!(text.contains("Secret Service provider"), "{text}");
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(text.contains("credential service"), "{text}");
         assert!(text.contains(KEYCHAIN_SERVICE), "{text}");
         assert!(!format!("{err} {err:?}").contains(SENTINEL));
     }

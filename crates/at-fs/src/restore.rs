@@ -335,7 +335,10 @@ fn install_tree(
     // A second writer may touch the live tree while the backup is staged; re-read it now.
     if crate::failpoint::hit(crate::failpoint::FaultPoint::RestoreRecheck, target).is_err() {
         abort(&stage, &journal_path);
-        return Err(io(target, std::io::Error::from_raw_os_error(libc::EIO)));
+        return Err(io(
+            target,
+            std::io::Error::from_raw_os_error(crate::errno::FAULT_IO),
+        ));
     }
     let before_hash = crate::changeset::hash_node(target).map_err(|error| io(target, error))?;
     if before_hash.as_deref() != current_hash {
@@ -641,7 +644,13 @@ pub fn restore_backup(request: RestoreRequest<'_>) -> Result<RestoreOutcome, Res
     let mut current_backup_id = None;
     if let Some(current_bytes) = current.as_deref() {
         let metadata = fs::symlink_metadata(&target).map_err(|error| io(&target, error))?;
-        let mode = std::os::unix::fs::MetadataExt::mode(&metadata) & 0o7777;
+        // Windows has no POSIX mode to record; the sidecar keeps `None` and the restore then
+        // reproduces content, which is the only thing the platform can promise.
+        #[cfg(unix)]
+        let mode = Some(std::os::unix::fs::MetadataExt::mode(&metadata) & 0o7777);
+        #[cfg(not(unix))]
+        let mode = None;
+        let _ = &metadata;
         let relative = target
             .strip_prefix(request.store_root)
             .map_err(|_| RestoreError::OutsideRoot)?;
@@ -653,7 +662,7 @@ pub fn restore_backup(request: RestoreRequest<'_>) -> Result<RestoreOutcome, Res
                 scope: sidecar.scope,
                 relpath: Some(relative.to_string_lossy().into_owned()),
                 operation_id: Some(operation_text.clone()),
-                mode: Some(mode),
+                mode,
             },
             now,
         )?;
@@ -682,9 +691,22 @@ pub fn restore_backup(request: RestoreRequest<'_>) -> Result<RestoreOutcome, Res
     }
     crate::apply(&write)?;
     if let Some(mode) = sidecar.mode {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))
-            .map_err(|error| io(&target, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))
+                .map_err(|error| io(&target, error))?;
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows can only express the read-only bit; a stored mode without a write bit
+            // restores read-only, every other stored mode restores writable.
+            let mut permissions = fs::metadata(&target)
+                .map_err(|error| io(&target, error))?
+                .permissions();
+            permissions.set_readonly(mode & 0o200 == 0);
+            fs::set_permissions(&target, permissions).map_err(|error| io(&target, error))?;
+        }
     }
     let actual = crate::symlink::read_nofollow(&target).map_err(RestoreError::Fs)?;
     let after_hash = sha256_hex(&actual);

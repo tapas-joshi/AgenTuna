@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -126,10 +125,7 @@ fn group_exists(pgid: u32) -> bool {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).expect("write fixture");
-    let mut permissions = fs::metadata(path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod");
+    at_fs::testkit::write_executable(path, body).expect("write executable fixture");
 }
 
 async fn open(

@@ -70,33 +70,48 @@ export function AppUpdatesSection() {
       <div className="mt-12 space-y-10">
         <StatusLine status={status} />
         <div className="flex flex-wrap gap-8">
-          <button
-            type="button"
-            className="rounded-6 border border-border bg-raised px-12 py-8 text-13 text-text disabled:opacity-50"
-            disabled={busy || installing}
-            onClick={() => void run(() => invoke<UpdateInstallGate>("app_update_check"))}
-          >
-            Check for updates
-          </button>
-          <button
-            type="button"
-            className="rounded-6 border border-border bg-raised px-12 py-8 text-13 text-text disabled:opacity-50"
-            disabled={busy || !gate?.can_install || status?.state !== "ready"}
-            onClick={() => {
-              if (status?.state !== "ready") return;
-              void run(() => invoke<UpdateInstallGate>("app_update_install_request", { version: status.version, editorDirty: false, modalOpen: false }));
-            }}
-          >
-            Install {status?.state === "ready" ? status.version : "update"}
-          </button>
-          <button
-            type="button"
-            className="rounded-6 border border-border px-12 py-8 text-13 text-text disabled:opacity-50"
-            disabled={busy || !gate?.can_cancel}
-            onClick={() => void run(() => invoke<UpdateInstallGate>("app_update_install_cancel"))}
-          >
-            Cancel queued install
-          </button>
+          {status?.state === "unsupported" ? (
+            <button
+              type="button"
+              className="rounded-6 border border-border bg-raised px-12 py-8 text-13 text-text"
+              onClick={() => {
+                void invoke("open_external_link", { url: "https://github.com/tapas-joshi/AgenTuna/releases/latest" })
+                  .catch((error: unknown) => setFailure(commandErrorMessage(error)));
+              }}
+            >
+              Download release from GitHub
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="rounded-6 border border-border bg-raised px-12 py-8 text-13 text-text disabled:opacity-50"
+                disabled={busy || installing}
+                onClick={() => void run(() => invoke<UpdateInstallGate>("app_update_check"))}
+              >
+                Check for updates
+              </button>
+              <button
+                type="button"
+                className="rounded-6 border border-border bg-raised px-12 py-8 text-13 text-text disabled:opacity-50"
+                disabled={busy || !gate?.can_install || status?.state !== "ready"}
+                onClick={() => {
+                  if (status?.state !== "ready") return;
+                  void run(() => invoke<UpdateInstallGate>("app_update_install_request", { version: status.version, editorDirty: false, modalOpen: false }));
+                }}
+              >
+                Install {status?.state === "ready" ? status.version : "update"}
+              </button>
+              <button
+                type="button"
+                className="rounded-6 border border-border px-12 py-8 text-13 text-text disabled:opacity-50"
+                disabled={busy || !gate?.can_cancel}
+                onClick={() => void run(() => invoke<UpdateInstallGate>("app_update_install_cancel"))}
+              >
+                Cancel queued install
+              </button>
+            </>
+          )}
         </div>
       </div>
     </section>
@@ -106,6 +121,8 @@ export function AppUpdatesSection() {
 function StatusLine({ status }: { readonly status: UpdateInstallStatus | null }) {
   if (status === null) return <p role="status" className="m-0 text-13 text-secondary">Loading update status…</p>;
   switch (status.state) {
+    case "unsupported":
+      return <p role="status" className="m-0 text-13 text-secondary">{status.reason}</p>;
     case "idle":
       return <p role="status" className="m-0 text-13 text-secondary">No update is staged. Use Check for updates to look for one.</p>;
     case "ready":

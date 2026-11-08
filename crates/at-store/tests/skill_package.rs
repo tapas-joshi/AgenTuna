@@ -1,5 +1,9 @@
 //! Acceptance tests for skill packages: round-trip, path safety, limits, guard, crash safety.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

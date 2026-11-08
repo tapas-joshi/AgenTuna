@@ -61,13 +61,11 @@ pub fn overwrite_move_aside_inner(
         ));
     }
     let target = validated_absolute_path(path)?;
-    ensure_registered_target(state, &target)?;
+    let paths = super::paths::resolve_active_paths(state)?;
+    ensure_registered_target(state, &paths, &target)?;
     let database = state
         .database_handle()
         .map_err(|_| CommandError::unavailable("database unavailable"))?;
-    let paths = state
-        .paths()
-        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
     let journal =
         at_store::move_journal::MoveJournalStore::in_support(database, paths.support_dir());
     let request =
@@ -198,7 +196,9 @@ fn validated_entry_name(name: Option<&str>) -> Result<Option<&str>, CommandError
 /// The scanned record a caller selected.
 ///
 /// `name` narrows the match to one entry inside a shared native document, because every MCP
-/// server in one configuration file scans to the same path.
+/// server in one configuration file scans to the same path. Paths compare spelling-tolerantly:
+/// the registered project is stored canonicalised (`/private/tmp` for `/tmp`), while native
+/// rows keep the raw `$HOME` spelling, so the same folder arrives under two prefixes.
 fn selected_scan_item<'r>(
     scan: &'r ScanReport,
     target: &Path,
@@ -206,11 +206,33 @@ fn selected_scan_item<'r>(
 ) -> Option<&'r ScanItem> {
     scan.items
         .iter()
-        .find(|item| item.path == target && name.is_none_or(|wanted| item.name == wanted))
+        .find(|item| same_path(&item.path, target) && name.is_none_or(|wanted| item.name == wanted))
+}
+
+/// Compares two spellings of one path, resolving symlinks and prefix symlinks such as
+/// `/tmp` → `/private/tmp`; falls back to exact equality when a side cannot be resolved.
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Refuses a path that is not below a registered agent discovery root.
-fn ensure_registered_target(state: &AppState, target: &Path) -> Result<(), CommandError> {
+///
+/// `paths` must be the command's resolved paths, i.e. re-resolved for the database-selected
+/// project: every adapter's native skill root is derived from the project store, so base shell
+/// paths without a project would leave project items with no matching root at all. The adapter
+/// roots mirror exactly what the native scan enumerates, so adoption accepts the same set the
+/// Skills screen offers.
+fn ensure_registered_target(
+    state: &AppState,
+    paths: &AppPaths,
+    target: &Path,
+) -> Result<(), CommandError> {
     let database = state.database().map_err(CommandError::unavailable)?;
     let agents = at_db::agents::list_agents_on_mac(database.connection())
         .map_err(|_| CommandError::internal("could not verify the registered agent paths"))?;
@@ -221,9 +243,6 @@ fn ensure_registered_target(state: &AppState, target: &Path) -> Result<(), Comma
         registered_paths.extend(paths.into_iter().filter_map(|entry| entry.path));
     }
     drop(database);
-    let paths = state
-        .paths()
-        .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
     if let Some(home) = paths.home_dir() {
         let environment = AgentEnvironment {
             home: home.to_path_buf(),
@@ -234,24 +253,59 @@ fn ensure_registered_target(state: &AppState, target: &Path) -> Result<(), Comma
             variables: BTreeMap::new(),
         };
         let adapters = AgentAdapterRegistry::register();
-        for agent in [at_model::AgentId::Codex, at_model::AgentId::Omp] {
-            if let Ok(Some(adapter)) = adapters.get(&agent) {
-                registered_paths.extend(
-                    adapter
-                        .paths(ItemKind::Skill, Scope::Project, &environment)
-                        .into_iter()
-                        .map(|candidate| candidate.path),
-                );
+        if let Ok(all_adapters) = adapters.adapters() {
+            for adapter in all_adapters {
+                for scope in [Scope::User, Scope::Project, Scope::Local] {
+                    registered_paths.extend(
+                        adapter
+                            .paths(ItemKind::Skill, scope, &environment)
+                            .into_iter()
+                            .map(|candidate| candidate.path),
+                    );
+                }
             }
         }
     }
     if !is_registered_target(target, &registered_paths) {
         return Err(CommandError::invalid_argument(
             "path",
-            "is outside registered agent paths",
+            &outside_registered_roots_message(&registered_paths, paths),
         ));
     }
     Ok(())
+}
+
+/// Explains a registered-target refusal: which roots the check consulted and where project
+/// roots come from, so the caller knows which list to extend. Only paths are named.
+fn outside_registered_roots_message(registered_paths: &[PathBuf], paths: &AppPaths) -> String {
+    const MAX_LISTED_ROOTS: usize = 8;
+    let mut message = String::from("is outside registered agent paths");
+    if registered_paths.is_empty() {
+        message.push_str("; no agent discovery roots are registered yet");
+    } else {
+        message.push_str(&format!("; checked {} roots: ", registered_paths.len()));
+        let shown = registered_paths.len().min(MAX_LISTED_ROOTS);
+        for (index, root) in registered_paths.iter().take(shown).enumerate() {
+            if index > 0 {
+                message.push_str(", ");
+            }
+            message.push_str(&root.display().to_string());
+        }
+        let hidden = registered_paths.len() - shown;
+        if hidden > 0 {
+            message.push_str(&format!(" and {hidden} more"));
+        }
+    }
+    match paths.project_store().and_then(Path::parent) {
+        Some(project) => message.push_str(&format!(
+            "; project roots follow the selected project {}",
+            project.display()
+        )),
+        None => message.push_str(
+            "; project roots need a selected project, so project items stay refused until one is selected",
+        ),
+    }
+    message
 }
 
 fn is_registered_target(target: &Path, registered_paths: &[PathBuf]) -> bool {
@@ -594,14 +648,13 @@ pub fn adopt_preview_inner(
 ) -> Result<AdoptPreviewView, CommandError> {
     let name = validated_entry_name(name)?;
     let target = validated_absolute_path(path)?;
-    ensure_registered_target(state, &target)?;
+    let paths = super::paths::resolve_active_paths(state)?;
+    ensure_registered_target(state, &paths, &target)?;
     ensure_unchanged_since_refusal(&target, expected_hash.as_deref())?;
     let handling = match handling.as_deref() {
         None => AdoptHandling::Link,
         Some(value) => AdoptHandling::parse(value).map_err(adopt_error)?,
     };
-    let paths = super::paths::resolve_command_paths(state, None)
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let scan = adopt_scan(&paths)?;
     let item = selected_scan_item(&scan, &target, name)
         .ok_or_else(|| {
@@ -682,14 +735,13 @@ pub fn adopt_apply_inner(
 ) -> Result<AdoptApplyView, CommandError> {
     let name = validated_entry_name(name)?;
     let target = validated_absolute_path(path)?;
-    ensure_registered_target(state, &target)?;
+    let paths = super::paths::resolve_active_paths(state)?;
+    ensure_registered_target(state, &paths, &target)?;
     ensure_unchanged_since_refusal(&target, expected_hash.as_deref())?;
     let handling = match handling.as_deref() {
         None => AdoptHandling::Link,
         Some(value) => AdoptHandling::parse(value).map_err(adopt_error)?,
     };
-    let paths = super::paths::resolve_command_paths(state, None)
-        .map_err(|_| CommandError::unavailable("application paths are unavailable"))?;
     let scan = adopt_scan(&paths)?;
     let item = selected_scan_item(&scan, &target, name)
         .ok_or_else(|| {

@@ -1,5 +1,9 @@
 //! TF-042: move-aside into the support area, cross-device verification and refusal remedies.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;

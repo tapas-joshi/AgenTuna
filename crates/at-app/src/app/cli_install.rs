@@ -5,6 +5,11 @@
 //! overwrite anything it does not own, and never edits shell profile files: the UI shows the
 //! exact export line instead. Every path is injectable so tests stay inside a temporary
 //! sandbox.
+//!
+//! The install target is a Unix absolute-symlink layout inside an application bundle. Windows
+//! has neither, and there is no decided PATH policy for it yet, so [`CliInstaller::install`]
+//! reports [`CliInstallError::Unavailable`] there instead of guessing a directory or copying a
+//! binary into one the user did not choose.
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
@@ -12,8 +17,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-
-use rustix::fs::{Access, access};
 
 /// Name of the packaged command-line tool.
 pub const CLI_NAME: &str = "agentuna";
@@ -72,6 +75,12 @@ pub enum CliInstallError {
         path: PathBuf,
         /// OS error text.
         message: String,
+    },
+    /// The platform has no supported install location; nothing was written.
+    #[error("the bundled CLI cannot be installed on this platform: {reason}")]
+    Unavailable {
+        /// Why the platform cannot perform it.
+        reason: &'static str,
     },
 }
 
@@ -250,6 +259,14 @@ impl CliInstaller {
         &self,
         location: CliInstallLocation,
     ) -> Result<CliInstallReport, CliInstallError> {
+        #[cfg(not(unix))]
+        {
+            let _ = location;
+            return Err(CliInstallError::Unavailable {
+                reason: "the install target is an absolute symlink in /usr/local/bin or ~/.local/bin, which this platform does not provide",
+            });
+        }
+        #[cfg(unix)]
         if !self.bundled_binary.is_file() {
             return Err(CliInstallError::BundledBinaryMissing {
                 path: self.bundled_binary.clone(),
@@ -289,6 +306,7 @@ impl CliInstaller {
             }
         }
 
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&self.bundled_binary, &link).map_err(|error| {
             if error.kind() == ErrorKind::AlreadyExists {
                 CliInstallError::ForeignFile { path: link.clone() }
@@ -476,9 +494,16 @@ impl CliInstaller {
 }
 
 fn probe_version(binary: &Path) -> Option<String> {
-    let output = std::process::Command::new(binary)
+    let mut command = std::process::Command::new(binary);
+    command
         .arg("--version")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // The CLI was just linked or replaced: Linux answers `execve` with `ETXTBSY` while anything
+    // still holds it open for writing, which clears on its own.
+    let output = at_mcp::spawn::spawn_retrying(&mut command)
+        .ok()?
+        .wait_with_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -491,7 +516,7 @@ fn directory_writable(directory: &Path) -> bool {
     let mut candidate = directory;
     loop {
         if candidate.is_dir() {
-            return access(candidate, Access::WRITE_OK).is_ok();
+            return at_fs::probe_directory_write(candidate).is_ok();
         }
         match candidate.parent() {
             Some(parent) => candidate = parent,
@@ -512,5 +537,6 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-#[cfg(test)]
+// Unix-only fixtures: symlinks and permission bits.
+#[cfg(all(test, unix))]
 mod tests;

@@ -21,7 +21,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -509,7 +510,7 @@ fn read_tree(
             .replace('\\', "/");
         validate_relative_path(&relative)?;
         let bytes = read_file(&path, meta.len())?;
-        let mode = meta.permissions().mode() & 0o7777;
+        let mode = package_mode(&meta);
         package
             .files
             .insert(relative, PackageFile::new(bytes, mode));
@@ -530,7 +531,7 @@ fn read_file(path: &Path, expected_len: u64) -> Result<Vec<u8>, SkillPackageErro
         path: path.to_path_buf(),
         source,
     })?;
-    if opened.dev() != before.dev() || opened.ino() != before.ino() {
+    if !crate::fs_identity::same_file_identity(&opened, &before) {
         return Err(SkillPackageError::Changed {
             path: path.to_path_buf(),
         });
@@ -550,6 +551,26 @@ fn read_file(path: &Path, expected_len: u64) -> Result<Vec<u8>, SkillPackageErro
         });
     }
     Ok(bytes)
+}
+
+/// The permission bits recorded for a package file.
+///
+/// Unix keeps the real mode, so an executable `scripts/` entry stays executable when the package
+/// is installed again. Windows has a single read-only bit; a read-only source stays read-only and
+/// everything else is recorded as `0o644`.
+fn package_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        meta.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        if meta.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        }
+    }
 }
 
 // at-fs owns the atomic install/swap for staged skill package directory trees.
@@ -588,15 +609,24 @@ fn write_tree(dir: &Path, package: &SkillPackage) -> Result<(), SkillPackageErro
                 source,
             },
         })?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(file.mode)).map_err(|source| {
-            SkillPackageError::Write {
-                path: path.clone(),
-                source: at_fs::FsError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                },
-            }
-        })?;
+        let write_error = |path: &Path, source: std::io::Error| SkillPackageError::Write {
+            path: path.to_path_buf(),
+            source: at_fs::FsError::Io {
+                path: path.to_path_buf(),
+                source,
+            },
+        };
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(file.mode))
+            .map_err(|source| write_error(&path, source))?;
+        #[cfg(not(unix))]
+        {
+            let mut permissions = fs::metadata(&path)
+                .map_err(|source| write_error(&path, source))?
+                .permissions();
+            permissions.set_readonly(file.mode & 0o200 == 0);
+            fs::set_permissions(&path, permissions).map_err(|source| write_error(&path, source))?;
+        }
     }
     Ok(())
 }
@@ -755,7 +785,9 @@ pub enum SkillPackageError {
     },
 }
 
-#[cfg(test)]
+// Unix-only fixtures: POSIX symlinks for the escape checks, and permission bits. The Windows
+// twin arrives with the slice that enables the Windows test suite.
+#[cfg(all(test, unix))]
 // Tests write fixture files directly; production code routes through at-fs or the
 // package staging mechanism.
 #[allow(clippy::disallowed_methods)]
@@ -897,6 +929,7 @@ mod tests {
         assert!(matches!(error, SkillPackageError::MissingSkillDoc { .. }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_inside_package_rejected_on_read() {
         let dir = tempfile::tempdir().expect("temp dir");

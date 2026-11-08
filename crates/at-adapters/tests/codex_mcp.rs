@@ -3,6 +3,10 @@
 //! Fixtures are synthetic. Each golden test compares whole documents byte for byte, so any
 //! change to a comment, a blank line or an unrelated table fails the test.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

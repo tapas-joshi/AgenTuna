@@ -36,9 +36,8 @@ fn fixture() -> Fixture {
 }
 
 fn write_executable(path: &Path, version: &str) -> PathBuf {
-    std::fs::write(path, format!("#!/bin/sh\necho \"agentuna {version}\"\n"))
+    at_fs::testkit::write_executable(path, format!("#!/bin/sh\necho \"agentuna {version}\"\n"))
         .expect("write script");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     path.to_path_buf()
 }
 

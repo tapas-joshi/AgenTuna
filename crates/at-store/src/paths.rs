@@ -168,7 +168,9 @@ pub enum HomeSource {
     /// Ask the `directories` crate for the process home (production).
     #[default]
     Process,
-    /// Use this directory instead (tests and sandboxes).
+    /// Use this directory instead (tests and sandboxes). [`AppPaths::resolve`] then derives every
+    /// root from it and ignores the process's platform root variables, so nothing escapes the
+    /// sandbox.
     Injected(PathBuf),
     /// No home exists; roots that need it fail with [`PathError::HomeUnavailable`].
     Unavailable,
@@ -263,6 +265,13 @@ impl AppPaths {
     /// The per-platform layout lives in [`crate::platform_roots`]; this method only selects the
     /// host platform and the process environment.
     ///
+    /// An injected home ([`HomeSource::Injected`]) is authoritative: the process's platform root
+    /// variables (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `%APPDATA%`,
+    /// `%LOCALAPPDATA%`) are not consulted, so the support, state and cache trees stay inside the
+    /// home the caller supplied. Without that rule a sandbox resolved its database, logs and
+    /// backups wherever the surrounding process pointed. Assert another platform's layout
+    /// through [`Self::resolve_for`], which takes an explicit lookup instead of the process.
+    ///
     /// # Errors
     /// [`PathError::HomeUnavailable`] when a root needs `$HOME` and neither an injected home nor
     /// a covering override exists; [`PathError::ProjectRootMissing`] or
@@ -270,8 +279,13 @@ impl AppPaths {
     /// [`PathError::ProjectRootRequired`] when a project store is overridden without one;
     /// [`PathError::PlatformRoot`] when a required platform variable is missing or malformed.
     pub fn resolve(env: &PathEnvironment) -> Result<Self, PathError> {
+        let injected_home = matches!(&env.home, HomeSource::Injected(_));
         Self::resolve_for(PortablePlatform::current(), env, |name| {
-            std::env::var_os(name)
+            if injected_home {
+                None
+            } else {
+                std::env::var_os(name)
+            }
         })
     }
 

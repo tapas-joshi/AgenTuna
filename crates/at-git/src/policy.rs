@@ -309,14 +309,14 @@ impl ProcessGitRunner {
 
 impl GitRunner for ProcessGitRunner {
     fn run(&self, authorized: &AuthorizedGitCall) -> Result<GitOutput, GitError> {
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(authorized.args())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env(GIT_TERMINAL_PROMPT_ENV, "0")
-            .spawn()
-            .map_err(GitError::Spawn)?;
+            .env(GIT_TERMINAL_PROMPT_ENV, "0");
+        let mut child = at_mcp::spawn::spawn_retrying(&mut command).map_err(GitError::Spawn)?;
 
         let stdout = child.stdout.take().map(|pipe| {
             let limit = self.output_limit;

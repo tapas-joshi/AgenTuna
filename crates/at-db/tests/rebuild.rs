@@ -1,5 +1,9 @@
 //! Integration tests for TF-019: DB rebuild and reindex from files.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;

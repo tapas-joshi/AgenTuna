@@ -2,7 +2,7 @@
 use super::{commands::CommandError, state::AppState};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::State;
+use tauri::{Manager, State};
 use ts_rs::TS;
 
 /// One rule file available in the Instructions editor.
@@ -208,9 +208,17 @@ pub struct AgentCardView {
 }
 
 /// Loads agents and their configuration paths from the database.
+///
+/// The shell calls this on mount; each card aggregates the agent's deployment counts, so the
+/// body runs on the blocking pool instead of the IPC thread that also serves webview assets
+/// (TF-035).
 #[tauri::command]
-pub fn agents_list(state: State<'_, AppState>) -> Result<Vec<AgentCardView>, CommandError> {
-    agents_list_inner(&state)
+pub async fn agents_list(app: tauri::AppHandle) -> Result<Vec<AgentCardView>, CommandError> {
+    super::commands::run_blocking(move || {
+        let state = app.state::<AppState>();
+        agents_list_inner(&state)
+    })
+    .await
 }
 
 /// Loads agents and their configuration paths without requiring a Tauri state wrapper.
@@ -282,15 +290,13 @@ fn agent_card(
         .map_err(|_| CommandError::internal("could not count agent deployments"))?;
     let health = at_db::deployments::health_counts(connection, &agent.id)
         .map_err(|_| CommandError::internal("could not compute agent health"))?;
-    let deployments = at_db::deployments::list_deployments_for_agent(connection, &agent.id)
-        .map_err(|_| CommandError::internal("could not read agent deployments"))?;
+    // The card needs one number, not the agent's whole deployment matrix: counting links in
+    // SQL keeps the first paint off thousands of allocated cells (TF-035).
     // A copy deployment while the agent is configured for links is the recorded symlink fallback;
     // the engine owns that derivation so the CLI and the card cannot disagree.
     let linked_deployments = i32::try_from(
-        deployments
-            .iter()
-            .filter(|cell| matches!(cell.mode.as_deref(), Some("symlink" | "junction")))
-            .count(),
+        at_db::deployments::linked_mode_count(connection, &agent.id)
+            .map_err(|_| CommandError::internal("could not count agent links"))?,
     )
     .unwrap_or(i32::MAX);
     let line = at_engine::health::line_with_connection(connection, &agent.id, home)
@@ -451,7 +457,7 @@ pub async fn agents_rescan(state: State<'_, AppState>) -> Result<Vec<AgentCardVi
     .await
     .map_err(|_| CommandError::internal("agent detection worker stopped unexpectedly"))?
     .map_err(CommandError::internal)?;
-    agents_list(state)
+    agents_list_inner(&state)
 }
 
 /// Records a user-chosen native path for one agent and re-probes it.

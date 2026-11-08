@@ -377,6 +377,20 @@ pub fn release_adoptions(connection: &Connection, item_id: &ItemId) -> Result<us
     Ok(released)
 }
 
+/// How many rows the index currently holds in `native_items`, missing ones included.
+///
+/// The startup log reports what the index holds after a rebuild and its follow-up native
+/// refresh; the rebuild transaction itself counts before the refresh writes its discoveries.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+pub fn count_native_items(connection: &Connection) -> Result<u64, DbError> {
+    let count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM native_items", [], |row| row.get(0))?;
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
 /// Every native row matching `filter`, ordered by agent, scope, kind, name.
 ///
 /// Missing rows are excluded unless [`NativeItemFilter::include_missing`] is

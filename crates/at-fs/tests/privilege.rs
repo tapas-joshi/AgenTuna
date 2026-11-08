@@ -3,6 +3,10 @@
 //! Every test runs in a temporary sandbox. The osascript elevator is replaced by a recording fake,
 //! so no test opens an authorization dialog, touches `/Library` or requires administrator rights.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

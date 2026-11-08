@@ -165,7 +165,7 @@ impl RemoteGitRunner for ProcessRemoteGitRunner {
     fn run(&self, call: &RemoteGitCall<'_>) -> Result<GitOutput, GitError> {
         let stdin = call.stdin.map(<[u8]>::to_vec);
         let mut command = Command::new(&self.program);
-        let mut child = command
+        command
             .current_dir(call.cwd)
             .args(call.args)
             .stdin(if stdin.is_some() {
@@ -177,9 +177,8 @@ impl RemoteGitRunner for ProcessRemoteGitRunner {
             .stderr(Stdio::piped())
             .env("GIT_TERMINAL_PROMPT", "0")
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .envs(call.env.iter().map(|(key, value)| (key, value)))
-            .spawn()
-            .map_err(GitError::Spawn)?;
+            .envs(call.env.iter().map(|(key, value)| (key, value)));
+        let mut child = at_mcp::spawn::spawn_retrying(&mut command).map_err(GitError::Spawn)?;
 
         let writer = stdin.and_then(|bytes| {
             child.stdin.take().map(|mut pipe| {

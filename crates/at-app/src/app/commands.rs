@@ -752,13 +752,8 @@ pub fn recovery_restore(
         .recovery()
         .ok_or_else(|| CommandError::unavailable("recovery service is unavailable"))?;
     service
-        .restore(file, std::path::Path::new(&backup))
-        .map(|report| {
-            state
-                .recent_writes()
-                .record_outcome(&report.path, &report.outcome);
-            report.operation_id
-        })
+        .restore_with_registry(file, std::path::Path::new(&backup), &state.recent_writes())
+        .map(|report| report.operation_id)
         .map_err(|error| CommandError::internal(error.to_string()))
 }
 

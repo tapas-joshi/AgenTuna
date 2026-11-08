@@ -25,6 +25,7 @@ import type { LibraryTransferMode } from "../../generated/LibraryTransferMode";
 import type { AgentCardView } from "../../generated/AgentCardView";
 import type { SkillScopeOptionsRequest } from "../../generated/SkillScopeOptionsRequest";
 import type { SkillScopeOptionsView } from "../../generated/SkillScopeOptionsView";
+import type { SkillAgentScopeView } from "../../generated/SkillAgentScopeView";
 import { ConnectAgentDialog } from "../../overlays/dialogs/ConnectAgentDialog";
 import type { ScopeToken } from "../../theme";
 
@@ -77,6 +78,13 @@ const EMPTY: WizardState = {
 
 function emptyForScope(scope: ScopeToken): WizardState {
   return { ...structuredClone(EMPTY), scope };
+}
+
+/** Keep paths readable in compact review rows while retaining the full accessible value. */
+function compactPath(path: string, maxLength = 76): string {
+  if (path.length <= maxLength) return path;
+  const side = Math.floor((maxLength - 1) / 2);
+  return `${path.slice(0, side)}…${path.slice(-side)}`;
 }
 
 /** Formats an install count the way the marketplace table promises, for example `1.2k`. */
@@ -708,6 +716,14 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
     : wizard.step === "review" ? "Nothing is written until you press Create skill."
     : "Choose where the skill comes from. Nothing is written until you review the plan.";
   const doneAgents = outcome === null ? [] : [...new Set(outcome.deployments.map((deployment) => AGENT_LABELS[deployment.agent] ?? deployment.agent))];
+  const agentRows: SkillAgentScopeView[][] = [];
+  for (const agent of scopeOptions?.agents ?? []) {
+    const sharedRow = agent.skills_dir !== null
+      ? agentRows.find((row) => row[0]?.skills_dir === agent.skills_dir)
+      : undefined;
+    if (sharedRow) sharedRow.push(agent);
+    else agentRows.push([agent]);
+  }
   return <main className="mx-auto flex w-full max-w-[1240px] flex-col gap-16 p-24" aria-labelledby={wizard.step === "done" ? undefined : "add-skill-title"} aria-label={wizard.step === "done" ? "Add skill result" : undefined}>
     {wizard.step !== "done" && <header className="flex items-start justify-between gap-16">
       <div><p className="m-0 text-12 font-medium text-muted">Skills / Add skill</p><h1 id="add-skill-title" className="mb-0 mt-4 text-26 font-semibold text-text">{stepTitle}</h1><p className="mb-0 mt-6 text-14 text-muted">{stepSubtitle}</p></div>
@@ -855,24 +871,28 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
         {scopeOptionsBusy && <p role="status" className="m-0 text-12 text-muted">Resolving agent paths and name clashes…</p>}
         <fieldset className="m-0 grid gap-8 rounded-10 border border-border bg-raised p-12">
           <legend className="sr-only">Agents that will load this skill</legend>
-          {scopeOptions?.agents.map((agent) => {
-            const checked = wizard.agents.includes(agent.agent);
-            const disabled = agent.disabled_reason !== null;
-            const targetPaths = agent.targets.filter((target) => selectedSkillNames.includes(target.name));
-            return <div key={agent.agent} className="grid gap-4 border-b border-border py-8 last:border-0">
+          {agentRows.map((agents) => {
+            const agent = agents[0]!;
+            const coupled = agents.length > 1;
+            const agentIds = agents.map((entry) => entry.agent);
+            const checked = agentIds.some((id) => wizard.agents.includes(id));
+            const disabled = agents.some((entry) => entry.disabled_reason !== null);
+            const targetPaths = [...new Map(agents.flatMap((entry) => entry.targets.filter((target) => selectedSkillNames.includes(target.name))).map((target) => [`${target.name}:${target.path}`, target])).values()];
+            return <div key={agentIds.join("+")} className="grid gap-4 border-b border-border py-8 last:border-0">
               <div className="flex flex-wrap items-start justify-between gap-8">
                 <label className={`flex min-w-0 items-start gap-8 text-13 ${disabled ? "text-text-muted" : "text-text"}`}>
                   <input type="checkbox" disabled={disabled || busy} checked={checked} onChange={(event) => {
-                    const agents = event.target.checked ? [...wizard.agents, agent.agent] : wizard.agents.filter((entry) => entry !== agent.agent);
-                    void send({ type: "set_agents", payload: agents });
+                    const selected = new Set(wizard.agents);
+                    for (const id of agentIds) event.target.checked ? selected.add(id) : selected.delete(id);
+                    void send({ type: "set_agents", payload: [...selected] });
                   }} />
-                  <span className="grid gap-4"><strong>{agent.name}</strong>{agent.disabled_reason && <span className="text-11 text-danger">{agent.disabled_reason}</span>}</span>
+                  <span className="grid gap-4"><strong>{agents.map((entry) => entry.name).join(" + ")}</strong>{agents.filter((entry) => entry.disabled_reason !== null).map((entry) => <span key={entry.agent} className="text-11 text-danger">{entry.disabled_reason}</span>)}</span>
                 </label>
                 {disabled && <button type="button" disabled={agentPathLoading} onClick={() => void setAgentPath(agent.agent)} className="rounded-6 border border-border px-8 py-8 text-11 text-text hover:bg-overlay disabled:opacity-50">{agentPathLoading ? "Loading…" : "Set path"}</button>}
               </div>
-              {agent.skills_dir && <code className="break-all pl-24 text-11 text-text-secondary">Skills path: {agent.skills_dir}</code>}
-              {checked && targetPaths.map((target) => <code key={`${agent.agent}:${target.name}`} className="break-all pl-24 text-11 text-text-secondary">{target.name}: {target.path}</code>)}
-              {checked && agent.shared_with.length > 0 && <p className="m-0 pl-24 text-11 text-warning">Shared skills folder with {agent.shared_with.join(", ")}; enabling this path loads the skill in both agents.</p>}
+              {agent.skills_dir && <code className="truncate pl-24 text-11 text-text-secondary" title={agent.skills_dir} aria-label={`Skills path: ${agent.skills_dir}`}>Skills path: {compactPath(agent.skills_dir)}</code>}
+              {checked && targetPaths.map((target) => <code key={`${target.name}:${target.path}`} className="truncate pl-24 text-11 text-text-secondary" title={target.path} aria-label={`${target.name}: ${target.path}`}>{target.name}: {compactPath(target.path)}</code>)}
+              {coupled && <p className="m-0 pl-24 text-11 text-warning">Shared skills folder; enabling this path loads the skill in both agents.</p>}
             </div>;
           })}
           {scopeOptions && scopeOptions.agents.length === 0 && <p className="m-0 text-12 text-muted">No supported agents are available.</p>}
@@ -902,15 +922,15 @@ export function AddSkillWizard({ onClose, projectId = null, initialScope = "user
         </section>
         {preview ? <section aria-label="Where files go" className="grid content-start gap-12 rounded-10 border border-border bg-surface p-16">
           <h3 className="m-0 text-14 font-semibold text-text">Where files go</h3>
-          {preview.store_init && <p aria-label="Store creation" className="m-0 flex flex-wrap items-baseline gap-4 rounded-8 border border-border bg-surface p-8 text-12 text-text" data-slot="skill-store-init"><strong>Create store at</strong><code className="break-all">{preview.store_init.path}</code><span className="text-muted">({preview.store_init.files_created} new entries, reviewed with this import)</span></p>}
-          {preview.files.length > 0 && <ul aria-label="Planned file paths" className="m-0 grid gap-4 p-0 text-12 text-text">{preview.files.map((file) => <li key={`${file.path}:${file.package_path}`} className="list-inside list-disc break-all">{file.path}{file.diff && <details className="ml-16"><summary className="cursor-pointer">Review existing-file diff</summary><pre className="overflow-auto whitespace-pre-wrap">{file.diff}</pre></details>}</li>)}</ul>}
-          {preview.deployments.length > 0 && <ul aria-label="Planned deployments" className="m-0 grid gap-4 p-0 text-12 text-text">{preview.deployments.map((deployment) => <li key={deployment.agent} className="list-inside list-disc break-all">{deployment.agent}: {deployment.mode} → {deployment.path}</li>)}</ul>}
-          {preview.items.length > 0 && <ul aria-label="Reviewed skill package transfers" className="m-0 grid gap-4 rounded-8 border border-border p-12 text-12 text-text">{preview.items.map((item) => <li key={`${item.name}:${item.target_path}`} className="grid gap-4 break-all"><strong>{item.mode === "link" ? "Link" : "Copy"} · {item.name}</strong><span>{item.source_path ?? "New skill"} → {item.target_path}</span></li>)}</ul>}
+          {preview.store_init && <p aria-label="Store creation" className="m-0 flex min-w-0 flex-wrap items-baseline gap-4 rounded-8 border border-border bg-surface p-8 text-12 text-text" data-slot="skill-store-init"><strong>Create store at</strong><code className="max-w-full truncate" title={preview.store_init.path} aria-label={preview.store_init.path}>{compactPath(preview.store_init.path)}</code><span className="text-muted">({preview.store_init.files_created} new entries, reviewed with this import)</span></p>}
+          {preview.files.length > 0 && <ul aria-label="Planned file paths" className="m-0 grid min-w-0 gap-4 p-0 text-12 text-text">{preview.files.map((file) => <li key={`${file.path}:${file.package_path}`} className="min-w-0 list-inside list-disc"><span className="inline-block max-w-full truncate align-bottom" title={file.path} aria-label={file.path}>{compactPath(file.path)}</span>{file.diff && <details className="ml-16"><summary className="cursor-pointer">Review existing-file diff</summary><pre className="overflow-auto whitespace-pre-wrap">{file.diff}</pre></details>}</li>)}</ul>}
+          {preview.deployments.length > 0 && <ul aria-label="Planned deployments" className="m-0 grid min-w-0 gap-4 p-0 text-12 text-text">{preview.deployments.map((deployment) => <li key={deployment.agent} className="min-w-0 list-inside list-disc"><span className="inline-block max-w-full truncate align-bottom" title={deployment.path} aria-label={`${deployment.agent}: ${deployment.mode} → ${deployment.path}`}>{deployment.agent}: {deployment.mode} → {compactPath(deployment.path)}</span></li>)}</ul>}
+          {preview.items.length > 0 && <ul aria-label="Reviewed skill package transfers" className="m-0 grid min-w-0 gap-4 rounded-8 border border-border p-12 text-12 text-text">{preview.items.map((item) => <li key={`${item.name}:${item.target_path}`} className="grid min-w-0 gap-4"><strong>{item.mode === "link" ? "Link" : "Copy"} · {item.name}</strong><span className="truncate" title={`${item.source_path ?? "New skill"} → ${item.target_path}`} aria-label={`${item.source_path ?? "New skill"} → ${item.target_path}`}>{compactPath(`${item.source_path ?? "New skill"} → ${item.target_path}`)}</span></li>)}</ul>}
           {preview.stage_available && <label className="flex items-center gap-8 text-13 text-text"><input type="checkbox" checked={stageRequested} onChange={(event) => { const stage = event.target.checked; setStageRequested(stage); void refreshPreview(stage); }} />Stage these project-scope paths with Git</label>}
           {preview.requires_overwrite_confirmation && <label className="flex items-start gap-8 text-13 text-text"><input type="checkbox" checked={confirmOverwrites} onChange={(event) => setConfirmOverwrites(event.target.checked)} />I reviewed the diffs and confirm replacing these existing files.</label>}
-          <div className="grid gap-4 border-t border-border pt-10">
+          <div className="grid min-w-0 gap-4 border-t border-border pt-10">
             <span className="text-11 uppercase text-muted">AgenTuna store</span>
-            <code className="break-all text-12 text-text">{preview.canonical_dir}</code>
+            <code className="truncate text-12 text-text" title={preview.canonical_dir} aria-label={preview.canonical_dir}>{compactPath(preview.canonical_dir)}</code>
             <span className="text-11 text-muted">Paths and deployment modes match the reviewed plan.</span>
           </div>
         </section> : <p role="status" className="m-0 text-12 text-muted">Preparing the exact file plan…</p>}

@@ -330,11 +330,32 @@ pub fn apply_reviewed(
     set: &ChangeSet,
     context: &mut at_fs::changeset::ApplyContext<'_>,
 ) -> Result<at_fs::changeset::ApplyOutcome, PreviewError> {
+    apply_reviewed_inner(set, context, None)
+}
+
+/// Like [`apply_reviewed`], registering expected writes before their atomic replacements.
+pub fn apply_reviewed_with_registry(
+    set: &ChangeSet,
+    context: &mut at_fs::changeset::ApplyContext<'_>,
+    registry: &at_fs::RecentWrites,
+) -> Result<at_fs::changeset::ApplyOutcome, PreviewError> {
+    apply_reviewed_inner(set, context, Some(registry))
+}
+
+fn apply_reviewed_inner(
+    set: &ChangeSet,
+    context: &mut at_fs::changeset::ApplyContext<'_>,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<at_fs::changeset::ApplyOutcome, PreviewError> {
     let current = preview(set, context.store_root)?;
     if current.id != set.preview_id {
         return Err(PreviewError::ConcurrentModification);
     }
-    at_fs::changeset::apply(set, context).map_err(|error| match error {
+    let result = match registry {
+        Some(registry) => at_fs::changeset::apply_with_registry(set, context, registry),
+        None => at_fs::changeset::apply(set, context),
+    };
+    result.map_err(|error| match error {
         at_fs::changeset::ChangeSetApplyError::Stale(_) => PreviewError::ConcurrentModification,
         other => PreviewError::Apply(other.to_string()),
     })

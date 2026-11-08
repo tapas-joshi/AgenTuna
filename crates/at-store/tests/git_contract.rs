@@ -4,6 +4,10 @@
 //! `HOME`, `XDG_CONFIG_HOME` and git's system/global configuration pointed at the sandbox, so a
 //! developer's own ignore rules cannot change the result.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::symlink;

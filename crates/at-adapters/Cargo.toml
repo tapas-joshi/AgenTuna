@@ -13,7 +13,6 @@ workspace = true
 at-model.workspace = true
 thiserror.workspace = true
 at-fs.workspace = true
-libc.workspace = true
 jsonc-parser = { workspace = true, features = ["cst", "serde_json"] }
 serde_json.workspace = true
 url.workspace = true
@@ -21,6 +20,9 @@ at-secrets.workspace = true
 toml_edit.workspace = true
 saphyr.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

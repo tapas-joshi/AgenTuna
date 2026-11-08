@@ -30,6 +30,8 @@ rusqlite.workspace = true
 time.workspace = true
 toml_edit.workspace = true
 similar.workspace = true
+
+[target.'cfg(unix)'.dependencies]
 rustix.workspace = true
  
 

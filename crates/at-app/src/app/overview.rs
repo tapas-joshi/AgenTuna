@@ -8,7 +8,7 @@ use at_engine::tombstones::TombstoneSource as _;
 use at_store::layout::{STORE_DIR_MODE, StoreLayout};
 use at_store::paths::AppPaths;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 use ts_rs::TS;
 
 use super::commands::{CommandError, CommandErrorCode};
@@ -145,12 +145,20 @@ fn attention_kind_wire(kind: &at_db::overview::AttentionKind) -> &'static str {
 }
 
 /// Loads Overview projections through the engine and shared database.
+///
+/// The Project card inspects the store's git work tree (a child process with a 1.5 s bound),
+/// so the body runs on the blocking pool: on the IPC thread that inspection stalled the
+/// webview's asset requests and the next screen's list query (TF-035).
 #[tauri::command]
-pub fn overview_load(
-    state: State<'_, AppState>,
+pub async fn overview_load(
+    app: tauri::AppHandle,
     active_scope: String,
 ) -> Result<OverviewView, CommandError> {
-    overview_load_inner(&state, &active_scope)
+    super::commands::run_blocking(move || {
+        let state = app.state::<AppState>();
+        overview_load_inner(&state, &active_scope)
+    })
+    .await
 }
 
 /// Bridge-facing body of [`overview_load`], callable without a Tauri app.
@@ -534,15 +542,19 @@ pub fn overview_setup_apply_inner(
             backup_folder: &cached.backup_folder,
             recorder: &mut recorder,
         };
-        at_fs::changeset::apply_with_roots(&cached.change_set, &mut context, &roots).map_err(
-            |error| match error {
-                at_fs::changeset::ChangeSetApplyError::Stale(_) => setup_stale(),
-                other => CommandError::new(
-                    CommandErrorCode::Internal,
-                    format!("the reviewed store setup could not be applied: {other}"),
-                ),
-            },
-        )?
+        at_fs::changeset::apply_with_roots_and_registry(
+            &cached.change_set,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
+        .map_err(|error| match error {
+            at_fs::changeset::ChangeSetApplyError::Stale(_) => setup_stale(),
+            other => CommandError::new(
+                CommandErrorCode::Internal,
+                format!("the reviewed store setup could not be applied: {other}"),
+            ),
+        })?
     };
     drop(database);
     if cached.creates_root {
@@ -551,7 +563,6 @@ pub fn overview_setup_apply_inner(
     if cached.creates_state_dir {
         tighten_directory_mode(&cached.store_root.join(at_store::layout::STATE_DIR));
     }
-    state.record_writes(&cached.change_set, &cached.store_root);
     Ok(ScopeSetupApplyView {
         operation_id: outcome.operation_id,
         scope: cached.scope.to_string(),

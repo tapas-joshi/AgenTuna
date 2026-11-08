@@ -1,5 +1,9 @@
 //! TF-038: platform-neutral link ordering, junction storage rules and link removal.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::cell::RefCell;
 use std::fs;
 use std::io;

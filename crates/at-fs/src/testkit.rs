@@ -666,6 +666,43 @@ impl ProjectFixture {
     }
 }
 
+/// Writes `contents` to `path` as an executable fixture, creating parent directories.
+///
+/// The handle is fully written, synced and closed before this returns, and only then does the
+/// file become executable. Both halves matter on Linux: `execve` answers `ETXTBSY`
+/// ([`io::ErrorKind::ExecutableFileBusy`]) while the file is still open for writing, and a test
+/// that writes a script and spawns it from another thread can otherwise see the descriptor
+/// inherited by an unrelated `fork` between the write and the `exec`. Closing here keeps the
+/// descriptor out of every later fork, so a fixture written with this helper cannot make a
+/// concurrent spawn fail with "text file busy".
+///
+/// # Errors
+/// [`crate::testkit::TestkitError::Io`] when the file or its parent directory cannot be written.
+pub fn write_executable(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> Result<(), TestkitError> {
+    use io::Write as _;
+
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| TestkitError::io(parent, source))?;
+    }
+    let mut file = fs::File::create(path).map_err(|source| TestkitError::io(path, source))?;
+    file.write_all(contents.as_ref())
+        .map_err(|source| TestkitError::io(path, source))?;
+    file.sync_all()
+        .map_err(|source| TestkitError::io(path, source))?;
+    drop(file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .map_err(|source| TestkitError::io(path, source))?;
+    }
+    Ok(())
+}
+
 /// Sorted relative paths below `dir` mapped to their SHA-256.
 ///
 /// Directories are skipped. Regular files are hashed by content. Symbolic links are hashed by
@@ -798,5 +835,25 @@ mod tests {
         home.write("a/b/c.txt", b"x").expect("write");
         let map = snapshot(home.home()).expect("snapshot");
         assert!(map.contains_key("a/b/c.txt"), "{map:?}");
+    }
+
+    #[test]
+    fn write_executable_writes_contents_and_the_executable_bit() {
+        let home = TestHome::new().expect("home");
+        let script = home.home().join("nested/fixture.sh");
+        write_executable(&script, "#!/bin/sh\nexit 0\n").expect("write executable fixture");
+        assert_eq!(
+            fs::read_to_string(&script).expect("read fixture"),
+            "#!/bin/sh\nexit 0\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&script)
+                .expect("fixture metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
     }
 }

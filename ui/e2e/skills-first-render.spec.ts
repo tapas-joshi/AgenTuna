@@ -9,10 +9,16 @@ import { expect, mockSkillsScale, test } from "./support/tauri-mock";
  * the 150 ms product budget; the GUI lane measures that on real hardware.
  */
 
-/** Headless ceiling for the first painted row, from the route click. */
-const FIRST_ROW_VISIBLE_LIMIT_MS = 1000;
-/** Headless ceiling for the whole snapshot being derived and published. */
-const FULL_LIST_LIMIT_MS = 2500;
+/**
+ * Headless ceiling for the first painted row, from the route click.
+ *
+ * The bound catches a regression back to a multi-second one-pass mount, so a shared CI runner
+ * gets 5 s of headroom: it measured 1.2 s for the first row while four browsers competed for
+ * three cores, and the 1 s bound then failed for reasons that had nothing to do with the code.
+ */
+const FIRST_ROW_VISIBLE_LIMIT_MS = process.env.CI ? 5_000 : 1_000;
+/** Headless ceiling for the whole snapshot being derived and published; same CI headroom. */
+const FULL_LIST_LIMIT_MS = process.env.CI ? 5_000 : 2_500;
 
 interface FirstRenderProbe {
   click: number | null;

@@ -62,7 +62,6 @@ export function MigratePlanScreen({
   readonly onBack: () => void;
   readonly onCancel: () => void;
 }): JSX.Element {
-  const [showFiles, setShowFiles] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -89,13 +88,9 @@ export function MigratePlanScreen({
     <section aria-label="Migration plan" className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-4">
         <p className="m-0 text-12 uppercase tracking-wide text-text-muted">Migrate to AgenTuna</p>
-        <h1 className="m-0 text-26 font-semibold text-text">
-          {showFiles ? "Preview the exact changes" : "Plan the move"}
-        </h1>
+        <h1 className="m-0 text-26 font-semibold text-text">Preview the exact changes</h1>
         <p className="m-0 text-13 text-text-secondary">
-          {showFiles
-            ? "Nothing has been written yet. This is the file list Apply will run."
-            : "Choose what happens to the originals. Every write is previewed, backed up and reversible."}
+          Nothing has been written yet. Review the exact paths Apply will change.
         </p>
       </div>
 
@@ -105,8 +100,30 @@ export function MigratePlanScreen({
         </div>
       )}
 
-      <div className="mt-16 grid min-h-0 flex-1 grid-cols-[1fr_360px] gap-16">
-        <div className="flex flex-col gap-16">
+      <div className="mt-16 grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-16 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
+        <div className="flex min-h-0 min-w-0 flex-col gap-16 overflow-y-auto">
+          <section aria-label="Planned files" className="flex min-h-0 min-w-0 shrink-0 flex-col gap-8 rounded-10 border border-border bg-raised p-16">
+            <h2 className="m-0 text-14 font-semibold text-text">Files Apply will write</h2>
+            {plan === null ? <p role="status" className="m-0 text-13 text-text-secondary">{busy ? "Building the reviewed plan…" : "No plan yet."}</p> : (
+              <div className="grid min-h-0 max-h-[420px] min-w-0 gap-10 overflow-auto">
+                {plan.scopes.map((entry) => {
+                  const meta = SCOPE_LABEL[entry.scope] ?? { label: entry.scope, tone: "neutral" as const };
+                  return <section key={entry.scope} aria-label={`${meta.label} store files`} className="grid min-w-0 gap-4">
+                    <p className="m-0 truncate text-11 uppercase tracking-wide text-text-muted" title={`${meta.label} store · ${entry.store_path}`}>{meta.label} store · {entry.store_path}</p>
+                    <ol className="m-0 grid min-w-0 list-none gap-4 p-0">
+                      {entry.steps.map((step) => <li key={`${entry.scope}:${step.seq}`} className="grid min-w-0 gap-4 rounded-6 border border-border p-8">
+                        <div className="flex min-w-0 items-center justify-between gap-6"><div className="grid min-w-0 gap-2"><span className="text-12 text-text">{step.seq}. {ACTION_LABEL[step.action] ?? step.action}</span>{step.item_name !== null && <strong className="truncate text-12 text-text">{step.item_name}</strong>}</div><span className="shrink-0 font-mono text-11 text-text-muted">{step.bytes} B</span></div>
+                        {step.source !== null && <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.source}>from {step.source}</p>}
+                        {step.destination !== null && <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.destination}>to {step.destination}</p>}
+                        {step.backup_path !== null && <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.backup_path}>backup {step.backup_path}</p>}
+                        {step.agents.length > 0 && <p className="m-0 text-11 text-text-muted">Read by {step.agents.join(", ")}</p>}
+                      </li>)}
+                    </ol>
+                  </section>;
+                })}
+              </div>
+            )}
+          </section>
           <section aria-label="AgenTuna stores" className="rounded-10 border border-border bg-raised p-16">
             <h2 className="m-0 text-14 font-semibold text-text">Where the items land</h2>
             {plan === null ? (
@@ -171,7 +188,7 @@ export function MigratePlanScreen({
           </section>
         </div>
 
-        <section aria-label="What will happen" className="flex flex-col gap-8 rounded-10 border border-border bg-raised p-16">
+        <section aria-label="What will happen" className="flex min-h-0 min-w-0 flex-col gap-8 overflow-y-auto rounded-10 border border-border bg-raised p-16">
           <h2 className="m-0 text-14 font-semibold text-text">What will happen</h2>
           {plan === null ? (
             <p role="status" className="m-0 text-13 text-text-secondary">
@@ -189,63 +206,6 @@ export function MigratePlanScreen({
               <p className="m-0 mt-8 text-12 text-text-muted">
                 Dry run: {plan.files_checked} file{plan.files_checked === 1 ? "" : "s"} checked, nothing written yet.
               </p>
-              <Button size="sm" variant="secondary" onClick={() => setShowFiles((current) => !current)}>
-                {showFiles ? "Hide file list" : "Show file list"}
-              </Button>
-              {showFiles && (
-                <section
-                  className="m-0 flex max-h-[320px] flex-col gap-10 overflow-auto"
-                  aria-label="Planned files"
-                >
-                  {plan.scopes.map((entry) => {
-                    const meta = SCOPE_LABEL[entry.scope] ?? { label: entry.scope, tone: "neutral" as const };
-                    return (
-                      <div key={entry.scope} className="flex flex-col gap-4" aria-label={`${meta.label} store files`}>
-                        <p className="m-0 text-11 uppercase tracking-wide text-text-muted">
-                          {meta.label} store · {entry.store_path}
-                        </p>
-                        <ol className="m-0 flex list-none flex-col gap-4 p-0">
-                          {entry.steps.map((step) => (
-                            <li key={`${entry.scope}:${step.seq}`} className="rounded-6 border border-border p-8">
-                              <div className="flex items-center justify-between gap-6">
-                                <div className="grid min-w-0 gap-2">
-                                  <span className="text-12 text-text">
-                                    {step.seq}. {ACTION_LABEL[step.action] ?? step.action}
-                                  </span>
-                                  {step.item_name !== null && (
-                                    <strong className="truncate text-12 text-text">{step.item_name}</strong>
-                                  )}
-                                </div>
-                                <span className="font-mono text-11 text-text-muted">{step.bytes} B</span>
-                              </div>
-                              {step.source !== null && (
-                                <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.source}>
-                                  from {step.source}
-                                </p>
-                              )}
-                              {step.destination !== null && (
-                                <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.destination}>
-                                  to {step.destination}
-                                </p>
-                              )}
-                              {step.backup_path !== null && (
-                                <p className="m-0 truncate font-mono text-11 text-text-muted" title={step.backup_path}>
-                                  backup {step.backup_path}
-                                </p>
-                              )}
-                              {step.agents.length > 0 && (
-                                <p className="m-0 text-11 text-text-muted">
-                                  Read by {step.agents.join(", ")}
-                                </p>
-                              )}
-                            </li>
-                          ))}
-                        </ol>
-                      </div>
-                    );
-                  })}
-                </section>
-              )}
               <p className="m-0 mt-8 text-11 text-text-muted">
                 Plan hash {plan.plan_hash.slice(0, 8)} across {plan.scopes.length} store
                 {plan.scopes.length === 1 ? "" : "s"}
@@ -263,11 +223,6 @@ export function MigratePlanScreen({
           <Button variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
-          {!showFiles ? (
-            <Button variant="secondary" disabled={plan === null || busy} onClick={() => setShowFiles(true)}>
-              Preview
-            </Button>
-          ) : null}
           <Button
             variant="primary"
             disabled={plan === null || busy}

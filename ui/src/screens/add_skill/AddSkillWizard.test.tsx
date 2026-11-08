@@ -241,7 +241,7 @@ describe("AddSkillWizard", () => {
     fireEvent.click(screen.getByRole("radio", { name: /User/ }));
     fireEvent.click(screen.getByRole("button", { name: "Show Local scope" }));
     fireEvent.click(screen.getByRole("radio", { name: /Local/ }));
-    await waitFor(() => expect(screen.getByText("Project Skill: /sandbox/project/.agents/skills/project-skill")).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText("Project Skill: /sandbox/project/.agents/skills/project-skill")).toHaveLength(1));
     expect(screen.getByText("/sandbox/project/.agentuna/local")).toBeTruthy();
     fireEvent.click(screen.getByRole("radio", { name: /User/ }));
     await waitFor(() => expect(screen.getByText("Project Skill: /sandbox/user/skills/project-skill")).toBeTruthy());
@@ -249,7 +249,7 @@ describe("AddSkillWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     expect(await screen.findByRole("heading", { name: "Review" })).toBeTruthy();
     expect(await screen.findByText("Link · Project Skill")).toBeTruthy();
-    expect(screen.getByText("/sandbox/projects/demo/.agents/skills/project-skill → /sandbox/user/skills/project-skill")).toBeTruthy();
+    expect(screen.getByLabelText("/sandbox/projects/demo/.agents/skills/project-skill → /sandbox/user/skills/project-skill")).toBeTruthy();
     expect(screen.getByLabelText("Planned file paths").textContent).toContain("/sandbox/user/skills/project-skill/SKILL.md");
     fireEvent.click(screen.getByText("Review existing-file diff"));
     expect(screen.getByText(/reviewed copy/)).toBeTruthy();
@@ -753,7 +753,7 @@ describe("AddSkillWizard source steps", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
     await screen.findByRole("radiogroup", { name: "Skill destination scope" });
-    fireEvent.click(await screen.findByRole("checkbox", { name: "Codex" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Codex \+ omp/ }));
     await waitFor(() => expect((screen.getByRole("button", { name: /^Continue/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
 

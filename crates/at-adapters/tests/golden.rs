@@ -9,6 +9,10 @@
 //! `at-adapters/src/golden.rs` is included by path rather than imported from the crate: the
 //! harness is test support and is deliberately absent from the production API surface.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 #[path = "../src/golden.rs"]
 mod harness;
 

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Badge, Button, Input } from "../../components";
-import { DiffViewer } from "../../components/diff/diff-viewer";
 import type { MigrateConflictCopyView } from "../../generated/MigrateConflictCopyView";
 import type { MigrateConflictView } from "../../generated/MigrateConflictView";
 import type { MigrateConflictsView } from "../../generated/MigrateConflictsView";
@@ -53,6 +52,20 @@ function shortHash(hash: string): string {
   return hash.slice(0, 8);
 }
 
+/** Splits text diffs into changed lines and safe metadata-only summaries. */
+function changedLines(diff: string): { readonly original: string[]; readonly proposed: string[]; readonly metadata: string[] } {
+  const original: string[] = [];
+  const proposed: string[] = [];
+  const metadata: string[] = [];
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@") || line.length === 0) continue;
+    if (line.startsWith("-")) original.push(line.slice(1));
+    else if (line.startsWith("+")) proposed.push(line.slice(1));
+    else metadata.push(line.trim());
+  }
+  return { original, proposed, metadata };
+}
+
 function CopyColumn({ label, copy }: { readonly label: string; readonly copy: MigrateConflictCopyView }) {
   return (
     <div className="min-w-0 rounded-8 border border-border p-10">
@@ -66,7 +79,7 @@ function CopyColumn({ label, copy }: { readonly label: string; readonly copy: Mi
       <p className="m-0 truncate font-mono text-11 text-text-muted" title={copy.path}>
         {copy.path}
       </p>
-      <p className="m-0 mt-2 font-mono text-11 text-text-muted">sha {shortHash(copy.raw_hash)}</p>
+      <p className="m-0 mt-2 font-mono text-11 text-text-muted" title={copy.raw_hash}>sha {shortHash(copy.raw_hash)}</p>
     </div>
   );
 }
@@ -237,6 +250,7 @@ export function MigrateResolveScreen({
               const choice = choices[key];
               const pair = names[key] ?? defaultNames(conflict);
               const error = nameErrors[key];
+              const lines = changedLines(conflict.unified_diff);
               return (
                 <li key={key} className="rounded-10 border border-border bg-raised p-12">
                   <header className="flex flex-wrap items-center gap-8">
@@ -261,9 +275,27 @@ export function MigrateResolveScreen({
                     ))}
                   </div>
                   {conflict.unified_diff.length > 0 && (
-                    <div className="mt-8">
-                      <DiffViewer diff={conflict.unified_diff} displayPath={conflict.name} />
-                    </div>
+                    <section aria-label={`${conflict.name} differing lines`} className="mt-8 min-w-0 rounded-6 border border-border bg-surface p-8">
+                      {lines.original.length === 0 && lines.proposed.length === 0 ? (
+                      <div aria-label={`${conflict.name} difference metadata`} className="min-w-0">
+                        <h3 className="m-0 text-11 font-medium text-text-secondary">Difference metadata</h3>
+                        <pre className="m-0 mt-4 max-h-[144px] overflow-auto whitespace-pre-wrap break-all font-mono text-11 text-text-secondary">
+                          {lines.metadata.join("\n") || "Content differences are not available; compare the copy hashes above."}
+                        </pre>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-8">
+                        <div className="min-w-0">
+                          <h3 className="m-0 text-11 font-medium text-text-secondary">Copy A changed lines</h3>
+                          <pre className="m-0 mt-4 max-h-[144px] overflow-auto whitespace-pre-wrap break-all font-mono text-11 text-text-secondary">{lines.original.join("\n") || "No changed lines"}</pre>
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="m-0 text-11 font-medium text-text-secondary">Copy B changed lines</h3>
+                          <pre className="m-0 mt-4 max-h-[144px] overflow-auto whitespace-pre-wrap break-all font-mono text-11 text-text-secondary">{lines.proposed.join("\n") || "No changed lines"}</pre>
+                        </div>
+                      </div>
+                      )}
+                    </section>
                   )}
                   <fieldset className="m-0 mt-8 border-0 p-0">
                     <legend className="mb-4 text-12 text-text-secondary">Keep</legend>

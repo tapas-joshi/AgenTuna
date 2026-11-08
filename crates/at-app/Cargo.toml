@@ -52,7 +52,6 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-rustix.workspace = true
 ts-rs.workspace = true
 ed25519-dalek.workspace = true
 url.workspace = true
@@ -67,15 +66,21 @@ tokio-util.workspace = true
 zip.workspace = true
 rusqlite.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
-rustix = { workspace = true, features = ["process"] }
 # Synthesizes a platform watch refusal so TA-081's tolerant-root policy is testable.
 notify.workspace = true
+
 # TF-010's temp-HOME fixture (`at_fs::testkit::TestHome`). Test builds only.
 at-fs = { workspace = true, features = ["testkit"] }
 at-migrate = { workspace = true, features = ["testkit"] }
 # Dev-only cycle: the crate under test needs its own `testkit` feature during `cargo test`
 # so `CARGO_BIN_EXE_at-app-health-fixture` exists (same pattern as at-migrate and at-fs).
 at-app = { path = ".", features = ["testkit"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }

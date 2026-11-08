@@ -354,7 +354,32 @@ pub fn apply_skill_update(
     plan: &SkillUpdatePlan,
     context: &mut at_fs::changeset::ApplyContext<'_>,
 ) -> Result<at_fs::changeset::ApplyOutcome, SkillUpdateError> {
-    let outcome = match crate::preview::apply_reviewed(&plan.change_set, context) {
+    apply_skill_update_inner(connection, plan, context, None)
+}
+
+/// Like [`apply_skill_update`], registering expected writes before atomic replacement.
+pub fn apply_skill_update_with_registry(
+    connection: &Connection,
+    plan: &SkillUpdatePlan,
+    context: &mut at_fs::changeset::ApplyContext<'_>,
+    registry: &at_fs::RecentWrites,
+) -> Result<at_fs::changeset::ApplyOutcome, SkillUpdateError> {
+    apply_skill_update_inner(connection, plan, context, Some(registry))
+}
+
+fn apply_skill_update_inner(
+    connection: &Connection,
+    plan: &SkillUpdatePlan,
+    context: &mut at_fs::changeset::ApplyContext<'_>,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<at_fs::changeset::ApplyOutcome, SkillUpdateError> {
+    let applied = match registry {
+        Some(registry) => {
+            crate::preview::apply_reviewed_with_registry(&plan.change_set, context, registry)
+        }
+        None => crate::preview::apply_reviewed(&plan.change_set, context),
+    };
+    let outcome = match applied {
         Ok(outcome) => outcome,
         Err(error) => {
             let mut operation = at_db::ops::NewOperation::new(

@@ -3,6 +3,10 @@
 //! Every case spawns the real binary with `AGENTUNA_*` roots redirected into a
 //! temp dir, so no test touches the real home, agent folders or Keychain.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;

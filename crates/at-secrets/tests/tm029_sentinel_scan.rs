@@ -232,18 +232,34 @@ fn a_spawned_child_receives_the_secret_only_through_its_environment() {
         "ps reports the fixture process and its script: {argv}"
     );
 
-    // Where the platform still exposes environments through `ps -E`, the value must be there
-    // — never in argv. Current macOS omits the environment section, so the child's own report
-    // above is the authoritative positive check.
-    let with_environment = ps_output(&["-E", "-ww", "-p", &pid]);
-    assert!(
-        !with_environment.contains(SENTINEL) || with_environment.contains("AGENTUNA_TM029_SECRET="),
-        "an exposed environment lists the assignment, not a bare argument: {with_environment}"
-    );
-    assert!(
-        with_environment.contains(&pid),
-        "ps -E still reports the fixture process: {with_environment}"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let environment = fs::read(format!("/proc/{pid}/environ"))
+            .expect("same-user process environment is readable");
+        let expected = format!("AGENTUNA_TM029_SECRET={SENTINEL}");
+        assert!(
+            environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes()),
+            "the exact secret assignment is exposed in the child's environment"
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Where the platform exposes environments through `ps -E`, the value must be there
+        // — never in argv. Current macOS omits the environment section, so the child's own
+        // report above is the authoritative positive check.
+        let with_environment = ps_output(&["-E", "-ww", "-p", &pid]);
+        assert!(
+            !with_environment.contains(SENTINEL)
+                || with_environment.contains("AGENTUNA_TM029_SECRET="),
+            "an exposed environment lists the assignment, not a bare argument: {with_environment}"
+        );
+        assert!(
+            with_environment.contains(&pid),
+            "ps -E still reports the fixture process: {with_environment}"
+        );
+    }
 
     let _ = guard.0.kill();
     let _ = guard.0.wait();

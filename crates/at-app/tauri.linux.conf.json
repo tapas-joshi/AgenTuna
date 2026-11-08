@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "true"
+  },
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "shortDescription": "Manage agent skills, MCP servers and rules across coding agents",
+    "longDescription": "AgenTuna manages agent skills, MCP servers and rule files across coding agents and Global, User, Project and Local scopes."
+  }
+}

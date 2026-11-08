@@ -977,6 +977,17 @@ pub fn skill_scope_options(
     state: State<'_, AppState>,
     request: SkillScopeOptionsRequest,
 ) -> Result<SkillScopeOptionsView, CommandError> {
+    skill_scope_options_inner(&state, &request)
+}
+
+/// Bridge-facing body of [`skill_scope_options`], callable without a Tauri app.
+///
+/// # Errors
+/// See [`skill_scope_options`].
+pub fn skill_scope_options_inner(
+    state: &AppState,
+    request: &SkillScopeOptionsRequest,
+) -> Result<SkillScopeOptionsView, CommandError> {
     use std::str::FromStr;
 
     if request.names.len() > 100
@@ -994,27 +1005,37 @@ pub fn skill_scope_options(
         .map(Scope::from_str)
         .transpose()
         .map_err(|_| CommandError::invalid_argument("scope", "choose a supported scope"))?;
-    let database = state.database().map_err(CommandError::unavailable)?;
+    // The database guard is scoped to these reads: `agents_list_impl` below re-locks the
+    // same non-reentrant mutex, and holding the guard across that call self-deadlocked
+    // the main thread, freezing the whole webview on the wizard's Scope & agents step.
+    let (selected_project, global_store_override, global_locks) = {
+        let database = state.database().map_err(CommandError::unavailable)?;
+        let selected_project = project_root(
+            database.connection(),
+            request.project_id.as_deref(),
+            Scope::User,
+        )?;
+        let settings = at_db::settings::load(database.connection())
+            .map_err(|_| CommandError::internal("could not load store settings"))?;
+        let global_locks = at_db::locks::locks_for_scope(database.connection(), Scope::Global)
+            .map_err(|_| CommandError::internal("could not read Global locks"))?;
+        (
+            selected_project,
+            settings.global_store_path().map(Path::to_path_buf),
+            global_locks,
+        )
+    };
     let mut paths = state
         .paths()
         .cloned()
         .ok_or_else(|| CommandError::unavailable("application paths are unavailable"))?;
-    let selected_project = project_root(
-        database.connection(),
-        request.project_id.as_deref(),
-        Scope::User,
-    )?;
     if let Some(project) = selected_project.as_deref() {
         paths = paths.for_project(project).map_err(|_| {
             CommandError::invalid_argument("project_id", "project path is unavailable")
         })?;
     }
-    let settings = at_db::settings::load(database.connection())
-        .map_err(|_| CommandError::internal("could not load store settings"))?;
-    paths.apply_settings_global_store(settings.global_store_path());
+    paths.apply_settings_global_store(global_store_override.as_deref());
     let global_status = at_fs::privilege::GlobalStoreStatus::probe(paths.global_store());
-    let global_locks = at_db::locks::locks_for_scope(database.connection(), Scope::Global)
-        .map_err(|_| CommandError::internal("could not read Global locks"))?;
     let mut scopes = Vec::with_capacity(Scope::ALL.len());
     let mut stores = Vec::with_capacity(Scope::ALL.len());
     for &scope in Scope::ALL {
@@ -1075,7 +1096,7 @@ pub fn skill_scope_options(
         variables: Default::default(),
     };
     let registry = AgentAdapterRegistry::register();
-    let cards = super::workflows::agents_list_impl(state.inner())?;
+    let cards = super::workflows::agents_list_impl(state)?;
     let mut agents = Vec::with_capacity(cards.len());
     for card in cards {
         let installed = card.installed;
@@ -1173,6 +1194,7 @@ pub fn skill_scope_options(
                     continue;
                 }
             };
+            let database = state.database().map_err(CommandError::unavailable)?;
             let report = at_engine::skill_names::check_skill_name_for_agents(
                 database.connection(),
                 &slug,
@@ -1532,7 +1554,12 @@ fn apply_cached_skill_add(
             ),
         );
     }
-    let outcome = at_fs::changeset::apply_with_roots(&cached.plan.change_set, &mut context, &roots)
+    let outcome = at_fs::changeset::apply_with_roots_and_registry(
+        &cached.plan.change_set,
+        &mut context,
+        &roots,
+        &state.recent_writes(),
+    )
         .map_err(|error| match error {
             at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
                 super::commands::CommandErrorCode::Conflict,
@@ -1543,7 +1570,6 @@ fn apply_cached_skill_add(
             ),
             other => CommandError::from(other),
         })?;
-    state.record_writes(&cached.plan.change_set, &cached.layout_root);
     if let Some(progress) = progress {
         progress.fraction(0.8, "Reviewed files applied");
     }

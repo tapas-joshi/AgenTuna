@@ -364,10 +364,11 @@ pub fn skill_update_apply(
         backup_folder: &cached.backup_folder,
         recorder: &mut recorder,
     };
-    let result = at_engine::skill_source::apply_skill_update(
+    let result = at_engine::skill_source::apply_skill_update_with_registry(
         database.connection(),
         &cached.plan,
         &mut context,
+        &state.recent_writes(),
     )
     .map_err(|error| match error {
         at_engine::skill_source::SkillUpdateError::Preview(
@@ -378,7 +379,6 @@ pub fn skill_update_apply(
         ),
         other => CommandError::unavailable(other.to_string()),
     })?;
-    state.record_writes(&cached.plan.change_set, &cached.store_root);
     Ok(SkillUpdateApplyView {
         operation_id: result.operation_id,
         files_changed: cached.plan.change_set.ops.len(),

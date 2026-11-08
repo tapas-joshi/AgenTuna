@@ -181,31 +181,6 @@ impl AppState {
         &self.adapters
     }
 
-    /// Records successful writes from an applied ChangeSet for filesystem-event suppression.
-    pub fn record_writes(&self, set: &at_model::ChangeSet, store_root: &Path) {
-        for operation in &set.ops {
-            let Some(path) = operation.destination() else {
-                continue;
-            };
-            let destination = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                store_root.join(path)
-            };
-            let hash = match operation {
-                at_model::FileOp::Write { bytes, .. } => at_fs::sha256_hex(bytes),
-                at_model::FileOp::Delete { .. } | at_model::FileOp::Mkdir { .. } => continue,
-                _ => {
-                    let Ok(bytes) = std::fs::read(&destination) else {
-                        continue;
-                    };
-                    at_fs::sha256_hex(&bytes)
-                }
-            };
-            self.recent_writes.record(destination, hash);
-        }
-        self.invalidate_scope_cache();
-    }
     /// Locks the shared database for a typed command operation.
     ///
     /// # Errors
@@ -291,12 +266,13 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use at_fs::{WatchConfig, WatchEvent, WatchRoot, WatchRootKind, WatchService};
-    use at_model::{ChangeSet, ExpectedState, FileOp, OperationKind};
+    use at_fs::{
+        ExpectedState, WatchConfig, WatchEvent, WatchRoot, WatchRootKind, WatchService,
+        WriteRequest, apply_with_registry,
+    };
 
     use super::AppState;
     use crate::app::bridge::{EventSink, JobBridge, JobEvent, TracingOperationsLog};
@@ -332,25 +308,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2_500));
         service.start().expect("start");
 
-        let app_bytes = b"app write".to_vec();
-        std::fs::write(&file, &app_bytes).expect("app write");
-        let change_set = ChangeSet {
-            id: "test".to_owned(),
-            preview_id: "test-preview".to_owned(),
-            operation_kind: OperationKind::parse("edit_skill").expect("operation"),
-            scope: None,
-            project_id: None,
-            summary: "test".to_owned(),
-            ops: vec![FileOp::Write {
-                path: PathBuf::from("settings.json"),
-                bytes: app_bytes,
-                expected: ExpectedState::absent(),
-                follow_symlink: false,
-                backup: true,
-            }],
-            created_at_unix_seconds: 0,
-        };
-        state.record_writes(&change_set, &root);
+        apply_with_registry(
+            &WriteRequest::replace(
+                &file,
+                b"app write".to_vec(),
+                ExpectedState::Hash(at_fs::sha256_hex(b"before")),
+            ),
+            &state.recent_writes(),
+        )
+        .expect("app write");
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while state.recent_writes().suppressed_count() == 0 && Instant::now() < deadline {

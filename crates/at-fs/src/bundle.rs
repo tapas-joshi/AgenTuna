@@ -14,6 +14,7 @@
 use std::fs;
 use std::fs::symlink_metadata;
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -197,6 +198,12 @@ pub enum BundleSwapError {
         /// Journal path.
         path: PathBuf,
     },
+    /// The platform has no equivalent of this operation; nothing was touched.
+    #[error("the application-bundle swap is unavailable on this platform: {reason}")]
+    UnsupportedPlatform {
+        /// Why the platform cannot perform it.
+        reason: &'static str,
+    },
 }
 
 impl BundleSwapError {
@@ -207,7 +214,10 @@ impl BundleSwapError {
     pub fn previous_bundle_intact(&self) -> bool {
         matches!(
             self,
-            Self::InvalidRequest { .. } | Self::Aside { .. } | Self::Install { .. }
+            Self::InvalidRequest { .. }
+                | Self::Aside { .. }
+                | Self::Install { .. }
+                | Self::UnsupportedPlatform { .. }
         )
     }
 }
@@ -460,10 +470,24 @@ fn require_directory(label: &str, path: &Path) -> Result<(), BundleSwapError> {
     Ok(())
 }
 
+/// The filesystem identity of `path`, used to prove every swap path shares one volume.
 fn device_of(path: &Path) -> Result<u64, BundleSwapError> {
-    fs::metadata(path)
-        .map(|metadata| metadata.dev())
-        .map_err(|_| invalid(format!("cannot read the filesystem of {}", path.display())))
+    #[cfg(unix)]
+    {
+        fs::metadata(path)
+            .map(|metadata| metadata.dev())
+            .map_err(|_| invalid(format!("cannot read the filesystem of {}", path.display())))
+    }
+    #[cfg(not(unix))]
+    {
+        // The swap renames a macOS `.app` bundle. Windows ships a different update mechanism
+        // (an installer), and there is no volume identity available here without an unsafe
+        // call, so the whole operation reports itself unavailable instead of skipping the check.
+        let _ = path;
+        Err(BundleSwapError::UnsupportedPlatform {
+            reason: "the macOS application-bundle swap has no Windows equivalent",
+        })
+    }
 }
 
 fn within(candidate: &Path, ancestor: &Path) -> bool {
@@ -488,7 +512,7 @@ fn rename_plain(from: &Path, to: &Path) -> Result<(), FsError> {
 }
 
 fn rename_error(from: &Path, to: &Path, error: io::Error) -> FsError {
-    if error.raw_os_error() == Some(libc::EXDEV) {
+    if crate::errno::is_cross_device(&error) {
         FsError::CrossDeviceRename {
             from: from.to_path_buf(),
             to: to.to_path_buf(),
@@ -555,7 +579,9 @@ fn sync_directory(path: &Path) {
     }
 }
 
-#[cfg(test)]
+// Unix-only fixtures: POSIX symlinks, permission bits and raw errno constants. The
+// Windows twins arrive with the slice that enables the Windows test suite.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::failpoint::{Fault, TestInjector};

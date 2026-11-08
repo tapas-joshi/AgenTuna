@@ -1,5 +1,9 @@
 //! TS-027: skill link strategy, cross-volume policy and typed error translation.
 
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;

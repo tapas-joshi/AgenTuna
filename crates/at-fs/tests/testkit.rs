@@ -1,4 +1,8 @@
 //! Behaviour of the shared test fixtures (`at_fs::testkit`).
+
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
 #![cfg(feature = "testkit")]
 
 use std::collections::BTreeSet;
@@ -304,4 +308,28 @@ fn paths_with_roots_app_paths_at_the_fixture() {
         "paths_with hands the home to the resolver"
     );
     let _unused: PathBuf = home.path("relative/file");
+}
+
+#[test]
+fn an_injected_home_owns_its_paths_while_the_environment_points_elsewhere() {
+    // The CI failure this guards: `empty_home_has_no_agent_files_and_no_store_items` resolved
+    // paths while a sibling test's `EnvScope` held the process pointed at another sandbox, so the
+    // Linux support tree landed outside the home under test.
+    let _lock = ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let elsewhere = TestHome::with_env().expect("home with env");
+    let home = TestHome::empty_home().expect("home");
+
+    let paths = paths_for(&home);
+    for root in [
+        paths.support_dir(),
+        paths.local_state_dir(),
+        paths.cache_dir(),
+    ] {
+        assert!(
+            root.starts_with(home.home()),
+            "{} escaped the home under test",
+            root.display()
+        );
+    }
+    assert_ne!(paths.support_dir(), elsewhere.path(".config/agentuna"));
 }

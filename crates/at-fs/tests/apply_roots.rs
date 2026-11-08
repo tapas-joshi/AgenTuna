@@ -1,4 +1,8 @@
 //! Integration tests for authorized absolute ChangeSet destinations.
+
+// Unix-only harness: POSIX symlinks, permission bits and raw errno constants. The Windows
+// twins arrive with the slice that enables the Windows test suite.
+#![cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -1,5 +1,9 @@
 //! TM-027: the MCP command surface is registered and secret values are not arguments.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::ffi::OsString;
@@ -102,8 +106,6 @@ fn mcp_add_accepts_dry_run_only_through_shared_global_flag() {
 
 /// A stdio MCP server that answers `initialize` and `tools/list` over newline-delimited JSON.
 fn fake_server_script(sandbox: &Sandbox) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = sandbox.path("fake-mcp-server.sh");
     let script = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -121,10 +123,7 @@ while IFS= read -r line; do
   esac
 done
 "#;
-    fs::write(&path, script).expect("write fake server");
-    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).expect("chmod fake server");
+    at_fs::testkit::write_executable(&path, script).expect("write fake server");
     path
 }
 

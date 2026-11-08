@@ -1,12 +1,28 @@
 //! Safe rule editing and create-only rule-file intents.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_model::{AgentId, ItemId, ItemKind, Scope};
 
 use crate::rules::RuleSource;
+
+/// Whether the file refuses writes.
+///
+/// Unix asks whether any write bit is set, because a file a group or other may write is still
+/// writable by this process. Windows has a single read-only attribute, which is exactly the
+/// question being asked there.
+fn is_read_only(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o222 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.permissions().readonly()
+    }
+}
 
 /// Native rule-file names supported by the create intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,7 +211,7 @@ pub fn save_rule_raw(
             .to_string(),
         });
     }
-    if metadata.permissions().mode() & 0o222 == 0 {
+    if is_read_only(&metadata) {
         return Err(RuleEditorError::PermissionDenied {
             path: source.path.clone(),
             os_error: std::io::Error::from(std::io::ErrorKind::PermissionDenied).raw_os_error(),
@@ -211,10 +227,9 @@ pub fn save_rule_raw(
         expected,
         true,
     )?;
-    let apply = at_fs::apply_with_roots(&change_set, context, roots)
+    let apply = at_fs::apply_with_roots_and_registry(&change_set, context, roots, recent_writes)
         .map_err(|error| apply_error(error, &source.path, editor_buffer))?;
     let saved_hash = at_fs::sha256_hex(editor_buffer);
-    recent_writes.record(&source.path, saved_hash.clone());
     record_version(
         item_id,
         source.scope,
@@ -277,7 +292,7 @@ pub fn save_rule(
             .to_string(),
         });
     }
-    if metadata.permissions().mode() & 0o222 == 0 {
+    if is_read_only(&metadata) {
         return Err(RuleEditorError::PermissionDenied {
             path: source.path.clone(),
             os_error: std::io::Error::from(std::io::ErrorKind::PermissionDenied).raw_os_error(),
@@ -297,10 +312,9 @@ pub fn save_rule(
         expected,
         true,
     )?;
-    let apply = at_fs::apply_with_roots(&change_set, context, roots)
+    let apply = at_fs::apply_with_roots_and_registry(&change_set, context, roots, recent_writes)
         .map_err(|error| apply_error(error, &source.path, editor_buffer))?;
     let saved_hash = at_fs::sha256_hex(&rendered);
-    recent_writes.record(&source.path, saved_hash.clone());
     record_version(
         item_id,
         source.scope,
@@ -425,16 +439,14 @@ pub fn apply_new_rule(
     recent_writes: &at_fs::RecentWrites,
 ) -> Result<(RuleSource, at_fs::ApplyOutcome), RuleEditorError> {
     let outcome =
-        at_fs::apply_with_roots(&intent.change_set, context, roots).map_err(
-            |error| match error {
+        at_fs::apply_with_roots_and_registry(&intent.change_set, context, roots, recent_writes)
+            .map_err(|error| match error {
                 at_fs::ChangeSetApplyError::Fs(at_fs::FsError::AlreadyExists { path }) => {
                     RuleEditorError::AlreadyExists { path }
                 }
                 other => RuleEditorError::Apply(other),
-            },
-        )?;
+            })?;
     let hash = at_fs::sha256_hex(&intent.template);
-    recent_writes.record(&intent.path, hash.clone());
     record_version(
         item_id,
         intent.scope,
@@ -939,7 +951,9 @@ mod tests {
         b"hand\n<!-- agentuna:begin -->\nnew\n<!-- agentuna:end -->\ntail\n";
 
     /// Reads the read-only fixture snapshot, then removes the write bit.
+    #[cfg(unix)]
     fn read_only_rule_source(root: &std::path::Path) -> (RuleSource, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
         let path = root.join("CLAUDE.md");
         std::fs::write(&path, READ_ONLY_TEST_ORIGINAL).expect("rule file");
         let metadata = std::fs::metadata(&path).expect("metadata");
@@ -959,6 +973,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_only_managed_rule_save_is_refused_without_writing() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1019,6 +1034,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_only_raw_rule_save_is_refused_without_writing() {
         use std::os::unix::fs::PermissionsExt;
 

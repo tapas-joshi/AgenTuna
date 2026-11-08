@@ -1,5 +1,9 @@
 //! TU-011: the project registry repository over `projects`.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod common;
 
 use std::fs;

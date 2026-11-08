@@ -1,5 +1,6 @@
 //! Exact, read-only review plans for adding a skill package and deploying it to agents.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -110,6 +111,9 @@ pub enum SkillAddPlanError {
     /// A library Link target already exists at the canonical destination.
     #[error("the linked destination already exists; choose another scope or copy the skill")]
     LinkedDestinationExists,
+    /// A shared physical destination cannot honor conflicting agent deployment modes.
+    #[error("agents sharing a skill destination disagree on deployment mode: {0}")]
+    SharedTargetModeConflict(PathBuf),
 }
 
 /// Inputs for constructing an Add Skill plan.
@@ -147,6 +151,7 @@ pub fn plan_skill_add(
     let mut files = Vec::new();
     let mut overwrites = Vec::new();
     let mut ops = Vec::new();
+    let mut deployment_modes = BTreeMap::<PathBuf, SkillDeploymentMode>::new();
     for package_path in request.package.paths() {
         let file =
             request
@@ -179,6 +184,15 @@ pub fn plan_skill_add(
                 deployment.target.clone(),
             ));
         }
+        if let Some(previous_mode) = deployment_modes.get(&deployment.target) {
+            if *previous_mode != deployment.mode {
+                return Err(SkillAddPlanError::SharedTargetModeConflict(
+                    deployment.target.clone(),
+                ));
+            }
+            continue;
+        }
+        deployment_modes.insert(deployment.target.clone(), deployment.mode);
         if deployment.mode == SkillDeploymentMode::Copy {
             for package_path in request.package.paths() {
                 let file = request.package.get(package_path).ok_or_else(|| {

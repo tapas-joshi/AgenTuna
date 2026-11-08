@@ -3,6 +3,10 @@
 //! Every path is redirected into a temporary directory: the tests never read the developer's
 //! home, stores or agent folders, and no MCP server is started anywhere in this file.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;

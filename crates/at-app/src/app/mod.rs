@@ -223,16 +223,35 @@ pub fn run() -> tauri::Result<()> {
                     now_ms as i64,
                 );
             }
-            if let Ok(database) = app.state::<AppState>().database_handle()
-                && let Err(error) = detection::start(
-                    app.handle().clone(),
-                    setup_paths.clone(),
-                    Arc::clone(&database),
-                    app.state::<AppState>().recent_writes(),
-                    jobs.clone(),
-                )
+            if let Some(window) = app.get_webview_window("main") {
+                window_state::restore_window(&window, app.state::<AppState>().inner());
+            }
+            // Non-critical background services start after the window is up. Ordering that
+            // matters is already done: the database is open, its derived data is current and the
+            // recovery decision has been taken before `app.manage(state)`, so no command can
+            // read or write through state before recovery was evaluated. Installing watchers is
+            // advisory work (writes are guarded by re-reads and stale-preview checks, not by a
+            // watcher), so it must not sit between the window and its first asset requests or
+            // first IPC (TF-035).
             {
-                tracing::warn!(%error, "agent filesystem detection watcher unavailable");
+                let detection_handle = app.handle().clone();
+                let detection_paths = setup_paths.clone();
+                let detection_jobs = jobs.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let state = detection_handle.state::<AppState>();
+                    let Ok(database) = state.database_handle() else {
+                        return;
+                    };
+                    if let Err(error) = detection::start(
+                        detection_handle.clone(),
+                        detection_paths,
+                        Arc::clone(&database),
+                        state.recent_writes(),
+                        detection_jobs,
+                    ) {
+                        tracing::warn!(%error, "agent filesystem detection watcher unavailable");
+                    }
+                });
             }
             if let Ok(database) = app.state::<AppState>().database_handle() {
                 let watcher = drift::start(
@@ -257,6 +276,7 @@ pub fn run() -> tauri::Result<()> {
             app.manage(updater::commands::UpdaterState::system(
                 setup_paths.cache_dir().join("updates"),
             ));
+            #[cfg(target_os = "macos")]
             {
                 let updater_handle = app.handle().clone();
                 tauri::async_runtime::spawn_blocking(move || {
@@ -746,6 +766,32 @@ pub fn run() -> tauri::Result<()> {
     Ok(())
 }
 
+/// Adds a long-lived cache policy to the immutable, content-hashed frontend assets.
+///
+/// Tauri serves the embedded bundle through its own `tauri://` handler with a `Content-Type`
+/// and no cache headers, and its configuration applies one header set to every response. A
+/// blanket policy would also pin `index.html`, which is not hashed: after an update the webview
+/// would keep loading the old document that references chunks this build no longer embeds. This
+/// hook scopes the policy to `/assets/` (Vite hashes those filenames, so a new build never
+/// reuses an old URL) and marks the document itself as revalidate-always.
+fn asset_cache_headers(
+    request: tauri::http::Request<Vec<u8>>,
+    response: &mut tauri::http::Response<std::borrow::Cow<'static, [u8]>>,
+) {
+    let cache_control = if request.uri().path().starts_with("/assets/") {
+        // Vite gives every build a fresh hash in the file name; the URL cannot change meaning.
+        "public, max-age=31536000, immutable"
+    } else {
+        // `index.html` names the current chunk hashes, so it must be revalidated.
+        "no-cache"
+    };
+    if let Ok(value) = tauri::http::HeaderValue::from_str(cache_control) {
+        response
+            .headers_mut()
+            .insert(tauri::http::header::CACHE_CONTROL, value);
+    }
+}
+
 /// Creates the `main` webview from `tauri.conf.json` with the navigation guard attached.
 ///
 /// The window declares `"create": false`, so Tauri leaves it to this function: the builder's
@@ -764,6 +810,7 @@ fn create_main_window<R: tauri::Runtime>(
         .cloned()
         .ok_or_else(|| std::io::Error::other("tauri.conf.json defines no `main` window"))?;
     tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .on_web_resource_request(asset_cache_headers)
         .on_navigation(external_link::navigation_allowed)
         .on_new_window(|_url, _features| {
             tracing::warn!(
@@ -796,4 +843,51 @@ fn config_level(config: &config::AppConfig) -> LogLevel {
         .and_then(|value| value.value.as_str())
         .and_then(LogLevel::parse)
         .unwrap_or(LogLevel::Info)
+}
+
+#[cfg(test)]
+mod tests {
+    use tauri::http::{Request, Response, header::CACHE_CONTROL};
+
+    use super::asset_cache_headers;
+
+    fn empty_response() -> Response<std::borrow::Cow<'static, [u8]>> {
+        Response::new(std::borrow::Cow::Borrowed(&[][..]))
+    }
+
+    #[test]
+    fn hashed_assets_are_immutable_and_the_document_revalidates() {
+        let mut asset = empty_response();
+        asset_cache_headers(
+            Request::builder()
+                .uri("tauri://localhost/assets/index-BWWS75zz.js")
+                .body(Vec::new())
+                .expect("asset request"),
+            &mut asset,
+        );
+        assert_eq!(
+            asset
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
+
+        let mut document = empty_response();
+        asset_cache_headers(
+            Request::builder()
+                .uri("tauri://localhost/index.html")
+                .body(Vec::new())
+                .expect("document request"),
+            &mut document,
+        );
+        assert_eq!(
+            document
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache"),
+            "index.html names the current chunk hashes and must not be pinned"
+        );
+    }
 }

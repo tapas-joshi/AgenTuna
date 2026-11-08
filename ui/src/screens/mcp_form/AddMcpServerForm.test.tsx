@@ -119,7 +119,7 @@ describe("AddMcpServerForm", () => {
     render(<AddMcpServerForm defaultAgents={["codex"]} onCancel={() => undefined} onPlan={vi.fn().mockResolvedValue(preview)} onSave={vi.fn().mockResolvedValue(undefined)} onPrepareLaunch={onPrepareLaunch} onTest={onTest} />);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Search" } });
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npx" } });
-    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     const dialog = await screen.findByRole("dialog", { name: "Run this connection test?" });
     expect(dialog.textContent).toContain("npx --serve");
     expect(dialog.textContent).toContain("/sandbox");
@@ -129,7 +129,7 @@ describe("AddMcpServerForm", () => {
     expect(screen.queryByRole("dialog", { name: "Run this connection test?" })).toBeNull();
     expect(onTest).not.toHaveBeenCalled();
     expect(onPrepareLaunch).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     await confirmRun();
     await waitFor(() => expect(onTest).toHaveBeenCalledTimes(1));
     expect(onTest.mock.calls[0]?.[1]).toEqual({ approval_id: "apr-fixture", request_hash: "a".repeat(64) });
@@ -141,14 +141,14 @@ describe("AddMcpServerForm", () => {
     render(<AddMcpServerForm defaultAgents={["codex"]} onCancel={() => undefined} onPlan={vi.fn().mockResolvedValue(preview)} onSave={vi.fn().mockResolvedValue(undefined)} onPrepareLaunch={onPrepareLaunch} onTest={onTest} />);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Search" } });
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npx" } });
-    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     await confirmRun();
     expect(await screen.findByText("Connected")).toBeTruthy();
     expect(screen.queryByText("Test result is stale")).toBeNull();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Search two" } });
     expect(screen.getByText("Test result is stale")).toBeTruthy();
     expect(screen.queryByText("Connected")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     await confirmRun();
     await waitFor(() => expect(onTest).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("Connected")).toBeTruthy();
@@ -164,7 +164,7 @@ describe("AddMcpServerForm", () => {
     render(<AddMcpServerForm defaultAgents={["codex"]} onCancel={() => undefined} onPlan={vi.fn().mockResolvedValue(preview)} onSave={vi.fn().mockResolvedValue(undefined)} onPrepareLaunch={vi.fn().mockResolvedValue(approvalView)} onTest={onTest} onSuggestedAction={onSuggestedAction} />);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Search" } });
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npx" } });
-    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     await confirmRun();
     expect(await screen.findByText("Sign-in required")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));

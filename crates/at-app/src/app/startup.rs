@@ -128,7 +128,7 @@ pub fn open_database(paths: &AppPaths) -> OpenedDatabase {
     } else {
         tracing::info!("building derived data on first database creation");
     }
-    let report = match rebuild(database.connection_mut(), &rebuild_paths(paths), None) {
+    let mut report = match rebuild(database.connection_mut(), &rebuild_paths(paths), None) {
         Ok(report) => Some(report),
         Err(error) => {
             tracing::error!(%error, "derived-data rebuild failed");
@@ -140,12 +140,18 @@ pub fn open_database(paths: &AppPaths) -> OpenedDatabase {
             None
         }
     };
-    if report.is_some() {
+    if let Some(report) = report.as_mut() {
         mark_derived_built(database.connection());
         // The rebuild writes skill rows only; MCP servers and rule files are discovered by the
         // shared native refresh, so a fresh or quarantined index must run it once or the MCP
         // screen would open with no "not in AgenTuna" rows and no banner.
         super::native_scan::refresh_native_findings(paths, database.connection());
+        // The rebuild counted its rows before that refresh wrote the native findings, so the
+        // report would claim `native_items=0` while the index holds every discovered row.
+        // Report what the index actually holds once startup has finished building it.
+        if let Ok(native_items) = at_db::native::count_native_items(database.connection()) {
+            report.counts.native_items = native_items;
+        }
     }
     OpenedDatabase {
         database: Some(database),

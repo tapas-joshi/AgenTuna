@@ -11,7 +11,7 @@ const wizardMain = (page: Page) => page.locator('main[aria-labelledby="add-skill
 
 test("add-skill source matches the three-card design", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await expect(page.getByRole("heading", { name: "Add a skill" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Wizard progress" })).toBeVisible();
@@ -23,7 +23,7 @@ test("add-skill source matches the three-card design", async ({ page }) => {
 });
 test("marketplace source respects disabled network policy", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Marketplace" }).click();
@@ -40,7 +40,7 @@ test("offline marketplace shows cached policy and makes no request until searche
       statement: "Offline mode is active.", allowed_hosts: [], actions: [], events: [], capacity: 100,
     };
   });
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Marketplace" }).click();
@@ -64,7 +64,7 @@ test("marketplace search runs only after explicit Search", async ({ page }) => {
       offline: false, stale: false, provenance: "Marketplace results",
     };
   });
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Marketplace" }).click();
@@ -86,7 +86,7 @@ test("marketplace search runs only after explicit Search", async ({ page }) => {
 });
 test("Git import uses bridge-job progress, validates candidates, preserves selection on Back, and matches the Git design", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Import from git/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -138,7 +138,7 @@ test("Git Back and forward restores fetched candidates, selection, and scroll po
       error: null,
     };
   });
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Import from git/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -170,7 +170,7 @@ test("Git import with no skills shows an empty state without an error notificati
     const mocks = (window as typeof window & { __AT_TEST_MOCKS__: { commandOverrides: Record<string, unknown> } }).__AT_TEST_MOCKS__;
     mocks.commandOverrides.skill_import_job_result = { candidates: [], error: null };
   });
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Import from git/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -188,7 +188,7 @@ test("folder with no SKILL.md shows a clear empty state", async ({ page }) => {
     const mocks = (window as typeof window & { __AT_TEST_MOCKS__: { commandOverrides: Record<string, unknown> } }).__AT_TEST_MOCKS__;
     mocks.commandOverrides.skill_import_job_result = { candidates: [], error: null };
   });
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Local folder" }).click();
@@ -202,7 +202,7 @@ test("folder with no SKILL.md shows a clear empty state", async ({ page }) => {
 
 test("folder import browses a source, reports progress, and previews detected candidates", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Local folder" }).click();
@@ -224,7 +224,7 @@ test("folder import browses a source, reports progress, and previews detected ca
 
 test("ZIP import cancellation and traversal failures stay visible and never continue to preview", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.locator("details").getByText("More import options").click();
   await page.getByRole("button", { name: "Zip file" }).click();
@@ -283,7 +283,7 @@ test("library import keeps cross-source selections, skips destination clashes, a
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /From your library/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -310,7 +310,7 @@ test("library import keeps cross-source selections, skips destination clashes, a
   await page.getByRole("button", { name: /^Continue/ }).click();
   await expect(page.getByRole("heading", { name: "Review" })).toBeVisible();
   await expect(page.getByText("Link · Project Skill")).toBeVisible();
-  await expect(page.getByText("/sandbox/Projects/AgenTuna/.config-studio/skills/project-skill → /sandbox/user/skills/project-skill")).toBeVisible();
+  await expect(page.getByLabel("/sandbox/Projects/AgenTuna/.config-studio/skills/project-skill → /sandbox/user/skills/project-skill")).toBeVisible();
   await expect(page).toHaveScreenshot("add-skill-library-review.png", { animations: "disabled", caret: "hide" });
 });
 test("library Copy selection is shown as a copied folder in Review", async ({ page }) => {
@@ -336,7 +336,7 @@ test("library Copy selection is shown as a copied folder in Review", async ({ pa
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /From your library/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -353,7 +353,7 @@ test("library Copy selection is shown as a copied folder in Review", async ({ pa
 
 test("empty library state offers a direct Git-import shortcut", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /From your library/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -364,7 +364,7 @@ test("empty library state offers a direct Git-import shortcut", async ({ page })
 
 test("review previews exact paths and Done reflects the applied Git result", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Write a new skill/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -396,7 +396,7 @@ test("review previews exact paths and Done reflects the applied Git result", asy
 
 test("new skill scope and agents review exact destinations before writing", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByRole("menuitem", { name: "New skill" }).click();
   await page.getByRole("button", { name: /Write a new skill/ }).click();
   await page.getByRole("button", { name: /^Continue/ }).click();
@@ -407,9 +407,8 @@ test("new skill scope and agents review exact destinations before writing", asyn
   const wizard = wizardMain(page);
   await expect(wizard.getByRole("heading", { name: "Scope & agents" })).toBeVisible();
   await wizard.getByRole("radio", { name: /Project/ }).click();
-  await wizard.getByLabel("Codex").check();
-  await expect(wizard.getByText("Visual Skill: /sandbox/Projects/AgenTuna/.agents/skills/visual-skill", { exact: true })).toBeVisible();
-  await expect(wizard.getByText("Shared skills folder with omp; enabling this path loads the skill in both agents.", { exact: true })).toBeVisible();
+  await wizard.getByRole("checkbox", { name: /Codex \+ omp/ }).check();
+  await expect(wizard.getByText("Shared skills folder; enabling this path loads the skill in both agents.", { exact: true })).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
   await expect(page).toHaveScreenshot("add-skill-scope-agents.png", { animations: "disabled", caret: "hide" });
 

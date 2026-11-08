@@ -11,6 +11,10 @@
 //! its seed and its step list, so the sequence is replayed exactly without a clock or the
 //! environment.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};

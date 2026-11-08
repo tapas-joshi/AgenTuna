@@ -993,3 +993,38 @@ fn a_move_to_a_scope_with_the_same_native_root_rebases_the_link() -> TestResult<
     assert!(flow_harness::reconcile_drift(&database)?.is_empty());
     Ok(())
 }
+
+#[test]
+fn scope_options_returns_while_the_database_guard_is_reacquired() -> TestResult<()> {
+    // skill_scope_options reads the index, then resolves agent targets through
+    // agents_list_impl, which locks the same database mutex again. Holding the first
+    // guard across that call self-deadlocked the command on the main thread and froze
+    // the whole webview on the wizard's Scope & agents step, so the command runs on a
+    // worker here and the test fails on timeout instead of hanging the suite.
+    let sandbox = Sandbox::new()?;
+    let mut database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::Codex)?;
+    let project_id = sandbox.register_project(&mut database)?;
+    let state = sandbox.shell_state()?;
+    let request = at_app::app::skill_wizard::SkillScopeOptionsRequest {
+        scope: Some("project".to_owned()),
+        agents: vec!["codex".to_owned()],
+        names: vec!["changelog".to_owned()],
+        project_id: Some(project_id),
+    };
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let outcome = at_app::app::skill_wizard::skill_scope_options_inner(&state, &request);
+        sender.send(outcome.is_ok()).ok();
+    });
+    let completed = receiver
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .map_err(|_| {
+            "skill_scope_options did not return: the database guard is still held \
+             across the agents_list_impl re-lock (main-thread self-deadlock)"
+        })?;
+    worker.join().map_err(|_| "scope options worker panicked")?;
+    assert!(completed, "scope options resolved without the nested lock");
+    Ok(())
+}

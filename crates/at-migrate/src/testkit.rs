@@ -57,7 +57,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use at_fs::deploy::DeployRequest;
@@ -374,7 +373,21 @@ fn write_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), FixtureErro
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), FixtureError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(FixtureError::io(path))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(FixtureError::io(path))
+    }
+    #[cfg(not(unix))]
+    {
+        // Only the read-only bit exists here, so a fixture asking for a mode without a write bit
+        // becomes read-only and every other mode becomes writable.
+        let mut permissions = fs::metadata(path)
+            .map_err(FixtureError::io(path))?
+            .permissions();
+        permissions.set_readonly(mode & 0o200 == 0);
+        fs::set_permissions(path, permissions).map_err(FixtureError::io(path))
+    }
 }
 
 fn snapshot_key(label: &str, root: &Path, path: &Path) -> Option<String> {
@@ -971,8 +984,25 @@ fn capture_root(
     Ok(())
 }
 
+/// The permission bits recorded in a snapshot.
+///
+/// Unix keeps the real mode, so the harness catches a migration that changes an executable into a
+/// plain file. Windows has one read-only bit; it is reported as `0o444` and everything else as
+/// `0o644`, which catches the same read-only regressions and nothing more.
 fn mode_bits(meta: &fs::Metadata) -> u32 {
-    meta.permissions().mode() & 0o7777
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        if meta.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------

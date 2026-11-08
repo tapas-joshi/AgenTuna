@@ -432,6 +432,7 @@ name = "at-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "at-fs",
  "at-model",
  "at-secrets",
  "http",
@@ -515,6 +516,7 @@ dependencies = [
  "at-model",
  "at-secrets",
  "directories",
+ "env-lock",
  "fs4",
  "saphyr",
  "serde",

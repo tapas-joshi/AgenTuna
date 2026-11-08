@@ -3,6 +3,10 @@
 //! Every test runs against a [`support::Sandbox`]: temp roots, fixture probes, no real
 //! home, Keychain, disk or agent folder is touched.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::os::unix::fs::PermissionsExt;

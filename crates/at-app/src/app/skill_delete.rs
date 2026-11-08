@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 use at_engine::skill_delete::{
-    DeleteSkill, DeleteSkillError, DeleteSkillPlan, DeleteSkillRequest, apply_delete_skill,
-    plan_delete_skill,
+    DeleteSkill, DeleteSkillError, DeleteSkillPlan, DeleteSkillRequest,
+    apply_delete_skill_with_registry, plan_delete_skill,
 };
 use at_model::ItemKind;
 use at_store::layout::{Slug, StoreLayout};
@@ -345,19 +345,24 @@ pub(crate) fn skill_delete_apply_impl(
         recorder: &mut recorder,
     };
 
-    let outcome = apply_delete_skill(database.connection(), &cached.plan, &mut context, &roots)
-        .map_err(|e| match e {
-            DeleteSkillError::Apply(at_fs::ChangeSetApplyError::Stale(path)) => CommandError::new(
-                CommandErrorCode::Conflict,
-                format!(
-                    "skill files changed at {} since review; preview again",
-                    path.display()
-                ),
+    let outcome = apply_delete_skill_with_registry(
+        database.connection(),
+        &cached.plan,
+        &mut context,
+        &roots,
+        &state.recent_writes(),
+    )
+    .map_err(|e| match e {
+        DeleteSkillError::Apply(at_fs::ChangeSetApplyError::Stale(path)) => CommandError::new(
+            CommandErrorCode::Conflict,
+            format!(
+                "skill files changed at {} since review; preview again",
+                path.display()
             ),
-            other => CommandError::internal(other.to_string()),
-        })?;
+        ),
+        other => CommandError::internal(other.to_string()),
+    })?;
 
-    state.record_writes(&cached.plan.change_set, &cached.plan.store_root);
     if let Err(error) = at_migrate::undo_meta::write_for_new_operations(
         database.connection(),
         &cached.backup_folder,

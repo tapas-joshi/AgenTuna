@@ -141,7 +141,7 @@ fn browser_launcher() -> (&'static str, Vec<OsString>) {
         let program = if std::path::Path::new("/usr/bin/xdg-open").exists() {
             "/usr/bin/xdg-open"
         } else {
-            "/usr/local/bin/xdg-open"
+            "xdg-open"
         };
         (program, Vec::new())
     }

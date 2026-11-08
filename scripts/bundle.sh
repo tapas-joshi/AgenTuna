@@ -78,10 +78,14 @@ VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/p' "$ROOT/Cargo.toml" \
     | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)"
 [[ -n "$VERSION" ]] || fail "missing workspace version in $ROOT/Cargo.toml"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "workspace version is not semver: $VERSION"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+    || fail "workspace version is not semver: $VERSION"
 
-IFS=. read -r VERSION_MAJOR VERSION_MINOR VERSION_PATCH <<<"$VERSION"
-# Numeric, strictly increasing with the semver: 0.1.0 -> 1000, 0.1.1 -> 1001, 1.0.0 -> 1000000.
+# CFBundleVersion is numeric, so a prerelease keeps its release's build number:
+# 0.1.0-rc.1 and 0.1.0 both -> 1000.
+VERSION_CORE="${VERSION%%-*}"
+IFS=. read -r VERSION_MAJOR VERSION_MINOR VERSION_PATCH <<<"$VERSION_CORE"
+# Increasing with the semver core: 0.1.0 -> 1000, 0.1.1 -> 1001, 1.0.0 -> 1000000.
 BUILD_NUMBER="$((10#$VERSION_MAJOR * 1000000 + 10#$VERSION_MINOR * 1000 + 10#$VERSION_PATCH))"
 (( BUILD_NUMBER > 0 )) || fail "computed CFBundleVersion is not positive: $BUILD_NUMBER"
 

@@ -3,6 +3,10 @@
 //! Every test works on synthetic fixtures copied into a temporary directory; nothing here
 //! touches a real home directory, a real agent folder or the network.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

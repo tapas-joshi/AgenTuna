@@ -5,6 +5,10 @@
 //! recursive content snapshot (symlinks by target) and the database is inspected for the
 //! operation, `operation_files` and `backups` rows the write pipeline must produce.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -160,7 +160,9 @@ describe("SkillDetailScreen", () => {
     render(<AppStateProvider state={appState}><SkillDetailScreen /></AppStateProvider>);
 
     await screen.findAllByText("Review checklist");
-    screen.getByRole("button", { name: "Manage agents" }).click();
+    const manageAgents = screen.getByRole("button", { name: "Manage agents" }) as HTMLButtonElement;
+    await waitFor(() => expect(manageAgents.disabled).toBe(false));
+    fireEvent.click(manageAgents);
     const dialog = await screen.findByRole("dialog", { name: "Enable for agents" });
     const checkbox = dialog.querySelector('input[type="checkbox"]');
     expect(checkbox).toBeTruthy();

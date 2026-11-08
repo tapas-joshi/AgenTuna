@@ -22,7 +22,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use rustix::fs::{Access, access};
+#[cfg(unix)]
+use rustix::process::{getgid, getuid};
 use serde::Serialize;
 
 use crate::atomic::{WriteOutcome, WriteRequest, apply};
@@ -55,7 +56,10 @@ pub enum GlobalStoreStatus {
 }
 
 impl GlobalStoreStatus {
-    /// Checks `path` without creating, chmodding or otherwise modifying anything.
+    /// Checks `path` without leaving anything behind: nothing is created, chmodded or modified
+    /// on Unix, where `access(2)` answers the question directly. On Windows the probe creates and
+    /// removes one uniquely named file, because there is no ACL query without unsafe calls and a
+    /// probe that never writes cannot prove a write will succeed.
     ///
     /// An absent directory is [`Self::Unavailable`] (first-run state); an existing directory the
     /// current user cannot write to is [`Self::ReadOnly`]. Relative paths, `..` components,
@@ -90,9 +94,8 @@ impl GlobalStoreStatus {
                 reason: "path is not a directory".to_owned(),
             };
         }
-        // `access` honours ACLs, which the mode bits alone would miss. A store directory must be
-        // both writable and searchable for files to be created in it.
-        match access(path, Access::WRITE_OK | Access::EXEC_OK) {
+        // A store directory must be both writable and searchable for files to be created in it.
+        match crate::probe::probe_directory_write(path) {
             Ok(()) => Self::Available,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Self::ReadOnly {
                 path: path.to_path_buf(),
@@ -278,11 +281,22 @@ impl StoreOwner {
     }
 
     /// The real user and group running this process.
+    ///
+    /// Windows has no numeric owner ids. This returns zeros there and documents it, because the
+    /// only consumer is an elevation request and [`platform_elevator`] refuses every request on a
+    /// platform without a consent-based elevator, so the value is never applied to a directory.
     #[must_use]
     pub fn current() -> Self {
-        Self {
-            uid: rustix::process::getuid().as_raw(),
-            gid: rustix::process::getgid().as_raw(),
+        #[cfg(unix)]
+        {
+            Self {
+                uid: getuid().as_raw(),
+                gid: getgid().as_raw(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self { uid: 0, gid: 0 }
         }
     }
 }
@@ -564,6 +578,7 @@ pub fn platform_elevator() -> Arc<dyn Elevator> {
 }
 
 /// Maps `osascript` stderr to a cancellation, a denial or a generic failure.
+#[cfg(any(test, target_os = "macos"))]
 fn classify_osascript_failure(stderr: &str) -> ElevationError {
     let lower = stderr.to_lowercase();
     if lower.contains("(-128)")
@@ -585,6 +600,7 @@ fn classify_osascript_failure(stderr: &str) -> ElevationError {
 }
 
 /// First non-empty line, control characters removed and bounded to 512 characters.
+#[cfg(any(test, target_os = "macos"))]
 fn first_line(stderr: &str) -> String {
     let line = stderr
         .lines()

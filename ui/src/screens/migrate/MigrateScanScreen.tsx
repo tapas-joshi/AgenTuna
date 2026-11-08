@@ -264,7 +264,7 @@ export function MigrateScanScreen() {
   const stepIndex = step === "scan" ? 0 : step === "resolve" ? 1 : step === "plan" ? 2 : 3;
 
   return (
-    <main aria-label="Move into AgenTuna" className="mx-auto flex min-h-full max-w-[1180px] flex-col gap-16 p-24">
+    <main aria-label="Move into AgenTuna" className={`mx-auto flex max-w-[1180px] flex-col gap-16 p-24 ${step === "plan" ? "h-full min-h-0" : "min-h-full"}`}>
       {step !== "scan" ? null : (
         <header className="flex flex-col gap-4">
           <p className="m-0 text-12 uppercase tracking-wide text-text-muted">

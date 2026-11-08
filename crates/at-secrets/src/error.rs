@@ -29,20 +29,45 @@ pub enum SecretsError {
         account: String,
     },
 
-    /// macOS locked the keychain or the user denied AgenTuna access to the item.
+    /// The platform credential store is locked or denied access to the item.
     ///
-    /// `errSecInteractionNotAllowed` (a background process with the GUI prompt
-    /// suppressed) also lands here: the remedy is the same.
-    #[error(
-        "Keychain access for service `{service}` was denied or the keychain is locked; open Keychain Access, unlock the login keychain and allow AgenTuna to access the item, then retry"
+    /// On Linux this typically means that the Secret Service provider is locked or denied
+    /// access; on macOS it includes a locked login keychain or suppressed Keychain prompt.
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "Keychain access for service `{service}` was denied or the keychain is locked; open Keychain Access, unlock the login keychain and allow AgenTuna to access the item, then retry"
+        )
+    )]
+    #[cfg_attr(
+        target_os = "linux",
+        error(
+            "access to credential service `{service}` was denied or its store is locked; unlock and authorize the Secret Service provider, then retry"
+        )
+    )]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux")),
+        error("access to credential service `{service}` was denied or its store is locked")
     )]
     KeychainDenied {
         /// Keychain service name.
         service: String,
     },
 
-    /// No platform credential store is available in this process.
-    #[error("the credential store for Keychain service `{service}` is unavailable")]
+    /// No platform credential store is available in this process. Linux users need
+    /// a running Secret Service provider; no secret is written outside the OS store.
+    #[cfg_attr(
+        target_os = "linux",
+        error(
+            "the credential store for Keychain service `{service}` is unavailable; install and start a Secret Service provider such as gnome-keyring or KWallet, then retry. AgenTuna never writes secrets to disk"
+        )
+    )]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        error(
+            "the credential store for Keychain service `{service}` is unavailable; configure the platform credential store and retry. AgenTuna never writes secrets to disk"
+        )
+    )]
     KeychainUnavailable {
         /// Keychain service name.
         service: String,

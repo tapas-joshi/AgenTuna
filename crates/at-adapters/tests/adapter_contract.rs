@@ -1,4 +1,8 @@
 //! Public behavior contract for the registered native adapters.
+
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 

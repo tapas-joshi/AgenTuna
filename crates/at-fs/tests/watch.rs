@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use at_fs::{
     ExpectedState, RecentWrites, WatchBatch, WatchChange, WatchConfig, WatchError, WatchEvent,
-    WatchRoot, WatchRootKind, WatchService, WriteRequest, apply,
+    WatchRoot, WatchRootKind, WatchService, WriteRequest, apply_with_registry,
 };
 use tempfile::TempDir;
 
@@ -122,8 +122,7 @@ fn a_write_recorded_in_the_registry_is_not_reported() {
     settle_fixture();
     service.start().expect("start");
 
-    let outcome = apply(&WriteRequest::create(&file, b"hello".to_vec())).expect("write");
-    registry.record_outcome(&file, &outcome);
+    apply_with_registry(&WriteRequest::create(&file, b"hello".to_vec()), &registry).expect("write");
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while registry.suppressed_count() == 0 && Instant::now() < deadline {
@@ -180,6 +179,8 @@ fn ignored_trees_and_editor_litter_never_reach_a_batch() {
     // batch that arrives — the ignored-path assertion must hold for all of them.
     let normal = root.join("skills/demo/SKILL.md");
     fs::create_dir_all(normal.parent().expect("parent")).expect("dirs");
+    // Create new nested directories and write immediately, before inotify necessarily installs
+    // its recursive watches; the parent event must let the service recover the file.
     fs::write(&normal, b"---\nname: demo\n---\n").expect("write");
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut batch = None;
@@ -214,6 +215,10 @@ fn a_rename_is_reported_once_with_both_paths() {
     let base = fs::canonicalize(home.path()).expect("canonical temp");
     let root = base.join("store");
     fs::create_dir_all(&root).expect("store");
+    let before = root.join("skill-a/SKILL.md");
+    let after = root.join("skill-b/SKILL.md");
+    fs::create_dir_all(before.parent().expect("parent")).expect("source dirs");
+    fs::create_dir_all(after.parent().expect("parent")).expect("destination dirs");
     let service = WatchService::new(WatchConfig::new([WatchRoot::dir(
         &root,
         WatchRootKind::SkillsDir,
@@ -221,14 +226,10 @@ fn a_rename_is_reported_once_with_both_paths() {
     settle_fixture();
     service.start().expect("start");
 
-    let before = root.join("skill-a/SKILL.md");
-    fs::create_dir_all(before.parent().expect("parent")).expect("dirs");
     fs::write(&before, b"---\nname: a\n---\n").expect("write");
     let created = next_batch(&service, Duration::from_secs(30)).expect("create batch");
     assert!(created.contains(&before), "{:?}", created.paths);
 
-    let after = root.join("skill-b/SKILL.md");
-    fs::create_dir_all(after.parent().expect("parent")).expect("dirs");
     fs::rename(&before, &after).expect("rename");
 
     let batch = next_batch(&service, Duration::from_secs(30)).expect("rename batch");
@@ -440,8 +441,11 @@ fn replacing_a_file_through_the_write_pipeline_updates_the_index() {
     service.start().expect("start");
 
     let expected = ExpectedState::Hash(at_fs::sha256_hex(b"one"));
-    let outcome = apply(&WriteRequest::replace(&file, b"two".to_vec(), expected)).expect("replace");
-    registry.record_outcome(&file, &outcome);
+    apply_with_registry(
+        &WriteRequest::replace(&file, b"two".to_vec(), expected),
+        &registry,
+    )
+    .expect("replace");
 
     // The replacement is ours: no batch.
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -475,7 +479,6 @@ fn a_full_queue_collapses_into_one_rescan_and_stays_bounded() {
     let service = WatchService::new(
         WatchConfig::new([WatchRoot::dir(&root, WatchRootKind::UserStore)])
             .with_capacity(3)
-            .with_max_batch_paths(0)
             .with_debounce(Duration::from_millis(100)),
     );
     settle_fixture();

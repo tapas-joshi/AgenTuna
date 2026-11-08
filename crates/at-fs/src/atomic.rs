@@ -3,10 +3,13 @@
 use crate::failpoint::{self, FaultPoint};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::watch::RecentWrites;
 
 use time::OffsetDateTime;
 
@@ -216,10 +219,15 @@ fn create_temp(parent: &Path, name: &str) -> Result<(File, TempGuard), FsError> 
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = parent.join(format!(".{name}.agentuna-tmp-{}-{n}", std::process::id()));
     fault(FaultPoint::TempCreate, &path)?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    // Unix asks for owner-only access on the staging file. Windows has no mode bits: the file
+    // inherits the parent directory's ACL, which is the user's own profile for every caller.
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let file = options
         .open(&path)
         .map_err(|e| FsError::from_platform_io(parent, e))?;
     Ok((file, TempGuard { path }))
@@ -233,10 +241,56 @@ fn concurrent(path: &Path, expected: &str, actual: &Observed) -> FsError {
     }
 }
 
+/// Flushes the directory entry that the rename created.
+///
+/// Unix opens the directory and fsyncs it. Windows has no directory handle to flush
+/// (`FlushFileBuffers` takes a file), so this step is a documented no-op there: the rename is
+/// still atomic and the new bytes were flushed before it, but a crash immediately afterwards may
+/// leave the directory entry itself unflushed. See the crate documentation.
 fn sync_dir(dir: &Path) -> Result<(), FsError> {
-    File::open(dir)
-        .and_then(|d| crate::durability::sync_all(&d))
-        .map_err(|e| FsError::from_io(dir, e))
+    #[cfg(unix)]
+    {
+        File::open(dir)
+            .and_then(|d| crate::durability::sync_all(&d))
+            .map_err(|e| FsError::from_io(dir, e))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// How often a rename may be retried when another process holds the destination open.
+const RENAME_ATTEMPTS: usize = 3;
+
+/// Backoff before each retry of [`rename_replacing`].
+const RENAME_BACKOFF: [std::time::Duration; RENAME_ATTEMPTS - 1] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(300),
+];
+
+/// Renames `from` onto `to`, replacing `to`.
+///
+/// Windows reports `ERROR_SHARING_VIOLATION` when another process (an editor, a virus scanner)
+/// has the destination open, and succeeds once it lets go, so the rename is retried a bounded
+/// number of times with a short backoff. Unix has no such state and always makes the single
+/// attempt. When every attempt fails the last error is returned unchanged: nothing is deleted and
+/// the staged file is removed by its guard.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if crate::errno::is_sharing_violation(&error) && attempt < RENAME_ATTEMPTS - 1 =>
+            {
+                std::thread::sleep(RENAME_BACKOFF[attempt]);
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Applies `request`. See the module docs for the exact order of operations.
@@ -247,7 +301,21 @@ fn sync_dir(dir: &Path) -> Result<(), FsError> {
 /// # Errors
 /// See [`FsError`].
 pub fn apply(request: &WriteRequest) -> Result<WriteOutcome, FsError> {
-    apply_with_hook(request, &mut |_| {})
+    apply_inner(request, &mut |_| {}, None)
+}
+
+/// Applies a write while registering its expected content before the atomic rename.
+///
+/// This closes the race where a fast filesystem watcher handles the rename before the caller
+/// receives the outcome and records it.
+///
+/// # Errors
+/// See [`FsError`].
+pub fn apply_with_registry(
+    request: &WriteRequest,
+    registry: &RecentWrites,
+) -> Result<WriteOutcome, FsError> {
+    apply_inner(request, &mut |_| {}, Some(registry))
 }
 
 /// Like [`apply`], calling `hook` at each [`Stage`]. For tests only.
@@ -255,6 +323,14 @@ pub fn apply(request: &WriteRequest) -> Result<WriteOutcome, FsError> {
 pub fn apply_with_hook(
     request: &WriteRequest,
     hook: &mut dyn FnMut(Stage),
+) -> Result<WriteOutcome, FsError> {
+    apply_inner(request, hook, None)
+}
+
+fn apply_inner(
+    request: &WriteRequest,
+    hook: &mut dyn FnMut(Stage),
+    registry: Option<&RecentWrites>,
 ) -> Result<WriteOutcome, FsError> {
     let new_len = request.new_bytes.len() as u64;
     if new_len > MAX_FILE_BYTES {
@@ -338,26 +414,34 @@ pub fn apply_with_hook(
     }
     hook(Stage::BackupCreated);
 
+    let after_hash = sha256_hex(&request.new_bytes);
+    let ticket = registry.map(|registry| registry.record_expected(&dest, after_hash.clone()));
     let result = install(&dest, &temp, request, &current, hook);
     match result {
         // The rename happened. A failed directory fsync is reported, but the backup is kept
         // because the new bytes are already in place.
         Ok(()) => {
+            if let (Some(registry), Some(ticket)) = (registry, ticket.as_ref()) {
+                registry.commit_expected(ticket);
+            }
             fault(FaultPoint::DirSync, parent)?;
             sync_dir(parent).map(|()| WriteOutcome {
                 diff,
                 backup_path: backup_files.map(|f| f.blob),
                 before_hash,
-                after_hash: sha256_hex(&request.new_bytes),
+                after_hash,
                 bytes: new_len,
                 symlink,
             })
         }
-        Err(e) => {
+        Err(error) => {
+            if let (Some(registry), Some(ticket)) = (registry, ticket.as_ref()) {
+                registry.cancel_expected(ticket);
+            }
             if let Some(files) = &backup_files {
                 files.discard();
             }
-            Err(e)
+            Err(error)
         }
     }
 }
@@ -398,17 +482,33 @@ fn install(
             _ => FsError::from_platform_io(dest, e),
         })?,
         WriteMode::Replace => {
-            fs::rename(&temp.path, dest).map_err(|e| FsError::from_platform_io(dest, e))?
+            rename_replacing(&temp.path, dest).map_err(|e| FsError::from_platform_io(dest, e))?
         }
     }
     Ok(())
 }
 
 /// Re-exported for tests that need to compute modes.
+///
+/// Unix reports the permission bits. Windows has none, so the result is the only distinction the
+/// platform can express: `Some(0o444)` for a read-only file and `Some(0o644)` otherwise.
 #[doc(hidden)]
 #[must_use]
 pub fn mode_bits(path: &Path) -> Option<u32> {
-    fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o7777)
+    #[cfg(unix)]
+    {
+        fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::metadata(path).ok().map(|m| {
+            if m.permissions().readonly() {
+                0o444
+            } else {
+                0o644
+            }
+        })
+    }
 }

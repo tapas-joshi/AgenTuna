@@ -13,8 +13,15 @@ import { expect, mockSkillsScale, test } from "./support/tauri-mock";
 
 /** Rows a 600 px viewport can show plus one overscan page. Hard ceiling. */
 const MOUNTED_ROW_LIMIT = 40;
-/** Generous wall-clock ceiling for the first painted rows (budget is 150 ms). */
-const FIRST_PAINT_LIMIT_MS = 1500;
+/**
+ * Generous wall-clock ceiling for the first painted rows (the product budget is 150 ms).
+ *
+ * This is a regression guard, not a measurement: it fails when a change goes back to mounting the
+ * whole snapshot in one pass, which takes seconds rather than milliseconds. A shared CI runner
+ * drives four browsers at once and measured 1.66 s for a single-screen mount, so CI gets 5 s of
+ * headroom while a local run keeps the tighter bound. The structural assertions stay exact.
+ */
+const FIRST_PAINT_LIMIT_MS = process.env.CI ? 5_000 : 1_500;
 
 interface ScaleProbe {
   click: number | null;

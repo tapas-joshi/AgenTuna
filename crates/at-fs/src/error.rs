@@ -280,21 +280,15 @@ impl FsError {
 
     /// Maps an IO error on `path` to the most specific variant.
     pub(crate) fn from_platform_io(path: &Path, source: io::Error) -> Self {
-        #[cfg(unix)]
-        {
-            let Some(code) = source.raw_os_error() else {
-                return Self::from_io(path, source);
+        if crate::errno::is_no_space(&source) {
+            return Self::NoSpaceLeft {
+                path: path.to_path_buf(),
             };
-            if code == libc::ENOSPC {
-                return Self::NoSpaceLeft {
-                    path: path.to_path_buf(),
-                };
-            }
-            if code == libc::EDQUOT {
-                return Self::QuotaExceeded {
-                    path: path.to_path_buf(),
-                };
-            }
+        }
+        if crate::errno::is_quota_exceeded(&source) {
+            return Self::QuotaExceeded {
+                path: path.to_path_buf(),
+            };
         }
         Self::from_io(path, source)
     }
@@ -313,7 +307,7 @@ impl FsError {
             io::ErrorKind::AlreadyExists => Self::AlreadyExists {
                 path: path.to_path_buf(),
             },
-            _ if source.raw_os_error() == Some(libc::ELOOP) => Self::SymlinkRefused {
+            _ if crate::errno::is_symlink_loop(&source) => Self::SymlinkRefused {
                 path: path.to_path_buf(),
             },
             _ => Self::Io {

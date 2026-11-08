@@ -3,6 +3,10 @@
 //! Sandboxed like every other test: injected home, temp Global store, recording elevator. No test
 //! opens a real authorization dialog or touches a machine-wide directory.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

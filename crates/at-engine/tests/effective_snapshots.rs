@@ -4,6 +4,10 @@
 //! effective projection from its deployment rows, and compares both serialized outputs with
 //! committed snapshots. No process HOME, Keychain, network or real agent configuration is used.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 use std::error::Error;
 use std::fs;
 use std::io;

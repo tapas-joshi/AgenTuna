@@ -36,9 +36,16 @@ test("keyboard-only Instructions flow creates, edits, saves and previews a rule 
     mocks.settings.values[`last_scope.${mocks.sampleProject.id}`] = "project";
   });
   await page.goto("/");
+  // The shortcut dispatcher mounts with the shell (AppOverlays). A Cmd+K sent before that is
+  // dropped by the window and the rest of the flow types into nothing, so wait for the shell
+  // and for the palette's focused search box before typing.
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
   await page.keyboard.press("Meta+k");
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette.getByRole("combobox", { name: "Search commands" })).toBeFocused();
   await page.keyboard.type("Instructions");
   await page.keyboard.press("Enter");
+  await expect(palette).toBeHidden();
   const main = page.getByRole("main", { name: "Instructions" });
   await expect(main).toBeVisible();
 

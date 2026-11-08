@@ -4,6 +4,10 @@
 //! store creation, the apply must create the store and the item as one operation, and undo must
 //! remove what that operation created.
 
+// Unix-only harness: POSIX symlinks and permission bits. The Windows twins arrive with the
+// slice that enables the Windows test suite.
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;
@@ -16,7 +20,7 @@ use at_app::app::network::NetworkState;
 use at_app::app::overwrite::operation_undo_inner;
 use at_app::app::skill_wizard::{SkillAddApplyRequest, SkillAddPreviewRequest};
 use at_engine::skill_wizard::{AddSkillWizard, SourceKind, WizardStep};
-use at_model::{AgentId, Scope};
+use at_model::{AgentId, LinkMode, Scope};
 use support::{Sandbox, TestResult};
 
 fn stdio_request(name: &str, agent: &str) -> McpPlanPreviewRequest {
@@ -160,6 +164,102 @@ fn skill_add_creates_the_store_in_the_same_operation() -> TestResult<()> {
         layout.skills_dir().join("fresh-skill/SKILL.md").is_file(),
         "the skill package is written"
     );
+    Ok(())
+}
+
+#[test]
+fn shared_project_skill_root_is_written_and_backed_up_once_then_undo_restores_it() -> TestResult<()>
+{
+    let sandbox = Sandbox::new()?;
+    let mut database = sandbox.database()?;
+    sandbox.register_agent(&database, AgentId::Codex)?;
+    sandbox.register_agent(&database, AgentId::Omp)?;
+    let project_id = sandbox.register_project(&mut database)?;
+    at_db::settings::set_default_link_mode(
+        database.connection_mut(),
+        LinkMode::Copy,
+        at_db::ops::OperationActor::Ui,
+    )?;
+    let target_dir = sandbox.project.join(".agents/skills/shared-skill");
+    fs::create_dir_all(&target_dir)?;
+    let target_file = target_dir.join("SKILL.md");
+    let original = b"---\nname: Shared Skill\ndescription: old copy\n---\n";
+    fs::write(&target_file, original)?;
+    let before = sandbox.snapshot()?;
+    let state = sandbox.project_state()?;
+    let network = NetworkState::new(at_model::network::NetworkPolicy::default());
+
+    let preview = flow_harness::skill_add_preview_inner(
+        &state,
+        &network,
+        SkillAddPreviewRequest {
+            wizard: AddSkillWizard {
+                step: WizardStep::Review,
+                source: Some(SourceKind::New),
+                name: "Shared Skill".to_owned(),
+                scope: Some("project".to_owned()),
+                agents: vec!["codex".to_owned(), "omp".to_owned()],
+                details: at_engine::skill_wizard::SourceDetails {
+                    description: "A single physical destination shared by Codex and omp."
+                        .to_owned(),
+                    template: Some("blank".to_owned()),
+                    ..Default::default()
+                },
+                ..AddSkillWizard::default()
+            },
+            project_id: Some(project_id),
+            import_id: None,
+            stage_requested: false,
+        },
+    )?;
+    let target_path = target_file.display().to_string();
+    assert_eq!(
+        preview
+            .files
+            .iter()
+            .filter(|file| file.path == target_path)
+            .count(),
+        1,
+        "one shared destination appears once in the reviewed plan"
+    );
+    assert_eq!(
+        preview.deployments.len(),
+        2,
+        "both agents remain visible in review"
+    );
+    assert!(preview.requires_overwrite_confirmation);
+
+    let applied = flow_harness::skill_add_apply_inner(
+        &state,
+        SkillAddApplyRequest {
+            preview_id: preview.preview_id,
+            confirm_overwrites: true,
+        },
+    )?;
+    assert!(
+        fs::read(&target_file)?
+            .windows(12)
+            .any(|bytes| bytes == b"Shared Skill")
+    );
+    let operation_target_count = database.connection().query_row(
+        "SELECT COUNT(*) FROM operation_files WHERE operation_id = ?1 AND path = ?2",
+        rusqlite::params![applied.operation_id, target_path],
+        |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(
+        operation_target_count, 1,
+        "the shared file is journaled once"
+    );
+    let backup_count = database.connection().query_row(
+        "SELECT COUNT(*) FROM backups WHERE operation_id = ?1 AND original_path = ?2",
+        rusqlite::params![applied.operation_id, target_path],
+        |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(backup_count, 1, "the shared destination has one backup");
+
+    operation_undo_inner(&state, &applied.operation_id, false)?;
+    assert_eq!(fs::read(&target_file)?, original);
+    before.assert_unchanged(&sandbox.snapshot()?, "undo of shared-root skill add");
     Ok(())
 }
 

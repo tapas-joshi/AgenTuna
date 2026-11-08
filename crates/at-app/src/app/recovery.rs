@@ -1215,6 +1215,25 @@ impl RecoveryService {
         file: &InterruptedFile,
         backup_blob: &Path,
     ) -> Result<RestoreReport, RecoveryError> {
+        self.restore_inner(file, backup_blob, None)
+    }
+
+    /// Restores one file and registers the expected write before its atomic replacement.
+    pub fn restore_with_registry(
+        &self,
+        file: &InterruptedFile,
+        backup_blob: &Path,
+        registry: &at_fs::RecentWrites,
+    ) -> Result<RestoreReport, RecoveryError> {
+        self.restore_inner(file, backup_blob, Some(registry))
+    }
+
+    fn restore_inner(
+        &self,
+        file: &InterruptedFile,
+        backup_blob: &Path,
+        registry: Option<&at_fs::RecentWrites>,
+    ) -> Result<RestoreReport, RecoveryError> {
         match &file.state {
             EntryState::After => {}
             EntryState::Before => {
@@ -1258,7 +1277,10 @@ impl RecoveryService {
             operation_folder,
             backup_meta: BackupMeta::default(),
         };
-        let outcome = fs_recovery::restore_file(&request)?;
+        let outcome = match registry {
+            Some(registry) => fs_recovery::restore_file_with_registry(&request, registry)?,
+            None => fs_recovery::restore_file(&request)?,
+        };
         tracing::info!(
             operation_id,
             path = %file.path.display(),

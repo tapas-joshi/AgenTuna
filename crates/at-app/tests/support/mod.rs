@@ -131,6 +131,37 @@ impl Sandbox {
         ))
     }
 
+    /// Application paths with no project selected, the production shell shape.
+    ///
+    /// The desktop shell resolves its process paths once without a project; commands re-resolve
+    /// them for the database-selected project. Tests that must reproduce that shell read these.
+    ///
+    /// # Errors
+    /// Propagates path-resolution failures.
+    pub fn shell_paths(&self) -> TestResult<AppPaths> {
+        Ok(AppPaths::resolve(&PathEnvironment {
+            home: HomeSource::Injected(self.home.clone()),
+            overrides: PathOverrides {
+                home: Some(self.support.clone()),
+                user_store: Some(self.user_store.clone()),
+                project_store: None,
+                global_store: Some(self.global.clone()),
+            },
+            project_root: None,
+        })?)
+    }
+
+    /// A fresh app state whose injected paths carry no project.
+    ///
+    /// # Errors
+    /// Propagates path resolution and database-open failures.
+    pub fn shell_state(&self) -> TestResult<AppState> {
+        Ok(flow_harness::test_state(
+            self.database()?,
+            self.shell_paths()?,
+        ))
+    }
+
     /// Store layout for one scope.
     ///
     /// # Errors
@@ -383,7 +414,19 @@ fn copy_node(source: &Path, dest: &Path, source_root: &Path, dest_root: &Path) -
             Ok(relative) => dest_root.join(relative),
             Err(_) => target,
         };
+        // A copied fixture tree keeps its links on Unix; Windows fixtures are built without
+        // links until the test-suite slice adds junction twins.
+        #[cfg(unix)]
         std::os::unix::fs::symlink(rewritten, dest)?;
+        #[cfg(not(unix))]
+        {
+            let _ = rewritten;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlinked fixture trees are unsupported on this platform",
+            )
+            .into());
+        }
     } else if metadata.is_dir() {
         fs::create_dir(dest)?;
         fs::set_permissions(dest, metadata.permissions())?;

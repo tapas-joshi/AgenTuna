@@ -273,6 +273,7 @@ test("Native shared root detail matches 02c", async ({ page }) => {
   await expect(detail.getByRole("heading", { name: "One folder, two agents" })).toBeVisible();
   await expect(detail.getByText("Shared discovery root")).toBeVisible();
   await expect(detail.getByRole("heading", { name: "Codex + omp" })).toBeVisible();
+  await expect(detail.getByRole("heading", { name: "Claude Code" })).toBeVisible();
   await expect(detail.getByText("Own copy · native, not managed")).toBeVisible();
   await expect(detail.getByRole("button", { name: "Adopt into AgenTuna…" })).toBeVisible();
   await expect(detail.getByRole("button", { name: "Leave alone" })).toBeVisible();

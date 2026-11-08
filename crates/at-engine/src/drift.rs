@@ -813,6 +813,21 @@ pub struct DriftResolutionOutcome {
 pub fn adopt_drift(
     request: DriftAdoptRequest<'_>,
 ) -> Result<DriftResolutionOutcome, DriftResolutionError> {
+    adopt_drift_inner(request, None)
+}
+
+/// Adopts drift while registering expected file writes before their atomic replacements.
+pub fn adopt_drift_with_registry(
+    request: DriftAdoptRequest<'_>,
+    registry: &at_fs::RecentWrites,
+) -> Result<DriftResolutionOutcome, DriftResolutionError> {
+    adopt_drift_inner(request, Some(registry))
+}
+
+fn adopt_drift_inner(
+    request: DriftAdoptRequest<'_>,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<DriftResolutionOutcome, DriftResolutionError> {
     let event = at_db::drift::drift_event(request.connection, request.event_id)?
         .ok_or(DriftResolutionError::EventNotFound(request.event_id))?;
     if !event.is_open() {
@@ -993,7 +1008,16 @@ pub fn adopt_drift(
             backup_folder: request.backup_root,
             recorder: &mut recorder,
         };
-        at_fs::apply_with_roots(&change_set, &mut context, request.authorized_roots)?.operation_id
+        let outcome = match registry {
+            Some(registry) => at_fs::apply_with_roots_and_registry(
+                &change_set,
+                &mut context,
+                request.authorized_roots,
+                registry,
+            )?,
+            None => at_fs::apply_with_roots(&change_set, &mut context, request.authorized_roots)?,
+        };
+        outcome.operation_id
     };
 
     let new_store_hash = hash_path(&store_dest, content_kind)
@@ -1175,6 +1199,21 @@ fn manifest_hash_op(
 pub fn restore_drift(
     request: DriftRestoreRequest<'_>,
 ) -> Result<DriftResolutionOutcome, DriftResolutionError> {
+    restore_drift_inner(request, None)
+}
+
+/// Restores drift while registering expected file writes before their atomic replacements.
+pub fn restore_drift_with_registry(
+    request: DriftRestoreRequest<'_>,
+    registry: &at_fs::RecentWrites,
+) -> Result<DriftResolutionOutcome, DriftResolutionError> {
+    restore_drift_inner(request, Some(registry))
+}
+
+fn restore_drift_inner(
+    request: DriftRestoreRequest<'_>,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<DriftResolutionOutcome, DriftResolutionError> {
     let event = at_db::drift::drift_event(request.connection, request.event_id)?
         .ok_or(DriftResolutionError::EventNotFound(request.event_id))?;
     if !event.is_open() {
@@ -1326,7 +1365,16 @@ pub fn restore_drift(
             backup_folder: request.backup_root,
             recorder: &mut recorder,
         };
-        at_fs::apply_with_roots(&change_set, &mut context, request.authorized_roots)?.operation_id
+        let outcome = match registry {
+            Some(registry) => at_fs::apply_with_roots_and_registry(
+                &change_set,
+                &mut context,
+                request.authorized_roots,
+                registry,
+            )?,
+            None => at_fs::apply_with_roots(&change_set, &mut context, request.authorized_roots)?,
+        };
+        outcome.operation_id
     };
 
     // An MCP restore reports success only when the bytes the adapter rendered reached the file.

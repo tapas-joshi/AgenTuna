@@ -5,6 +5,13 @@ import { McpTestConnectionPanel } from "./McpTestConnectionPanel";
 afterEach(cleanup);
 
 describe("McpTestConnectionPanel", () => {
+  it("shows an honest empty tools state and runs only after explicit test click", () => {
+    const onRunTest = vi.fn();
+    render(<McpTestConnectionPanel result={null} onRunTest={onRunTest} />);
+    expect(screen.getByText("Tools appear after a successful test.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    expect(onRunTest).toHaveBeenCalledOnce();
+  });
   it("runs only on explicit click and shows first five tool names with expansion", () => {
     const onRunTest = vi.fn();
     const result: McpTestResultView = {
@@ -25,7 +32,7 @@ describe("McpTestConnectionPanel", () => {
     expect(screen.queryByText("six")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show all tools" }));
     expect(screen.getByText("six")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     expect(onRunTest).toHaveBeenCalledOnce();
   });
 

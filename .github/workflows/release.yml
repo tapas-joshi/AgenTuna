@@ -1,0 +1,458 @@
+name: Release
+
+# The release pipeline for the artifacts AgenTuna actually ships: macOS arm64 and Linux
+# x86_64. Windows is not built yet; docs/releasing.md says so.
+#
+# Triggers:
+#   - pushing a tag v<major>.<minor>.<patch>: build every artifact, then create a DRAFT release
+#   - workflow_dispatch: build the same artifacts with dry_run defaulting to true, which uploads
+#     them as workflow artifacts and never creates a release.
+#
+# push/authz: this workflow only runs on tags this repository's own push creates and on manual
+# dispatches by people with write access; no pull_request trigger, so no untrusted code runs
+# with the signing secrets.
+#
+# `rust` in ci.yml owns fmt, clippy, tests and docs. This workflow repeats none of them: it
+# checks the declared versions match the tag, builds, packages, and (on a tag) drafts the
+# release for a human to publish.
+#
+# Every third-party action is pinned by commit SHA with the release it came from in a comment.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload workflow artifacts without creating a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      is_tag: ${{ steps.resolve.outputs.is_tag }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      REF: ${{ github.ref }}
+      REF_NAME: ${{ github.ref_name }}
+      DRY_RUN_INPUT: ${{ inputs.dry_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the version and check it against the tag
+        id: resolve
+        # A tag push must match every declared version or the job fails, because a release whose
+        # About box and file names disagree is worse than no release. A dry run has no tag to
+        # compare against, so a mismatch is a warning and the Cargo.toml version is used.
+        run: |
+          set -euo pipefail
+
+          # Only a push of a tag creates a release. A workflow_dispatch can be started on a tag
+          # ref too, so the event name, not github.ref_type, decides: dispatches are always dry
+          # runs and can never reach the publish job.
+          is_tag=false
+          if [[ "$EVENT_NAME" == "push" && "$REF" == refs/tags/* ]]; then
+            is_tag=true
+          elif [[ "${DRY_RUN_INPUT:-true}" == "false" ]]; then
+            echo "::warning::dry_run=false is ignored for a $EVENT_NAME run; only a tag push publishes"
+          fi
+          dry_run=true
+          if [[ "$is_tag" == "true" ]]; then
+            dry_run=false
+          fi
+
+          problems=()
+          report() {
+            if [[ "$is_tag" == "true" ]]; then
+              problems+=("$1")
+            else
+              echo "::warning::$1"
+            fi
+          }
+
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n 1)"
+          # Semver core with an optional prerelease, so v0.2.0-rc.1 is a valid release tag.
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::[workspace.package] version in Cargo.toml is not semver: '$version'"
+            exit 1
+          fi
+          echo "Cargo.toml workspace version: $version"
+
+          ui_version="$(jq -r '.version' ui/package.json)"
+          if [[ "$ui_version" != "$version" ]]; then
+            report "ui/package.json declares $ui_version but Cargo.toml declares $version"
+          fi
+
+          # Tauri derives the bundle version from the crate version, which inherits
+          # [workspace.package]; a literal `version` here would override it and must agree.
+          tauri_version="$(jq -r '.version // empty' crates/at-app/tauri.conf.json)"
+          if [[ -n "$tauri_version" && "$tauri_version" != "$version" ]]; then
+            report "crates/at-app/tauri.conf.json declares $tauri_version but Cargo.toml declares $version"
+          fi
+
+          if [[ "$is_tag" == "true" && "$REF_NAME" != "v$version" ]]; then
+            problems+=("tag $REF_NAME does not match version $version (expected v$version)")
+          fi
+
+          if (( ${#problems[@]} > 0 )); then
+            for problem in "${problems[@]}"; do
+              echo "::error::$problem"
+            done
+            echo "::error::bump every declared version together and re-tag"
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "is_tag=$is_tag"
+            echo "dry_run=$dry_run"
+          } >>"$GITHUB_OUTPUT"
+
+          {
+            echo "## Release $version"
+            echo
+            echo "- ref: ${REF} (${EVENT_NAME}, is_tag=$is_tag)"
+            echo "- dry_run=$dry_run"
+            case "$version" in
+              *-*) echo "- prerelease: the publish job will mark the release as a pre-release" ;;
+            esac
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  build-macos-arm64:
+    name: macOS arm64
+    needs: verify
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      # Signing and notarization stay inside the existing scripts; the job only feeds them.
+      # Unset secrets select the ad-hoc path, so a fork or a secret-less run still builds.
+      SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+      NOTARY_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      # The runner has no graphical session, so dmg.sh skips the Finder layout pass.
+      AGENTUNA_DMG_LAYOUT: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ runner.os }}-arm64-${{ hashFiles('Cargo.lock') }}-release
+          cache-on-failure: true
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Import the Developer ID certificate into a temporary keychain
+        # Only when the repository has the certificate; a run without it stays ad-hoc.
+        if: env.APPLE_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/agentuna-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          umask 077
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode >"$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" \
+            "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -s "$keychain"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Build the .app
+        # bundle.sh builds the frontend first (it embeds ui/dist) and validates the result:
+        # Info.plist, no non-system dylibs, no debug info, the CLI reports the same version.
+        run: scripts/bundle.sh
+
+      - name: Sign the .app
+        run: |
+          set -euo pipefail
+          if [[ -n "${APPLE_CERT_P12:-}" ]]; then
+            scripts/sign.sh
+          else
+            echo "::warning::no APPLE_CERT_P12 secret: the app is ad-hoc signed and Gatekeeper will warn on other machines"
+            scripts/sign.sh --adhoc
+          fi
+
+      - name: Package the dmg
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${APPLE_CERT_P12:-}" ]]; then
+            AGENTUNA_SIGN_IDENTITY="$SIGNING_IDENTITY" scripts/dmg.sh
+          else
+            scripts/dmg.sh
+          fi
+          # dmg.sh names the image by architecture; releases name it by target so the Linux
+          # and future Windows files sort next to it.
+          mv "dist/AgenTuna-${VERSION}-arm64.dmg" "dist/AgenTuna-${VERSION}-macos-arm64.dmg"
+          # SHA256SUMS in the publish job covers every file, so the per-dmg copy would lie
+          # about a name that no longer exists.
+          rm -f dist/*.dmg.sha256
+
+      - name: Notarize and staple the app and the dmg
+        # Needs a Developer ID signature, so it only runs with the certificate; it also needs
+        # the notarization secrets, which the script validates itself.
+        if: env.APPLE_CERT_P12 != ''
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: scripts/notarize.sh --dmg "dist/AgenTuna-${VERSION}-macos-arm64.dmg"
+
+      - name: Package the .app zip and the CLI tarball
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # ditto preserves the bundle's symlinks, permissions and extended attributes, which
+          # `zip -r` does not; this zip is what a notarization submission and a manual install
+          # both expect (see scripts/notarize.sh).
+          ditto -c -k --keepParent target/release/AgenTuna.app \
+            "dist/AgenTuna-${VERSION}-macos-arm64.app.zip"
+          cli_dir="dist/agentuna-cli-${VERSION}-macos-arm64"
+          mkdir -p "$cli_dir"
+          install -m 0755 target/release/agentuna "$cli_dir/agentuna"
+          install -m 0644 LICENSE "$cli_dir/LICENSE"
+          tar -czf "dist/agentuna-cli-${VERSION}-macos-arm64.tar.gz" -C dist \
+            "agentuna-cli-${VERSION}-macos-arm64"
+          rm -rf "$cli_dir"
+          ls -lh dist
+
+      - name: Upload the macOS artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-macos-arm64
+          path: |
+            dist/AgenTuna-${{ needs.verify.outputs.version }}-macos-arm64.dmg
+            dist/AgenTuna-${{ needs.verify.outputs.version }}-macos-arm64.app.zip
+            dist/agentuna-cli-${{ needs.verify.outputs.version }}-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Delete the temporary signing keychain
+        # Runs even when signing, notarization or the upload failed, so the job never leaves the
+        # imported certificate behind; the runner is ephemeral, but the keychain is still a copy
+        # of a private key that should not outlive the steps that need it.
+        if: always()
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/agentuna-signing.keychain-db"
+          if [[ -z "${APPLE_CERT_P12:-}" ]]; then
+            echo "no certificate was imported; nothing to delete"
+            exit 0
+          fi
+          if [[ ! -e "$keychain" ]]; then
+            echo "the temporary keychain is already gone: $keychain"
+            exit 0
+          fi
+          security delete-keychain "$keychain"
+          echo "deleted $keychain"
+
+  build-linux-x86_64:
+    name: Linux x86_64
+    needs: verify
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the system libraries the Tauri app links
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev patchelf
+
+      - name: Install the FUSE 2 runtime appimagetool may need
+        # Only the optional .AppImage step uses it, so a missing package must not cost the
+        # tarballs; ubuntu-22.04 still ships libfuse2.
+        continue-on-error: true
+        run: sudo apt-get install --yes --no-install-recommends libfuse2
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ runner.os }}-x86_64-${{ hashFiles('Cargo.lock') }}-release
+          cache-on-failure: true
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Build the binaries and the portable tarballs
+        # The portable tree is the artifact that always exists; it mirrors the layout
+        # scripts/install-linux.sh expects, so `scripts/install-linux.sh` just works after
+        # extraction.
+        run: scripts/bundle-linux.sh
+
+      - name: Build the .deb and the .AppImage with the Tauri bundler
+        # Informational: the bundler downloads its AppImage tooling and no test launches either
+        # package yet. When it fails the tarballs above are still a complete release.
+        continue-on-error: true
+        run: scripts/bundle-linux.sh --bundler-only
+
+      - name: Report the Linux artifacts
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          if compgen -G "dist/AgenTuna-${VERSION}-linux-x86_64.deb" >/dev/null; then
+            echo "deb: packaged"
+          else
+            echo "deb: not produced on this run (see the bundler step above)"
+          fi
+          if compgen -G "dist/AgenTuna-${VERSION}-linux-x86_64.AppImage" >/dev/null; then
+            echo "AppImage: packaged"
+          else
+            echo "AppImage: not produced on this run (see the bundler step above)"
+          fi
+
+      - name: Upload the Linux artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-linux-x86_64
+          # dist/ holds only release files: the two tarballs, and the deb and AppImage when the
+          # bundler succeeded.
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish draft release
+    needs: [verify, build-macos-arm64, build-linux-x86_64]
+    # Only a tag push creates a release, and never a dry run. A draft is deliberate: the
+    # workflow cannot publish, a maintainer reviews the files and clicks Publish.
+    if: needs.verify.outputs.is_tag == 'true' && needs.verify.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # `contents: write` creates the draft release; `actions: read` is the scope artifact
+      # download uses when the token is not the run-scoped one.
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Download the build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check every expected file and compute SHA256SUMS
+        # No SBOM is generated: the workspace has no SBOM or THIRD_PARTY notice tool, and this
+        # workflow adds no dependency for one. When such a tool exists in the repository, run it
+        # here and add its output to dist/ so it is attached with everything else. LICENSE ships
+        # inside both tarballs today.
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          for pattern in "AgenTuna-${VERSION}-macos-arm64.dmg" \
+            "AgenTuna-${VERSION}-macos-arm64.app.zip" \
+            "agentuna-cli-${VERSION}-macos-arm64.tar.gz" \
+            "AgenTuna-${VERSION}-linux-x86_64.tar.gz" \
+            "agentuna-cli-${VERSION}-linux-x86_64.tar.gz"; do
+            if [[ ! -f "$pattern" ]]; then
+              echo "::error::missing release file: $pattern"
+              exit 1
+            fi
+          done
+          rm -f SHA256SUMS SHA256SUMS.tmp ./*.sha256
+          # Bare names, no `./` prefix, sorted by file so the file is diffable; the checksum file
+          # is written after the glob expanded, so it cannot list itself.
+          sha256sum -- * | sort -k2 >SHA256SUMS.tmp
+          mv SHA256SUMS.tmp SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the draft release
+        run: |
+          set -euo pipefail
+          flags=(--draft --verify-tag --generate-notes --title "AgenTuna ${VERSION}")
+          # A tag with a prerelease suffix (v0.2.0-rc.1) is marked as a GitHub pre-release.
+          case "$TAG" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" dist/* "${flags[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo
+            echo "Draft release created. Review the files, then publish it from the Releases page"
+            echo "or with \`gh release edit $TAG --draft=false\`."
+          } >>"$GITHUB_STEP_SUMMARY"

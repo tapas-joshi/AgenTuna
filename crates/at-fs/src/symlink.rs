@@ -1,7 +1,10 @@
 //! Symlink policy and non-following file access.
 
-use std::fs::{self, File, Metadata, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File, Metadata};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -52,11 +55,30 @@ pub(crate) fn resolve(
 
 /// Opens `path` read-only without following a final symlink and without blocking on fifos.
 pub(crate) fn open_nofollow(path: &Path) -> Result<File, FsError> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| FsError::from_io(path, e))
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|e| FsError::from_io(path, e))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no `O_NOFOLLOW`. `FILE_FLAG_OPEN_REPARSE_POINT` would need an unsafe
+        // `CreateFileW` call, which this workspace forbids, so the entry is opened and then
+        // re-inspected: a link that appeared between the two calls is still refused, and a link
+        // that is already there is refused before its target is read. The residual window is a
+        // same-user race, which the single-user threat model already accepts.
+        let file = File::open(path).map_err(|e| FsError::from_io(path, e))?;
+        let meta = fs::symlink_metadata(path).map_err(|e| FsError::from_io(path, e))?;
+        if meta.file_type().is_symlink() {
+            return Err(FsError::SymlinkRefused {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(file)
+    }
 }
 
 /// Reads at most [`MAX_FILE_BYTES`] from an opened regular file.

@@ -1,6 +1,7 @@
 //! Canonical AgenTuna store manifests, file storage and every filesystem root.
 
 pub mod config;
+mod fs_identity;
 pub mod git_contract;
 pub mod instance;
 pub mod integrity;
