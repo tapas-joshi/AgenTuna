@@ -20,6 +20,27 @@ use crate::paths::APP_DIR_NAME;
 /// Directory name of the per-user support tree on Linux (lowercase, matching `~/.agentuna`).
 pub const LINUX_APP_DIR_NAME: &str = "agentuna";
 
+/// Machine-wide default location of the Global store on `platform`.
+///
+/// The Global scope is machine-wide, so its default never lives inside the user's home:
+/// `/Library/Application Support/AgenTuna/global` on macOS, `/var/lib/agentuna/global` on Linux
+/// (FHS variable application state) and `C:\ProgramData\AgenTuna\global` on Windows.
+/// `AGENTUNA_GLOBAL_STORE` and the `global_store_path` setting override it; creating the
+/// directory is an explicit administrative action, never part of first-run setup.
+///
+/// A hard-coded macOS path here used to be returned on every platform, so a Linux build showed
+/// and probed `/Library/Application Support/AgenTuna/global`, which does not exist there.
+#[must_use]
+pub const fn default_global_store(platform: PortablePlatform) -> &'static str {
+    match platform {
+        PortablePlatform::MacOs | PortablePlatform::Other => {
+            "/Library/Application Support/AgenTuna/global"
+        }
+        PortablePlatform::Linux => "/var/lib/agentuna/global",
+        PortablePlatform::Windows => r"C:\ProgramData\AgenTuna\global",
+    }
+}
+
 /// Every root AgenTuna needs on one platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformRoots {
