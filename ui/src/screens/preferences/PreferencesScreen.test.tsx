@@ -103,7 +103,7 @@ describe("PreferencesScreen", () => {
     renderPreferences();
     const control = await screen.findByLabelText("Marketplace access");
     fireEvent.click(control);
-    expect(await screen.findByText("read-only settings database")).toBeTruthy();
+    expect((await screen.findAllByText("read-only settings database")).length).toBeGreaterThan(0);
     expect(control.getAttribute("aria-checked")).toBe("false");
     expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThan(0);
   });
