@@ -32,5 +32,6 @@ tracing-panic.workspace = true
 tempfile.workspace = true
 zip.workspace = true
 [dev-dependencies]
+at-fs = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }

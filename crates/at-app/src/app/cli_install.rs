@@ -494,9 +494,16 @@ impl CliInstaller {
 }
 
 fn probe_version(binary: &Path) -> Option<String> {
-    let output = std::process::Command::new(binary)
+    let mut command = std::process::Command::new(binary);
+    command
         .arg("--version")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // The CLI was just linked or replaced: Linux answers `execve` with `ETXTBSY` while anything
+    // still holds it open for writing, which clears on its own.
+    let output = at_mcp::spawn::spawn_retrying(&mut command)
+        .ok()?
+        .wait_with_output()
         .ok()?;
     if !output.status.success() {
         return None;

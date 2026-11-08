@@ -42,6 +42,7 @@ webbrowser.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
+at-fs = { workspace = true, features = ["testkit"] }
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

@@ -1068,7 +1068,7 @@ impl StdioClient {
         #[cfg(unix)]
         command.process_group(0);
 
-        let mut child = match command.spawn() {
+        let mut child = match crate::spawn::spawn_retrying_async(&mut command).await {
             Ok(child) => child,
             Err(error) => {
                 return Err(match error.kind() {

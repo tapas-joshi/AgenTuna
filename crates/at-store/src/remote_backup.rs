@@ -2465,12 +2465,10 @@ exec git "$@"
         sandbox: &TempDir,
         fail_clones: &str,
     ) -> (PathBuf, ProcessRemoteGitRunner) {
-        use std::os::unix::fs::PermissionsExt;
         let counter = sandbox.path().join(format!("clone-attempts-{fail_clones}"));
         let script = sandbox.path().join(format!("flaky-git-{fail_clones}.sh"));
-        fs::write(&script, FLAKY_GIT_SCRIPT).expect("write flaky git fixture");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
-            .expect("executable fixture");
+        at_fs::testkit::write_executable(&script, FLAKY_GIT_SCRIPT)
+            .expect("write flaky git fixture");
         let runner = ProcessRemoteGitRunner::new(script, std::time::Duration::from_secs(30))
             .with_env("AGENTUNA_FIXTURE_COUNTER", &counter)
             .with_env("AGENTUNA_FIXTURE_FAIL_CLONES", fail_clones)

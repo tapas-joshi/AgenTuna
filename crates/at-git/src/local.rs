@@ -135,7 +135,7 @@ impl LocalGitRunner for ProcessLocalGitRunner {
         if call.literal_pathspecs {
             command.arg("--literal-pathspecs");
         }
-        let mut child = command
+        command
             .current_dir(call.repo)
             .args(call.args)
             .stdin(if stdin.is_some() {
@@ -147,9 +147,8 @@ impl LocalGitRunner for ProcessLocalGitRunner {
             .stderr(Stdio::piped())
             .env(GIT_TERMINAL_PROMPT_ENV, "0")
             .env(GIT_OPTIONAL_LOCKS_ENV, "0")
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .spawn()
-            .map_err(GitError::Spawn)?;
+            .envs(self.env.iter().map(|(key, value)| (key, value)));
+        let mut child = at_mcp::spawn::spawn_retrying(&mut command).map_err(GitError::Spawn)?;
 
         // A failed write means git stopped reading (usually because it already rejected the
         // command); its exit status and stderr carry the real error, so the write result is

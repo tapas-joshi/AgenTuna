@@ -36,6 +36,7 @@ thiserror.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+at-fs = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true
 saphyr.workspace = true
 sha2.workspace = true

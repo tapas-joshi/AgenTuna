@@ -787,13 +787,13 @@ impl PathResolver {
     }
 
     fn probe_login_shell(&self) -> Result<String, ProbeFailure> {
-        let mut child = Command::new(&self.shell)
+        let mut command = Command::new(&self.shell);
+        command
             .args(LOGIN_SHELL_ARGS)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(ProbeFailure::from)?;
+            .stderr(Stdio::null());
+        let mut child = crate::spawn::spawn_retrying(&mut command).map_err(ProbeFailure::from)?;
         let stdout = child.stdout.take();
 
         // Read the pipe on a helper thread so a grandchild that inherits stdout cannot

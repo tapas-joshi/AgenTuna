@@ -16,13 +16,7 @@ use at_mcp::path::{
 use tempfile::TempDir;
 
 fn write_executable(path: &Path, body: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("create fixture dir");
-    }
-    fs::write(path, body).expect("write fixture");
-    let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod fixture");
+    at_fs::testkit::write_executable(path, body).expect("write executable fixture");
 }
 
 fn write_non_executable(path: &Path) {

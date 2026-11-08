@@ -5,6 +5,7 @@ pub mod oauth;
 pub mod path;
 pub mod policy;
 pub mod session;
+pub mod spawn;
 pub mod test_connection;
 pub mod tls;
 pub use test_connection::{McpError, McpErrorKind, TestResult, test_connection};

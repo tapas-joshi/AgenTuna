@@ -757,10 +757,7 @@ fn configure_remote(sandbox: &Sandbox) {
 
 /// A stdio MCP server that answers `initialize` and `tools/list`, so `mcp test` runs offline.
 fn fake_server(sandbox: &Sandbox) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = sandbox.path("fixtures/fake-mcp-server.sh");
-    fs::create_dir_all(path.parent().expect("fixture directory")).expect("fixture directory");
     let script = r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
@@ -775,10 +772,7 @@ while IFS= read -r line; do
   esac
 done
 "#;
-    fs::write(&path, script).expect("write the fake server");
-    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).expect("chmod the fake server");
+    at_fs::testkit::write_executable(&path, script).expect("write the fake server");
     path
 }
 
