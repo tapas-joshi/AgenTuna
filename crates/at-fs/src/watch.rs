@@ -26,7 +26,10 @@
 //!   single [`WatchEvent::RescanRequired`]; a full queue does the same. The queue never exceeds
 //!   its capacity, so memory stays bounded.
 //! * A watched path that disappears yields [`WatchEvent::PathGone`]; the watch moves to the
-//!   nearest existing ancestor and the subtree is watched again once the path comes back.
+//!   nearest existing ancestor and the subtree is watched again once the path comes back. The
+//!   disappearance is noticed from a delivered event or, because a platform may not report the
+//!   removal of a watched root at all, from a periodic stat-only recheck (see
+//!   `ROOT_RECHECK_INTERVAL`).
 //!
 //! # Platform notes
 //!
@@ -86,10 +89,22 @@ const PATH_INDEX_CAPACITY: usize = 100_000;
 /// Debouncer tick cap, limiting default event delivery to one additional 300 ms tick.
 const MAX_DEBOUNCE_TICK: Duration = Duration::from_millis(300);
 
-/// Fallback interval for roots whose return is not reported by the active native watcher.
-/// Present roots are never statted on this timer; changes to missing roots remain event-driven
-/// where the backend reports their ancestor.
+/// How often the worker re-stats a root while another root is missing.
+///
+/// A missing root has no watch of its own, so its return is seen by the parent watch or by this
+/// stat. Five seconds keeps the retry cheap while a store is absent.
 const MISSING_ROOT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often the worker re-stats a root while every root is present.
+///
+/// A removed root is not guaranteed to produce an event. macOS `FSEvents` reports `RootChanged`
+/// only for a stream created with `kFSEventStreamCreateFlagWatchRoot`, which `notify` does not
+/// set, so the removal of a root reaches this worker only through the parent watch — and on a
+/// loaded arm64 CI runner that delivered nothing at all for 30 s while the store was gone. This
+/// stat-only recheck makes `PathGone` independent of any delivered event. The cost is one
+/// `symlink_metadata` per root and never a tree walk, so an idle watcher stays cheap and the index
+/// is still never re-walked.
+const ROOT_RECHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Debouncer type used by the service.
 type FsDebouncer = Debouncer<RecommendedWatcher, RecommendedCache>;
@@ -1095,8 +1110,7 @@ fn run_worker(
     }
     let ignored = roots.ignore_rules(&config.ignored);
     let mut index = PathIndex::new(PATH_INDEX_CAPACITY);
-    #[cfg(test)]
-    shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
+    count_seed(shared);
     index.seed(&roots, &ignored);
     let mut burst = BurstGuard::new(config.max_batch_paths, config.burst_quiet);
     let mut reseed = false;
@@ -1108,23 +1122,22 @@ fn run_worker(
         if shared.stop.load(Ordering::SeqCst) {
             break;
         }
-        let received = if roots.has_missing() {
-            match rx.recv_timeout(MISSING_ROOT_RETRY_INTERVAL) {
-                Ok(result) => Some(result),
-                Err(RecvTimeoutError::Timeout) => {
-                    if roots.poll_missing(&mut debouncer, shared) {
-                        let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
-                        #[cfg(test)]
-                        shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
-                        fresh.seed(&roots, &ignored);
-                        index = fresh;
-                    }
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => None,
-            }
+        // A missing root has no watch of its own; everything else is event-driven except for the
+        // stat-only root recheck, which is what makes `PathGone` independent of event delivery.
+        let idle_wait = if roots.has_missing() {
+            MISSING_ROOT_RETRY_INTERVAL
         } else {
-            rx.recv().ok()
+            ROOT_RECHECK_INTERVAL
+        };
+        let received = match rx.recv_timeout(idle_wait) {
+            Ok(result) => Some(result),
+            Err(RecvTimeoutError::Timeout) => {
+                if roots.poll(&mut debouncer, shared) {
+                    reseed_index(&mut index, &roots, &ignored, shared);
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => None,
         };
         let Some(result) = received else {
             break;
@@ -1133,11 +1146,7 @@ fn run_worker(
             break;
         }
         if reseed {
-            let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
-            #[cfg(test)]
-            shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
-            fresh.seed(&roots, &ignored);
-            index = fresh;
+            reseed_index(&mut index, &roots, &ignored, shared);
             reseed = false;
         }
         match result {
@@ -1156,19 +1165,33 @@ fn run_worker(
                 reseed = true;
             }
         }
-        // Reconcile only after native events, including events delivered for an ancestor
-        // watched on behalf of a missing root.
+        // Verify the roots after every batch, including batches delivered for an ancestor
+        // watched on behalf of a root that is missing.
         if roots.poll(&mut debouncer, shared) {
-            let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
-            #[cfg(test)]
-            shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
-            fresh.seed(&roots, &ignored);
-            index = fresh;
+            reseed_index(&mut index, &roots, &ignored, shared);
         }
     }
     *lock(&shared.wake_sender) = None;
     drop(debouncer);
     let _ = done.send(());
+}
+
+/// Rebuilds the inode index from what is on disk now.
+///
+/// Only a root that appeared again needs this: the tree behind the old paths no longer exists.
+fn reseed_index(index: &mut PathIndex, roots: &Roots, ignored: &IgnoreRules, shared: &Shared) {
+    count_seed(shared);
+    let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
+    fresh.seed(roots, ignored);
+    *index = fresh;
+}
+
+/// Counts an index seed in test builds so the idle test can prove nothing is re-walked.
+fn count_seed(shared: &Shared) {
+    #[cfg(test)]
+    shared.counters.index_seeds.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(test))]
+    let _ = shared;
 }
 
 /// Processes one debounce cycle. Returns whether the inode index has to be rebuilt.
@@ -1417,28 +1440,15 @@ impl Roots {
         self.roots.iter().any(|runtime| !runtime.present)
     }
 
-    /// Notices roots that disappeared or returned after a native event.
+    /// Re-stats every root and reports whether one of them came back.
+    ///
+    /// Cheap by construction: one `symlink_metadata` per root, no tree walk. It runs after every
+    /// delivered batch and on the idle recheck, so a root that vanished without an event is still
+    /// reported as [`WatchEvent::PathGone`].
     fn poll(&mut self, debouncer: &mut FsDebouncer, shared: &Shared) -> bool {
-        self.poll_state(debouncer, shared, false)
-    }
-
-    /// Retries only missing roots; a quiet, fully present watch set does no filesystem work.
-    fn poll_missing(&mut self, debouncer: &mut FsDebouncer, shared: &Shared) -> bool {
-        self.poll_state(debouncer, shared, true)
-    }
-
-    fn poll_state(
-        &mut self,
-        debouncer: &mut FsDebouncer,
-        shared: &Shared,
-        missing_only: bool,
-    ) -> bool {
         let mut changed = false;
         let mut returned = false;
         for runtime in &mut self.roots {
-            if missing_only && runtime.present {
-                continue;
-            }
             #[cfg(test)]
             shared.counters.root_checks.fetch_add(1, Ordering::Relaxed);
             let exists = fs::symlink_metadata(&runtime.root.path).is_ok();
@@ -1779,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_worker_does_not_check_roots_or_reseed_the_index() {
+    fn idle_worker_rechecks_roots_without_rewalking_or_emitting() {
         let dir = TempDir::new().expect("temp");
         let root = dir.path().join("store");
         fs::create_dir_all(&root).expect("store");
@@ -1793,27 +1803,114 @@ mod tests {
         let (seeds, _) = service.idle_work_counts();
         assert_eq!(seeds, 1, "the initial index is seeded once");
 
+        // Idle work is one stat per root per interval and nothing else: no tree walk, no event.
+        let began = Instant::now();
         assert!(
-            service.next_event(Duration::from_millis(750)).is_none(),
+            service
+                .next_event(ROOT_RECHECK_INTERVAL + Duration::from_millis(750))
+                .is_none(),
             "an idle watcher must not emit an event"
         );
-        let (idle_seeds, startup_checks) = service.idle_work_counts();
-        assert_eq!(idle_seeds, seeds);
-        assert!(
-            startup_checks <= 1,
-            "a startup native event may check the single watched root once, got {startup_checks}"
+        let elapsed = began.elapsed();
+        let (idle_seeds, checks) = service.idle_work_counts();
+        assert_eq!(
+            idle_seeds, seeds,
+            "idle rechecks must not re-index the tree"
         );
+        let allowed = elapsed.as_millis() / ROOT_RECHECK_INTERVAL.as_millis() + 2;
+        assert!(
+            u128::from(checks) <= allowed,
+            "idle rechecks must stay on the slow timer: {checks} root stats in {elapsed:?}"
+        );
+        assert!(checks >= 1, "the timer must recheck the root at least once");
 
+        // The recheck is what makes the disappearance independent of a delivered event. A batch
+        // describing the store's files can arrive first, so skip to the PathGone.
+        fs::remove_dir_all(&root).expect("delete the store");
+        let deadline = Instant::now() + ROOT_RECHECK_INTERVAL * 4;
+        let mut gone = false;
+        while Instant::now() < deadline {
+            if let Some(WatchEvent::PathGone { .. }) =
+                service.next_event(Duration::from_millis(200))
+            {
+                gone = true;
+                break;
+            }
+        }
         assert!(
-            service.next_event(Duration::from_millis(750)).is_none(),
-            "an idle watcher must not emit an event"
+            gone,
+            "a deleted root must be reported even when the platform delivers nothing"
         );
         assert_eq!(
-            service.idle_work_counts(),
-            (idle_seeds, startup_checks),
-            "idle shutdown ticks must not re-walk or stat roots after startup"
+            service.idle_work_counts().0,
+            seeds,
+            "reporting PathGone must not re-index the tree"
         );
         service.stop().expect("stop watcher");
+    }
+
+    #[test]
+    fn a_root_that_vanishes_is_reported_by_the_stat_check_alone() {
+        let dir = TempDir::new().expect("temp");
+        let base = fs::canonicalize(dir.path()).expect("canonical");
+        let store = base.join("store");
+        fs::create_dir_all(store.join("skills")).expect("store");
+        let shared = Shared {
+            queue: Mutex::new(Queue::default()),
+            condvar: Condvar::new(),
+            stop: AtomicBool::new(false),
+            capacity: 8,
+            counters: Counters::default(),
+            registry: Arc::new(RecentWrites::new()),
+            wake_sender: Mutex::new(None),
+        };
+        let mut debouncer =
+            new_debouncer(Duration::from_millis(50), None, |_| {}).expect("debouncer");
+        let mut roots = Roots::build(&[WatchRoot::dir(&store, WatchRootKind::UserStore)]);
+        roots
+            .reconcile(&mut debouncer, &shared.counters)
+            .expect("watch the store");
+
+        // No watcher event takes part in this check: it stats the root itself, which is the
+        // guarantee a platform that never reports a removed root's removal must still meet.
+        assert!(
+            !roots.poll(&mut debouncer, &shared),
+            "a present root reports nothing"
+        );
+        assert!(
+            lock(&shared.queue).events.is_empty(),
+            "a present root is quiet"
+        );
+
+        fs::remove_dir_all(&store).expect("delete the store");
+        assert!(!roots.poll(&mut debouncer, &shared), "nothing returned");
+        let event = lock(&shared.queue)
+            .events
+            .pop_front()
+            .expect("PathGone is queued");
+        match event {
+            WatchEvent::PathGone { path, .. } => assert_eq!(path, store),
+            other => panic!("expected PathGone, got {other:?}"),
+        }
+        assert!(roots.has_missing(), "a missing root stays tracked");
+        assert_eq!(
+            roots.watched.keys().collect::<Vec<_>>(),
+            vec![&base],
+            "the watch falls back to the nearest existing ancestor"
+        );
+
+        // The return is noticed the same way and asks for a fresh index.
+        fs::create_dir_all(&store).expect("recreate the store");
+        assert!(
+            roots.poll(&mut debouncer, &shared),
+            "a returned root asks for an index re-seed"
+        );
+        assert!(!roots.has_missing(), "the root is present again");
+        assert_eq!(
+            roots.watched.get(&store),
+            Some(&RecursiveMode::Recursive),
+            "the recursive watch is re-attached"
+        );
     }
 
     #[test]
