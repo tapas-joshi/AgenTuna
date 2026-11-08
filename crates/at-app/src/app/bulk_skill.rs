@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use at_engine::bulk_skill::{
-    BulkIntent, BulkItemPlan, BulkKind, BulkProgressEvent, BulkProgressStage, apply_bulk, plan_bulk,
+    BulkIntent, BulkItemPlan, BulkKind, BulkProgressEvent, BulkProgressStage,
+    apply_bulk_with_registry, plan_bulk,
 };
 use at_model::{AgentId, ItemState};
 use serde::{Deserialize, Serialize};
@@ -224,11 +225,16 @@ pub(crate) fn bulk_skill_apply_inner(
             backup_folder: &backup_root,
             recorder: &mut recorder,
         };
-        apply_bulk(&plan, &mut context, &roots, |event| collected.push(event))
+        apply_bulk_with_registry(
+            &plan,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+            |event| collected.push(event),
+        )
     };
     let batch = match result {
         Ok(outcome) => {
-            state.record_writes(&plan.change_set, &store_root);
             update_deployments(database.connection(), &plans, &outcome.operation_id)?;
             refresh_baselines(database.connection(), &plans)?;
             BulkSkillBatchView {

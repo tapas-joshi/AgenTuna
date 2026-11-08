@@ -227,10 +227,9 @@ pub fn save_rule_raw(
         expected,
         true,
     )?;
-    let apply = at_fs::apply_with_roots(&change_set, context, roots)
+    let apply = at_fs::apply_with_roots_and_registry(&change_set, context, roots, recent_writes)
         .map_err(|error| apply_error(error, &source.path, editor_buffer))?;
     let saved_hash = at_fs::sha256_hex(editor_buffer);
-    recent_writes.record(&source.path, saved_hash.clone());
     record_version(
         item_id,
         source.scope,
@@ -313,10 +312,9 @@ pub fn save_rule(
         expected,
         true,
     )?;
-    let apply = at_fs::apply_with_roots(&change_set, context, roots)
+    let apply = at_fs::apply_with_roots_and_registry(&change_set, context, roots, recent_writes)
         .map_err(|error| apply_error(error, &source.path, editor_buffer))?;
     let saved_hash = at_fs::sha256_hex(&rendered);
-    recent_writes.record(&source.path, saved_hash.clone());
     record_version(
         item_id,
         source.scope,
@@ -441,16 +439,14 @@ pub fn apply_new_rule(
     recent_writes: &at_fs::RecentWrites,
 ) -> Result<(RuleSource, at_fs::ApplyOutcome), RuleEditorError> {
     let outcome =
-        at_fs::apply_with_roots(&intent.change_set, context, roots).map_err(
-            |error| match error {
+        at_fs::apply_with_roots_and_registry(&intent.change_set, context, roots, recent_writes)
+            .map_err(|error| match error {
                 at_fs::ChangeSetApplyError::Fs(at_fs::FsError::AlreadyExists { path }) => {
                     RuleEditorError::AlreadyExists { path }
                 }
                 other => RuleEditorError::Apply(other),
-            },
-        )?;
+            })?;
     let hash = at_fs::sha256_hex(&intent.template);
-    recent_writes.record(&intent.path, hash.clone());
     record_version(
         item_id,
         intent.scope,

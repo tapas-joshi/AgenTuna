@@ -222,7 +222,7 @@ fn renders_mcp_and_rule_migrations_through_adapter_projections() -> Result<(), B
     let canonical_rule = paths
         .user_store
         .join("rules")
-        .join(format!("{rule_name}.md"));
+        .join(format!("{}.md", rule_name.to_ascii_lowercase()));
     assert!(canonical_rule.is_file());
     assert!(!applied.operation_id.is_empty());
     Ok(())

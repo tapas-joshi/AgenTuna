@@ -1301,12 +1301,14 @@ fn apply_cached(
             backup_folder: &cached.backup_folder,
             recorder: &mut recorder,
         };
-        at_engine::mcp_plan::apply_item_plan(&cached.plan, &mut context, &roots)
-            .map_err(CommandError::from)?
+        at_engine::mcp_plan::apply_item_plan_with_registry(
+            &cached.plan,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
+        .map_err(CommandError::from)?
     };
-    for set in cached.plan.plan.apply_order() {
-        state.record_writes(set, &cached.store_root);
-    }
     // The index stores a project id only for Project and Local scopes. The plan ChangeSet may
     // carry the active project the screen passed in even for a user-scope row; filtering here
     // keeps `items`/`deployments` valid and the list query matching the row.

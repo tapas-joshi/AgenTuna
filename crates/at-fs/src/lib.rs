@@ -29,7 +29,8 @@ pub mod bundle;
 pub use changeset::{
     ApplyContext, ApplyOutcome, ApplyRoots, ChangeSetApplyError, DbOperationRecorder,
     OperationRecorder, RollbackHandle, apply as apply_changeset, apply_with_roots,
-    apply_with_roots_reversible, commit_reversible, hash_node, rollback_committed,
+    apply_with_roots_and_registry, apply_with_roots_reversible,
+    apply_with_roots_reversible_and_registry, commit_reversible, hash_node, rollback_committed,
 };
 pub mod changeset;
 pub mod concurrency;
@@ -61,7 +62,7 @@ pub mod watch;
 
 /// Deployment mode, re-exported so callers of [`deploy()`] need no extra import.
 pub use at_model::LinkMode;
-pub use atomic::{BackupPolicy, WriteMode, WriteOutcome, WriteRequest, apply};
+pub use atomic::{BackupPolicy, WriteMode, WriteOutcome, WriteRequest, apply, apply_with_registry};
 pub use backup::BackupError::BackupFailed;
 pub use backup::{BackupError, BackupFiles, BackupMeta, BackupSidecar, operation_backup_dir};
 pub use concurrency::ExpectedState;

@@ -308,6 +308,27 @@ pub fn apply_delete_skill(
     context: &mut at_fs::ApplyContext<'_>,
     roots: &at_fs::ApplyRoots,
 ) -> Result<DeleteSkillOutcome, DeleteSkillError> {
+    apply_delete_skill_inner(connection, plan, context, roots, None)
+}
+
+/// Applies deletion while registering expected file writes before their atomic replacements.
+pub fn apply_delete_skill_with_registry(
+    connection: &rusqlite::Connection,
+    plan: &DeleteSkillPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: &at_fs::RecentWrites,
+) -> Result<DeleteSkillOutcome, DeleteSkillError> {
+    apply_delete_skill_inner(connection, plan, context, roots, Some(registry))
+}
+
+fn apply_delete_skill_inner(
+    connection: &rusqlite::Connection,
+    plan: &DeleteSkillPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<DeleteSkillOutcome, DeleteSkillError> {
     if context.store_root != plan.store_root {
         return Err(at_model::ChangeSetError::InvalidPath {
             path: context.store_root.display().to_string(),
@@ -315,7 +336,15 @@ pub fn apply_delete_skill(
         }
         .into());
     }
-    let applied = at_fs::apply_with_roots_reversible(&plan.change_set, context, roots)?;
+    let applied = match registry {
+        Some(registry) => at_fs::apply_with_roots_reversible_and_registry(
+            &plan.change_set,
+            context,
+            roots,
+            registry,
+        )?,
+        None => at_fs::apply_with_roots_reversible(&plan.change_set, context, roots)?,
+    };
     let Some(handle) = applied.rollback_handle else {
         return Err(DeleteSkillError::Rehome {
             cause: "apply did not return a rollback token".to_owned(),

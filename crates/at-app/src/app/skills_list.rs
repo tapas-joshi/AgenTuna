@@ -6,11 +6,12 @@
 //! happen in the webview; the query loads every canonical row plus
 //! native-only discoveries for the active project context.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use at_model::{DeploymentState, Scope};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::Manager;
 use ts_rs::TS;
 
 use super::{commands::CommandError, state::AppState};
@@ -130,15 +131,24 @@ fn deployment_cell(state: DeploymentState) -> (&'static str, bool) {
 
 /// Reads the skills list projection for the Skills screen.
 ///
+/// A full index projects thousands of rows, so the body runs on the runtime's blocking pool
+/// instead of the IPC thread: the same thread also serves the webview's asset requests, and a
+/// synchronous projection there delayed both the chunk fetch and the click-to-rows render
+/// (TF-035).
+///
 /// # Errors
 /// Returns a typed error when the database is unavailable or a stored
 /// identifier fails to parse.
 #[tauri::command]
-pub fn skills_list(
-    state: State<'_, AppState>,
+pub async fn skills_list(
+    app: tauri::AppHandle,
     request: SkillsListRequest,
 ) -> Result<SkillsListView, CommandError> {
-    skills_list_inner(&state, &request)
+    super::commands::run_blocking(move || {
+        let state = app.state::<AppState>();
+        skills_list_inner(&state, &request)
+    })
+    .await
 }
 
 /// Reads the skills list projection for an injected app state.
@@ -178,32 +188,27 @@ pub(crate) fn skills_list_inner(
         .map_err(|error| CommandError::internal(format!("cannot read locks: {error}")))?;
     let lock_by_item = locks
         .iter()
-        .map(|lock| (lock.item_id.to_string(), lock))
-        .collect::<std::collections::HashMap<_, _>>();
+        .map(|lock| (lock.item_id, lock))
+        .collect::<HashMap<_, _>>();
+    // One statement each for the whole screen: a per-row `list_deployments_for_item` /
+    // `source_for` pair costs two prepared statements per skill (TF-035 click budget).
+    let target_paths = at_db::deployments::target_paths_by_cell(database.connection())
+        .map_err(|error| CommandError::internal(format!("cannot read deployments: {error}")))?;
+    let sources = at_db::sources::live_sources_by_item(database.connection())
+        .map_err(|error| CommandError::internal(format!("cannot read skill source: {error}")))?;
     for row in rows {
         let native = row.item_id.is_none();
         let lock = row
             .item_id
-            .as_ref()
-            .and_then(|item_id| lock_by_item.get(&item_id.to_string()).copied());
+            .and_then(|item_id| lock_by_item.get(&item_id).copied());
         let mut cells = Vec::with_capacity(row.deployed.len());
-        let deployments = match &row.item_id {
-            Some(item_id) => {
-                let deployments =
-                    at_db::deployments::list_deployments_for_item(database.connection(), item_id)
-                        .map_err(|error| {
-                        CommandError::internal(format!("cannot read deployments: {error}"))
-                    })?;
-                Some(deployments)
-            }
-            None => None,
-        };
+        let source = row.item_id.and_then(|item_id| sources.get(&item_id));
         for (agent_id, deployment_state) in &row.deployed {
-            let config_path = match &deployments {
-                Some(deployments) => deployments
-                    .iter()
-                    .find(|cell| &cell.agent_id == agent_id && cell.scope == row.scope)
-                    .and_then(|cell| cell.target_path.clone()),
+            let config_path = match row.item_id {
+                Some(item_id) => target_paths
+                    .get(&(item_id, agent_id.clone(), row.scope))
+                    .cloned()
+                    .flatten(),
                 None => row
                     .native_paths
                     .get(agent_id)
@@ -223,14 +228,6 @@ pub(crate) fn skills_list_inner(
             });
         }
         cells.sort_by(|left, right| left.agent.cmp(&right.agent));
-        let source = match &row.item_id {
-            Some(item_id) => {
-                at_db::sources::source_for(database.connection(), item_id).map_err(|error| {
-                    CommandError::internal(format!("cannot read skill source: {error}"))
-                })?
-            }
-            None => None,
-        };
         view_rows.push(SkillRowView {
             item_id: row
                 .item_id

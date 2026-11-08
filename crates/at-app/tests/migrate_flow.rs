@@ -87,6 +87,7 @@ async fn scan_command_keeps_empty_missing_and_unreadable_roots_with_found_items(
 #[tokio::test]
 async fn migrate_scan_plan_apply_and_undo_restores_original_tree() -> Result<(), Box<dyn Error>> {
     let fixture = MigrationFixture::new(LinkMode::Link)?;
+    std::fs::create_dir_all(&fixture.paths().support_dir)?;
     let filter = fixture.filter();
     let before = filter.capture()?;
 
@@ -101,7 +102,6 @@ async fn migrate_scan_plan_apply_and_undo_restores_original_tree() -> Result<(),
         project_root: Some(fixture.paths().project.clone()),
     })?;
 
-    std::fs::create_dir_all(&fixture.paths().support_dir)?;
     let database = at_db::Database::open_file(&fixture.paths().db_path)?;
 
     // Register detected agents in DB so migration_inputs recognizes them.
@@ -271,6 +271,7 @@ type ScanApp = (AppState, Arc<JobBridge>, Arc<RecordingSink>);
 async fn a_mixed_scope_selection_lands_in_each_store_and_undoes_as_one()
 -> Result<(), Box<dyn Error>> {
     let fixture = MigrationFixture::new(LinkMode::Link)?;
+    std::fs::create_dir_all(&fixture.paths().support_dir)?;
     let paths = fixture.paths();
     // A project rule the scan reports at Project scope.
     let project_rule = paths.project.join("CLAUDE.md");
@@ -289,7 +290,6 @@ async fn a_mixed_scope_selection_lands_in_each_store_and_undoes_as_one()
         },
         project_root: Some(paths.project.clone()),
     })?;
-    std::fs::create_dir_all(&paths.support_dir)?;
     let database = at_db::Database::open_file(&paths.db_path)?;
     for agent in [AgentId::ClaudeCode, AgentId::Codex, AgentId::Omp] {
         at_db::agents::upsert_agent(

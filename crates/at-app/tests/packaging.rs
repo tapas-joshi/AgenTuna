@@ -239,11 +239,14 @@ fn bundle_script_end_to_end_dry_run_and_launch_command_verification() {
     // 3. Launch command verification (TF-029 AC1)
     // The bundle script targets target/release/AgenTuna.app.
     // The standard macOS launcher command is `open 'target/release/AgenTuna.app'`.
-    let open_bin = Path::new("/usr/bin/open");
-    assert!(
-        open_bin.exists(),
-        "the macOS launch command `/usr/bin/open` must exist on the system"
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let open_bin = Path::new("/usr/bin/open");
+        assert!(
+            open_bin.exists(),
+            "the macOS launch command `/usr/bin/open` must exist on the system"
+        );
+    }
 
     let script_content = fs::read_to_string(&bundle_script).expect("bundle.sh readable");
     assert!(

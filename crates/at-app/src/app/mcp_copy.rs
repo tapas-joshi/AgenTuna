@@ -434,9 +434,14 @@ pub(crate) fn mcp_server_copy_apply_impl(
             backup_folder: &cached.backup_folder,
             recorder: &mut recorder,
         };
-        at_fs::apply_with_roots(&cached.merged, &mut context, &roots).map_err(CommandError::from)?
+        at_fs::apply_with_roots_and_registry(
+            &cached.merged,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
+        .map_err(CommandError::from)?
     };
-    state.record_writes(&cached.merged, &cached.store_root);
     // The copied item is only usable once the derived index knows it: the MCP list, the row
     // actions and the drift baselines all read those rows.
     let target_layout = StoreLayout::new(cached.target_scope, cached.target_layout_root.clone());

@@ -691,6 +691,27 @@ pub fn apply_skill_transfer(
     context: &mut at_fs::ApplyContext<'_>,
     roots: &at_fs::ApplyRoots,
 ) -> Result<SkillTransferOutcome, SkillTransferError> {
+    apply_skill_transfer_inner(connection, plan, context, roots, None)
+}
+
+/// Like [`apply_skill_transfer`], registering expected writes before atomic replacements.
+pub fn apply_skill_transfer_with_registry(
+    connection: &rusqlite::Connection,
+    plan: &SkillTransferPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: &at_fs::RecentWrites,
+) -> Result<SkillTransferOutcome, SkillTransferError> {
+    apply_skill_transfer_inner(connection, plan, context, roots, Some(registry))
+}
+
+fn apply_skill_transfer_inner(
+    connection: &rusqlite::Connection,
+    plan: &SkillTransferPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<SkillTransferOutcome, SkillTransferError> {
     if context.store_root != plan.target_store_root {
         return Err(at_model::ChangeSetError::InvalidPath {
             path: context.store_root.display().to_string(),
@@ -698,7 +719,15 @@ pub fn apply_skill_transfer(
         }
         .into());
     }
-    let canonical = at_fs::apply_with_roots_reversible(&plan.change_set, context, roots)?;
+    let canonical = match registry {
+        Some(registry) => at_fs::apply_with_roots_reversible_and_registry(
+            &plan.change_set,
+            context,
+            roots,
+            registry,
+        )?,
+        None => at_fs::apply_with_roots_reversible(&plan.change_set, context, roots)?,
+    };
     let canonical_handle =
         canonical
             .rollback_handle
@@ -710,7 +739,16 @@ pub fn apply_skill_transfer(
     let mut deployment_ids = Vec::new();
     let mut install_operation = None;
     if let Some(deployment_set) = &plan.deployment_change_set {
-        match at_fs::apply_with_roots_reversible(deployment_set, context, roots) {
+        let phase_two = match registry {
+            Some(registry) => at_fs::apply_with_roots_reversible_and_registry(
+                deployment_set,
+                context,
+                roots,
+                registry,
+            ),
+            None => at_fs::apply_with_roots_reversible(deployment_set, context, roots),
+        };
+        match phase_two {
             Ok(outcome) => {
                 install_operation = Some(outcome.operation_id.clone());
                 deployment_ids.push(outcome.operation_id);

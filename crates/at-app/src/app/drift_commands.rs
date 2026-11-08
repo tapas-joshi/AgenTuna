@@ -579,7 +579,13 @@ pub fn backup_restore_inner(
             backup_folder: &backup_root,
             recorder: &mut recorder,
         };
-        at_fs::apply_with_roots(&change_set, &mut context, &authorized_roots).map_err(|error| {
+        at_fs::apply_with_roots_and_registry(
+            &change_set,
+            &mut context,
+            &authorized_roots,
+            &state.recent_writes(),
+        )
+        .map_err(|error| {
             // A stale destination and an authorization/IO refusal are different problems; the
             // user needs the real one, not a catch-all "it changed".
             CommandError::new(
@@ -599,7 +605,6 @@ pub fn backup_restore_inner(
             ))
         },
     )?;
-    record_recent_write(state, &path, &bytes);
     state.invalidate_scope_cache();
     Ok(BackupRestoreResultView {
         backup_id: backup.id,
@@ -942,21 +947,24 @@ fn resolve_drift(state: &AppState, event_id: i64, adopt: bool) -> Result<(), Com
         connection: database.connection(),
         actor: at_db::ops::OperationActor::Ui,
     };
-    let outcome = if adopt {
-        at_engine::drift::adopt_drift(request)
+    if adopt {
+        at_engine::drift::adopt_drift_with_registry(request, &state.recent_writes())
     } else {
-        at_engine::drift::restore_drift(at_engine::drift::DriftRestoreRequest {
-            event_id,
-            store_root: context.layout.root(),
-            backup_root: &backup_root,
-            authorized_roots: &roots,
-            connection: database.connection(),
-            home: context
-                .paths
-                .home_dir()
-                .unwrap_or_else(|| context.paths.user_store()),
-            actor: at_db::ops::OperationActor::Ui,
-        })
+        at_engine::drift::restore_drift_with_registry(
+            at_engine::drift::DriftRestoreRequest {
+                event_id,
+                store_root: context.layout.root(),
+                backup_root: &backup_root,
+                authorized_roots: &roots,
+                connection: database.connection(),
+                home: context
+                    .paths
+                    .home_dir()
+                    .unwrap_or_else(|| context.paths.user_store()),
+                actor: at_db::ops::OperationActor::Ui,
+            },
+            &state.recent_writes(),
+        )
     }
     .map_err(|_| {
         CommandError::new(
@@ -964,13 +972,6 @@ fn resolve_drift(state: &AppState, event_id: i64, adopt: bool) -> Result<(), Com
             "The drift item changed or could not be resolved safely.",
         )
     })?;
-    for path in outcome.touched_paths {
-        if let Ok(bytes) = fs::read(&path) {
-            state
-                .recent_writes()
-                .record(path, at_fs::sha256_hex(&bytes));
-        }
-    }
     // The canonical copy and the deployment now agree by construction. Recording that as the
     // new baseline is what keeps the next reconcile from reporting our own resolution as a
     // fresh external edit.
@@ -1313,12 +1314,6 @@ fn redact(state: &AppState, diff: String) -> (String, bool) {
         return (diff, false);
     };
     (logging.redactor().redact(&diff), true)
-}
-
-fn record_recent_write(state: &AppState, path: &Path, bytes: &[u8]) {
-    state
-        .recent_writes()
-        .record(path.to_path_buf(), at_fs::sha256_hex(bytes));
 }
 
 /// Opens the selected registered drift target in the system text editor.

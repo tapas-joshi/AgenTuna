@@ -12,6 +12,7 @@
 //! All reads go through one prepared statement; none hold a write
 //! transaction, so the UI can render while a scan runs elsewhere.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use at_model::{AgentId, ItemId, ItemState, Scope, SyncLabel};
@@ -20,6 +21,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::DbError;
 use crate::shared::DeploymentCell;
+
+/// Identity of one deployment cell: the item, the agent and the scope.
+pub type DeploymentCellKey = (ItemId, AgentId, Scope);
+
+/// Target path of every deployment cell, keyed by [`DeploymentCellKey`].
+///
+/// [`target_paths_by_cell`] builds this for a whole list projection in one query.
+pub type DeploymentTargetPaths = HashMap<DeploymentCellKey, Option<String>>;
 
 /// Per-agent health line: how many deployments are managed, in sync and total.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +542,56 @@ pub fn list_deployments_for_item(
     Ok(rows)
 }
 
+/// Target path of every deployment cell, keyed by item, agent and scope.
+///
+/// [`list_deployments_for_item`] costs one prepared statement per item, so a list projection
+/// that reads one cell per agent column pays for thousands of statements on a full index. This
+/// query answers the whole screen with one statement. A cell that exists in several projects
+/// keeps the first row `ORDER BY item_id, agent_id, scope` returns, which is the same answer
+/// the per-item loop's `find` produced.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails or a stored identifier is unreadable.
+pub fn target_paths_by_cell(connection: &Connection) -> Result<DeploymentTargetPaths, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT item_id, agent_id, scope, target_path FROM deployments \
+         ORDER BY item_id, agent_id, scope",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            parse_cell_column::<ItemId>(row, 0)?,
+            parse_cell_column::<AgentId>(row, 1)?,
+            parse_cell_column::<Scope>(row, 2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut cells = HashMap::new();
+    for row in rows {
+        let (item_id, agent_id, scope, target_path) = row?;
+        cells
+            .entry((item_id, agent_id, scope))
+            .or_insert(target_path);
+    }
+    Ok(cells)
+}
+
+/// One typed deployment column, with a parse failure reported as a SQL conversion error.
+fn parse_cell_column<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    let text = row.get::<_, String>(index)?;
+    text.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 /// Item ids of every deployment row one operation wrote, sorted and deduplicated.
 ///
 /// An operation that migrated or adopted items stamps its id on each row it writes, so this
@@ -758,6 +817,24 @@ pub fn list_deployments_for_agent(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Count of deployments that materialise as a link (`symlink` or Windows `junction`).
+///
+/// The Agents card needs this one number; reading every deployment row of the agent to count
+/// it allocates thousands of cells per screen load on a full index (TF-035).
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+pub fn linked_mode_count(connection: &Connection, agent_id: &AgentId) -> Result<i64, DbError> {
+    let count = connection.query_row(
+        "SELECT COUNT(*) FROM deployments \
+          WHERE agent_id = ?1 AND mode IN ('symlink', 'junction')",
+        [agent_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(count)
 }
 
 /// Health line for one agent: managed, in-sync and total deployment counts.

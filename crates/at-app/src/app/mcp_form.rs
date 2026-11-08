@@ -595,11 +595,14 @@ pub fn mcp_save_impl(
         };
         // Reversible, so a failed native phase restores the store bytes *and* removes the
         // directories this operation created (including a first-run store skeleton).
-        let mut outcome =
-            at_fs::changeset::apply_with_roots_reversible(store, &mut context, &roots)
-                .map_err(CommandError::from)?;
+        let mut outcome = at_fs::changeset::apply_with_roots_reversible_and_registry(
+            store,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
+        .map_err(CommandError::from)?;
         store_reversible = outcome.rollback_handle.take();
-        state.record_writes(store, &cached.store_root);
         Some(outcome)
     } else {
         None
@@ -613,7 +616,12 @@ pub fn mcp_save_impl(
             backup_folder: &cached.backup_folder,
             recorder: &mut recorder,
         };
-        at_fs::changeset::apply_with_roots(&native, &mut context, &roots)
+        at_fs::changeset::apply_with_roots_and_registry(
+            &native,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
     };
     let native_outcome = match native_result {
         Ok(outcome) => {
@@ -637,7 +645,6 @@ pub fn mcp_save_impl(
             return Err(CommandError::from(error));
         }
     };
-    state.record_writes(&native, &cached.store_root);
     let operation_id = store_outcome
         .map(|outcome| outcome.operation_id)
         .unwrap_or(native_outcome.operation_id);

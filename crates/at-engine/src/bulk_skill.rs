@@ -203,6 +203,27 @@ pub fn apply_bulk(
     plan: &BulkPlan,
     context: &mut at_fs::ApplyContext<'_>,
     roots: &at_fs::ApplyRoots,
+    progress: impl FnMut(BulkProgressEvent),
+) -> Result<at_fs::ApplyOutcome, BulkApplyError> {
+    apply_bulk_inner(plan, context, roots, None, progress)
+}
+
+/// Like [`apply_bulk`], registering expected file writes before atomic replacement.
+pub fn apply_bulk_with_registry(
+    plan: &BulkPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: &at_fs::RecentWrites,
+    progress: impl FnMut(BulkProgressEvent),
+) -> Result<at_fs::ApplyOutcome, BulkApplyError> {
+    apply_bulk_inner(plan, context, roots, Some(registry), progress)
+}
+
+fn apply_bulk_inner(
+    plan: &BulkPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: Option<&at_fs::RecentWrites>,
     mut progress: impl FnMut(BulkProgressEvent),
 ) -> Result<at_fs::ApplyOutcome, BulkApplyError> {
     for item_id in &plan.items {
@@ -211,7 +232,13 @@ pub fn apply_bulk(
             stage: BulkProgressStage::ItemStarted,
         });
     }
-    match at_fs::apply_with_roots(&plan.change_set, context, roots) {
+    let result = match registry {
+        Some(registry) => {
+            at_fs::apply_with_roots_and_registry(&plan.change_set, context, roots, registry)
+        }
+        None => at_fs::apply_with_roots(&plan.change_set, context, roots),
+    };
+    match result {
         Ok(outcome) => {
             for item_id in &plan.items {
                 progress(BulkProgressEvent {

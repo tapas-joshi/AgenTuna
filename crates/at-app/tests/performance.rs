@@ -147,6 +147,30 @@ fn reports_headless_startup_memory_and_idle_cpu_budgets() {
     );
 }
 
+#[cfg(target_os = "linux")]
+fn process_cpu_centiseconds() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let fields = stat.get(stat.rfind(')')?.checked_add(2)?..)?;
+    let mut fields = fields.split_whitespace();
+    let user_ticks = fields.nth(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.next()?.parse::<u64>().ok()?;
+    let ticks_per_second = Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let ticks_per_second = String::from_utf8(ticks_per_second.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let centiseconds = u128::from(user_ticks.checked_add(system_ticks)?)
+        .checked_mul(100)?
+        .checked_div(u128::from(ticks_per_second))?;
+    u64::try_from(centiseconds).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
 fn process_cpu_centiseconds() -> Option<u64> {
     let output = Command::new("ps")
         .args(["-o", "cputime=", "-p", &std::process::id().to_string()])

@@ -929,6 +929,7 @@ mod tests {
         assert!(matches!(error, SkillPackageError::MissingSkillDoc { .. }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_inside_package_rejected_on_read() {
         let dir = tempfile::tempdir().expect("temp dir");

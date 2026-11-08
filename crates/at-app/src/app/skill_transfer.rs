@@ -18,7 +18,8 @@ use at_engine::{
     local_scope::{LocalLayer, LocalScope},
     skill_transfer::{
         ClashResolution, NativeTransferTarget, SkillTransfer, SkillTransferPlan,
-        SkillTransferRequest, apply_skill_transfer, plan_skill_transfer, update_deployment_rows,
+        SkillTransferRequest, apply_skill_transfer_with_registry, plan_skill_transfer,
+        update_deployment_rows,
     },
 };
 use at_model::{ChangeSet, ExpectedState, FileOp, ItemId, ItemKind, ItemState, LinkMode, Scope};
@@ -612,12 +613,14 @@ pub(crate) fn skill_transfer_apply_impl(
         backup_folder: &cached.backup_root,
         recorder: &mut recorder,
     };
-    let outcome = apply_skill_transfer(database.connection(), &cached.plan, &mut context, &roots)
-        .map_err(transfer_error)?;
-    state.record_writes(&cached.plan.change_set, &cached.target_root);
-    if let Some(deployment_set) = &cached.plan.deployment_change_set {
-        state.record_writes(deployment_set, &cached.target_root);
-    }
+    let outcome = apply_skill_transfer_with_registry(
+        database.connection(),
+        &cached.plan,
+        &mut context,
+        &roots,
+        &state.recent_writes(),
+    )
+    .map_err(transfer_error)?;
     Ok(SkillTransferApplyView {
         operation_id: outcome.canonical_operation_id,
         backup_location: cached.backup_root.display().to_string(),
@@ -1062,7 +1065,12 @@ pub(crate) fn skill_transfer_bulk_apply_impl(
             backup_folder: &cached.backup_root,
             recorder: &mut recorder,
         };
-        at_fs::apply_with_roots_reversible(&cached.plan.change_set, &mut context, &roots)
+        at_fs::apply_with_roots_reversible_and_registry(
+            &cached.plan.change_set,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
     };
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -1139,7 +1147,6 @@ pub(crate) fn skill_transfer_bulk_apply_impl(
     at_fs::commit_reversible(rollback_handle).map_err(|error| {
         CommandError::internal(format!("bulk transfer could not be finalized: {error}"))
     })?;
-    state.record_writes(&cached.plan.change_set, &cached.target_root);
     emit_bulk_transfer_progress(
         app,
         &cached.plan,
@@ -1454,7 +1461,12 @@ pub(crate) fn skill_disable_in_repo_apply_impl(
             backup_folder: &cached.backup_root,
             recorder: &mut recorder,
         };
-        at_fs::apply_with_roots_reversible(&cached.set, &mut context, &roots)
+        at_fs::apply_with_roots_reversible_and_registry(
+            &cached.set,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
     };
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -1511,7 +1523,6 @@ pub(crate) fn skill_disable_in_repo_apply_impl(
     at_fs::commit_reversible(rollback_handle).map_err(|error| {
         CommandError::internal(format!("disable operation could not be finalized: {error}"))
     })?;
-    state.record_writes(&cached.set, &cached.project_store_root);
     let agents_disabled = u64::try_from(cached.linked_cells.len()).unwrap_or(u64::MAX);
     Ok(SkillDisableInRepoApplyView {
         operation_id: outcome.operation_id,

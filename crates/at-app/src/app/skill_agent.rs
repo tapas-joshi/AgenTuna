@@ -535,19 +535,22 @@ pub(crate) fn skill_agent_apply_impl(
         backup_folder: &cached.backup_root,
         recorder: &mut recorder,
     };
-    let outcome = at_fs::changeset::apply_with_roots(set, &mut context, &roots).map_err(
-        |error| match error {
-            at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
-                CommandErrorCode::Conflict,
-                format!(
-                    "The reviewed skill target changed at {}. Review the current state again.",
-                    path.display()
-                ),
+    let outcome = at_fs::changeset::apply_with_roots_and_registry(
+        set,
+        &mut context,
+        &roots,
+        &state.recent_writes(),
+    )
+    .map_err(|error| match error {
+        at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
+            CommandErrorCode::Conflict,
+            format!(
+                "The reviewed skill target changed at {}. Review the current state again.",
+                path.display()
             ),
-            other => CommandError::from(other),
-        },
-    )?;
-    state.record_writes(set, &cached.store_root);
+        ),
+        other => CommandError::from(other),
+    })?;
     let store_hash = at_store::manifest::hash_skill_folder(&cached.source)
         .map_err(|_| CommandError::unavailable("the canonical skill package could not be hashed"))?
         .to_string();

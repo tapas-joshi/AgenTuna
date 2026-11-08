@@ -33,6 +33,7 @@ use crate::backup::BackupMeta;
 use crate::concurrency::ExpectedState;
 use crate::error::FsError;
 use crate::hash::sha256_hex;
+use crate::watch::RecentWrites;
 
 use at_model::{ExpectedState as ModelExpectedState, FileOp};
 
@@ -1953,6 +1954,25 @@ pub fn purge_expired_journals(
 /// [`RecoveryError::BackupMismatch`] when the offered bytes are not the recorded ones, or any
 /// [`crate::FsError`] from the write.
 pub fn restore_file(request: &RestoreRequest) -> Result<WriteOutcome, RecoveryError> {
+    restore_file_inner(request, None)
+}
+
+/// Like [`restore_file`], registering the expected content before the destination is replaced.
+///
+/// # Errors
+/// [`RecoveryError::BackupMismatch`] when the offered bytes are not the recorded ones, or any
+/// [`crate::FsError`] from the write.
+pub fn restore_file_with_registry(
+    request: &RestoreRequest,
+    registry: &RecentWrites,
+) -> Result<WriteOutcome, RecoveryError> {
+    restore_file_inner(request, Some(registry))
+}
+
+fn restore_file_inner(
+    request: &RestoreRequest,
+    registry: Option<&RecentWrites>,
+) -> Result<WriteOutcome, RecoveryError> {
     let actual = sha256_hex(&request.before_bytes);
     if actual != request.before_hash {
         return Err(RecoveryError::BackupMismatch {
@@ -1974,7 +1994,11 @@ pub fn restore_file(request: &RestoreRequest) -> Result<WriteOutcome, RecoveryEr
         backup_meta: request.backup_meta.clone(),
         guard: None,
     };
-    apply(&write).map_err(RecoveryError::from)
+    match registry {
+        Some(registry) => crate::atomic::apply_with_registry(&write, registry),
+        None => apply(&write),
+    }
+    .map_err(RecoveryError::from)
 }
 // Unix-only fixtures: POSIX symlinks, permission bits and raw errno constants. The
 // Windows twins arrive with the slice that enables the Windows test suite.

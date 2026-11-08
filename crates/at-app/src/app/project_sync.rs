@@ -440,17 +440,20 @@ pub fn project_sync_apply(
             backup_folder: &cached.backup_folder,
             recorder: &mut recorder,
         };
-        at_fs::changeset::apply_with_roots(&cached.change_set, &mut context, &roots).map_err(
-            |error| match error {
-                at_fs::changeset::ChangeSetApplyError::Stale(_) => CommandError::new(
-                    CommandErrorCode::Conflict,
-                    "Files changed since review; preview the sync again.",
-                ),
-                other => CommandError::from(other),
-            },
-        )?
+        at_fs::changeset::apply_with_roots_and_registry(
+            &cached.change_set,
+            &mut context,
+            &roots,
+            &state.recent_writes(),
+        )
+        .map_err(|error| match error {
+            at_fs::changeset::ChangeSetApplyError::Stale(_) => CommandError::new(
+                CommandErrorCode::Conflict,
+                "Files changed since review; preview the sync again.",
+            ),
+            other => CommandError::from(other),
+        })?
     };
-    state.record_writes(&cached.change_set, &cached.target_root);
     at_db::deployments::update_project_sync_baseline(
         database.connection(),
         &cached.item_id,

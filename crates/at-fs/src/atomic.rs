@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::watch::RecentWrites;
+
 use time::OffsetDateTime;
 
 use crate::backup::{self, BackupFiles, BackupMeta};
@@ -299,7 +301,21 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
 /// # Errors
 /// See [`FsError`].
 pub fn apply(request: &WriteRequest) -> Result<WriteOutcome, FsError> {
-    apply_with_hook(request, &mut |_| {})
+    apply_inner(request, &mut |_| {}, None)
+}
+
+/// Applies a write while registering its expected content before the atomic rename.
+///
+/// This closes the race where a fast filesystem watcher handles the rename before the caller
+/// receives the outcome and records it.
+///
+/// # Errors
+/// See [`FsError`].
+pub fn apply_with_registry(
+    request: &WriteRequest,
+    registry: &RecentWrites,
+) -> Result<WriteOutcome, FsError> {
+    apply_inner(request, &mut |_| {}, Some(registry))
 }
 
 /// Like [`apply`], calling `hook` at each [`Stage`]. For tests only.
@@ -307,6 +323,14 @@ pub fn apply(request: &WriteRequest) -> Result<WriteOutcome, FsError> {
 pub fn apply_with_hook(
     request: &WriteRequest,
     hook: &mut dyn FnMut(Stage),
+) -> Result<WriteOutcome, FsError> {
+    apply_inner(request, hook, None)
+}
+
+fn apply_inner(
+    request: &WriteRequest,
+    hook: &mut dyn FnMut(Stage),
+    registry: Option<&RecentWrites>,
 ) -> Result<WriteOutcome, FsError> {
     let new_len = request.new_bytes.len() as u64;
     if new_len > MAX_FILE_BYTES {
@@ -390,26 +414,34 @@ pub fn apply_with_hook(
     }
     hook(Stage::BackupCreated);
 
+    let after_hash = sha256_hex(&request.new_bytes);
+    let ticket = registry.map(|registry| registry.record_expected(&dest, after_hash.clone()));
     let result = install(&dest, &temp, request, &current, hook);
     match result {
         // The rename happened. A failed directory fsync is reported, but the backup is kept
         // because the new bytes are already in place.
         Ok(()) => {
+            if let (Some(registry), Some(ticket)) = (registry, ticket.as_ref()) {
+                registry.commit_expected(ticket);
+            }
             fault(FaultPoint::DirSync, parent)?;
             sync_dir(parent).map(|()| WriteOutcome {
                 diff,
                 backup_path: backup_files.map(|f| f.blob),
                 before_hash,
-                after_hash: sha256_hex(&request.new_bytes),
+                after_hash,
                 bytes: new_len,
                 symlink,
             })
         }
-        Err(e) => {
+        Err(error) => {
+            if let (Some(registry), Some(ticket)) = (registry, ticket.as_ref()) {
+                registry.cancel_expected(ticket);
+            }
             if let Some(files) = &backup_files {
                 files.discard();
             }
-            Err(e)
+            Err(error)
         }
     }
 }

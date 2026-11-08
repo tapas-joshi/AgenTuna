@@ -578,6 +578,7 @@ pub fn platform_elevator() -> Arc<dyn Elevator> {
 }
 
 /// Maps `osascript` stderr to a cancellation, a denial or a generic failure.
+#[cfg(any(test, target_os = "macos"))]
 fn classify_osascript_failure(stderr: &str) -> ElevationError {
     let lower = stderr.to_lowercase();
     if lower.contains("(-128)")
@@ -599,6 +600,7 @@ fn classify_osascript_failure(stderr: &str) -> ElevationError {
 }
 
 /// First non-empty line, control characters removed and bounded to 512 characters.
+#[cfg(any(test, target_os = "macos"))]
 fn first_line(stderr: &str) -> String {
     let line = stderr
         .lines()

@@ -62,7 +62,7 @@ use crate::hash::sha256_hex;
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// How long a recorded write keeps suppressing the events it caused.
-pub const DEFAULT_SUPPRESS_TTL: Duration = Duration::from_secs(2);
+pub const DEFAULT_SUPPRESS_TTL: Duration = Duration::from_secs(5);
 
 /// Capacity of the batch queue.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
@@ -294,21 +294,30 @@ impl IgnoreRules {
 
 /// Registry of writes AgenTuna performed itself.
 ///
-/// Share one registry between the write path and the watch service:
-/// record every [`WriteOutcome`] with [`Self::record_outcome`] and the service suppresses the
-/// events that write caused. An entry stops suppressing when the file no longer holds the
-/// recorded content (someone else wrote it) or when [`Self::ttl`] elapses.
+/// Share one registry between the write path and the watch service. The write pipeline registers
+/// expected content before installing it, so watcher events cannot race ahead of suppression.
+/// An entry stops suppressing when the file no longer holds the recorded content or when the
+/// configured time-to-live elapses.
+
 #[derive(Debug)]
 pub struct RecentWrites {
     ttl: Duration,
     entries: Mutex<HashMap<PathBuf, Vec<Recorded>>>,
     suppressed: AtomicU64,
 }
+static WRITE_TICKET_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 struct Recorded {
+    id: u64,
     after_hash: String,
     at: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct WriteTicket {
+    path: PathBuf,
+    id: u64,
 }
 
 impl RecentWrites {
@@ -348,16 +357,44 @@ impl RecentWrites {
     ///
     /// Tests use the explicit instant to exercise the TTL without sleeping.
     pub fn record_at(&self, path: impl Into<PathBuf>, after_hash: impl Into<String>, at: Instant) {
+        let id = WRITE_TICKET_ID.fetch_add(1, Ordering::Relaxed);
+        self.append_record(path.into(), after_hash.into(), at, id);
+    }
+
+    fn append_record(&self, path: PathBuf, after_hash: String, at: Instant, id: u64) {
         let mut entries = lock(&self.entries);
-        let recorded = entries.entry(path.into()).or_default();
-        recorded.push(Recorded {
-            after_hash: after_hash.into(),
-            at,
-        });
+        let recorded = entries.entry(path).or_default();
+        recorded.push(Recorded { id, after_hash, at });
         // Keep at most a handful of records per path; only the newest can match the file.
         if recorded.len() > 8 {
             let excess = recorded.len() - 8;
             recorded.drain(..excess);
+        }
+    }
+
+    pub(crate) fn record_expected(&self, path: &Path, after_hash: String) -> WriteTicket {
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let id = WRITE_TICKET_ID.fetch_add(1, Ordering::Relaxed);
+        self.append_record(path.clone(), after_hash, Instant::now(), id);
+        WriteTicket { path, id }
+    }
+
+    pub(crate) fn commit_expected(&self, ticket: &WriteTicket) {
+        if let Some(recorded) = lock(&self.entries).get_mut(&ticket.path)
+            && let Some(entry) = recorded.iter_mut().find(|entry| entry.id == ticket.id)
+        {
+            entry.at = Instant::now();
+        }
+    }
+
+    pub(crate) fn cancel_expected(&self, ticket: &WriteTicket) {
+        let mut entries = lock(&self.entries);
+        let empty = entries.get_mut(&ticket.path).is_some_and(|recorded| {
+            recorded.retain(|entry| entry.id != ticket.id);
+            recorded.is_empty()
+        });
+        if empty {
+            entries.remove(&ticket.path);
         }
     }
 
@@ -394,11 +431,23 @@ impl RecentWrites {
         };
         let hash = sha256_hex(&bytes);
         if recorded.iter().any(|entry| entry.after_hash == hash) {
-            self.suppressed.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
+            let mut refreshed = false;
+            if let Some(current) = lock(&self.entries).get_mut(path) {
+                for entry in current {
+                    if entry.after_hash == hash
+                        && recorded.iter().any(|expected| expected.id == entry.id)
+                    {
+                        entry.at = now;
+                        refreshed = true;
+                    }
+                }
+            }
+            if refreshed {
+                self.suppressed.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
         }
+        false
     }
 
     /// Number of events suppressed since this registry was created.
@@ -1115,6 +1164,9 @@ fn process(
     }
     let mut unrelated = 0usize;
     candidates.retain(|path| {
+        if roots.is_present_directory_root(path) {
+            return false;
+        }
         if ignored.is_ignored(path) {
             return false;
         }
@@ -1154,18 +1206,45 @@ fn process(
     let mut changes = Vec::with_capacity(candidates.len());
     // Classify surviving paths first: a rename arrives as an event for each side, and the new
     // side has to be matched against the old inode before the old path is reported as removed.
-    let (existing, missing): (Vec<PathBuf>, Vec<PathBuf>) = candidates
-        .into_iter()
-        .partition(|path| fs::symlink_metadata(path).is_ok());
-    for path in existing {
-        if let Some(change) = index.classify(&path) {
+    let mut existing = Vec::new();
+    let mut missing = Vec::new();
+    for path in &candidates {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => existing.push((path, meta)),
+            Err(_) => missing.push(path),
+        }
+    }
+    for (path, meta) in existing {
+        let directory = meta.is_dir();
+        if let Some(change) = index.classify_existing(path, &meta) {
+            let scan_subtree = directory
+                && matches!(
+                    &change,
+                    WatchChange::Created(_) | WatchChange::Renamed { .. }
+                );
             changes.push(change);
+            if scan_subtree
+                && index.discover_subtree(
+                    path,
+                    ignored,
+                    &candidates,
+                    &mut changes,
+                    config.max_batch_paths,
+                )
+            {
+                shared.force_rescan(observed_at);
+                return true;
+            }
         }
     }
     for path in missing {
-        if let Some(change) = index.classify(&path) {
+        if let Some(change) = index.classify_missing(path) {
             changes.push(change);
         }
+    }
+    if changes.len() > config.max_batch_paths {
+        shared.force_rescan(observed_at);
+        return true;
     }
     let batch = WatchBatch::build(changes, observed_at);
     if !batch.is_empty() {
@@ -1235,6 +1314,12 @@ impl Roots {
         self.roots
             .iter()
             .any(|runtime| path == runtime.root.path || path.starts_with(&runtime.root.path))
+    }
+
+    fn is_present_directory_root(&self, path: &Path) -> bool {
+        self.roots.iter().any(|runtime| {
+            runtime.present && runtime.root.kind.is_directory() && runtime.root.path == path
+        })
     }
 
     fn desired(&self) -> BTreeMap<PathBuf, RecursiveMode> {
@@ -1512,38 +1597,82 @@ impl PathIndex {
     }
 
     /// Classifies the current state of `path` against what the index remembers.
+    #[cfg(test)]
     fn classify(&mut self, path: &Path) -> Option<WatchChange> {
         match fs::symlink_metadata(path) {
-            Ok(meta) => {
-                let key = inode_key(&meta);
-                if self.remove(path) {
-                    self.insert(path.to_path_buf(), key);
-                    return Some(WatchChange::Modified(path.to_path_buf()));
+            Ok(meta) => self.classify_existing(path, &meta),
+            Err(_) => self.classify_missing(path),
+        }
+    }
+
+    fn classify_existing(&mut self, path: &Path, meta: &fs::Metadata) -> Option<WatchChange> {
+        let key = inode_key(meta);
+        if self.remove(path) {
+            self.insert(path.to_path_buf(), key);
+            return Some(WatchChange::Modified(path.to_path_buf()));
+        }
+        if let Some(key) = key
+            && let Some(previous) = self.by_inode.get(&key).cloned()
+            && previous != path
+            && fs::symlink_metadata(&previous).is_err()
+        {
+            self.by_inode.remove(&key);
+            self.known.remove(&previous);
+            self.insert(path.to_path_buf(), Some(key));
+            return Some(WatchChange::Renamed {
+                from: previous,
+                to: path.to_path_buf(),
+            });
+        }
+        self.insert(path.to_path_buf(), key);
+        Some(WatchChange::Created(path.to_path_buf()))
+    }
+
+    fn classify_missing(&mut self, path: &Path) -> Option<WatchChange> {
+        if self.remove(path) {
+            Some(WatchChange::Removed(path.to_path_buf()))
+        } else {
+            None
+        }
+    }
+
+    /// Finds files that appeared before inotify installed its watch on a new directory.
+    fn discover_subtree(
+        &mut self,
+        root: &Path,
+        ignored: &IgnoreRules,
+        candidates: &BTreeSet<PathBuf>,
+        changes: &mut Vec<WatchChange>,
+        max_changes: usize,
+    ) -> bool {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if ignored.is_ignored(&path) {
+                    continue;
                 }
-                if let Some(key) = key
-                    && let Some(previous) = self.by_inode.get(&key).cloned()
-                    && previous != path
-                    && fs::symlink_metadata(&previous).is_err()
-                {
-                    self.by_inode.remove(&key);
-                    self.known.remove(&previous);
-                    self.insert(path.to_path_buf(), Some(key));
-                    return Some(WatchChange::Renamed {
-                        from: previous,
-                        to: path.to_path_buf(),
-                    });
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    stack.push(path.clone());
                 }
-                self.insert(path.to_path_buf(), key);
-                Some(WatchChange::Created(path.to_path_buf()))
-            }
-            Err(_) => {
-                if self.remove(path) {
-                    Some(WatchChange::Removed(path.to_path_buf()))
-                } else {
-                    None
+                if candidates.contains(&path) || self.known.contains(&path) {
+                    continue;
+                }
+                if let Some(change) = self.classify_existing(&path, &meta) {
+                    changes.push(change);
+                    if changes.len() > max_changes {
+                        return true;
+                    }
                 }
             }
         }
+        false
     }
 }
 
@@ -1631,9 +1760,19 @@ mod tests {
         )]));
 
         service.start().expect("start watcher");
-        let (seeds, root_checks) = service.idle_work_counts();
+        let (seeds, _) = service.idle_work_counts();
         assert_eq!(seeds, 1, "the initial index is seeded once");
-        assert_eq!(root_checks, 0, "no root checks before any event");
+
+        assert!(
+            service.next_event(Duration::from_millis(750)).is_none(),
+            "an idle watcher must not emit an event"
+        );
+        let (idle_seeds, startup_checks) = service.idle_work_counts();
+        assert_eq!(idle_seeds, seeds);
+        assert!(
+            startup_checks <= 1,
+            "a startup native event may check the single watched root once, got {startup_checks}"
+        );
 
         assert!(
             service.next_event(Duration::from_millis(750)).is_none(),
@@ -1641,8 +1780,8 @@ mod tests {
         );
         assert_eq!(
             service.idle_work_counts(),
-            (seeds, root_checks),
-            "idle shutdown ticks must not re-walk or stat roots"
+            (idle_seeds, startup_checks),
+            "idle shutdown ticks must not re-walk or stat roots after startup"
         );
         service.stop().expect("stop watcher");
     }
@@ -1743,6 +1882,22 @@ mod tests {
         fs::write(&file, b"y").expect("write");
         assert!(!registry.should_suppress_at(&file, now));
         assert_eq!(registry.suppressed_count(), 1);
+    }
+    #[test]
+    fn recent_writes_refresh_the_suppression_window_for_late_notifications() {
+        let dir = TempDir::new().expect("temp");
+        let file = dir.path().join("config.json");
+        touch(&file);
+        let registry = RecentWrites::with_ttl(Duration::from_secs(2));
+        let start = Instant::now();
+        registry.record_at(&file, sha256_hex(b"x"), start);
+
+        assert!(registry.should_suppress_at(&file, start + Duration::from_secs(1)));
+        assert!(
+            registry.should_suppress_at(&file, start + Duration::from_millis(2_500)),
+            "a suppressed native event extends suppression for later events in the same burst"
+        );
+        assert_eq!(registry.suppressed_count(), 2);
     }
 
     #[test]

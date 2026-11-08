@@ -888,20 +888,22 @@ pub(crate) fn skill_keep_copy_apply_inner(
         backup_folder: &cached.backup_root,
         recorder: &mut recorder,
     };
-    let outcome =
-        at_fs::changeset::apply_with_roots(&cached.set, &mut context, &roots).map_err(|error| {
-            match error {
-                at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
-                    CommandErrorCode::Conflict,
-                    format!(
-                        "The replaced copy changed at {}. Compare the copies again.",
-                        path.display()
-                    ),
-                ),
-                other => CommandError::from(other),
-            }
-        })?;
-    state.record_writes(&cached.set, &cached.store_root);
+    let outcome = at_fs::changeset::apply_with_roots_and_registry(
+        &cached.set,
+        &mut context,
+        &roots,
+        &state.recent_writes(),
+    )
+    .map_err(|error| match error {
+        at_fs::changeset::ChangeSetApplyError::Stale(path) => CommandError::new(
+            CommandErrorCode::Conflict,
+            format!(
+                "The replaced copy changed at {}. Compare the copies again.",
+                path.display()
+            ),
+        ),
+        other => CommandError::from(other),
+    })?;
     let updated = at_store::skill_package::SkillPackage::read(&cached.drop_dir)
         .map_err(|_| CommandError::internal("the replaced skill package could not be re-read"))?;
     let operation_id = outcome.operation_id.clone();
@@ -1291,8 +1293,9 @@ pub(crate) fn skill_edit_apply_inner(
         backup_folder: &store_root.join(at_store::layout::BACKUPS_DIR),
         recorder: &mut recorder,
     };
-    let outcome = at_fs::changeset::apply(&change_set, &mut context).map_err(CommandError::from)?;
-    state.record_writes(&change_set, store_root);
+    let outcome =
+        at_fs::changeset::apply_with_registry(&change_set, &mut context, &state.recent_writes())
+            .map_err(CommandError::from)?;
     let updated = at_store::skill_package::SkillPackage::read(&source)
         .map_err(|_| CommandError::internal("the saved skill package could not be re-read"))?;
     let relative_text = relative.to_string_lossy().into_owned();
@@ -1433,7 +1436,7 @@ mod reveal_item_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod keep_copy_drift_tests {
     use std::path::PathBuf;
     use std::sync::Arc;

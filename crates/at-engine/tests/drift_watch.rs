@@ -39,7 +39,7 @@ const BUDGET: Duration = Duration::from_secs(15);
 
 /// Files one burst rewrites, and the quiet window that ends the drain of its batches.
 const ASSETS: usize = 300;
-const QUIET: Duration = Duration::from_secs(3);
+const QUIET: Duration = Duration::from_secs(6);
 
 /// A canonical temporary home with one agent skills folder and one AgenTuna store.
 struct Fixture {
@@ -585,13 +585,14 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
     std::thread::sleep(SETTLE);
 
     let written = br#"{"mcpServers":{"example":{"command":"node","args":["-y"]}}}"#;
-    let outcome = at_fs::apply(&WriteRequest::replace(
-        &path,
-        written.to_vec(),
-        at_fs::ExpectedState::Hash(baseline.clone()),
-    ))?;
-    registry.record_outcome(&path, &outcome);
-
+    at_fs::apply_with_registry(
+        &WriteRequest::replace(
+            &path,
+            written.to_vec(),
+            at_fs::ExpectedState::Hash(baseline.clone()),
+        ),
+        registry.as_ref(),
+    )?;
     let events: Vec<WatchEvent> = {
         // An absence assertion: the longer the window, the stronger, and a loaded runner may
         // deliver the suppressed event late.
@@ -609,8 +610,9 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
         if let Some(batch) = event.batch() {
             assert!(
                 !batch.contains(&path),
-                "an AgenTuna write must not reach a batch: {:?}",
-                batch.paths
+                "an AgenTuna write must not reach a batch: {:?} (suppressed events: {})",
+                batch.paths,
+                registry.suppressed_count()
             );
         }
         assert!(
@@ -618,6 +620,10 @@ fn an_agentuna_write_is_suppressed_and_produces_no_drift() -> Result<(), Box<dyn
             "an AgenTuna write must not produce drift"
         );
     }
+    assert!(
+        registry.suppressed_count() > 0,
+        "the watcher must observe and suppress the atomic rename's target event"
+    );
     assert_eq!(fs::read(&path)?, written, "the write itself succeeded");
     service.stop()?;
     Ok(())

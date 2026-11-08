@@ -131,6 +131,37 @@ impl Sandbox {
         ))
     }
 
+    /// Application paths with no project selected, the production shell shape.
+    ///
+    /// The desktop shell resolves its process paths once without a project; commands re-resolve
+    /// them for the database-selected project. Tests that must reproduce that shell read these.
+    ///
+    /// # Errors
+    /// Propagates path-resolution failures.
+    pub fn shell_paths(&self) -> TestResult<AppPaths> {
+        Ok(AppPaths::resolve(&PathEnvironment {
+            home: HomeSource::Injected(self.home.clone()),
+            overrides: PathOverrides {
+                home: Some(self.support.clone()),
+                user_store: Some(self.user_store.clone()),
+                project_store: None,
+                global_store: Some(self.global.clone()),
+            },
+            project_root: None,
+        })?)
+    }
+
+    /// A fresh app state whose injected paths carry no project.
+    ///
+    /// # Errors
+    /// Propagates path resolution and database-open failures.
+    pub fn shell_state(&self) -> TestResult<AppState> {
+        Ok(flow_harness::test_state(
+            self.database()?,
+            self.shell_paths()?,
+        ))
+    }
+
     /// Store layout for one scope.
     ///
     /// # Errors

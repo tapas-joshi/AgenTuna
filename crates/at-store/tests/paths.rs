@@ -97,7 +97,8 @@ fn empty_values_are_not_overrides() {
     let overrides = PathOverrides::from_lookup(|_| Some(OsString::new()));
     assert_eq!(overrides, PathOverrides::default());
     let paths = resolve(&injected("/Users/tester").with_overrides(overrides));
-    assert_eq!(paths.support_dir().file_name().unwrap(), "AgenTuna");
+    let default_paths = resolve(&injected("/Users/tester"));
+    assert_eq!(paths.support_dir(), default_paths.support_dir());
 }
 
 #[test]

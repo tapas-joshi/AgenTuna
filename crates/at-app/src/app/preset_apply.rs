@@ -711,8 +711,13 @@ pub fn preset_apply(
             backup_folder: ctx.paths.backup_dir(),
             recorder: &mut recorder,
         };
-        at_fs::changeset::apply_with_roots(set, &mut apply_context, &roots)
-            .map_err(conflict_error)?
+        at_fs::changeset::apply_with_roots_and_registry(
+            set,
+            &mut apply_context,
+            &roots,
+            &state.recent_writes(),
+        )
+        .map_err(conflict_error)?
     };
     let mut service = at_engine::presets::PresetService::new(&mut database);
     service
@@ -782,7 +787,12 @@ pub fn preset_unapply(
         backup_folder: ctx.paths.backup_dir(),
         recorder: &mut recorder,
     };
-    let outcome = at_fs::changeset::apply_with_roots(set, &mut apply_context, &roots)
-        .map_err(conflict_error)?;
+    let outcome = at_fs::changeset::apply_with_roots_and_registry(
+        set,
+        &mut apply_context,
+        &roots,
+        &state.recent_writes(),
+    )
+    .map_err(conflict_error)?;
     Ok(result_view(&plan, Some(&outcome)))
 }

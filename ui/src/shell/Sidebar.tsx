@@ -172,6 +172,10 @@ export function Sidebar({
                     if (section === "skills") void import("../screens/skills/SkillsScreen").catch(() => undefined);
                     if (section === "mcp") void import("../screens/mcp_list/McpListScreen").catch(() => undefined);
                   }}
+                  onPointerDown={() => {
+                    if (section === "skills") void import("../screens/skills/SkillsScreen").catch(() => undefined);
+                    if (section === "mcp") void import("../screens/mcp_list/McpListScreen").catch(() => undefined);
+                  }}
                   onFocus={() => {
                     if (section === "skills") void import("../screens/skills/SkillsScreen").catch(() => undefined);
                     if (section === "mcp") void import("../screens/mcp_list/McpListScreen").catch(() => undefined);

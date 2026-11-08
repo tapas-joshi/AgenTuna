@@ -1058,9 +1058,33 @@ pub fn apply_item_plan(
     context: &mut at_fs::ApplyContext<'_>,
     roots: &at_fs::ApplyRoots,
 ) -> Result<at_fs::ApplyOutcome, at_fs::ChangeSetApplyError> {
+    apply_item_plan_inner(plan, context, roots, None)
+}
+
+/// Applies a reviewed row-action plan while registering expected file writes before rename.
+pub fn apply_item_plan_with_registry(
+    plan: &McpItemPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: &at_fs::RecentWrites,
+) -> Result<at_fs::ApplyOutcome, at_fs::ChangeSetApplyError> {
+    apply_item_plan_inner(plan, context, roots, Some(registry))
+}
+
+fn apply_item_plan_inner(
+    plan: &McpItemPlan,
+    context: &mut at_fs::ApplyContext<'_>,
+    roots: &at_fs::ApplyRoots,
+    registry: Option<&at_fs::RecentWrites>,
+) -> Result<at_fs::ApplyOutcome, at_fs::ChangeSetApplyError> {
     let (store_outcome, handle) = match plan.plan.store.as_ref() {
         Some(store) => {
-            let mut applied = at_fs::apply_with_roots_reversible(store, context, roots)?;
+            let mut applied = match registry {
+                Some(registry) => at_fs::apply_with_roots_reversible_and_registry(
+                    store, context, roots, registry,
+                )?,
+                None => at_fs::apply_with_roots_reversible(store, context, roots)?,
+            };
             let handle = applied.rollback_handle.take();
             (Some(applied), handle)
         }
@@ -1075,7 +1099,11 @@ pub fn apply_item_plan(
         }
         return Ok(applied);
     };
-    match at_fs::apply_with_roots(native, context, roots) {
+    let native_result = match registry {
+        Some(registry) => at_fs::apply_with_roots_and_registry(native, context, roots, registry),
+        None => at_fs::apply_with_roots(native, context, roots),
+    };
+    match native_result {
         Ok(native_outcome) => {
             if let Some(handle) = handle {
                 at_fs::commit_reversible(handle)?;

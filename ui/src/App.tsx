@@ -159,17 +159,26 @@ export function App() {
     : null;
 
   useEffect(() => {
-    const preload = () => {
-      void loadSkillsScreen().catch(() => undefined);
-      void loadMcpListScreen().catch(() => undefined);
+    // Route-level code splitting means the Skills chunk otherwise arrives inside the first
+    // click. `requestIdleCallback` is not a fix: it only fires once the main thread idles,
+    // which happens at or after the earliest realistic click (TF-035). Fetch right after the
+    // shell's first paint instead, and let the sidebar's pointerdown/focus prefetch cover an
+    // even earlier interaction.
+    if (!bootstrapped) return;
+    let cancelled = false;
+    const frame = globalThis.requestAnimationFrame(() => {
+      // A microtask after the frame callback keeps the fetch out of that frame's paint.
+      void Promise.resolve().then(() => {
+        if (cancelled) return;
+        void loadSkillsScreen().catch(() => undefined);
+        void loadMcpListScreen().catch(() => undefined);
+      });
+    });
+    return () => {
+      cancelled = true;
+      globalThis.cancelAnimationFrame(frame);
     };
-    if (typeof window.requestIdleCallback === "function") {
-      const handle = window.requestIdleCallback(preload);
-      return () => window.cancelIdleCallback(handle);
-    }
-    const timer = globalThis.setTimeout(preload, 0);
-    return () => globalThis.clearTimeout(timer);
-  }, []);
+  }, [bootstrapped]);
   useEffect(() => {
     invoke<AppInfo>("app_info").then(setInfo, (e: unknown) => setError(commandErrorMessage(e)));
   }, []);

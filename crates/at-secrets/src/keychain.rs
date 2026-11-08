@@ -370,7 +370,12 @@ mod tests {
         let err = store.read(&id()).unwrap_err();
         assert!(matches!(err, SecretsError::KeychainDenied { .. }));
         let text = err.to_string();
+        #[cfg(target_os = "macos")]
         assert!(text.contains("Keychain Access"), "{text}");
+        #[cfg(target_os = "linux")]
+        assert!(text.contains("Secret Service provider"), "{text}");
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(text.contains("credential service"), "{text}");
         assert!(text.contains(KEYCHAIN_SERVICE), "{text}");
         assert!(!format!("{err} {err:?}").contains(SENTINEL));
     }

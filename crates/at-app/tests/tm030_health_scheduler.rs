@@ -158,7 +158,23 @@ fn read_report(path: &Path) -> (i32, Option<i32>) {
 }
 
 fn alive(pid: i32) -> bool {
-    rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).expect("pid")).is_ok()
+    if rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).expect("pid"))
+        .is_err()
+    {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Linux reports an unreaped orphan zombie as signalable, although it cannot execute.
+        // The minimal container init may leave such children until the test process exits.
+        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+            return stat
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().next())
+                != Some("Z");
+        }
+    }
+    true
 }
 
 /// Polls until `pid` is gone; panics when it outlives the bound.

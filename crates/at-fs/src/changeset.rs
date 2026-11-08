@@ -21,6 +21,7 @@ use crate::backup::BackupMeta;
 use crate::concurrency::ExpectedState;
 use crate::hash::sha256_hex;
 use crate::recovery::{JOURNAL_VERSION, JournalEntry, PendingJournal, write_journal};
+use crate::watch::RecentWrites;
 use crate::{FsError, MAX_FILE_BYTES};
 
 /// Database callbacks for operation lifecycle and file history.
@@ -400,7 +401,27 @@ pub fn apply(
     set: &ChangeSet,
     context: &mut ApplyContext<'_>,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, None, None, false, STORE_LOCK_WAIT)
+    apply_inner(set, context, None, None, None, false, STORE_LOCK_WAIT)
+}
+
+/// Applies a relative-path ChangeSet while registering expected writes before their atomic renames.
+///
+/// # Errors
+/// Returns the same errors as [`apply`].
+pub fn apply_with_registry(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    registry: &RecentWrites,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(
+        set,
+        context,
+        None,
+        None,
+        Some(registry),
+        false,
+        STORE_LOCK_WAIT,
+    )
 }
 
 /// Applies a ChangeSet with ownership checks for destructive operations on native paths.
@@ -416,7 +437,15 @@ pub fn apply_with_ownership_guard(
     context: &mut ApplyContext<'_>,
     guard: &dyn crate::guard::OverwriteGuard,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, None, Some(guard), false, STORE_LOCK_WAIT)
+    apply_inner(
+        set,
+        context,
+        None,
+        Some(guard),
+        None,
+        false,
+        STORE_LOCK_WAIT,
+    )
 }
 
 /// Applies a ChangeSet that may include absolute paths beneath explicitly authorized roots.
@@ -432,7 +461,39 @@ pub fn apply_with_roots(
     context: &mut ApplyContext<'_>,
     roots: &ApplyRoots,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, Some(roots), None, false, STORE_LOCK_WAIT)
+    apply_inner(
+        set,
+        context,
+        Some(roots),
+        None,
+        None,
+        false,
+        STORE_LOCK_WAIT,
+    )
+}
+
+/// Applies a ChangeSet while registering each expected file write before its atomic rename.
+///
+/// This avoids a race where the filesystem watcher observes an AgenTuna write before its
+/// outcome can be recorded by the caller.
+///
+/// # Errors
+/// Returns the same errors as [`apply_with_roots`].
+pub fn apply_with_roots_and_registry(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    roots: &ApplyRoots,
+    registry: &RecentWrites,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(
+        set,
+        context,
+        Some(roots),
+        None,
+        Some(registry),
+        false,
+        STORE_LOCK_WAIT,
+    )
 }
 /// Applies a reviewed ChangeSet while retaining a single-use in-process rollback token.
 ///
@@ -447,7 +508,28 @@ pub fn apply_with_roots_reversible(
     context: &mut ApplyContext<'_>,
     roots: &ApplyRoots,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
-    apply_inner(set, context, Some(roots), None, true, STORE_LOCK_WAIT)
+    apply_inner(set, context, Some(roots), None, None, true, STORE_LOCK_WAIT)
+}
+
+/// Applies a reversible ChangeSet while registering expected writes before their atomic renames.
+///
+/// # Errors
+/// Returns the same errors as [`apply_with_roots_reversible`].
+pub fn apply_with_roots_reversible_and_registry(
+    set: &ChangeSet,
+    context: &mut ApplyContext<'_>,
+    roots: &ApplyRoots,
+    registry: &RecentWrites,
+) -> Result<ApplyOutcome, ChangeSetApplyError> {
+    apply_inner(
+        set,
+        context,
+        Some(roots),
+        None,
+        Some(registry),
+        true,
+        STORE_LOCK_WAIT,
+    )
 }
 
 /// Reverses a completed reversible ChangeSet, refusing to overwrite later external edits.
@@ -531,6 +613,7 @@ pub fn apply_with_roots_and_guard(
         context,
         Some(roots),
         Some(guard),
+        None,
         false,
         STORE_LOCK_WAIT,
     )
@@ -601,6 +684,7 @@ fn apply_inner(
     context: &mut ApplyContext<'_>,
     authorized_roots: Option<&ApplyRoots>,
     ownership_guard: Option<&dyn crate::guard::OverwriteGuard>,
+    recent_writes: Option<&RecentWrites>,
     reversible: bool,
     lock_wait: Duration,
 ) -> Result<ApplyOutcome, ChangeSetApplyError> {
@@ -833,6 +917,7 @@ fn apply_inner(
                 store_root: context.store_root,
                 backup_root: &backup_folder,
                 ownership_guard,
+                recent_writes,
             },
         ) {
             Ok(path) => path,
@@ -947,6 +1032,17 @@ struct ExecuteContext<'a> {
     store_root: &'a Path,
     backup_root: &'a Path,
     ownership_guard: Option<&'a dyn crate::guard::OverwriteGuard>,
+    recent_writes: Option<&'a RecentWrites>,
+}
+
+fn apply_write_maybe_registered(
+    request: &WriteRequest,
+    recent_writes: Option<&RecentWrites>,
+) -> Result<crate::atomic::WriteOutcome, FsError> {
+    match recent_writes {
+        Some(registry) => crate::atomic::apply_with_registry(request, registry),
+        None => apply_write(request),
+    }
 }
 
 fn execute_op(
@@ -990,7 +1086,7 @@ fn execute_op(
             }
             request.backup_meta =
                 backup_meta(context.set, context.operation_id, path, backup_relative);
-            apply_write(&request)
+            apply_write_maybe_registered(&request, context.recent_writes)
                 .map(|outcome| outcome.backup_path)
                 .map_err(|error| error.to_string())
         }
@@ -1055,7 +1151,7 @@ fn execute_op(
             } else {
                 let bytes = fs::read(&source).map_err(|error| error.to_string())?;
                 let request = WriteRequest::create(path, bytes);
-                apply_write(&request)
+                apply_write_maybe_registered(&request, context.recent_writes)
                     .map(|_| None)
                     .map_err(|error| error.to_string())
             }
@@ -2188,6 +2284,7 @@ mod tests {
 
     /// Seeds a store whose `claude.json` is a symbolic link to a Dotfiles target, the layout a
     /// dotfile manager leaves behind for `~/.claude.json`.
+    #[cfg(unix)]
     fn symlinked_store(sandbox: &TempDir, before: &[u8]) -> (PathBuf, PathBuf, PathBuf) {
         let root = sandbox.path().join("store");
         fs::create_dir_all(root.join("dotfiles")).expect("dotfiles dir");
@@ -2198,6 +2295,7 @@ mod tests {
         (root, link, target)
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_following_a_symlinked_config_updates_the_target_and_keeps_the_link() {
         let sandbox = TempDir::new().expect("tempdir");
@@ -2231,6 +2329,7 @@ mod tests {
         assert_eq!(fs::read(&target).expect("target bytes"), after);
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_without_following_a_symlink_is_refused_before_any_history() {
         let sandbox = TempDir::new().expect("tempdir");
@@ -2280,6 +2379,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_batch_rolls_a_symlinked_write_back_through_the_link() {
         let sandbox = TempDir::new().expect("tempdir");
@@ -2475,7 +2575,7 @@ mod tests {
                 backup_folder: &backup_root,
                 recorder: &mut recorder,
             };
-            apply_inner(&set, &mut context, None, None, false, wait).expect_err("lock held")
+            apply_inner(&set, &mut context, None, None, None, false, wait).expect_err("lock held")
         };
         let elapsed = started.elapsed();
         FileExt::unlock(&held).expect("release the store lock");
