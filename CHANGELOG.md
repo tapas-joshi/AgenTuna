@@ -4,15 +4,51 @@ All notable changes to AgenTuna are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.1] - 2026-11-09
+
+Polish and platform fixes on top of 0.1.0, found by running the real app on macOS and Linux.
+
+### Added
+
+- **A real app icon:** three toggle switches (green on, slate off, blue on) on the navy tile,
+  replacing the placeholder green square. macOS, Windows and Linux files come from one SVG.
+- **Homebrew:** `brew tap tapas-joshi/agentuna`, then `brew install --cask agentuna` (macOS Apple
+  Silicon app plus the `agentuna` command) or `brew install agentuna-cli` (macOS Apple Silicon and
+  Linux x86_64). The cask clears the quarantine flag, so the unnotarized app opens without the
+  Gatekeeper prompt. Homebrew 6+ asks you to trust third-party taps once (`brew trust
+  tapas-joshi/agentuna`, or install with the fully qualified name).
 
 ### Fixed
 
-- The Global scope default no longer comes from macOS on every platform. `AppPaths` asks
-  `platform_roots::default_global_store` for the machine-wide location, so a Linux build resolves
-  `/var/lib/agentuna/global` and a Windows build `C:\ProgramData\AgenTuna\global` instead of
-  showing and probing `/Library/Application Support/AgenTuna/global`. `AGENTUNA_GLOBAL_STORE` and
-  the `global_store_path` setting still take precedence, and the macOS default is unchanged.
+- **Button labels are optically centred** in the macOS web view: labels sat about 0.75 CSS px low
+  because the font's line box was centred instead of its glyphs.
+- **Deleting a watched store folder is noticed again.** The watcher waited for an OS event that
+  macOS does not always deliver; roots are now also re-checked by `stat` every few seconds.
+- **AgenTuna's own writes no longer show up as "changed outside AgenTuna".** They are recognised by
+  path and content hash for as long as the file still holds what AgenTuna wrote, not by a 5-second
+  window.
+- **The Global scope default is platform-specific:** Linux `/var/lib/agentuna/global`, Windows
+  `C:\ProgramData\AgenTuna\global`; it showed the macOS path on every platform. macOS is unchanged,
+  and `AGENTUNA_GLOBAL_STORE` and the `global_store_path` setting still take precedence.
+- **macOS 15 first launch:** the right-click > Open override no longer works; the release notes and
+  README now describe **System Settings > Privacy & Security > Open Anyway** (or Homebrew).
+
+### Changed
+
+- **The Linux desktop app has been launched and checked** (Ubuntu 22.04, WebKitGTK 4.1, under a
+  virtual display): it starts with no special environment variables and renders Overview, Skills,
+  MCP Servers and Preferences. Untested: real GPU and Wayland, HiDPI, installing the `.deb` and
+  AppImage on a desktop, and unlocked-keyring secret writes.
+- CI now runs the `rust` and screenshot checks on Apple Silicon runners, and three CI jobs cover
+  Ubuntu and Windows (compile and tests; Windows tests have not run yet).
+
+### Known limitations
+
+- macOS builds are still not notarized (no Apple Developer ID): use Homebrew, **Open Anyway**, or
+  `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`.
+- Windows builds are not provided yet.
+- Performance on an Apple M4: cold start to interactive about 2 s, first open of a 3,000-item Skills
+  list about 0.8 s; memory stays well under 250 MB.
 
 ## [0.1.0] - 2026-11-08
 
@@ -73,4 +109,5 @@ Rust workspace (12 crates) with a Tauri 2 shell and a React/TypeScript front end
 engine behind the GUI and CLI; SQLite index; format-preserving config edits; 2,400+ Rust tests and
 800+ UI tests; screenshot tests against the FigCraft designs.
 
+[0.1.1]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.1
 [0.1.0]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.0
