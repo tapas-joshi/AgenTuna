@@ -37,7 +37,9 @@ const screens: readonly Screen[] = [
   {
     name: "skills-list",
     open: async (page) => { await navigation(page, "Skills").click(); },
-    ready: (page) => page.getByRole("main", { name: "Skills" }).getByText("code-review", { exact: true }),
+    // The toggle renders only after the async agents list has loaded, so it is the readiness signal for
+    // a stable screenshot (waiting for a row alone raced it).
+    ready: (page) => page.getByRole("main", { name: "Skills" }).getByRole("button", { name: /Show all agents/ }),
     action: (page) => page.getByRole("main", { name: "Skills" }).getByRole("button", { name: "+ New skill" }).first(),
     baseline: "small-skills",
     fitsWithoutSideScroll: true,

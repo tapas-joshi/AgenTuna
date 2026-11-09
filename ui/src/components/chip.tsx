@@ -29,7 +29,7 @@ const DOT_CLASSES: Readonly<Record<ChipDotTone, string>> = {
 };
 
 const BASE_CLASSES =
-  "inline-flex h-32 shrink-0 items-center gap-4 rounded-full border px-8 text-12 transition-colors " +
+  "inline-flex h-32 shrink-0 items-center gap-4 rounded-full border px-8 optical-label-center text-12 transition-colors " +
   "data-[state=on]:border-text data-[state=on]:bg-raised data-[state=on]:font-semibold data-[state=on]:text-text " +
   "data-[state=off]:border-border data-[state=off]:text-text-secondary data-[state=off]:hover:border-text-muted data-[state=off]:hover:text-text " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus " +

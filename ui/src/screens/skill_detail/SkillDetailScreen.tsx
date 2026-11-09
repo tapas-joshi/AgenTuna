@@ -67,7 +67,7 @@ const AGENT_LABELS: Readonly<Record<string, string>> = {
 
 /** Shared styling for the header action menu items. */
 const MENU_ITEM =
-  "w-full rounded-4 px-8 py-4 text-left hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-50";
+  "w-full rounded-4 px-8 py-4 optical-label-center text-left hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Display name for a deployment; a stored row that still holds the id gets the product name. */
 function deploymentAgentName(deployment: SkillDeploymentView): string {

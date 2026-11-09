@@ -100,7 +100,7 @@ export function SkillUpdateBadge({ row, onUpdate, onIgnore, busy = false }: Skil
               type="button"
               role="menuitem"
               disabled={busy}
-              className="w-full rounded-4 px-8 py-4 text-left hover:bg-surface disabled:opacity-50"
+              className="w-full rounded-4 px-8 py-4 optical-label-center text-left hover:bg-surface disabled:opacity-50"
               onClick={() => {
                 setOpen(false);
                 onUpdate(row);
@@ -112,7 +112,7 @@ export function SkillUpdateBadge({ row, onUpdate, onIgnore, busy = false }: Skil
               type="button"
               role="menuitem"
               disabled={busy}
-              className="w-full rounded-4 px-8 py-4 text-left hover:bg-surface disabled:opacity-50"
+              className="w-full rounded-4 px-8 py-4 optical-label-center text-left hover:bg-surface disabled:opacity-50"
               onClick={() => {
                 setOpen(false);
                 onIgnore(row);

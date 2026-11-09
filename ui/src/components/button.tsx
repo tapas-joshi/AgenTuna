@@ -25,7 +25,7 @@ const SIZE_CLASSES: Readonly<Record<ButtonSize, string>> = {
 };
 
 const BASE_CLASSES =
-  "inline-flex shrink-0 items-center justify-center rounded-6 font-medium transition-colors " +
+  "inline-flex shrink-0 items-center justify-center rounded-6 optical-label-center font-medium transition-colors " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 

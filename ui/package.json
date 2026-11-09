@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "tauri": "cd ../crates/at-app && tauri",
     "test": "vitest run",
+    "test:button-centering": "node ../scripts/button-centering.mjs",
     "visual": "playwright test",
     "visual:update": "playwright test --update-snapshots"
   },

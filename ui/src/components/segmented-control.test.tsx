@@ -44,6 +44,8 @@ describe("SegmentedControl", () => {
     expect(group.getAttribute("aria-orientation")).toBe("horizontal");
     expect(radios.map((radio) => radio.textContent)).toEqual(["Global", "User", "Project"]);
     expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual(["false", "false", "true"]);
+    expect(radios[0]?.className).toContain("optical-label-center");
+    expect(radios[0]?.className).toContain("h-32");
   });
 
   test("Tab reaches the group and the checked segment owns the tab stop", async () => {

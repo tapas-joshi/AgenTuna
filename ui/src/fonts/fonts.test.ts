@@ -38,6 +38,7 @@ describe("bundled font declarations", () => {
     }
   });
 
+
   test("loads only local woff2 files, never a remote URL", () => {
     const urls = [...CSS.matchAll(/url\("([^"]+)"\)/g)].map((match) => match[1] ?? "");
     expect(urls).toEqual([

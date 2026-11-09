@@ -28,7 +28,7 @@ export interface SegmentedControlProps<T extends string = string> {
 }
 
 const ITEM_BASE =
-  "inline-flex flex-1 items-center justify-center gap-4 rounded-6 border border-transparent whitespace-nowrap transition-colors " +
+  "inline-flex flex-1 items-center justify-center gap-4 rounded-6 border border-transparent optical-label-center whitespace-nowrap transition-colors " +
   "text-text-secondary hover:text-text " +
   "data-[state=checked]:border-border data-[state=checked]:bg-raised data-[state=checked]:font-medium data-[state=checked]:text-text " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus " +
