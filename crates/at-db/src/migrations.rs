@@ -50,6 +50,9 @@ pub const MIGRATION_V8_SQL: &str = include_str!("../migrations/0008_presets.sql"
 pub const MIGRATION_V9_SQL: &str =
     include_str!("../migrations/0009_settings_secrets_remote_backup.sql");
 
+/// SQL for migration v10: native entry link target and discovery outcome (TS-028).
+pub const MIGRATION_V10_SQL: &str = include_str!("../migrations/0010_native_discovery_details.sql");
+
 /// Name of the table that records applied migrations.
 pub(crate) const SCHEMA_VERSION_TABLE: &str = "schema_version";
 
@@ -70,6 +73,7 @@ pub const SHIPPED_MIGRATIONS: &[Migration] = &[
     Migration::new(7, MIGRATION_V7_SQL),
     Migration::new(8, MIGRATION_V8_SQL),
     Migration::new(9, MIGRATION_V9_SQL),
+    Migration::new(10, MIGRATION_V10_SQL),
 ];
 
 /// One numbered schema migration.

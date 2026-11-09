@@ -133,7 +133,11 @@ impl Fixture {
     }
 
     fn service(&self, roots: Vec<WatchRoot>) -> Result<WatchService, Box<dyn std::error::Error>> {
-        let service = WatchService::new(drift_watch_config(roots, Arc::new(RecentWrites::new())));
+        let service = WatchService::new(drift_watch_config(
+            roots,
+            Arc::new(RecentWrites::new()),
+            Vec::new(),
+        ));
         service.start()?;
         std::thread::sleep(SETTLE);
         Ok(service)

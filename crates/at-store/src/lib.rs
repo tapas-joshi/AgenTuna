@@ -34,8 +34,9 @@ pub use manifest::{
     CanonicalJsonError, ContentHash, ContentHashError, DisabledAgents, DisabledEntry, FieldError,
     FieldProblem, HashError, ItemSource, LoadedManifest, MCP_IDENTITY_KEYS, ManifestError,
     ManifestItem, PathTrustError, PlannedManifest, SaveOutcome, SourceKind, StoreManifest,
-    StorePath, StorePathError, canonical_json, hash_bytes, hash_mcp_entry, hash_rule_bytes,
-    hash_skill_folder, mcp_identity_key, resolve_item_path,
+    StorePath, StorePathError, ValidatedSkillRoot, canonical_json, hash_bytes, hash_mcp_entry,
+    hash_rule_bytes, hash_skill_folder, hash_skill_folder_resolved, mcp_identity_key,
+    resolve_item_path,
 };
 pub use mcp_store::{
     LoadedMcpStore, MCP_STORE_MAX_BYTES, MCP_STORE_MAX_SERVERS, McpSaveOutcome, McpStore,

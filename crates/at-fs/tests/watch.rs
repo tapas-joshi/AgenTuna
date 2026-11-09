@@ -589,3 +589,84 @@ fn the_service_can_be_shared_between_the_ui_and_the_worker() {
     assert_send_sync::<WatchRoot>();
     assert_send_sync::<WatchError>();
 }
+
+/// A linked skill entry whose target is outside the configured roots is not walked or watched.
+///
+/// Skill managers install links, but a link is user-controlled: one can point at `/` or at
+/// another user's home. Following it would make AgenTuna index and watch that whole tree.
+#[cfg(unix)]
+#[test]
+fn a_link_target_outside_the_allowed_roots_is_reported_and_not_followed() {
+    let sandbox = TempDir::new().expect("temp");
+    let sandbox = fs::canonicalize(sandbox.path()).expect("canonical sandbox");
+    let home = sandbox.join("home");
+    let skills = home.join("claude/skills");
+    fs::create_dir_all(&skills).expect("skills root");
+    let outside = sandbox.join("outside");
+    fs::create_dir_all(&outside).expect("outside dir");
+    let outside_file = outside.join("secret.md");
+    fs::write(&outside_file, "outside content\n").expect("outside file");
+    let link = skills.join("escape");
+    std::os::unix::fs::symlink(&outside, &link).expect("link to the outside dir");
+
+    settle_fixture();
+    let service = WatchService::new(
+        WatchConfig::new([WatchRoot::dir(&skills, WatchRootKind::SkillsDir)])
+            .with_allowed_link_roots([home.clone()])
+            .with_debounce(Duration::from_millis(50)),
+    );
+    service.start().expect("start");
+
+    // The refusal is reported as a typed degradation the Sync & drift screen can show.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut reported = false;
+    while Instant::now() < deadline {
+        if let at_fs::WatchStatus::Degraded(roots) = service.status()
+            && roots.iter().any(|root| {
+                matches!(
+                    &root.reason,
+                    at_fs::RootDegradation::LinkTargetOutsideRoots { link: reported_link, .. }
+                        if reported_link == &link
+                )
+            })
+        {
+            reported = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        reported,
+        "the outside link target is reported, status: {:?}",
+        service.status()
+    );
+
+    // A change inside the outside directory never reaches a batch under the link spelling.
+    drain(&service, Duration::from_secs(1));
+    fs::write(&outside_file, "edited outside\n").expect("edit outside");
+    let batch = next_batch(&service, Duration::from_secs(2));
+    assert!(
+        batch
+            .as_ref()
+            .is_none_or(|batch| !batch.paths.iter().any(|path| path.starts_with(&link))),
+        "the outside tree is not indexed under the link: {batch:?}"
+    );
+
+    // The link entry itself is still watched: replacing it is a change the app must see.
+    fs::remove_file(&link).expect("remove the link");
+    fs::create_dir_all(skills.join("inside")).expect("inside skill");
+    std::os::unix::fs::symlink(skills.join("inside"), &link).expect("replace the link");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut saw_link = false;
+    while Instant::now() < deadline {
+        let Some(batch) = next_batch(&service, Duration::from_secs(5)) else {
+            break;
+        };
+        if batch.paths.iter().any(|path| path == &link) {
+            saw_link = true;
+            break;
+        }
+    }
+    assert!(saw_link, "the link entry itself is still watched");
+    service.stop().expect("stop");
+}

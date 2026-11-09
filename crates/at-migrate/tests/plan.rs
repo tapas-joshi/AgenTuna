@@ -12,7 +12,9 @@ use at_migrate::plan::{
     BuildPlanRequest, ConflictResolution, MigrationAction, MigrationStrategy, PlanError,
     build_plan, dry_run, persist_plans, validate_plan,
 };
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest, scan};
+use at_migrate::scan::{
+    DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport, ScanRequest, scan,
+};
 use at_migrate::testkit::MigrationFixture;
 use at_model::{AgentId, LinkMode, Scope};
 
@@ -171,6 +173,9 @@ fn scanned_item(path: PathBuf, name: &str) -> ScanItem {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     }
 }
 

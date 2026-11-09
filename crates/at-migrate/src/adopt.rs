@@ -224,7 +224,7 @@ pub fn preview_adopt(request: &AdoptPreviewRequest<'_>) -> Result<AdoptPreview, 
     if item.store_link || item.ownership == Ownership::Managed {
         return Err(AdoptError::AlreadyManaged(item.path.clone()));
     }
-    let current = current_state(item)?;
+    let current = current_state(item, request.authorized_roots)?;
     let scanned = scanned_digest(item);
     if scanned.as_deref() != Some(current_digest(&current).as_str()) {
         return Err(AdoptError::StaleScanRecord {
@@ -461,22 +461,36 @@ fn scanned_digest(item: &ScanItem) -> Option<String> {
 }
 
 /// The digest the same content has now, computed the way the scanner computes it.
-fn current_state(item: &ScanItem) -> Result<PathState, AdoptError> {
+fn current_state(item: &ScanItem, roots: &ApplyRoots) -> Result<PathState, AdoptError> {
     match item.kind {
         ItemKind::Skill => {
-            let hash = at_store::manifest::hash_skill_folder(&item.path)
-                .map(|hash| hash.to_string())
-                .map_err(|error| match error {
-                    at_store::manifest::HashError::Read { source, .. }
-                        if source.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        AdoptError::StaleScanRecord {
-                            path: item.path.clone(),
-                            current: PathState::Missing,
-                        }
+            let source = item.resolved.as_deref().unwrap_or(&item.path);
+            let hash = if item.resolved.is_some() {
+                // The scan record names the canonical library folder; re-validate it against the
+                // injected roots now, so a link retargeted outside them is refused instead of
+                // read.
+                let allowed = roots
+                    .roots()
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>();
+                at_store::manifest::ValidatedSkillRoot::new(source, &allowed)
+                    .and_then(|root| at_store::hash_skill_folder_resolved(&root))
+            } else {
+                at_store::manifest::hash_skill_folder(source)
+            }
+            .map(|hash| hash.to_string())
+            .map_err(|error| match error {
+                at_store::manifest::HashError::Read { source, .. }
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    AdoptError::StaleScanRecord {
+                        path: item.path.clone(),
+                        current: PathState::Missing,
                     }
-                    other => AdoptError::Store(other.to_string()),
-                })?;
+                }
+                other => AdoptError::Store(other.to_string()),
+            })?;
             Ok(PathState::Present(hash))
         }
         ItemKind::McpServer => {

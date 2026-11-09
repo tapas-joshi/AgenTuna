@@ -5,8 +5,9 @@
 //! (`deployments`, falling back to the newest `item_versions` row), and every detected change is
 //! persisted by the engine and emitted to the UI with its classification.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use at_db::Database;
 use at_engine::drift::{
@@ -18,13 +19,27 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
-use super::detection::watch_roots_for;
+use super::detection::{allowed_link_roots, watch_roots_for};
 fn now_ms() -> i64 {
     (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 
 /// Event emitted with every drift notice produced by one batch.
 pub const EVENT_DRIFT_DETECTED: &str = "agentuna:drift-detected";
+
+/// Event emitted whenever the watcher condition changes, so the Sync & drift screen can show
+/// `Watching` / `Not watching: <reason>` without polling.
+pub const EVENT_DRIFT_WATCHER_STATUS: &str = "agentuna:drift-watcher-status";
+
+/// Background retry schedule for a watcher that failed to start. Each entry is the delay
+/// before the next attempt; the last entry repeats.
+const RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+];
 
 /// Drift event payload emitted to the UI after watcher processing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -71,10 +86,19 @@ pub struct DriftWatcherStatusView {
 pub struct DriftWatcherControl {
     watcher: Arc<WatchService>,
     status: Arc<Mutex<DriftWatcherStatusView>>,
+    app: AppHandle,
+    paused: Arc<AtomicBool>,
+    retry: Arc<Mutex<RetryState>>,
+}
+
+#[derive(Debug, Default)]
+struct RetryState {
+    attempt: usize,
+    last_attempt: Option<Instant>,
 }
 
 impl DriftWatcherControl {
-    fn new(watcher: Arc<WatchService>) -> Self {
+    fn new(watcher: Arc<WatchService>, app: AppHandle) -> Self {
         Self {
             watcher,
             status: Arc::new(Mutex::new(DriftWatcherStatusView {
@@ -82,6 +106,9 @@ impl DriftWatcherControl {
                 path: None,
                 error: None,
             })),
+            app,
+            paused: Arc::new(AtomicBool::new(false)),
+            retry: Arc::new(Mutex::new(RetryState::default())),
         }
     }
 
@@ -103,6 +130,7 @@ impl DriftWatcherControl {
     /// # Errors
     /// Returns the watcher failure when it cannot stop or install its native watches.
     pub fn set_paused(&self, paused: bool) -> Result<DriftWatcherStatusView, String> {
+        self.paused.store(paused, Ordering::SeqCst);
         if paused {
             self.watcher.stop().map_err(|error| error.to_string())?;
             self.set_status("paused", None, None);
@@ -110,6 +138,9 @@ impl DriftWatcherControl {
         }
         match self.watcher.start() {
             Ok(()) => {
+                if let Ok(mut retry) = self.retry.lock() {
+                    *retry = RetryState::default();
+                }
                 self.set_status("active", None, None);
                 Ok(self.status())
             }
@@ -123,12 +154,91 @@ impl DriftWatcherControl {
     }
 
     fn set_status(&self, status: &str, path: Option<String>, error: Option<String>) {
+        let next = DriftWatcherStatusView {
+            status: status.to_owned(),
+            path,
+            error,
+        };
         if let Ok(mut current) = self.status.lock() {
-            *current = DriftWatcherStatusView {
-                status: status.to_owned(),
-                path,
-                error,
-            };
+            if *current == next {
+                return;
+            }
+            *current = next.clone();
+        }
+        if let Err(error) = self.app.emit(EVENT_DRIFT_WATCHER_STATUS, &next) {
+            tracing::warn!(%error, "drift watcher status event emission failed");
+        }
+    }
+
+    /// Syncs the visible condition with the watch service and retries a dead service in the
+    /// background with backoff.
+    ///
+    /// The watch service installs its watches asynchronously and self-heals refused roots on
+    /// its own recheck, so this only mirrors its state — and, when the service could not be
+    /// started at all, brings it back.
+    fn sync_status(&self) {
+        if self.paused.load(Ordering::SeqCst) {
+            return;
+        }
+        let service_status = self.watcher.status();
+        let (name, error) = match &service_status {
+            at_fs::WatchStatus::Starting => ("starting", None),
+            at_fs::WatchStatus::Watching => ("active", None),
+            at_fs::WatchStatus::Failed(message) => ("error", Some(message.clone())),
+            at_fs::WatchStatus::Degraded(roots) => {
+                let reason = roots
+                    .first()
+                    .map(|root| root.reason.to_string())
+                    .unwrap_or_else(|| "Some roots are degraded.".to_owned());
+                ("degraded", Some(reason))
+            }
+            other => {
+                let message = other.to_string();
+                ("error", Some(message))
+            }
+        };
+        self.set_status(name, None, error);
+        if matches!(service_status, at_fs::WatchStatus::Failed(_)) && !self.watcher.is_running() {
+            self.retry_start();
+        }
+    }
+
+    /// Attempts one background start, honouring [`RETRY_DELAYS`] between attempts.
+    fn retry_start(&self) {
+        let allowed = self
+            .retry
+            .lock()
+            .map(|mut retry| {
+                let index = retry.attempt.min(RETRY_DELAYS.len() - 1);
+                let cooling_down = retry.last_attempt.is_some_and(|last| {
+                    Instant::now().saturating_duration_since(last) < RETRY_DELAYS[index]
+                });
+                if cooling_down {
+                    return false;
+                }
+                retry.last_attempt = Some(Instant::now());
+                retry.attempt += 1;
+                true
+            })
+            .unwrap_or(false);
+        if !allowed {
+            return;
+        }
+        match self.watcher.start() {
+            Ok(()) => {
+                if let Ok(mut retry) = self.retry.lock() {
+                    *retry = RetryState::default();
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                tracing::warn!(%error, "drift watcher retry failed");
+                self.set_status(
+                    "error",
+                    watcher_error_path(&error, self.watcher.roots()),
+                    Some(message),
+                );
+            }
         }
     }
 }
@@ -145,8 +255,12 @@ pub fn start(
     jobs: super::jobs::JobsControl,
 ) -> DriftWatcherControl {
     let roots = watch_roots_for(&paths);
-    let watcher = Arc::new(WatchService::new(drift_watch_config(roots, registry)));
-    let control = DriftWatcherControl::new(Arc::clone(&watcher));
+    let watcher = Arc::new(WatchService::new(drift_watch_config(
+        roots,
+        registry,
+        allowed_link_roots(&paths),
+    )));
+    let control = DriftWatcherControl::new(Arc::clone(&watcher), app.clone());
     match watcher.start() {
         Ok(()) => control.set_status("active", None, None),
         Err(error) => {
@@ -159,6 +273,7 @@ pub fn start(
         }
     }
     let worker_control = control.clone();
+    let cancellation = jobs.cancellation_token();
     tauri::async_runtime::spawn_blocking(move || {
         if jobs.window_is_paused(now_ms()) {
             jobs.wait_until_window_active();
@@ -166,6 +281,11 @@ pub fn start(
         reconcile_once(&app, &database);
         let mut deferred_while_hidden = false;
         loop {
+            // App shutdown cancels the token; the watcher is dropped with the process, so the
+            // worker must stop instead of idling forever on the event queue.
+            if cancellation.is_cancelled() {
+                return;
+            }
             if jobs.window_is_paused(now_ms()) {
                 deferred_while_hidden = true;
                 jobs.wait_until_window_active();
@@ -177,6 +297,9 @@ pub fn start(
                 deferred_while_hidden = false;
             }
             let Some(event) = watcher.next_event(Duration::from_secs(1)) else {
+                // Idle tick: mirror the watch service's own background progress (async watch
+                // installation, self-healing, retries) into the visible condition.
+                worker_control.sync_status();
                 continue;
             };
             if jobs.window_is_paused(now_ms()) {

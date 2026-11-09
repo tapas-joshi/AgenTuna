@@ -38,6 +38,19 @@ native: boolean,
  */
 native_path: string | null, 
 /**
+ * Folder a manager-installed link resolves to; the Skills screen names it next to the link.
+ */
+native_link_target: string | null, 
+/**
+ * What the scan observed about the native entry: `valid`, `invalid`, `broken_link`,
+ * `unreadable`. `None` for canonical rows.
+ */
+native_state: string | null, 
+/**
+ * Short reason a native entry is broken or refused, when the scan reported one.
+ */
+native_problem: string | null, 
+/**
  * Whether the source advertises an update the user has not ignored (TS-040 renders the badge).
  */
 update_available: boolean, 

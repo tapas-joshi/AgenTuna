@@ -12,7 +12,7 @@ use at_migrate::conflicts::{
     occupied_names,
 };
 use at_migrate::normalize;
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, StoreItem};
+use at_migrate::scan::{DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport, StoreItem};
 use at_model::{AgentId, ItemKind, Scope};
 use tempfile::TempDir;
 
@@ -38,6 +38,9 @@ fn item(copy: FixtureCopy, agent: AgentId) -> ScanItem {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     }
 }
 

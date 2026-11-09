@@ -202,6 +202,9 @@ pub fn index(
                         update_available: false,
                         updated_at: String::new(),
                         description: None,
+                        native_link_target: None,
+                        native_state: Some("unreadable".to_owned()),
+                        native_problem: Some(error.to_string()),
                     };
                     rows.push(SkillIndexRow {
                         skill: failed,
@@ -257,10 +260,19 @@ pub fn index(
                     update_available: false,
                     updated_at,
                     description: None,
+                    native_link_target: native
+                        .resolved
+                        .as_ref()
+                        .or(native.target.as_ref())
+                        .map(|target| target.to_string_lossy().into_owned()),
+                    native_state: Some(native_state_name(native.state).to_owned()),
+                    native_problem: native.error.clone(),
                 },
                 agents: BTreeMap::from([(
                     agent_id.clone(),
-                    SkillCellState::Native { path: native.path },
+                    SkillCellState::Native {
+                        path: native.path.clone(),
+                    },
                 )]),
             });
         }
@@ -296,6 +308,18 @@ pub fn index(
         rows.retain(|row| row.skill.shadowed_by.is_some());
     }
     Ok(SkillsIndex { rows, counts })
+}
+
+/// Wire name of a discovery state, shared with the DB projection.
+fn native_state_name(state: at_adapters::native_skills::NativeSkillState) -> &'static str {
+    match state {
+        at_adapters::native_skills::NativeSkillState::Valid => "valid",
+        at_adapters::native_skills::NativeSkillState::Invalid => "invalid",
+        at_adapters::native_skills::NativeSkillState::Broken => "broken_link",
+        at_adapters::native_skills::NativeSkillState::PermissionDenied => "unreadable",
+        // A state added later is reported as unreadable rather than claiming it loads.
+        _ => "unreadable",
+    }
 }
 
 fn cell_from_deployment(

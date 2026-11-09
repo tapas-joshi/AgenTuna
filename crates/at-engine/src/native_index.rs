@@ -115,6 +115,12 @@ struct OwnedEntry {
     name: String,
     path: String,
     content_hash: Option<String>,
+    /// Folder a validated link resolved to, or the link target as written when it did not.
+    link_target: Option<String>,
+    /// What the scan observed about the entry itself.
+    discovery_state: Option<String>,
+    /// Short reason a refused or broken entry carries.
+    discovery_note: Option<String>,
 }
 
 /// Scans the injected machine context and replaces the derived native rows.
@@ -198,11 +204,19 @@ pub fn refresh_native_with_environment(
             }
             let scan_entries = entries
                 .iter()
-                .map(|entry| NativeScanEntry {
-                    kind: entry.kind,
-                    name: &entry.name,
-                    path: &entry.path,
-                    content_hash: entry.content_hash.as_deref(),
+                .map(|entry| {
+                    let mut recorded = NativeScanEntry::new(entry.kind, &entry.name, &entry.path)
+                        .with_discovery(
+                            entry.discovery_state.as_deref().unwrap_or("valid"),
+                            entry.discovery_note.as_deref(),
+                        );
+                    if let Some(hash) = entry.content_hash.as_deref() {
+                        recorded = recorded.with_content_hash(hash);
+                    }
+                    if let Some(target) = entry.link_target.as_deref() {
+                        recorded = recorded.with_link_target(target);
+                    }
+                    recorded
                 })
                 .collect::<Vec<_>>();
             let replaced = replace_scan(connection, agent, *scope, &scan_entries)?;
@@ -352,14 +366,16 @@ fn group_findings(
             continue;
         }
         if let ParseStatus::Error(message) = &item.parse_status {
+            // An entry whose content is refused or whose link is broken stays listed: it is
+            // what the agent folder holds, and dropping it here is what made the next refresh
+            // mark every manager-installed skill `missing`.
             refresh.warnings.push(ScanWarning {
                 path: item.path.clone(),
                 kind: item.kind,
-                agent,
+                agent: agent.clone(),
                 scope: item.scope,
                 message: message.clone(),
             });
-            continue;
         }
         let Some(path) = row_path(item) else {
             refresh.warnings.push(ScanWarning {
@@ -374,6 +390,10 @@ fn group_findings(
             });
             continue;
         };
+        let note = match &item.parse_status {
+            ParseStatus::Error(message) => Some(message.clone()),
+            _ => None,
+        };
         slices
             .entry((agent, item.scope))
             .or_default()
@@ -385,6 +405,13 @@ fn group_findings(
                     .normalized_hash
                     .clone()
                     .or_else(|| item.content_hash.clone()),
+                link_target: item
+                    .resolved
+                    .as_ref()
+                    .or(item.link_target.as_ref())
+                    .map(|target| target.to_string_lossy().into_owned()),
+                discovery_state: Some(item.discovery.as_str().to_owned()),
+                discovery_note: note,
             });
     }
     for entries in slices.values_mut() {

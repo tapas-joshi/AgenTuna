@@ -2,7 +2,10 @@
 
 use std::fs;
 
-use at_db::migrations::{MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V7_SQL, SHIPPED_MIGRATIONS};
+use at_db::migrations::{
+    MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V7_SQL, MIGRATION_V9_SQL, MIGRATION_V10_SQL,
+    SHIPPED_MIGRATIONS,
+};
 use at_db::{Database, DbError, Migration, Migrations};
 use rusqlite::Connection;
 use rusqlite::types::FromSql;
@@ -534,4 +537,66 @@ fn sparse_sets_allow_gaps_but_require_order() {
         ]),
         Err(DbError::InvalidMigrations { .. })
     ));
+}
+
+#[test]
+fn an_existing_v9_database_keeps_its_native_rows_when_v10_adds_discovery_columns() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = database_path(&dir);
+    // The previous release shipped v1..v9.
+    let v9_migrations = || {
+        let prefix = SHIPPED_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.version() <= 9)
+            .collect::<Vec<_>>();
+        Migrations::new(&prefix).expect("v1..v9 is a valid list")
+    };
+    let v9 = v9_migrations();
+
+    let database = Database::open_file_with(&path, v9).expect("older database opens");
+    assert_eq!(database.schema_version().expect("version"), 9);
+    let path_text = "/sandbox/home/.claude/skills/alpha";
+    database
+        .connection()
+        .execute(
+            "INSERT INTO native_items (id, agent_id, scope, kind, name, path, content_hash, status) \
+             VALUES ('nat_old', 'claude_code', 'user', 'skill', 'alpha', ?1, 'abc', 'missing')",
+            [path_text],
+        )
+        .expect("a v9 native row is written");
+    drop(database);
+
+    let database = Database::open_file(&path).expect("upgrade to the shipped schema");
+    assert_eq!(database.schema_version().expect("version"), 10);
+    let row = at_db::native::native_item_by_path(database.connection(), path_text)
+        .expect("row reads")
+        .expect("the v9 row survived the upgrade");
+    assert_eq!(row.name, "alpha");
+    assert_eq!(row.status, at_db::native::NativeStatus::Missing);
+    assert_eq!(row.content_hash.as_deref(), Some("abc"));
+    assert!(row.link_target.is_none(), "the new column starts empty");
+    assert!(row.discovery_state.is_none());
+    assert!(row.discovery_note.is_none());
+    assert!(
+        database
+            .applied_migrations()
+            .expect("migrations")
+            .iter()
+            .any(|m| m.version == 10)
+    );
+
+    // The documented downgrade behaviour: additive, nullable columns, and an older binary
+    // refuses the newer index rather than reading it.
+    assert!(
+        MIGRATION_V10_SQL.contains("Downgrade:"),
+        "the migration documents what a downgrade does"
+    );
+    assert!(MIGRATION_V9_SQL.contains("CREATE TABLE settings"));
+    drop(database);
+    let older = Database::open_file_with(&path, v9_migrations());
+    assert!(
+        older.is_err(),
+        "a v9 binary refuses a v10 index instead of downgrading it"
+    );
 }

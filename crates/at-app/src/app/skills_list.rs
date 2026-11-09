@@ -62,6 +62,13 @@ pub struct SkillRowView {
     pub native: bool,
     /// Source path of a native-only discovery.
     pub native_path: Option<String>,
+    /// Folder a manager-installed link resolves to; the Skills screen names it next to the link.
+    pub native_link_target: Option<String>,
+    /// What the scan observed about the native entry: `valid`, `invalid`, `broken_link`,
+    /// `unreadable`. `None` for canonical rows.
+    pub native_state: Option<String>,
+    /// Short reason a native entry is broken or refused, when the scan reported one.
+    pub native_problem: Option<String>,
     /// Whether the source advertises an update the user has not ignored (TS-040 renders the badge).
     pub update_available: bool,
     /// Live source kind (`git`, `marketplace`, `library`, `folder`) when the row was imported.
@@ -240,6 +247,9 @@ pub(crate) fn skills_list_inner(
             description: row.description,
             native,
             native_path: row.native_path,
+            native_link_target: row.native_link_target,
+            native_state: row.native_state,
+            native_problem: row.native_problem,
             update_available: row.update_available,
             source: source
                 .as_ref()

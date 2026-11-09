@@ -13,7 +13,7 @@ use at_migrate::plan::{
     BuildPlanRequest, ConflictResolution, DryRunRow, MigrationAction, MigrationPlan,
     MigrationStrategy, PlanCounts, PlanError, build_plan, dry_run, validate_plan,
 };
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport, StoreItem};
+use at_migrate::scan::{DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport, StoreItem};
 use at_model::{AgentId, ItemKind, Scope};
 use tempfile::TempDir;
 
@@ -74,6 +74,9 @@ impl Workspace {
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,
+            discovery: DiscoveryState::Valid,
+            link_target: None,
+            resolved: None,
         }
     }
 
@@ -96,6 +99,9 @@ impl Workspace {
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,
+            discovery: DiscoveryState::Valid,
+            link_target: None,
+            resolved: None,
         }
     }
 
@@ -113,6 +119,9 @@ impl Workspace {
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,
+            discovery: DiscoveryState::Valid,
+            link_target: None,
+            resolved: None,
         }
     }
 }

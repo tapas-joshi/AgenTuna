@@ -42,6 +42,12 @@ pub struct NativeSkill {
     pub mtime: Option<SystemTime>,
     /// Symlink target as written, including dangling targets.
     pub target: Option<PathBuf>,
+    /// Canonical folder a symlink resolves to, after the target was checked against the roots
+    /// this scan may read. `None` for a real folder and for a link that was refused.
+    ///
+    /// Hashing and copying use this path, never the link entry: a skill manager installs skills
+    /// as links, and the link is the identity while this path is the content.
+    pub resolved: Option<PathBuf>,
     /// Whether this was found in a secondary, unmanaged discovery root.
     pub unmanaged_alternative: bool,
     /// Discovery state.
@@ -127,6 +133,9 @@ pub fn list_native_skills_with_options(
             } else {
                 None
             };
+            // Only a link that resolved and whose target passed the root check may be hashed
+            // through this path; every other branch leaves it `None`.
+            let mut resolved_link: Option<PathBuf> = None;
             let content_root = if let Some(target_path) = target.as_ref() {
                 let resolved = match std::fs::canonicalize(&path) {
                     Ok(resolved) => resolved,
@@ -181,6 +190,7 @@ pub fn list_native_skills_with_options(
                     skills.push(row);
                     continue;
                 }
+                resolved_link = Some(resolved.clone());
                 resolved
             } else {
                 if !metadata.is_dir() {
@@ -228,6 +238,7 @@ pub fn list_native_skills_with_options(
                 scope: root.scope,
                 mtime: metadata.modified().ok(),
                 target,
+                resolved: resolved_link,
                 unmanaged_alternative: !root.primary,
                 state,
             });
@@ -356,6 +367,7 @@ fn skill_error(
         scope,
         mtime: None,
         target,
+        resolved: None,
         unmanaged_alternative: false,
         state,
     }

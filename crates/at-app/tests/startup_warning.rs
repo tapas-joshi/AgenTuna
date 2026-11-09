@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use at_app::app::startup::{self, OpenedDatabase, StartupWarningView};
+use at_db::migrations::SHIPPED_MIGRATIONS;
 use at_db::rebuild::rebuild;
 use at_model::{ItemKind, Scope};
 use at_store::layout::{Slug, StoreLayout, init_store};
@@ -139,7 +140,14 @@ fn a_corrupt_index_is_quarantined_rebuilt_and_reported() {
 
     // The fresh index is usable and the quarantine file is left alone.
     let database = opened.database.as_ref().expect("database");
-    assert_eq!(database.schema_version().expect("schema"), 9);
+    assert_eq!(
+        database.schema_version().expect("schema"),
+        SHIPPED_MIGRATIONS
+            .iter()
+            .map(|migration| migration.version())
+            .max()
+            .expect("at least one migration ships")
+    );
     assert!(quarantine.exists());
 }
 

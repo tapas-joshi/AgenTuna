@@ -4,6 +4,37 @@ All notable changes to AgenTuna are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-11-10
+
+Fixes skills not being detected on machines where a skills manager installs skills as symbolic
+links, and a file watcher that gave up on large skill folders.
+
+### Fixed
+
+- **Skills installed through symbolic links are detected.** Folders in `~/.claude/skills`,
+  `~/.codex/skills`, `~/.agents/skills` and omp's `managed-skills` that link into a skills-manager
+  library (cc-switch, skills-manager and similar) were all rejected as "unreadable skill content",
+  so only MCP servers showed up. The link's target folder is now validated (it must resolve inside
+  your home or project folder), read, and shown as one skill listed under every agent that links to
+  it, with "linked" and "links to" details. Broken links appear as "broken link" rows instead of
+  disappearing. Links inside a skill folder, links leaving your home folder and link loops are still
+  refused.
+- **Migrating and adopting linked skills is safe.** The plan records each link's target; if you
+  retarget or replace a link between review and apply, the plan is refused as stale, and undo refuses
+  to touch a link you changed. Two agents linking one library folder are copied and backed up once.
+- **The file watcher no longer fails with "the watch service did not start within 5s".** On macOS
+  starting it blocked once per watched folder. It now starts in under 100 ms, seeds in the
+  background, retries with backoff, and Sync & drift shows Watching, Watching (degraded) or Not
+  watching with the reason and a Retry button. Skill links are watched through their target folder
+  (only inside your home, project and store folders), bounded to 256 targets and 20,000 entries per
+  folder.
+
+### Changed
+
+- The AgenTuna database moves to schema version 10 (link target and discovery state columns). It is
+  upgraded in place and keeps existing rows; skills previously marked missing reappear after the
+  next scan.
+
 ## [0.1.1] - 2026-11-09
 
 Polish and platform fixes on top of 0.1.0, found by running the real app on macOS and Linux.
@@ -109,5 +140,6 @@ Rust workspace (12 crates) with a Tauri 2 shell and a React/TypeScript front end
 engine behind the GUI and CLI; SQLite index; format-preserving config edits; 2,400+ Rust tests and
 800+ UI tests; screenshot tests against the FigCraft designs.
 
+[0.1.2]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.2
 [0.1.1]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.1
 [0.1.0]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.0

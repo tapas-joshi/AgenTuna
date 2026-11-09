@@ -190,7 +190,7 @@ use std::path::{Path, PathBuf};
 use at_migrate::apply::{ApplyPlanContext, apply_plan};
 use at_migrate::conflicts::detect_conflicts;
 use at_migrate::plan::{BuildPlanRequest, MigrationStrategy, build_plan};
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+use at_migrate::scan::{DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport};
 use at_model::{AgentId, ItemId, ItemKind, Scope};
 
 struct MigrateFixture {
@@ -287,6 +287,9 @@ fn skill_item(path: &Path, name: &str, agents: &[AgentId]) -> ScanItem {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     }
 }
 
@@ -556,6 +559,9 @@ fn undo_of_migration_with_sibling_skills_restores_each_native_tree() {
                 parse_status: ParseStatus::Parsed,
                 store_link: false,
                 ownership: Ownership::NotInAgenTuna,
+                discovery: DiscoveryState::Valid,
+                link_target: None,
+                resolved: None,
             }
         })
         .collect::<Vec<_>>();

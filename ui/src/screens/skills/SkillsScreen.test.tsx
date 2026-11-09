@@ -29,6 +29,9 @@ const mockSkill = (overrides = {}) => ({
   description: "Code review helpers for pull requests",
   native: false,
   native_path: null,
+  native_link_target: null,
+  native_state: null,
+  native_problem: null,
   update_available: false,
   source: null,
   source_commit_sha: null,
@@ -713,5 +716,79 @@ describe("SkillsScreen STATUS column (design 02-skills)", () => {
           (call.args as Record<string, unknown>).path === "/sandbox/home/.claude/skills/unmanaged-tool",
       ),
     ).toBe(true);
+  });
+});
+
+describe("manager-installed skills", () => {
+  const linkedRow = (overrides = {}) =>
+    mockSkill({
+      item_id: "",
+      name: "pdf-extract",
+      scope: "user",
+      native: true,
+      native_path: "/sandbox/home/.claude/skills/pdf-extract",
+      native_link_target: "/sandbox/home/.cc-switch/skills/pdf-extract",
+      native_state: "valid",
+      native_problem: null,
+      agents: [
+        {
+          agent: "claude_code",
+          state: "native",
+          enabled: true,
+          config_path: "/sandbox/home/.claude/skills/pdf-extract",
+        },
+        {
+          agent: "codex",
+          state: "native",
+          enabled: true,
+          config_path: "/sandbox/home/.codex/skills/pdf-extract",
+        },
+      ],
+      ...overrides,
+    });
+
+  test("a linked skill shows its link path and the folder it links to", async () => {
+    ipc.reply = (command) =>
+      command === "skills_list"
+        ? Promise.resolve(mockView({ rows: [linkedRow()] }))
+        : Promise.resolve(undefined);
+    renderScreen();
+    expect(await screen.findByText("pdf-extract")).toBeTruthy();
+    const path = document.querySelector('[data-slot="native-path"]');
+    expect(path?.textContent).toBe("/sandbox/home/.claude/skills/pdf-extract");
+    const target = document.querySelector('[data-slot="native-link-target"]');
+    expect(target?.textContent).toBe("links to /sandbox/home/.cc-switch/skills/pdf-extract");
+    expect(screen.getByText("linked")).toBeTruthy();
+  });
+
+  test("a broken link and refused content stay listed with their reason", async () => {
+    ipc.reply = (command) =>
+      command === "skills_list"
+        ? Promise.resolve(
+            mockView({
+              rows: [
+                linkedRow({
+                  name: "superset-missing-01",
+                  native_path: "/sandbox/home/.codex/skills/superset-missing-01",
+                  native_link_target: "/sandbox/home/.cc-switch/skills/superset-missing-01",
+                  native_state: "broken_link",
+                  native_problem: "dangling symbolic link",
+                }),
+                linkedRow({
+                  name: "inner-link",
+                  native_state: "invalid",
+                  native_problem: "symlink inside skill folder: references/alias.txt",
+                }),
+              ],
+            }),
+          )
+        : Promise.resolve(undefined);
+    renderScreen();
+    expect(await screen.findByText("Broken link")).toBeTruthy();
+    expect(await screen.findByText("Unreadable")).toBeTruthy();
+    expect(screen.getByText("dangling symbolic link")).toBeTruthy();
+    expect(screen.getByText("symlink inside skill folder: references/alias.txt")).toBeTruthy();
+    expect(screen.getByText("superset-missing-01")).toBeTruthy();
+    expect(screen.getByText("inner-link")).toBeTruthy();
   });
 });

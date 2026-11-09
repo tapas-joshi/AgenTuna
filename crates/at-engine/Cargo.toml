@@ -33,6 +33,7 @@ serde_json.workspace = true
 similar.workspace = true
 [dev-dependencies]
 at-fs = { workspace = true, features = ["testkit"] }
+at-migrate = { workspace = true, features = ["testkit"] }
 serde_json.workspace = true
 tempfile.workspace = true
 zip.workspace = true

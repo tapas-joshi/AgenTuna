@@ -55,6 +55,25 @@ pub struct SkillRow {
     pub updated_at: String,
     /// One-line description parsed from SKILL.md at index time; native-only rows have none.
     pub description: Option<String>,
+    /// Folder a manager-installed link resolved to, when the native row is a link.
+    pub native_link_target: Option<String>,
+    /// What the scan observed about the native entry (`valid`, `invalid`, `broken_link`, ...).
+    pub native_state: Option<String>,
+    /// Short reason a link is broken or its content refused, when the scan reported one.
+    pub native_problem: Option<String>,
+}
+
+/// How one native skill is identified across agents.
+///
+/// Two agents that read the same physical folder — shared discovery roots, or two links into one
+/// skill-manager library — must render as one row. The resolved target is that identity when the
+/// scan validated one; otherwise the link or folder path is.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum NativeIdentity {
+    /// Canonical folder a validated link resolves to.
+    Resolved(PathBuf),
+    /// The entry path, for real folders and links that do not resolve.
+    Path(PathBuf),
 }
 
 /// Lists canonical skills and optionally native-only discoveries.
@@ -175,6 +194,9 @@ pub fn list_skills(
                 update_available,
                 updated_at,
                 description,
+                native_link_target: None,
+                native_state: None,
+                native_problem: None,
             });
             index
         };
@@ -244,7 +266,8 @@ pub fn list_skills(
             agents.dedup();
         }
         let mut native = connection.prepare(
-            "SELECT n.name, n.scope, n.path, n.last_seen_at, n.agent_id \
+            "SELECT n.name, n.scope, n.path, n.last_seen_at, n.agent_id, \
+                    n.link_target, n.discovery_state, n.discovery_note \
                FROM native_items n WHERE n.kind='skill' AND n.status='new' AND n.adopted_item_id IS NULL \
                  AND (?1 IS NULL OR n.scope=?1) \
                  AND (?2 IS NULL OR lower(n.name) LIKE '%' || lower(?2) || '%' OR lower(n.path) LIKE '%' || lower(?2) || '%') \
@@ -264,12 +287,15 @@ pub fn list_skills(
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )?;
-        let mut native_indexes = BTreeMap::<(String, Scope, PathBuf), usize>::new();
+        let mut native_indexes = BTreeMap::<(String, Scope, NativeIdentity), usize>::new();
         for row in native_rows {
-            let (name, scope, path, updated_at, agent) = row?;
+            let (name, scope, path, updated_at, agent, link_target, discovery_state, note) = row?;
             let scope =
                 scope
                     .parse()
@@ -283,16 +309,29 @@ pub fn list_skills(
                     field: "native_items.agent_id",
                     reason: e.to_string(),
                 })?;
-            // A native item is unique by physical path. Include the folder in the
-            // projection key so separate same-name copies remain distinct.
+            // A native skill's identity is the folder it actually reads. A manager-installed
+            // skill is a link, so claude, codex and omp link to one library folder: grouping by
+            // the target shows one row with every agent that loads it, whether the content is
+            // readable or was refused. An entry that resolved nothing (a link whose target is
+            // missing or escapes the roots) is named by its own path.
+            let identity = match link_target.as_deref() {
+                Some(target) => NativeIdentity::Resolved(PathBuf::from(target)),
+                None => NativeIdentity::Path(PathBuf::from(&path)),
+            };
             let native_path = PathBuf::from(&path);
-            let key = (at_model::normalized_name(&name), scope, native_path.clone());
+            let key = (at_model::normalized_name(&name), scope, identity);
             let readers = native_path
                 .parent()
                 .and_then(|root| roots.get(&(scope, root.to_path_buf())))
                 .cloned()
                 .unwrap_or_else(|| vec![agent.clone()]);
             let index = if let Some(index) = native_indexes.get(&key).copied() {
+                // The first row of a group carries the state; a later entry can only add the
+                // reason its own link failed, which never contradicts a validated sibling.
+                let existing = &mut rows[index];
+                if existing.native_problem.is_none() {
+                    existing.native_problem = note.clone();
+                }
                 index
             } else {
                 native_indexes.insert(key, rows.len());
@@ -308,6 +347,9 @@ pub fn list_skills(
                     update_available: false,
                     updated_at,
                     description: None,
+                    native_link_target: link_target,
+                    native_state: discovery_state,
+                    native_problem: note,
                 });
                 rows.len() - 1
             };
