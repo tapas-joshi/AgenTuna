@@ -24,6 +24,7 @@ test("renders Global, User and Project and hides Local when disabled", () => {
   const onScopeSelected = renderSwitcher();
   expect(within(screen.getByRole("radiogroup", { name: "Scope" })).getAllByRole("radio")).toHaveLength(3);
   expect(screen.queryByRole("radio", { name: "Local (only you, this repo)" })).toBeNull();
+  expect(screen.getByRole("radio", { name: "User" }).className).toContain("optical-label-center");
   expect(screen.getByRole("radio", { name: "User" }).getAttribute("aria-checked")).toBe("true");
   expect(onScopeSelected).not.toHaveBeenCalled();
 });

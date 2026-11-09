@@ -1352,7 +1352,7 @@ export function SkillsScreen(
                   type="button"
                   role="menuitem"
                   tabIndex={-1}
-                  className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                  className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                   onClick={() => handleRowAction(row, "open")}
                 >
                   Open
@@ -1361,7 +1361,7 @@ export function SkillsScreen(
                   type="button"
                   role="menuitem"
                   tabIndex={-1}
-                  className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                  className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                   onClick={() => handleRowAction(row, "why")}
                 >
                   Why is this on?
@@ -1374,7 +1374,7 @@ export function SkillsScreen(
                       type="button"
                       role="menuitem"
                       tabIndex={-1}
-                      className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                       onClick={() => {
                         rowMenu.close();
                         setAdoptModalTarget(row);
@@ -1387,7 +1387,7 @@ export function SkillsScreen(
                         type="button"
                         role="menuitem"
                         tabIndex={-1}
-                        className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                        className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                         onClick={() => {
                           rowMenu.close();
                           app.navigate("migrate");
@@ -1404,7 +1404,7 @@ export function SkillsScreen(
                       type="button"
                       role="menuitem"
                       tabIndex={-1}
-                      className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                       onClick={() => handleRowAction(row, "promote")}
                     >
                       Promote
@@ -1413,7 +1413,7 @@ export function SkillsScreen(
                       type="button"
                       role="menuitem"
                       tabIndex={-1}
-                      className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                       onClick={() => handleRowAction(row, "move")}
                     >
                       Move to scope
@@ -1422,7 +1422,7 @@ export function SkillsScreen(
                       type="button"
                       role="menuitem"
                       tabIndex={-1}
-                      className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                       onClick={() => handleRowAction(row, "duplicate")}
                     >
                       Duplicate
@@ -1431,7 +1431,7 @@ export function SkillsScreen(
                       type="button"
                       role="menuitem"
                       tabIndex={-1}
-                      className="w-full text-left rounded-4 px-8 py-4 text-danger hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      className="w-full text-left rounded-4 px-8 py-4 optical-label-center text-danger hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                       onClick={() => handleRowAction(row, "delete")}
                     >
                       Delete
@@ -1441,7 +1441,7 @@ export function SkillsScreen(
                         type="button"
                         role="menuitem"
                         tabIndex={-1}
-                        className="w-full text-left rounded-4 px-8 py-4 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                        className="w-full text-left rounded-4 px-8 py-4 optical-label-center hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                         onClick={() => handleRowAction(row, "disable-in-repo")}
                       >
                         Disable in this repo

@@ -107,7 +107,7 @@ export function ScopeSwitcher({
             onClick={() => { if (!disabled) onScopeSelected(option.value); }}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
-              "inline-flex h-32 shrink-0 items-center justify-center whitespace-nowrap rounded-6 border px-12 text-13 transition-colors max-[1439px]:px-8",
+              "inline-flex h-32 shrink-0 items-center justify-center whitespace-nowrap rounded-6 border px-12 optical-label-center text-13 transition-colors max-[1439px]:px-8",
               "border-transparent text-text-secondary hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
               "aria-disabled:cursor-not-allowed aria-disabled:text-text-secondary",
               scope === option.value && "border-border bg-raised font-medium text-text",

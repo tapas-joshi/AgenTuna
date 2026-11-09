@@ -54,7 +54,7 @@ export interface SidebarProps {
 }
 
 const NAV_ITEM_BASE =
-  "flex w-full items-center gap-8 rounded-6 px-8 py-[6px] text-left text-13 transition-colors " +
+  "flex w-full items-center gap-8 rounded-6 px-8 py-6 optical-label-center text-left text-13 transition-colors " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus";
 
 /**
@@ -165,6 +165,7 @@ export function Sidebar({
                   }}
                   type="button"
                   data-slot="shell-nav-item"
+                  data-optical-padding="6"
                   data-section={section}
                   aria-current={active ? "page" : undefined}
                   tabIndex={0}
