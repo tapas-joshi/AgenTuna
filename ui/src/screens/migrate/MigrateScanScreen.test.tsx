@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
@@ -603,5 +603,20 @@ describe("MigrateScanScreen", () => {
     expect(await screen.findByRole("heading", { name: "Resolve conflicts" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(await screen.findByRole("heading", { name: "Preview the exact changes" })).toBeTruthy();
+  });
+
+  test("re-scans when the shell reports changed agent folders on the scan step", async () => {
+    ipc.reply = scanReply(scan);
+    renderScreen();
+    await waitFor(() => expect(ipc.calls.filter((call) => call.command === "migrate_scan_start").length).toBe(1));
+
+    await act(async () => {
+      appState.requestExternalReload();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 150);
+      await promise;
+    });
+
+    await waitFor(() => expect(ipc.calls.filter((call) => call.command === "migrate_scan_start").length).toBe(2));
   });
 });

@@ -4,6 +4,20 @@ All notable changes to AgenTuna are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-11-09
+
+A skills-detection fix for people upgrading from 0.1.1.
+
+### Fixed
+
+- **Skills no longer stay hidden after upgrading from 0.1.1.** 0.1.1 stored the skills it found in
+  agent folders, then never scanned again: the rows stayed marked missing, and the schema upgrade
+  in 0.1.2 added the discovery columns empty, so the Skills screen showed nothing although the
+  folders held your skills. AgenTuna now rescans agent folders in the background at every start —
+  after the window is up, so startup is not slower — and an open screen reloads when the scan
+  lands. A database in that older state heals on the first start with this version; a manual
+  Rescan is no longer needed.
+
 ## [0.1.2] - 2026-11-10
 
 Fixes skills not being detected on machines where a skills manager installs skills as symbolic
@@ -140,6 +154,7 @@ Rust workspace (12 crates) with a Tauri 2 shell and a React/TypeScript front end
 engine behind the GUI and CLI; SQLite index; format-preserving config edits; 2,400+ Rust tests and
 800+ UI tests; screenshot tests against the FigCraft designs.
 
+[0.1.3]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.3
 [0.1.2]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.2
 [0.1.1]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.1
 [0.1.0]: https://github.com/tapas-joshi/AgenTuna/releases/tag/v0.1.0

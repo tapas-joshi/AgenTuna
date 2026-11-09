@@ -17,8 +17,9 @@ use rusqlite::Connection;
 /// Rescans native folders and replaces the derived `native_items` rows.
 ///
 /// Returns `None` when the scan could not run or its rows could not be written; every problem is
-/// logged first, with the failing path when the scanner named one.
-pub(crate) fn refresh_native_findings(
+/// logged first, with the failing path when the scanner named one. Public so the shell's startup
+/// job and its tests share one scan implementation.
+pub fn refresh_native_findings(
     paths: &AppPaths,
     connection: &Connection,
 ) -> Option<NativeRefreshReport> {

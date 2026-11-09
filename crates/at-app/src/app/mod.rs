@@ -133,6 +133,9 @@ pub fn run() -> tauri::Result<()> {
             "derived data rebuilt at startup"
         );
     }
+    // A fresh or quarantined index already ran the native refresh inside `open_database`, so the
+    // background job below must not scan the same folders a second time on that path.
+    let derived_built_at_startup = startup.rebuild.is_some();
     let setup_warnings = startup.warnings;
     let database = startup.database;
     let setup_updates_opt_in = database
@@ -262,6 +265,50 @@ pub fn run() -> tauri::Result<()> {
                     jobs.clone(),
                 );
                 app.manage(watcher);
+            }
+            // An index that already existed is never rescanned by `open_database`; only a fresh or
+            // quarantined one is. An index written by an older release therefore keeps what it saw
+            // last — schema v10 backfilled `native_items.discovery_state` with NULL and kept the
+            // rows 0.1.1 had marked `missing`, so the Skills screen stayed empty after upgrading
+            // until a manual Rescan. This one background refresh closes that gap: it starts after
+            // the window is up, so startup never waits for the scan, and the event it reports
+            // tells an open screen to reload. A fresh or quarantined index already scanned during
+            // `open_database`, so that path skips the second scan.
+            if !derived_built_at_startup
+                && let Ok(database) = app.state::<AppState>().database_handle()
+            {
+                let refresh_handle = app.handle().clone();
+                let on_refresh = move |report: at_engine::native_index::NativeRefreshReport| {
+                    tracing::info!(
+                        upserted = report.upserted,
+                        marked_missing = report.marked_missing,
+                        resurrected = report.resurrected,
+                        partial = report.partial,
+                        "native findings refreshed at startup"
+                    );
+                    if let Err(error) = refresh_handle.emit(
+                        detection::EVENT_EXTERNAL_REFRESH,
+                        detection::ExternalRefreshEvent {
+                            paths: Vec::new(),
+                            full_rescan: true,
+                        },
+                    ) {
+                        tracing::warn!(%error, "startup refresh event emission failed");
+                    }
+                };
+                if startup::spawn_native_refresh(
+                    setup_paths.clone(),
+                    database,
+                    &jobs,
+                    native_scan::refresh_native_findings,
+                    on_refresh,
+                )
+                .is_none()
+                {
+                    tracing::info!(
+                        "the app is shutting down; agent folders are rescanned on the next start"
+                    );
+                }
             }
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore_window(&window, app.state::<AppState>().inner());
