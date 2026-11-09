@@ -160,11 +160,15 @@ SHA-256.
   right-click → **Open** override only works on macOS 13 and 14), or run
   `xattr -dr com.apple.quarantine /Applications/AgenTuna.app`. Only a Developer ID signed and
   notarized build avoids that; it requires the paid Apple Developer Program membership.
-- **The Linux GUI is unverified.** No CI job has built the Linux app before: `ci.yml` compiles
-  the workspace on macOS and only `at-store` on Linux, so the release workflow is the first Linux
-  build. Nothing starts the window, and the `.deb`/`.AppImage` from the Tauri bundler have never
-  been installed and launched. The portable tarball plus `scripts/install-linux.sh` is the
-  supported path, and release notes must describe the Linux build as untested.
+- **The Linux GUI is smoke-verified, not desktop-tested.** On 2026-11-08 a release build of
+  `at-app` (`--features custom-protocol`, Ubuntu 22.04 arm64 container, WebKitGTK 4.1 2.50.4,
+  built from source) rendered Overview, Skills, MCP Servers and Preferences under Xvfb at
+  1440x900 with **no** `WEBKIT_DISABLE_*` workaround, and creating the User store through the UI
+  wrote `~/.agentuna` on disk. That covers the window, the embedded frontend, IPC and the write
+  path; it does not cover a real GPU or Wayland session, HiDPI scaling, or the `.deb`/`.AppImage`
+  from the Tauri bundler, which still have never been installed and launched. The portable
+  tarball plus `scripts/install-linux.sh` stays the supported path, and release notes must not
+  claim the packages or specific desktop environments are tested.
 - **The `.deb` and `.AppImage` are best effort.** They need the Tauri bundler to download its
   AppImage tooling on the runner. That step is allowed to fail, and then only the tarballs are
   published.

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use at_model::{ItemId, Scope};
+use at_store::default_global_store;
 use at_store::layout::{
     MANIFEST_FILE, SCHEMA_VERSION, SLUG_MAX_CHARS, Slug, SlugError, StoreError, StoreId,
     StoreLayout, init_store, unique_slug,
@@ -400,7 +401,7 @@ fn global_root_comes_from_app_paths_and_its_overrides() {
     assert_eq!(default_layout.root(), default_paths.global_store());
     assert_eq!(
         default_layout.root(),
-        Path::new("/Library/Application Support/AgenTuna/global")
+        Path::new(default_global_store(at_store::PortablePlatform::current()))
     );
 
     let overridden = admin.path().join("global");

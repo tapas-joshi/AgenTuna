@@ -1,8 +1,9 @@
 //! Global store availability and the one-shot elevated preparation of its directory.
 //!
-//! The Global scope is machine-wide (by default
-//! `/Library/Application Support/AgenTuna/global`), so the resolved directory can exist outside
-//! the user's write permission. This module answers three questions and nothing else:
+//! The Global scope is machine-wide (by default `/Library/Application Support/AgenTuna/global`
+//! on macOS, `/var/lib/agentuna/global` on Linux, `C:\ProgramData\AgenTuna\global` on Windows),
+//! so the resolved directory can exist outside the user's write permission. This module answers
+//! three questions and nothing else:
 //!
 //! 1. [`GlobalStoreStatus::probe`] reports whether the resolved directory is writable, without
 //!    creating or modifying anything.

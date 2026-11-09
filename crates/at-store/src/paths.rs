@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use directories::BaseDirs;
 
 use crate::pathkey::PortablePlatform;
-use crate::platform_roots::{PlatformRootError, join_child, resolve_platform_roots};
+use crate::platform_roots::{
+    PlatformRootError, default_global_store, join_child, resolve_platform_roots,
+};
 
 /// Directory name of the per-user and per-project stores (`.agentuna`).
 pub const STORE_DIR_NAME: &str = ".agentuna";
@@ -34,12 +36,6 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 
 /// Directory name for caches under the support directory.
 pub const CACHE_DIR_NAME: &str = "cache";
-
-/// Machine-wide Global store used when neither the environment nor settings override it.
-///
-/// A leading slash is deliberate: the Global scope is machine-wide, so its default is the
-/// system `Application Support` directory, not the per-user one.
-pub const DEFAULT_GLOBAL_STORE: &str = "/Library/Application Support/AgenTuna/global";
 
 /// Environment variable relocating the support directory (db, logs, backups, cache).
 pub const ENV_HOME: &str = "AGENTUNA_HOME";
@@ -64,7 +60,7 @@ pub enum GlobalStoreSource {
     Environment,
     /// Settings key [`SETTINGS_KEY_GLOBAL_STORE`], applied after the database opened.
     Settings,
-    /// [`DEFAULT_GLOBAL_STORE`].
+    /// The platform default from [`default_global_store`].
     Default,
 }
 
@@ -134,7 +130,7 @@ pub struct PathOverrides {
     pub user_store: Option<PathBuf>,
     /// `AGENTUNA_PROJECT_STORE`: replaces `<project>/.agentuna`.
     pub project_store: Option<PathBuf>,
-    /// `AGENTUNA_GLOBAL_STORE`: replaces [`DEFAULT_GLOBAL_STORE`].
+    /// `AGENTUNA_GLOBAL_STORE`: replaces the platform default.
     pub global_store: Option<PathBuf>,
 }
 
@@ -258,7 +254,7 @@ pub struct AppPaths {
 impl AppPaths {
     /// Resolves every root for the host platform.
     ///
-    /// The Global store starts from [`DEFAULT_GLOBAL_STORE`] or `AGENTUNA_GLOBAL_STORE`; a
+    /// The Global store starts from [`default_global_store`] or `AGENTUNA_GLOBAL_STORE`; a
     /// settings override is applied later with [`Self::apply_settings_global_store`] because
     /// settings only become readable once the database is open.
     ///
@@ -343,12 +339,10 @@ impl AppPaths {
             (None, None) => None,
         };
 
+        let default_global = PathBuf::from(default_global_store(platform));
         let (global_store, global_store_source) = match &env.overrides.global_store {
             Some(dir) => (dir.clone(), GlobalStoreSource::Environment),
-            None => (
-                PathBuf::from(DEFAULT_GLOBAL_STORE),
-                GlobalStoreSource::Default,
-            ),
+            None => (default_global.clone(), GlobalStoreSource::Default),
         };
 
         Ok(Self {
@@ -361,7 +355,7 @@ impl AppPaths {
             support_dir,
             user_store,
             project_store,
-            default_global_store: PathBuf::from(DEFAULT_GLOBAL_STORE),
+            default_global_store: default_global,
             global_store,
             global_store_source,
         })
