@@ -1331,9 +1331,17 @@ fn run_worker(
 ) {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     *lock(&shared.wake_sender) = Some(tx.clone());
-    let mut watcher = match notify::recommended_watcher(move |result| {
-        let _ = tx.send(result);
-    }) {
+    // Never let the platform backend follow a symlink when it installs a recursive watch.
+    // Linux inotify follows symlinked children by default, which would watch an arbitrary
+    // directory behind a direct-child skill link; the link targets allowed by
+    // `WatchConfig::allowed_link_roots` are added explicitly below instead.
+    let watcher_config = notify::Config::default().with_follow_symlinks(false);
+    let mut watcher = match notify::RecommendedWatcher::new(
+        move |result| {
+            let _ = tx.send(result);
+        },
+        watcher_config,
+    ) {
         Ok(watcher) => watcher,
         Err(source) => {
             let _ = ready.send(Err(WatchError::Watcher(source)));

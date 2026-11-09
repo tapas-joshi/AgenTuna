@@ -1,6 +1,10 @@
 //! `agentuna` over a machine whose skills are manager-installed links.
 //!
 //! Everything runs the real binary with all roots redirected into a temporary directory.
+//!
+//! The layout is POSIX symlinks; the fixture refuses to install on other platforms.
+
+#![cfg(unix)]
 
 mod support;
 

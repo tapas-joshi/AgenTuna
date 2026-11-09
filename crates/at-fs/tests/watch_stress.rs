@@ -7,6 +7,8 @@
 //! linked tree first: seeding happens in the background after the platform watches are
 //! installed.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
