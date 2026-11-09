@@ -529,9 +529,11 @@ export const scopeScrollPositions = new Map<string, number>();
 
 /** Overview uses only the typed Rust query; errors and loading are never hidden by sample data. */
 export function OverviewScreen({ projectName = null }: { readonly projectName?: string | null } = {}) {
-  const { scope, activeProject } = useAppSnapshot();
+  const { scope, activeProject, externalRefreshVersion } = useAppSnapshot();
   const activeScope = scope;
-  const resource = useAsyncResource(() => loadOverview(activeScope), { deps: [activeScope], isEmpty: (data) => !data || !Array.isArray(data.scopes) || data.scopes.length === 0 });
+  // `externalRefreshVersion` moves when the shell reports changed agent folders — including the
+  // background rescan every start runs — so the counts reload without a remount.
+  const resource = useAsyncResource(() => loadOverview(activeScope), { deps: [activeScope, externalRefreshVersion], isEmpty: (data) => !data || !Array.isArray(data.scopes) || data.scopes.length === 0 });
 
   useEffect(() => {
     const target = document.getElementById("shell-main");

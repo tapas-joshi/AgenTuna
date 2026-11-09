@@ -12,14 +12,26 @@
 //! A database that cannot be opened at all is treated the same way: the file is left exactly as
 //! it was, the app starts without an index, and the warning names the file and the reason. History
 //! in an unreadable file is never discarded to "make startup work".
+//!
+//! An index that already existed is *not* rescanned here: only a fresh or quarantined one is
+//! rebuilt. That left an upgraded database describing whatever the previous release last saw —
+//! schema v10 backfilled `native_items.discovery_state` with NULL and kept the rows 0.1.1 had
+//! marked `missing`, so the Skills screen stayed empty until a manual Rescan. [`spawn_native_refresh`]
+//! closes that gap: the shell starts it after the window is up, so startup never waits for the
+//! scan, and the event it reports makes an open screen reload.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use at_db::Database;
 use at_db::rebuild::{RebuildPaths, RebuildReport, rebuild};
+use at_engine::native_index::NativeRefreshReport;
 use at_store::paths::AppPaths;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+use super::jobs::JobsControl;
 
 /// A non-blocking problem the shell reports after startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -207,4 +219,55 @@ fn mark_derived_built(connection: &rusqlite::Connection) {
          ON CONFLICT(key) DO UPDATE SET value_json = 'true'",
         [],
     );
+}
+
+/// One native-findings scan as the startup job runs it.
+///
+/// Production passes [`super::native_scan::refresh_native_findings`]; tests inject a slow or
+/// failing scan to observe that startup does not wait for it.
+pub type NativeRefreshFn = fn(&AppPaths, &Connection) -> Option<NativeRefreshReport>;
+
+/// Starts the one startup native-findings refresh on a blocking worker.
+///
+/// The job holds the database mutex only while the scan writes, exactly like every other caller of
+/// the refresh, and reports through `on_refresh` only after it finished and the app is still
+/// running. The returned handle lets a caller wait for the worker; the shell drops it, so the job
+/// is detached and never extends startup.
+///
+/// Returns `None` when the app is already shutting down, so the caller can say so instead of
+/// scanning for a window that is gone.
+#[must_use]
+pub fn spawn_native_refresh<F>(
+    paths: AppPaths,
+    database: Arc<Mutex<Database>>,
+    jobs: &JobsControl,
+    refresh: NativeRefreshFn,
+    on_refresh: F,
+) -> Option<tauri::async_runtime::JoinHandle<()>>
+where
+    F: FnOnce(NativeRefreshReport) + Send + 'static,
+{
+    let cancellation = jobs.cancellation_token();
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    Some(tauri::async_runtime::spawn_blocking(move || {
+        if cancellation.is_cancelled() {
+            return;
+        }
+        let report = {
+            let database = database.lock().unwrap_or_else(PoisonError::into_inner);
+            refresh(&paths, database.connection())
+        };
+        let Some(report) = report else {
+            // The refresh logged why; the next start (or a manual Rescan) retries.
+            tracing::debug!("the startup native refresh recorded nothing");
+            return;
+        };
+        if cancellation.is_cancelled() {
+            // The rows are written either way; there is just no window left to reload.
+            return;
+        }
+        on_refresh(report);
+    }))
 }

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { AppStateProvider } from "../../state/context";
 import { createAppState } from "../../state/AppState";
@@ -483,5 +483,25 @@ describe("ProjectSyncPanel (TC-027)", () => {
     expect(await within(nextPanel).findByText("Beta Skill")).toBeTruthy();
     expect(within(nextPanel).getByText("Library only")).toBeTruthy();
     expect(within(nextPanel).queryByText("Alpha Skill")).toBeNull();
+  });
+
+  test("reloads the overview when the shell reports changed agent folders", async () => {
+    const testState = createAppState();
+    testState.restore("proj-alpha", "project");
+    ipc.reply = (command) => Promise.resolve(command === "project_sync_status" ? [] : payload);
+    render(<AppStateProvider state={testState}><OverviewScreen /></AppStateProvider>);
+    expect(await screen.findByText("Effective in this repo")).toBeTruthy();
+    expect(ipc.calls.filter((call) => call.command === "overview_load").length).toBe(1);
+
+    await act(async () => {
+      // The shell turns `agentuna:external-refresh` (the startup rescan and the watcher both emit
+      // it) into this call; the counts must reload without a remount or a user action.
+      testState.requestExternalReload();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 150);
+      await promise;
+    });
+
+    await waitFor(() => expect(ipc.calls.filter((call) => call.command === "overview_load").length).toBe(2));
   });
 });

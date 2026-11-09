@@ -72,7 +72,7 @@ function itemState(item: MigrateScanItemView): { readonly label: string; readonl
 
 /** Migration wizard: scan, resolve conflicts, then the reviewed plan. */
 export function MigrateScanScreen() {
-  const { activeProject, screenState } = useAppSnapshot();
+  const { activeProject, screenState, externalRefreshVersion } = useAppSnapshot();
   const app = useAppState();
   const kindFilter = screenState["migrate:kind"] as string | undefined;
   const [step, setStep] = useState<Step>("scan");
@@ -199,6 +199,22 @@ export function MigrateScanScreen() {
     // The initial scan runs once per project; reselection is a user action.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject]);
+
+  // A shell report about changed agent folders (including the background rescan every start
+  // runs) re-reads the folders on this step only. Re-scanning past the scan step would invalidate
+  // the rows the user already reviewed, and a scan that is already running includes the change,
+  // so both cases wait for the user's own action instead.
+  const seenExternalRefresh = useRef(externalRefreshVersion);
+  const latestScan = useRef(startScan);
+  useEffect(() => {
+    latestScan.current = startScan;
+  });
+  useEffect(() => {
+    if (externalRefreshVersion === seenExternalRefresh.current) return;
+    seenExternalRefresh.current = externalRefreshVersion;
+    if (step !== "scan" || busy) return;
+    void latestScan.current();
+  }, [externalRefreshVersion, step, busy]);
 
   async function handleApply(): Promise<void> {
     if (!plan) return;
