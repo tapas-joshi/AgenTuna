@@ -4,6 +4,16 @@ All notable changes to AgenTuna are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The Global scope default no longer comes from macOS on every platform. `AppPaths` asks
+  `platform_roots::default_global_store` for the machine-wide location, so a Linux build resolves
+  `/var/lib/agentuna/global` and a Windows build `C:\ProgramData\AgenTuna\global` instead of
+  showing and probing `/Library/Application Support/AgenTuna/global`. `AGENTUNA_GLOBAL_STORE` and
+  the `global_store_path` setting still take precedence, and the macOS default is unchanged.
+
 ## [0.1.0] - 2026-11-08
 
 First public build. AgenTuna is a local-first desktop app and headless CLI that manages skills,

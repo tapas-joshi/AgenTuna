@@ -47,7 +47,8 @@ pub use paths::{
     SETTINGS_KEY_GLOBAL_STORE,
 };
 pub use platform_roots::{
-    LINUX_APP_DIR_NAME, PlatformRootError, PlatformRoots, resolve_platform_roots,
+    LINUX_APP_DIR_NAME, PlatformRootError, PlatformRoots, default_global_store,
+    resolve_platform_roots,
 };
 pub use project_scan::{
     CancelFlag, DEFAULT_MAX_DEPTH, DEFAULT_PROGRESS_EVERY, DEFAULT_ROOT_DIR, DiscoveredProject,
