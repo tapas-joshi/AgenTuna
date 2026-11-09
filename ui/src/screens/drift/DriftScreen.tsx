@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "../../components/button";
 import { DiffViewer } from "../../components/diff/diff-viewer";
 import type { BackupPreviewView } from "../../generated/BackupPreviewView";
@@ -33,6 +34,8 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   unreadable: "Permission or read error",
 };
 
+const WATCHER_STATUS_EVENT = "agentuna:drift-watcher-status";
+
 function failureMessage(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
   if (typeof cause === "object" && cause !== null && "message" in cause && typeof cause.message === "string") {
@@ -58,9 +61,18 @@ function WatcherBadge({ watcher }: { readonly watcher: DriftWatcherStatusView })
     : watcher.status === "error"
       ? "border-danger/30 bg-danger/10 text-danger"
       : "border-warning/30 bg-warning/10 text-warning";
-  const label = watcher.status === "active" ? "Watching" : watcher.status === "error" ? "Watch error" : "Paused";
+  const dot = watcher.status === "active" ? "bg-success" : watcher.status === "error" ? "bg-danger" : "bg-warning";
+  const label = watcher.status === "active"
+    ? "Watching"
+    : watcher.status === "degraded"
+      ? "Watching (degraded)"
+      : watcher.status === "error"
+        ? "Not watching"
+        : watcher.status === "starting"
+          ? "Starting…"
+          : "Paused";
   return <span className={`inline-flex items-center gap-6 rounded-full border px-10 py-5 text-12 max-[1199px]:gap-8 max-[1199px]:px-12 max-[1199px]:py-4 ${style}`}>
-    <span aria-hidden="true" className={`h-7 w-7 rounded-full max-[1199px]:size-8 ${watcher.status === "active" ? "bg-success" : watcher.status === "error" ? "bg-danger" : "bg-warning"}`} />
+    <span aria-hidden="true" className={`h-7 w-7 rounded-full max-[1199px]:size-8 ${dot}`} />
     {label}
   </span>;
 }
@@ -119,6 +131,23 @@ export function DriftScreen(): JSX.Element {
   useEffect(() => {
     void loadSnapshot();
   }, [loadSnapshot]);
+
+  useEffect(() => {
+    // The backend retries the watcher and updates the condition in the background; the event
+    // keeps the badge and banners current without polling.
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    void listen<DriftWatcherStatusView>(WATCHER_STATUS_EVENT, ({ payload }) => {
+      setSnapshot((current) => (current ? { ...current, watcher: payload } : current));
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedEvent === null) {
@@ -194,6 +223,18 @@ export function DriftScreen(): JSX.Element {
     }
   }
 
+  async function retryWatcher() {
+    setActionError(null);
+    try {
+      const watcher = await invoke<DriftWatcherStatusView>("drift_watcher_set_paused", {
+        paused: false,
+      });
+      setSnapshot((current) => (current ? { ...current, watcher } : current));
+    } catch (cause) {
+      setActionError(failureMessage(cause));
+    }
+  }
+
   async function applyDriftAction() {
     if (confirmation?.kind !== "drift") return;
     const { row, action } = confirmation;
@@ -237,7 +278,7 @@ export function DriftScreen(): JSX.Element {
     }
   }
 
-  const watcher = snapshot?.watcher ?? { status: "error", path: null, error: "Watcher status is unavailable." };
+  const watcher = snapshot?.watcher ?? null;
 
   return <main aria-label="Sync and drift" className="flex min-h-0 w-full flex-1 flex-col gap-16 p-20 max-[1199px]:p-24">
     <header className="flex flex-wrap items-start justify-between gap-12">
@@ -247,16 +288,23 @@ export function DriftScreen(): JSX.Element {
       </div>
       <div className="flex items-center gap-8">
         {snapshot && <span className="rounded-8 border border-border bg-raised px-10 py-7 text-12 text-text-secondary max-[1199px]:px-12 max-[1199px]:py-8"><strong className="font-mono text-text">{snapshot.in_sync_count}</strong> items in sync</span>}
-        <WatcherBadge watcher={watcher} />
-        <Button size="sm" variant="secondary" disabled={!snapshot || watcher.status === "error"} onClick={() => void toggleWatcher()}>
-          {watcher.status === "active" ? "Pause watching" : "Resume watching"}
+        {watcher && <WatcherBadge watcher={watcher} />}
+        <Button size="sm" variant="secondary" disabled={!watcher || watcher.status === "error"} onClick={() => void toggleWatcher()}>
+          {watcher?.status === "active" ? "Pause watching" : "Resume watching"}
         </Button>
       </div>
     </header>
 
-    {watcher.status === "error" && <div role="alert" className="flex flex-wrap items-center justify-between gap-8 rounded-8 border border-danger/30 bg-danger/10 p-10 text-12 text-text">
-      <span><strong>File watching is unavailable.</strong> {watcher.error} {watcher.path && <span className="font-mono">{watcher.path}</span>}</span>
-      <Button size="sm" variant="secondary" loading={loading} onClick={() => void rescan()}>Rescan</Button>
+    {watcher?.status === "error" && <div role="alert" className="flex flex-wrap items-center justify-between gap-8 rounded-8 border border-danger/30 bg-danger/10 p-10 text-12 text-text">
+      <span>Not watching: {watcher.error ?? "the filesystem watcher did not start."} {watcher.path && <span className="font-mono">{watcher.path}</span>}</span>
+      <span className="flex items-center gap-8">
+        <Button size="sm" variant="secondary" onClick={() => void retryWatcher()}>Retry</Button>
+        <Button size="sm" variant="secondary" loading={loading} onClick={() => void rescan()}>Rescan</Button>
+      </span>
+    </div>}
+    {watcher?.status === "degraded" && <div role="status" className="flex flex-wrap items-center justify-between gap-8 rounded-8 border border-warning/30 bg-warning/10 p-10 text-12 text-text">
+      <span>Watching with reduced coverage: {watcher.error ?? "some roots are degraded."} Affected paths are covered by periodic rescans.</span>
+      <Button size="sm" variant="secondary" loading={loading} onClick={() => void rescan()}>Rescan now</Button>
     </div>}
     {error && <div role="alert" className="flex items-center justify-between gap-8 rounded-8 border border-danger/30 bg-danger/10 p-10 text-12 text-danger">{error}<Button size="sm" onClick={() => void loadSnapshot()}>Retry</Button></div>}
     {actionError && <div role="alert" className="flex items-center justify-between gap-8 rounded-8 border border-danger/30 bg-danger/10 p-10 text-12 text-danger">{actionError}<Button size="sm" variant="ghost" onClick={() => setActionError(null)}>Dismiss</Button></div>}

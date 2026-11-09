@@ -21,7 +21,7 @@ use at_fs::{
 use at_migrate::apply::{ApplyPlanContext, apply_plan};
 use at_migrate::conflicts::detect_conflicts;
 use at_migrate::plan::{BuildPlanRequest, MigrationStrategy, build_plan};
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+use at_migrate::scan::{DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport};
 use at_model::{AgentId, ChangeSet, ExpectedState, FileOp, ItemKind, OperationKind, Scope};
 use at_store::instance::LockPolicy;
 use at_store::layout::{StoreLayout, init_store};
@@ -87,6 +87,9 @@ fn a_source_changed_between_plan_and_apply_aborts_before_any_backup() -> Result<
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     };
     let scan = ScanReport {
         roots: Vec::new(),

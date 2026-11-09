@@ -17,7 +17,7 @@ use at_migrate::plan::{
     BuildPlanRequest, DryRunRow, MigrationAction, MigrationPlan, MigrationStrategy, build_plan,
     dry_run,
 };
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+use at_migrate::scan::{DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport};
 use at_model::{AgentId, ItemKind, Scope};
 use tempfile::TempDir;
 
@@ -56,6 +56,9 @@ fn fixture() -> Fixture {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     };
 
     let mcp_path = root.join("native/mcp.json");
@@ -73,6 +76,9 @@ fn fixture() -> Fixture {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     };
 
     let rule_path = root.join("native/team-rules.md");
@@ -90,6 +96,9 @@ fn fixture() -> Fixture {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     };
 
     Fixture {

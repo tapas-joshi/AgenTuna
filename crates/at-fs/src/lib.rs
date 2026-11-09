@@ -105,10 +105,11 @@ pub use strategy::{
 };
 pub use symlink::SymlinkWrite;
 pub use watch::{
-    DEFAULT_BURST_QUIET, DEFAULT_DEBOUNCE, DEFAULT_MAX_BATCH_PATHS, DEFAULT_QUEUE_CAPACITY,
-    DEFAULT_START_TIMEOUT, DEFAULT_STOP_TIMEOUT, DEFAULT_SUPPRESS_TTL, IgnoreRules, RecentWrites,
-    WatchBatch, WatchChange, WatchConfig, WatchError, WatchEvent, WatchRoot, WatchRootKind,
-    WatchService, WatchStats,
+    DEFAULT_BURST_QUIET, DEFAULT_DEBOUNCE, DEFAULT_MAX_BATCH_PATHS, DEFAULT_MAX_ENTRIES_PER_ROOT,
+    DEFAULT_MAX_LINK_TARGETS_PER_ROOT, DEFAULT_QUEUE_CAPACITY, DEFAULT_READY_GRACE,
+    DEFAULT_STOP_TIMEOUT, DEFAULT_SUPPRESS_TTL, DegradedRoot, IgnoreRules, RecentWrites,
+    RootDegradation, WatchBatch, WatchChange, WatchConfig, WatchError, WatchEvent, WatchRoot,
+    WatchRootKind, WatchService, WatchStats, WatchStatus,
 };
 
 /// Largest file `at-fs` will read or write in one operation (64 MiB).

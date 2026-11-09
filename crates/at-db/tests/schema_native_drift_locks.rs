@@ -413,6 +413,9 @@ fn native_drift_and_lock_columns_and_indexes_match_the_story() {
             "last_seen_at",
             "adopted_item_id",
             "status",
+            "link_target",
+            "discovery_state",
+            "discovery_note",
         ]
     );
     assert_eq!(

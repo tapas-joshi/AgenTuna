@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use at_model::{AgentId, ItemKind, Scope};
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,126 @@ pub struct PlanStep {
     pub agents: BTreeSet<AgentId>,
     /// Scope of the source item.
     pub scope: Scope,
+    /// The native link this step replaces or records, captured at plan time.
+    ///
+    /// `None` for an item that is not a symbolic link and for steps that do not touch the
+    /// native entry. A plan persisted before link snapshots existed deserializes without it
+    /// and is then refused as stale, because its hash no longer matches.
+    #[serde(default)]
+    pub planned_link: Option<PlannedLink>,
+}
+
+/// The native symbolic link a step replaces or records, as it was when the plan was built.
+///
+/// A manager-installed skill is a link into a library, and the plan replaces that link. Between
+/// the preview the user reviewed and the apply, the same path can be retargeted — a link whose
+/// content hash stays equal is still a different entry, and replacing it would silently discard
+/// the user's change. The snapshot travels inside the plan (and therefore inside its hash), and
+/// [`validate_plan`] re-reads the link before anything is backed up or written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedLink {
+    /// The link entry itself.
+    pub path: PathBuf,
+    /// Target text the link held, exactly as `read_link` reported it.
+    pub text: PathBuf,
+    /// Canonical folder the link resolved to.
+    pub target: PathBuf,
+    /// Size of the link entry from `lstat`.
+    pub size: u64,
+    /// Modification time in nanoseconds since the Unix epoch, when the platform reported one.
+    pub modified_unix_nanos: Option<u64>,
+    /// Device and inode on Unix; `None` where the platform exposes no stable entry id.
+    pub device_inode: Option<(u64, u64)>,
+}
+
+impl PlannedLink {
+    /// Reads the native link a scan record described.
+    ///
+    /// Returns `Ok(None)` for a real folder and [`PlanError::StalePlan`] when the entry is no
+    /// longer the link the scan recorded (retargeted, replaced by a real folder, or gone).
+    fn capture(item: &ScanItem) -> Result<Option<Self>, PlanError> {
+        let Some(text) = item.link_target.as_deref() else {
+            let meta = fs::symlink_metadata(&item.path).map_err(|_| PlanError::StalePlan)?;
+            if meta.file_type().is_symlink() {
+                return Err(PlanError::StalePlan);
+            }
+            return Ok(None);
+        };
+        let resolved = item.resolved.as_deref().ok_or(PlanError::StalePlan)?;
+        let snapshot = Self::read(&item.path, text, resolved)?;
+        Ok(Some(snapshot))
+    }
+
+    /// Records `path` only when it is still the link the scan described.
+    fn read(path: &Path, text: &Path, resolved: &Path) -> Result<Self, PlanError> {
+        let meta = fs::symlink_metadata(path).map_err(|_| PlanError::StalePlan)?;
+        if !meta.file_type().is_symlink() {
+            return Err(PlanError::StalePlan);
+        }
+        let actual = fs::read_link(path).map_err(|_| PlanError::StalePlan)?;
+        if actual != text {
+            return Err(PlanError::StalePlan);
+        }
+        let target = fs::canonicalize(path).map_err(|_| PlanError::StalePlan)?;
+        if target != resolved {
+            return Err(PlanError::StalePlan);
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            text: actual,
+            target,
+            size: meta.len(),
+            modified_unix_nanos: modified_unix_nanos(&meta),
+            device_inode: device_inode(&meta),
+        })
+    }
+
+    /// Re-reads the link and refuses when it is no longer the recorded entry.
+    ///
+    /// # Errors
+    /// [`PlanError::StalePlan`] when the path is gone, is no longer a symbolic link, carries
+    /// different target text, resolves to a different folder, or is a different entry on disk
+    /// (lstat identity or modification time changed).
+    pub fn verify(&self) -> Result<(), PlanError> {
+        let meta = fs::symlink_metadata(&self.path).map_err(|_| PlanError::StalePlan)?;
+        if !meta.file_type().is_symlink() {
+            return Err(PlanError::StalePlan);
+        }
+        if fs::read_link(&self.path).map_err(|_| PlanError::StalePlan)? != self.text {
+            return Err(PlanError::StalePlan);
+        }
+        if fs::canonicalize(&self.path).map_err(|_| PlanError::StalePlan)? != self.target {
+            return Err(PlanError::StalePlan);
+        }
+        if meta.len() != self.size
+            || modified_unix_nanos(&meta) != self.modified_unix_nanos
+            || device_inode(&meta) != self.device_inode
+        {
+            return Err(PlanError::StalePlan);
+        }
+        Ok(())
+    }
+}
+
+/// Modification time of one entry, in nanoseconds since the Unix epoch.
+fn modified_unix_nanos(meta: &fs::Metadata) -> Option<u64> {
+    let modified = meta.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_nanos()).ok()
+}
+
+/// Device and inode of one entry on Unix; `None` where `std` exposes no stable entry id.
+fn device_inode(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// Counts summarizing an applicable plan.
@@ -335,6 +455,11 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
     // Selected store names by `(kind, lowercased name)`: the value keeps the reviewed spelling
     // so a collision can name both names the user saw.
     let mut selected_names: BTreeMap<(ItemKind, String), String> = BTreeMap::new();
+    // Physical content already written to the store by this plan. Two agent links that resolve
+    // to one library folder are two deployments of one skill, not two store items: the store
+    // copy is written once and every link is replaced.
+    let mut planned_content: BTreeMap<(ItemKind, PathBuf), String> = BTreeMap::new();
+    let mut planned_backups: BTreeSet<PathBuf> = BTreeSet::new();
     for item in selected {
         let normalized_name = normalize(&item.name);
         let conflict = request
@@ -364,14 +489,30 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
                     reason: error.to_string(),
                 });
             }
+            // A skill entry that is a link is snapshotted as it is now: the plan binds the
+            // reviewed target and entry identity, so a retarget between preview and apply is
+            // refused instead of replacing a link the user changed.
+            let planned_link = if item.kind == ItemKind::Skill {
+                PlannedLink::capture(item)?
+            } else {
+                None
+            };
             let (digest, bytes) = hash_source(item)?;
             let store_path = item_destination(&request.store_root, item, &selected_name);
             ensure_path_length(&store_path)?;
-            let backup_path = request.backup_root.join(&selected_name);
+            let mut backup_path = request.backup_root.join(&selected_name);
+            let mut suffix = 2usize;
+            while planned_backups.contains(&backup_path) {
+                backup_path = request
+                    .backup_root
+                    .join(format!("{selected_name}-{suffix}"));
+                suffix += 1;
+            }
             ensure_path_length(&backup_path)?;
             if request.strategy == MigrationStrategy::ReplaceWithLinks
                 && item.kind == ItemKind::Skill
             {
+                planned_backups.insert(backup_path.clone());
                 steps.push(PlanStep {
                     seq: 0,
                     action: MigrationAction::BackupOriginal,
@@ -386,6 +527,7 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
                     agent: None,
                     agents: BTreeSet::new(),
                     scope: item.scope,
+                    planned_link: planned_link.clone(),
                 });
             }
             let action = match item.kind {
@@ -393,21 +535,41 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
                 ItemKind::Rule => MigrationAction::RenderRule,
                 _ => MigrationAction::CreateStoreItem,
             };
-            steps.push(PlanStep {
-                seq: 0,
-                action,
-                item_name: Some(selected_name.clone()),
-                source_item_name: Some(item.name.clone()),
-                source: Some(item.path.clone()),
-                destination: Some(store_path.clone()),
-                expected_source_hash: Some(digest.clone()),
-                expected_destination_hash: None,
-                backup_path: None,
-                bytes,
-                agent: item.agents.iter().next().cloned(),
-                agents: item.agents.clone(),
-                scope: item.scope,
-            });
+            // The store item is copied from the folder that holds the content. For a
+            // manager-installed link that is the validated target, not the link entry:
+            // copying the entry would put a link inside the store.
+            let content_source = if item.kind == ItemKind::Skill {
+                item.resolved.clone().unwrap_or_else(|| item.path.clone())
+            } else {
+                item.path.clone()
+            };
+            // A second agent's link to the same library folder reuses the one store item the
+            // first link planned: one write, one manifest entry, two deployments.
+            let shares_content = planned_content
+                .get(&(item.kind, content_source.clone()))
+                .is_some_and(|existing| *existing == selected_name);
+            if !shares_content {
+                if item.kind == ItemKind::Skill {
+                    planned_content
+                        .insert((item.kind, content_source.clone()), selected_name.clone());
+                }
+                steps.push(PlanStep {
+                    seq: 0,
+                    action,
+                    item_name: Some(selected_name.clone()),
+                    source_item_name: Some(item.name.clone()),
+                    source: Some(content_source),
+                    destination: Some(store_path.clone()),
+                    expected_source_hash: Some(digest.clone()),
+                    expected_destination_hash: None,
+                    backup_path: None,
+                    bytes,
+                    agent: item.agents.iter().next().cloned(),
+                    agents: item.agents.clone(),
+                    scope: item.scope,
+                    planned_link: None,
+                });
+            }
             // Skills are deployed at their own path; MCP and rule items live inside a shared
             // agent config, so they are only recorded as watched and never linked.
             let replaced = item.kind == ItemKind::Skill
@@ -446,6 +608,7 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
                     agent: item.agents.iter().next().cloned(),
                     agents: item.agents.clone(),
                     scope: item.scope,
+                    planned_link: planned_link.clone(),
                 });
             }
             items += 1;
@@ -484,6 +647,7 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
             agent: None,
             agents: BTreeSet::new(),
             scope: request.scope,
+            planned_link: None,
         });
     }
     // A first migration into a scope with no store yet starts with its skeleton, so the
@@ -504,6 +668,7 @@ pub fn build_plan(request: BuildPlanRequest<'_>) -> Result<MigrationPlan, PlanEr
             agent: None,
             agents: BTreeSet::new(),
             scope: request.scope,
+            planned_link: None,
         });
     }
     steps.sort_by_key(|step| match step.action {
@@ -739,6 +904,12 @@ pub fn validate_plan(plan: &MigrationPlan) -> Result<(), PlanError> {
     }
     let mut selected_names: BTreeMap<(ItemKind, String), String> = BTreeMap::new();
     for step in &plan.steps {
+        // The native entry the plan replaces must still be the link the user reviewed: a
+        // retargeted link keeps an unchanged content hash when both targets hold the same
+        // bytes, so the entry itself is compared.
+        if let Some(link) = &step.planned_link {
+            link.verify()?;
+        }
         if step.action == MigrationAction::UpdateManifest
             && let (Some(destination), Some(expected)) =
                 (&step.destination, &step.expected_destination_hash)
@@ -840,19 +1011,46 @@ fn hash_path(path: &std::path::Path) -> Result<String, PlanError> {
         source,
     })?;
     if metadata.is_dir() {
-        at_store::manifest::hash_skill_folder(path)
+        return at_store::manifest::hash_skill_folder(path)
             .map(|hash| hash.to_string())
             .map_err(|error| PlanError::SourceRead {
                 path: path.to_path_buf(),
                 source: std::io::Error::other(error),
-            })
-    } else {
-        let bytes = fs::read(path).map_err(|source| PlanError::SourceRead {
+            });
+    }
+    if metadata.file_type().is_symlink() {
+        // A manager-installed skill is a link to a folder, and the plan's source hash is that
+        // folder's content. Validation must read the same content the plan did; the apply never
+        // writes through the link, so this follows it only to hash.
+        if let Ok(target) = fs::canonicalize(path)
+            && target.is_dir()
+        {
+            // The target is canonical, but it may have been swapped for a symlink after the
+            // scan validated it; re-check it at use before reading any content.
+            let validated = at_store::manifest::ValidatedSkillRoot::from_trusted_scan(&target)
+                .map_err(|error| PlanError::SourceRead {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other(error),
+                })?;
+            return at_store::manifest::hash_skill_folder_resolved(&validated)
+                .map(|hash| hash.to_string())
+                .map_err(|error| PlanError::SourceRead {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other(error),
+                });
+        }
+        // A link to a file hashes by its target text, the way the write pipeline records links.
+        let target = fs::read_link(path).map_err(|source| PlanError::SourceRead {
             path: path.to_path_buf(),
             source,
         })?;
-        Ok(at_fs::sha256_hex(&bytes))
+        return Ok(at_fs::sha256_hex(target.as_os_str().as_encoded_bytes()));
     }
+    let bytes = fs::read(path).map_err(|source| PlanError::SourceRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(at_fs::sha256_hex(&bytes))
 }
 
 fn item_destination(root: &std::path::Path, item: &ScanItem, name: &str) -> PathBuf {
@@ -865,12 +1063,16 @@ fn item_destination(root: &std::path::Path, item: &ScanItem, name: &str) -> Path
 }
 
 fn hash_source(item: &ScanItem) -> Result<(String, u64), PlanError> {
-    let metadata = fs::symlink_metadata(&item.path).map_err(|source| PlanError::SourceRead {
+    // A manager-installed skill is a link; the content lives at the target the adapter already
+    // resolved and validated. Hashing the entry would either follow a link (copying is still
+    // refused) or, for a link to a folder, read it as a file.
+    let source = item.resolved.as_deref().unwrap_or(&item.path);
+    let metadata = fs::metadata(source).map_err(|source_error| PlanError::SourceRead {
         path: item.path.clone(),
-        source,
+        source: source_error,
     })?;
     if metadata.is_dir() {
-        let hash = at_store::manifest::hash_skill_folder(&item.path).map_err(|error| {
+        let hash = hash_folder(source, item.resolved.is_some()).map_err(|error| {
             PlanError::SourceRead {
                 path: item.path.clone(),
                 source: std::io::Error::other(error),
@@ -878,11 +1080,24 @@ fn hash_source(item: &ScanItem) -> Result<(String, u64), PlanError> {
         })?;
         Ok((hash.to_string(), metadata.len()))
     } else {
-        let bytes = fs::read(&item.path).map_err(|source| PlanError::SourceRead {
+        let bytes = fs::read(source).map_err(|source_error| PlanError::SourceRead {
             path: item.path.clone(),
-            source,
+            source: source_error,
         })?;
         Ok((at_fs::sha256_hex(&bytes), bytes.len() as u64))
+    }
+}
+
+/// Hashes a skill folder, allowing a resolved root only when the adapter produced one.
+fn hash_folder(
+    root: &std::path::Path,
+    resolved: bool,
+) -> Result<at_store::manifest::ContentHash, at_store::manifest::HashError> {
+    if resolved {
+        let validated = at_store::manifest::ValidatedSkillRoot::from_trusted_scan(root)?;
+        at_store::hash_skill_folder_resolved(&validated)
+    } else {
+        at_store::manifest::hash_skill_folder(root)
     }
 }
 

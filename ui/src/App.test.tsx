@@ -143,7 +143,7 @@ test("command palette loads live skill inventory and dispatches the selected ite
     cmd === "overview_load" ? { scopes: [], attention: [], attention_total: 0, changes: [], user_path: "/sandbox/user", global_store: { path: "/sandbox/global", source: "environment", status: "read_only", reason: null, needs_elevation: true, locks: [] }, startup_warnings: [] } :
     cmd === "skills_list" ? { rows: [{
       item_id: "itm_skill", name: "Nimbus", scope: "user", state: "active", shadowed_by: null,
-      description: "Searchable fixture", native: false, native_path: null, update_available: false,
+      description: "Searchable fixture", native: false, native_path: null, native_link_target: null, native_state: null, native_problem: null, update_available: false,
       updated_at: "2026-11-06T10:00:00Z", locked: false, lock_scope: null, lock_reason: null, agents: [],
     }], agents: [], project_id: null, project_name: null } :
     cmd === "mcp_server_list" ? { servers: [], project_id: null, project_name: null, project_agents: [], global_writable: false, global_reason: null } :

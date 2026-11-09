@@ -8,6 +8,11 @@ test("Skills list renders populated table, filter chips, native banner and shado
   await expect(main.getByText("code-review", { exact: true })).toBeVisible();
   await expect(main.getByText("native-helper", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Unmanaged skills banner" })).toBeVisible();
+  // A manager-installed link names the folder it links to; a broken one names its reason.
+  await expect(main.getByText("linked-library-skill", { exact: true })).toBeVisible();
+  await expect(main.getByText("links to /sandbox/home/.cc-switch/skills/linked-library-skill")).toBeVisible();
+  await expect(main.getByText("Broken link", { exact: true })).toBeVisible();
+  await expect(main.getByText("dangling symbolic link", { exact: true })).toBeVisible();
   await expect(page).toHaveScreenshot("skills-populated.png", { animations: "disabled", caret: "hide" });
 
   // Filter chips
@@ -25,6 +30,9 @@ test("Skills STATUS column names locked and shadowed rows", async ({ page }) => 
       description: null,
       native: false,
       native_path: null,
+      native_link_target: null,
+      native_state: null,
+      native_problem: null,
       update_available: false,
       updated_at: "2026-11-06T12:00:00Z",
     };

@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "at-adapters"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-fs",
  "at-model",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "at-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-adapters",
  "at-app",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "at-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-adapters",
  "at-db",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "at-db"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-model",
  "at-secrets",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "at-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-adapters",
  "at-db",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "at-fs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-db",
  "at-fs",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "at-git"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-fs",
  "at-mcp",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "at-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "at-fs",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "at-migrate"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-adapters",
  "at-db",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "at-model"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "at-secrets"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-model",
  "keyring",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "at-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "at-db",
  "at-fs",

@@ -95,6 +95,50 @@ const AGENT_SHORT_NAME: Readonly<Record<string, string>> = {
   "Claude Code": "Claude",
 };
 
+/**
+ * Origin badge of a native row: `linked` when a manager tool installed it as a link,
+ * `not in AgenTuna` for a plain folder only an agent reads.
+ */
+function NativeOriginBadge({ row }: { readonly row: SkillRowView }) {
+  return row.native_link_target != null
+    ? <Badge tone="muted">linked</Badge>
+    : <Badge tone="muted">not in AgenTuna</Badge>;
+}
+
+/**
+ * Path line of a native row: the folder the agent reads, the library folder a link resolves to,
+ * and the reason a broken or refused entry carries. Nothing here hides a row.
+ */
+function NativeOriginLine({ row }: { readonly row: SkillRowView }) {
+  const target = row.native_link_target ?? null;
+  const problem = row.native_problem ?? null;
+  if (row.native_path === null) {
+    return null;
+  }
+  return (
+    <>
+      <span
+        className="flex min-w-0 flex-wrap items-center gap-4 truncate text-12 text-text-muted"
+        title={target === null ? row.native_path : `${row.native_path} links to ${target}`}
+      >
+        <span className="truncate font-mono" data-slot="native-path">
+          {row.native_path}
+        </span>
+        {target !== null && (
+          <span className="truncate" data-slot="native-link-target">
+            links to {target}
+          </span>
+        )}
+      </span>
+      {problem !== null && (
+        <span className="truncate text-12 text-danger" data-slot="native-problem">
+          {problem}
+        </span>
+      )}
+    </>
+  );
+}
+
 /** Distinct native folder paths recorded for one native skill name. */
 function nativeCopyPaths(copies: readonly SkillRowView[]): readonly string[] {
   const paths = new Set<string>();
@@ -209,6 +253,22 @@ export function skillStatus(
     return { label: `Shadowed by ${statusScope(row.shadowed_by)}`, tone: "neutral" };
   }
   if (row.native) {
+    // A manager-installed link that does not resolve, or whose content is refused, is reported
+    // as such instead of being counted as a healthy native copy.
+    if (row.native_state === "broken_link") {
+      return {
+        label: "Broken link",
+        tone: "danger",
+        title: row.native_problem ?? row.native_path ?? undefined,
+      };
+    }
+    if (row.native_state === "invalid" || row.native_state === "unreadable") {
+      return {
+        label: "Unreadable",
+        tone: "warning",
+        title: row.native_problem ?? row.native_path ?? undefined,
+      };
+    }
     const copies = lookup.nativeCopies(row);
     const paths = nativeCopyPaths(copies);
     const owners = nativeOwners(copies, agentLabel);
@@ -668,8 +728,9 @@ export function SkillsScreen(
                   onIgnore={(row) => void handleIgnoreUpdate(row)}
                 />
               )}
-              {item.native && <Badge tone="muted">not in AgenTuna</Badge>}
+              {item.native && <NativeOriginBadge row={item} />}
             </div>
+            {item.native && <NativeOriginLine row={item} />}
             {item.description && (
               <span className="truncate text-12 text-text-muted">{item.description}</span>
             )}

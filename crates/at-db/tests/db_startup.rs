@@ -3,12 +3,22 @@
 use std::fs;
 use std::path::Path;
 
+use at_db::migrations::SHIPPED_MIGRATIONS;
 use at_db::{Database, Migration, Migrations};
 use tempfile::TempDir;
 const V1: &str = at_db::migrations::MIGRATION_V1_SQL;
 
 fn one_version(sql: &'static str) -> Migrations {
     Migrations::new(&[Migration::new(1, sql)]).expect("valid migration list")
+}
+
+/// Highest schema version this binary ships, so a new migration does not pin the number here.
+fn latest_schema_version() -> u32 {
+    SHIPPED_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version())
+        .max()
+        .expect("at least one migration ships")
 }
 
 fn path(dir: &TempDir) -> std::path::PathBuf {
@@ -24,7 +34,7 @@ fn pending_migration_keeps_a_fsynced_copy_of_the_prior_schema() {
     let database = Database::open_file(&db_path).expect("migrate to current schema");
     assert_eq!(
         database.schema_version().expect("current schema version"),
-        9
+        latest_schema_version()
     );
     drop(database);
     let backup_dir = dir.path().join("backups/db");
@@ -97,7 +107,10 @@ fn corrupt_file_is_quarantined_and_new_database_exposes_warning_path() {
             .is_some_and(|name| name.to_string_lossy().starts_with("agentuna.db.corrupt-"))
     );
     assert!(warning.exists());
-    assert_eq!(database.schema_version().expect("new schema version"), 9);
+    assert_eq!(
+        database.schema_version().expect("new schema version"),
+        latest_schema_version()
+    );
 }
 
 #[test]

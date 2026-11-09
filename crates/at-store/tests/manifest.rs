@@ -17,8 +17,9 @@ use at_store::layout::{Slug, StoreLayout, init_store};
 use at_store::manifest::{
     ContentHash, DisabledAgents, FieldProblem, HashError, ItemSource, MANIFEST_MAX_BYTES,
     MANIFEST_MAX_NAME_CHARS, MANIFEST_MAX_SOURCE_FIELD_CHARS, ManifestError, ManifestItem,
-    PathTrustError, SKILL_HASH_MAX_FILE_BYTES, SourceKind, StoreManifest, StorePath, hash_bytes,
-    hash_mcp_entry, hash_rule_bytes, hash_skill_folder, mcp_identity_key, resolve_item_path,
+    PathTrustError, SKILL_HASH_MAX_FILE_BYTES, SourceKind, StoreManifest, StorePath,
+    ValidatedSkillRoot, hash_bytes, hash_mcp_entry, hash_rule_bytes, hash_skill_folder,
+    hash_skill_folder_resolved, mcp_identity_key, resolve_item_path,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -1020,4 +1021,169 @@ fn a_manifest_cannot_be_saved_into_another_scope() {
         before,
         "the wrong-scope save writes nothing"
     );
+}
+
+#[test]
+fn a_validated_link_root_hashes_the_resolved_folder_only() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let home = sandbox.path().join("home");
+    let library = home.join(".skills-manager/skills/demo");
+    fs::create_dir_all(library.join("references")).expect("library folder");
+    fs::write(
+        library.join("SKILL.md"),
+        "---\nname: demo\ndescription: A manager-installed skill\n---\n",
+    )
+    .expect("document");
+    fs::write(library.join("references/guide.md"), "# Guide\n").expect("guide");
+    let link = home.join(".claude/skills/demo");
+    fs::create_dir_all(link.parent().expect("link parent")).expect("agent root");
+    std::os::unix::fs::symlink(&library, &link).expect("link");
+
+    // The entry itself stays refused: this is the guard the manager layout trips.
+    let error = hash_skill_folder(&link).expect_err("a link is not a folder");
+    assert!(
+        matches!(error, HashError::Symlink { relative: None, .. }),
+        "{error}"
+    );
+
+    // The resolved folder is the content, so both entry points agree on it.
+    let resolved = fs::canonicalize(&link).expect("canonical link");
+    assert_eq!(
+        resolved,
+        fs::canonicalize(&library).expect("canonical library")
+    );
+    let canonical_home = fs::canonicalize(&home).expect("canonical home");
+    let validated = ValidatedSkillRoot::new(&resolved, &[canonical_home.as_path()])
+        .expect("the resolved folder is inside the injected home");
+    assert_eq!(validated.path(), resolved.as_path());
+    let from_root = hash_skill_folder_resolved(&validated).expect("resolved hash");
+    assert_eq!(
+        from_root,
+        hash_skill_folder(&library).expect("library hash"),
+        "the resolved folder hashes exactly like the real folder"
+    );
+
+    // A link inside the tree is still refused, and the error names the entry not the folder.
+    let asset = library.join("references/guide.md");
+    std::os::unix::fs::symlink(&asset, library.join("references/alias.md")).expect("inner link");
+    let error = hash_skill_folder_resolved(&validated).expect_err("inner link refused");
+    match error {
+        HashError::Symlink { relative, .. } => assert_eq!(
+            relative.as_deref(),
+            Some(Path::new("references/alias.md")),
+            "the entry inside the folder is named"
+        ),
+        other => panic!("expected a symlink error, got {other}"),
+    }
+    assert_eq!(
+        error_text(&hash_skill_folder_resolved(&validated)),
+        "symlink inside skill folder: references/alias.md"
+    );
+
+    // A file is not a skill folder, resolved or not.
+    let file_root = ValidatedSkillRoot::new(&asset, &[canonical_home.as_path()])
+        .expect_err("a file is not a folder");
+    assert!(
+        matches!(file_root, HashError::NotADirectory { .. }),
+        "{file_root}"
+    );
+}
+
+/// A validated root swapped for a symlink after validation is refused, never followed.
+#[cfg(unix)]
+#[test]
+fn a_resolved_root_swapped_for_a_symlink_is_refused_at_use() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let home = sandbox.path().join("home");
+    let library = home.join(".skills-manager/skills/demo");
+    fs::create_dir_all(&library).expect("library folder");
+    fs::write(library.join("SKILL.md"), "# demo\n").expect("document");
+    let canonical_home = fs::canonicalize(&home).expect("canonical home");
+    let resolved = fs::canonicalize(&library).expect("canonical library");
+    let validated =
+        ValidatedSkillRoot::new(&resolved, &[canonical_home.as_path()]).expect("resolved folder");
+
+    // The reviewed target is swapped for an outside symlink before the content is read.
+    let outside = sandbox.path().join("outside");
+    fs::create_dir_all(&outside).expect("outside");
+    fs::write(outside.join("SKILL.md"), "# outside\n").expect("outside document");
+    fs::remove_dir_all(&library).expect("remove the reviewed folder");
+    std::os::unix::fs::symlink(&outside, &library).expect("outside link");
+
+    let error = hash_skill_folder_resolved(&validated).expect_err("the swap is refused");
+    assert!(
+        matches!(
+            error,
+            HashError::Symlink { relative: None, .. } | HashError::NotCanonical { .. }
+        ),
+        "a root that is now a symlink must be refused, not followed: {error}"
+    );
+}
+
+/// A resolved root outside the allowed roots is refused when it is validated.
+#[cfg(unix)]
+#[test]
+fn a_resolved_root_outside_the_allowed_roots_is_refused() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let home = sandbox.path().join("home");
+    let outside = sandbox.path().join("outside-skill");
+    fs::create_dir_all(&home).expect("home");
+    fs::create_dir_all(&outside).expect("outside skill");
+    fs::write(outside.join("SKILL.md"), "# outside\n").expect("document");
+    let canonical_home = fs::canonicalize(&home).expect("canonical home");
+    let canonical_outside = fs::canonicalize(&outside).expect("canonical outside");
+
+    let error = ValidatedSkillRoot::new(&canonical_outside, &[canonical_home.as_path()])
+        .expect_err("outside the allowed root");
+    assert!(
+        matches!(error, HashError::OutsideAllowedRoots { .. }),
+        "{error}"
+    );
+
+    // No allowed roots at all is a refusal, not an implicit “anything goes”.
+    let error = ValidatedSkillRoot::new(&canonical_outside, &[]).expect_err("no allowed roots");
+    assert!(
+        matches!(error, HashError::OutsideAllowedRoots { .. }),
+        "{error}"
+    );
+}
+
+/// A root reached through a symlinked component is not canonical and is refused.
+#[cfg(unix)]
+#[test]
+fn a_non_canonical_resolved_root_is_refused() {
+    let sandbox = tempfile::tempdir().expect("temp dir");
+    let home = sandbox.path().join("home");
+    let real = home.join("real");
+    let library = real.join("demo");
+    fs::create_dir_all(&library).expect("library folder");
+    fs::write(library.join("SKILL.md"), "# demo\n").expect("document");
+    let alias = home.join("alias");
+    std::os::unix::fs::symlink(&real, &alias).expect("parent alias");
+    let through_alias = alias.join("demo");
+    let canonical_home = fs::canonicalize(&home).expect("canonical home");
+
+    let error = ValidatedSkillRoot::new(&through_alias, &[canonical_home.as_path()])
+        .expect_err("a symlinked parent is not canonical");
+    assert!(matches!(error, HashError::NotCanonical { .. }), "{error}");
+
+    // The link entry itself is never a content root.
+    let canonical_real = fs::canonicalize(&real).expect("canonical real");
+    let error = ValidatedSkillRoot::new(&alias, &[canonical_real.as_path()])
+        .expect_err("the root is a symlink");
+    assert!(
+        matches!(
+            error,
+            HashError::Symlink { relative: None, .. } | HashError::NotCanonical { .. }
+        ),
+        "{error}"
+    );
+}
+
+/// Renders whichever error a hashing attempt returned.
+fn error_text(result: &Result<ContentHash, HashError>) -> String {
+    match result {
+        Ok(hash) => hash.to_string(),
+        Err(error) => error.to_string(),
+    }
 }

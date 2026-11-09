@@ -376,10 +376,17 @@ fn opening_an_older_database_upgrades_without_losing_history() {
         .expect("operation records");
     }
 
-    // Reopen with every shipped migration: v8 and v9 apply additively.
+    // Reopen with every shipped migration: the later versions apply additively.
     let database = Database::open_file(&path).expect("upgrade opens");
     let connection = database.connection();
-    assert_eq!(database.schema_version().expect("schema version"), 9);
+    assert_eq!(
+        database.schema_version().expect("schema version"),
+        at_db::migrations::SHIPPED_MIGRATIONS
+            .iter()
+            .map(|migration| migration.version())
+            .max()
+            .expect("at least one migration ships")
+    );
 
     let versions = versions_for_item(connection, &id).expect("versions after upgrade");
     assert_eq!(versions.len(), 1, "history survives the upgrade");

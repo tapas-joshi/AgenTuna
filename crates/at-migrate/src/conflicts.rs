@@ -405,6 +405,7 @@ fn text_diff(a: &std::path::Path, b: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::DiscoveryState;
     use crate::scan::{Ownership, ScanItem};
 
     fn copy(path: &str, raw: &str, normalized: &str, agent: AgentId) -> ScanItem {
@@ -420,6 +421,9 @@ mod tests {
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,
+            discovery: DiscoveryState::Valid,
+            link_target: None,
+            resolved: None,
         }
     }
 

@@ -1773,3 +1773,429 @@ pub fn run_round_trip<M: MigrationUnderTest>(
     trip.record(MigrationStep::Undo, || engine.undo())?;
     Ok(trip)
 }
+
+/// Skills in the `~/.cc-switch/skills` library, the one Claude Code, Codex and omp link to.
+///
+/// The four last names exercise shapes a real library has: nested `references/`, `scripts/` and
+/// `assets/` folders, a link inside the tree, a CRLF `SKILL.md` and broken frontmatter.
+pub const CC_SWITCH_SKILLS: [&str; 15] = [
+    "cc-01",
+    "cc-02",
+    "cc-03",
+    "cc-04",
+    "cc-05",
+    "cc-06",
+    "cc-07",
+    "cc-08",
+    "cc-09",
+    "cc-10",
+    "cc-11",
+    "cc-nested",
+    "cc-inner-link",
+    "cc-crlf",
+    "cc-bad-frontmatter",
+];
+
+/// Skills in the `~/.skills-manager/skills` library, the second manager on the same machine.
+pub const SKILLS_MANAGER_SKILLS: [&str; 6] = ["sm-01", "sm-02", "sm-03", "sm-04", "sm-05", "sm-06"];
+
+/// Skill linked from `~/.local/share/<tool>/skills`, a third library location.
+pub const LOCAL_LINKER_SKILL: &str = "local-01";
+
+/// Real (not linked) skill folders inside `~/.claude/skills` that hold nested skills.
+pub const REAL_SKILL_DIRS: [&str; 2] = ["superset", "synced"];
+
+/// File name of the skill document inside a library folder.
+pub const LIBRARY_SKILL_FILE: &str = "SKILL.md";
+
+/// How many dangling links `~/.codex/skills` holds.
+pub const DANGLING_LINKS: usize = 13;
+
+/// Name prefix of the dangling links: `superset-missing-01` … `superset-missing-13`.
+pub const DANGLING_PREFIX: &str = "superset-missing";
+
+/// Counts a scan of [`SymlinkedSkillsHome`] must report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymlinkedSkillsExpectations {
+    /// Distinct physical skills with readable content.
+    pub unique_valid_skills: usize,
+    /// Distinct physical skills whose tree or frontmatter is refused.
+    pub invalid_skills: usize,
+    /// Dangling and looping links, one row each.
+    pub broken_links: usize,
+    /// Links whose target is outside the injected home; refused, never read.
+    pub refused_links: usize,
+    /// `(agent, skill) -> link path` entries the fixture created.
+    pub link_count: usize,
+}
+
+/// A synthetic copy of a machine whose skills are installed by manager tools as links.
+///
+/// The layout mirrors what such a machine looks like: one central library per manager, and every
+/// agent folder full of links into them.
+///
+/// - `~/.cc-switch/skills`: [`CC_SWITCH_SKILLS`], including nested folders, a link *inside* one
+///   tree, a CRLF document and invalid frontmatter.
+/// - `~/.skills-manager/skills`: [`SKILLS_MANAGER_SKILLS`].
+/// - `~/.local/share/linker/skills`: [`LOCAL_LINKER_SKILL`].
+/// - `~/.claude/skills`: links to every skill above, the two real folders in [`REAL_SKILL_DIRS`],
+///   a two-link loop and one link whose target sits outside the home.
+/// - `~/.codex/skills`: links to the first fourteen cc-switch skills, [`DANGLING_LINKS`] dangling
+///   `superset-missing-*` links and a `.system` folder holding a nested skill.
+/// - `~/.agents/skills`: the Codex secondary root, links to every cc-switch and skills-manager
+///   skill.
+/// - `~/.omp/agent/managed-skills`: omp's primary root, the same links.
+/// - `~/.omp/agent/skills` is deliberately absent: the adapter's secondary root, not the one omp
+///   reads on such a machine.
+///
+/// The temp directory is owned by the fixture and removed on drop; nothing here reads or writes
+/// a real home directory.
+#[derive(Debug)]
+pub struct SymlinkedSkillsHome {
+    /// Owns a fresh temporary home; `None` when installed into a caller's sandbox home.
+    owner: Option<TestHome>,
+    home: PathBuf,
+    root: PathBuf,
+    project: PathBuf,
+    outside: PathBuf,
+    cc_switch: PathBuf,
+    skills_manager: PathBuf,
+    local_linker: PathBuf,
+    claude: PathBuf,
+    codex: PathBuf,
+    agents_root: PathBuf,
+    omp: PathBuf,
+    system_dir: PathBuf,
+    dangling: Vec<PathBuf>,
+    loop_links: Vec<PathBuf>,
+    escape_link: PathBuf,
+    links: BTreeMap<(AgentId, String), PathBuf>,
+}
+
+impl SymlinkedSkillsHome {
+    /// Builds the layout in a fresh temporary home.
+    ///
+    /// # Errors
+    /// [`FixtureError::Testkit`] for the home itself and [`FixtureError::Io`] for any folder,
+    /// document or link that cannot be created.
+    pub fn new() -> Result<Self, FixtureError> {
+        let home = TestHome::new()?;
+        let project = home.project("symlink-project")?.root().to_path_buf();
+        let mut fixture = Self::install(home.home(), home.root(), &project)?;
+        fixture.owner = Some(home);
+        Ok(fixture)
+    }
+
+    /// Installs the same layout into a caller-owned home (an app or CLI sandbox).
+    ///
+    /// The temporary directory that owns the home must be passed as `root`: the one skill folder
+    /// outside the home is created under it, which is what proves an escaping link is refused.
+    ///
+    /// # Errors
+    /// [`FixtureError::Io`] for any folder, document or link that cannot be created.
+    pub fn install(home: &Path, root: &Path, project: &Path) -> Result<Self, FixtureError> {
+        let home_root = home.to_path_buf();
+        let project = project.to_path_buf();
+        let outside = root.join("outside-skill");
+        fs::create_dir_all(&outside).map_err(FixtureError::io(&outside))?;
+        write_file(
+            &outside.join(LIBRARY_SKILL_FILE),
+            skill_document("outside-skill", "A skill outside the injected home"),
+        )?;
+
+        let cc_switch = home_root.join(".cc-switch/skills");
+        let skills_manager = home_root.join(".skills-manager/skills");
+        let local_linker = home_root.join(".local/share/linker/skills");
+        let claude = home_root.join(".claude/skills");
+        let codex = home_root.join(".codex/skills");
+        let agents_root = home_root.join(".agents/skills");
+        let omp = home_root.join(".omp/agent/managed-skills");
+        for (library, names) in [
+            (&cc_switch, CC_SWITCH_SKILLS.as_slice()),
+            (&skills_manager, SKILLS_MANAGER_SKILLS.as_slice()),
+            (&local_linker, [LOCAL_LINKER_SKILL].as_slice()),
+        ] {
+            for name in names {
+                write_library_skill(library, name)?;
+            }
+        }
+        for name in REAL_SKILL_DIRS {
+            let folder = claude.join(name);
+            write_file(
+                &folder.join(LIBRARY_SKILL_FILE),
+                skill_document(name, "A real skill folder with nested skills"),
+            )?;
+            write_file(
+                &folder.join("nested-skill").join(LIBRARY_SKILL_FILE),
+                skill_document("nested-skill", "A nested skill document"),
+            )?;
+        }
+
+        let mut links = BTreeMap::new();
+        // Claude Code links every library skill.
+        for name in CC_SWITCH_SKILLS.iter().chain(SKILLS_MANAGER_SKILLS.iter()) {
+            link_skill(
+                &cc_switch,
+                &skills_manager,
+                &claude,
+                name,
+                AgentId::ClaudeCode,
+                &mut links,
+            )?;
+        }
+        link_path(
+            &local_linker.join(LOCAL_LINKER_SKILL),
+            &claude.join(LOCAL_LINKER_SKILL),
+        )?;
+        links.insert(
+            (AgentId::ClaudeCode, LOCAL_LINKER_SKILL.to_owned()),
+            claude.join(LOCAL_LINKER_SKILL),
+        );
+
+        // Codex keeps its own folder (fourteen of the fifteen cc-switch skills) and reads the
+        // shared `.agents/skills` root as a secondary location.
+        for name in &CC_SWITCH_SKILLS[..14] {
+            link_skill(
+                &cc_switch,
+                &skills_manager,
+                &codex,
+                name,
+                AgentId::Codex,
+                &mut links,
+            )?;
+        }
+        for name in CC_SWITCH_SKILLS.iter().chain(SKILLS_MANAGER_SKILLS.iter()) {
+            link_skill(
+                &cc_switch,
+                &skills_manager,
+                &agents_root,
+                name,
+                AgentId::Codex,
+                &mut links,
+            )?;
+        }
+        // omp's primary root holds the same library links.
+        for name in CC_SWITCH_SKILLS.iter().chain(SKILLS_MANAGER_SKILLS.iter()) {
+            link_skill(
+                &cc_switch,
+                &skills_manager,
+                &omp,
+                name,
+                AgentId::Omp,
+                &mut links,
+            )?;
+        }
+
+        let mut dangling = Vec::new();
+        for index in 1..=DANGLING_LINKS {
+            let name = format!("{DANGLING_PREFIX}-{index:02}");
+            let path = codex.join(&name);
+            link_path(&home_root.join(".cc-switch/skills").join(&name), &path)?;
+            dangling.push(path);
+        }
+        let system_dir = codex.join(".system");
+        write_file(
+            &system_dir.join("inner").join(LIBRARY_SKILL_FILE),
+            skill_document("inner", "A nested skill under the system folder"),
+        )?;
+
+        let loop_links = vec![claude.join("loop-a"), claude.join("loop-b")];
+        link_path(&loop_links[1], &loop_links[0])?;
+        link_path(&loop_links[0], &loop_links[1])?;
+        let escape_link = claude.join("escape-link");
+        link_path(&outside, &escape_link)?;
+
+        Ok(Self {
+            owner: None,
+            home: home_root.clone(),
+            root: root.to_path_buf(),
+            project,
+            outside,
+            cc_switch,
+            skills_manager,
+            local_linker,
+            claude,
+            codex,
+            agents_root,
+            omp,
+            system_dir,
+            dangling,
+            loop_links,
+            escape_link,
+            links,
+        })
+    }
+
+    /// The injected home directory, already canonical.
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    /// The directory that owns the home, for paths that must stay outside it.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The registered project directory (empty of skills).
+    #[must_use]
+    pub fn project(&self) -> &Path {
+        &self.project
+    }
+
+    /// Folder outside the injected home that [`Self::escape_link`] points at.
+    #[must_use]
+    pub fn outside_skill(&self) -> &Path {
+        &self.outside
+    }
+
+    /// Library folder holding `name`, or `None` when no library has it.
+    #[must_use]
+    pub fn library_path(&self, name: &str) -> Option<PathBuf> {
+        if CC_SWITCH_SKILLS.contains(&name) {
+            return Some(self.cc_switch.join(name));
+        }
+        if SKILLS_MANAGER_SKILLS.contains(&name) {
+            return Some(self.skills_manager.join(name));
+        }
+        (name == LOCAL_LINKER_SKILL).then(|| self.local_linker.join(name))
+    }
+
+    /// The three skill roots the fixture fills, in adapter declaration order.
+    #[must_use]
+    pub fn agent_roots(&self) -> BTreeMap<AgentId, Vec<PathBuf>> {
+        BTreeMap::from([
+            (AgentId::ClaudeCode, vec![self.claude.clone()]),
+            (
+                AgentId::Codex,
+                vec![self.codex.clone(), self.agents_root.clone()],
+            ),
+            (AgentId::Omp, vec![self.omp.clone()]),
+        ])
+    }
+
+    /// Every `(agent, skill) -> link path` pair the fixture created.
+    #[must_use]
+    pub fn links(&self) -> &BTreeMap<(AgentId, String), PathBuf> {
+        &self.links
+    }
+
+    /// The 13 links whose target does not exist.
+    #[must_use]
+    pub fn dangling_links(&self) -> &[PathBuf] {
+        &self.dangling
+    }
+
+    /// The two links that point at each other.
+    #[must_use]
+    pub fn loop_links(&self) -> &[PathBuf] {
+        &self.loop_links
+    }
+
+    /// The one link whose target sits outside the injected home.
+    #[must_use]
+    pub fn escape_link(&self) -> &Path {
+        &self.escape_link
+    }
+
+    /// The `.system` folder that holds a nested skill and no document of its own.
+    #[must_use]
+    pub fn system_dir(&self) -> &Path {
+        &self.system_dir
+    }
+
+    /// What a correct scan and index of this layout must report.
+    #[must_use]
+    pub fn expectations(&self) -> SymlinkedSkillsExpectations {
+        // Two of the cc-switch skills carry content every scan refuses: one has a link inside
+        // its tree and one has invalid frontmatter. They are physical skills, but not valid ones.
+        let unique_valid_skills =
+            CC_SWITCH_SKILLS.len() - 2 + SKILLS_MANAGER_SKILLS.len() + 1 + REAL_SKILL_DIRS.len();
+        SymlinkedSkillsExpectations {
+            unique_valid_skills,
+            invalid_skills: 2,
+            broken_links: DANGLING_LINKS + self.loop_links.len(),
+            refused_links: 1,
+            link_count: self.links.len(),
+        }
+    }
+}
+
+/// Writes one library skill folder, giving the special names their extra content.
+fn write_library_skill(library: &Path, name: &str) -> Result<PathBuf, FixtureError> {
+    let folder = library.join(name);
+    match name {
+        "cc-nested" => {
+            write_file(&folder.join("references").join("guide.md"), "# Guide\n")?;
+            write_file(
+                &folder.join("scripts").join("run.sh"),
+                "#!/bin/sh\necho ok\n",
+            )?;
+            write_file(&folder.join("assets").join("logo.txt"), "logo\n")?;
+        }
+        "cc-inner-link" => {
+            write_file(&folder.join("references").join("guide.md"), "# Guide\n")?;
+            let asset = folder.join("assets").join("note.txt");
+            write_file(&asset, "note\n")?;
+            link_path(&asset, &folder.join("references").join("alias.txt"))?;
+        }
+        _ => {}
+    }
+    let document = match name {
+        "cc-crlf" => {
+            skill_document(name, "A skill saved with CRLF line endings").replace('\n', "\r\n")
+        }
+        "cc-bad-frontmatter" => String::from("---\n: : not yaml : :\n---\n# broken\n"),
+        _ => skill_document(name, "A skill installed by a manager tool"),
+    };
+    write_file(&folder.join(LIBRARY_SKILL_FILE), document)?;
+    Ok(folder)
+}
+
+/// Links one library skill into an agent root, recording the pair.
+fn link_skill(
+    cc_switch: &Path,
+    skills_manager: &Path,
+    root: &Path,
+    name: &str,
+    agent: AgentId,
+    links: &mut BTreeMap<(AgentId, String), PathBuf>,
+) -> Result<(), FixtureError> {
+    let target = if CC_SWITCH_SKILLS.contains(&name) {
+        cc_switch.join(name)
+    } else {
+        skills_manager.join(name)
+    };
+    let link = root.join(name);
+    link_path(&target, &link)?;
+    links.insert((agent, name.to_owned()), link);
+    Ok(())
+}
+
+/// Creates a symbolic link, replacing nothing.
+fn link_path(target: &Path, link: &Path) -> Result<(), FixtureError> {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).map_err(FixtureError::io(parent))?;
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).map_err(FixtureError::io(link))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        Err(FixtureError::Io {
+            path: link.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "symlinked skills are a Unix layout",
+            ),
+        })
+    }
+}
+
+/// One valid `SKILL.md` document with frontmatter.
+fn skill_document(name: &str, description: &str) -> String {
+    format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n")
+}

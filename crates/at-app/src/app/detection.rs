@@ -4,6 +4,16 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+/// Background retry schedule for a detection watcher that failed to start. Each entry is the
+/// delay before the next attempt; the last entry repeats.
+const RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+];
+
 use at_adapters::adapter::{AgentAdapterRegistry, AgentEnvironment};
 use at_adapters::detect::{VersionProbe, detect_one, find_executable};
 use at_db::Database;
@@ -163,23 +173,63 @@ pub trait WatchStarter {
 /// The real platform watcher, sharing the app's self-write registry.
 pub struct PlatformWatcher {
     registry: Arc<RecentWrites>,
+    link_roots: Vec<std::path::PathBuf>,
 }
 
 impl PlatformWatcher {
     /// Creates a starter that shares one write-suppression registry with the write path.
+    ///
+    /// No link target is followed until [`Self::with_allowed_link_roots`] names the roots a
+    /// linked skill may resolve inside; production always sets them from the injected paths.
     #[must_use]
     pub fn new(registry: Arc<RecentWrites>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            link_roots: Vec::new(),
+        }
+    }
+
+    /// Restricts link-target following to these roots.
+    #[must_use]
+    pub fn with_allowed_link_roots(
+        mut self,
+        link_roots: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        self.link_roots = link_roots.into_iter().collect();
+        self
     }
 }
 
 impl WatchStarter for PlatformWatcher {
     fn start(&mut self, roots: Vec<WatchRoot>) -> Result<WatchService, WatchError> {
-        let service =
-            WatchService::new(WatchConfig::new(roots).with_registry(Arc::clone(&self.registry)));
+        let service = WatchService::new(
+            WatchConfig::new(roots)
+                .with_allowed_link_roots(self.link_roots.iter().cloned())
+                .with_registry(Arc::clone(&self.registry)),
+        );
         service.start()?;
         Ok(service)
     }
+}
+
+/// Roots a linked skill target may resolve inside for this application layout.
+///
+/// The injected home and the project root cover agent and library folders. The stores are
+/// included as well, so a link into the User or Global store (which an override can place
+/// outside the home) keeps being watched instead of degrading.
+pub(crate) fn allowed_link_roots(paths: &AppPaths) -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = paths.home_dir() {
+        roots.push(home.to_path_buf());
+    }
+    if let Some(project) = paths.project_store().and_then(|store| store.parent()) {
+        roots.push(project.to_path_buf());
+    }
+    roots.push(paths.user_store().to_path_buf());
+    roots.push(paths.global_store().to_path_buf());
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 /// Starts a watch service over every root the platform accepts (TA-081 AC4).
@@ -265,6 +315,12 @@ fn now_ms() -> i64 {
 }
 
 /// Starts an initial agent scan and keeps the index current as native files change.
+///
+/// When the platform refuses the initial watch, the start is retried in the background with
+/// backoff; the returned error reports the first failure so the caller can log it once.
+///
+/// # Errors
+/// Returns the startup error of the first attempt.
 pub fn start(
     app: AppHandle,
     paths: AppPaths,
@@ -275,9 +331,38 @@ pub fn start(
     let adapters = Arc::new(AgentAdapterRegistry::register());
     let environment = at_engine::refresh::agent_environment(&paths);
     let roots = watch_roots(&adapters, &environment, &paths);
-    let mut starter = PlatformWatcher::new(registry);
-    let (watcher, diagnostics) = start_retaining_watchable_roots(roots, &mut starter)?;
-    for diagnostic in &diagnostics {
+    let link_roots = allowed_link_roots(&paths);
+    let mut starter =
+        PlatformWatcher::new(Arc::clone(&registry)).with_allowed_link_roots(link_roots.clone());
+    match start_retaining_watchable_roots(roots.clone(), &mut starter) {
+        Ok((watcher, diagnostics)) => {
+            emit_diagnostics(&app, &diagnostics);
+            spawn_detection_consumers(&app, adapters, environment, database, jobs, watcher);
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "agent filesystem detection watcher unavailable; retrying in the background"
+            );
+            spawn_detection_retry(
+                app,
+                environment,
+                database,
+                adapters,
+                roots,
+                link_roots,
+                registry,
+                jobs,
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Emits per-root watch refusals as typed diagnostics.
+fn emit_diagnostics(app: &AppHandle, diagnostics: &[Diagnostic]) {
+    for diagnostic in diagnostics {
         tracing::warn!(
             ?diagnostic,
             "watch root refused; the remaining roots stay live"
@@ -286,16 +371,123 @@ pub fn start(
             tracing::warn!(%error, "detection diagnostic event emission failed");
         }
     }
+}
+
+/// Retries the detection watcher start in the background with backoff until it succeeds.
+///
+/// Each attempt rebuilds the platform watcher; a success hands the service to the same
+/// consumers a normal start would have used, so detection becomes live without user action.
+#[allow(clippy::too_many_arguments)]
+fn spawn_detection_retry(
+    app: AppHandle,
+    environment: AgentEnvironment,
+    database: Arc<Mutex<Database>>,
+    adapters: Arc<AgentAdapterRegistry>,
+    roots: Vec<WatchRoot>,
+    link_roots: Vec<std::path::PathBuf>,
+    registry: Arc<RecentWrites>,
+    jobs: super::jobs::JobsControl,
+) {
+    // The app's shutdown cancels this token; the loop must stop retrying even while the
+    // platform watcher keeps refusing, instead of spinning past the process lifetime.
+    let cancellation = jobs.cancellation_token();
+    tauri::async_runtime::spawn_blocking(move || {
+        retry_with_backoff(
+            &RETRY_DELAYS,
+            || cancellation.is_cancelled(),
+            |index| {
+                let mut starter = PlatformWatcher::new(Arc::clone(&registry))
+                    .with_allowed_link_roots(link_roots.iter().cloned());
+                match start_retaining_watchable_roots(roots.clone(), &mut starter) {
+                    Ok((watcher, diagnostics)) => {
+                        tracing::info!("agent filesystem detection watcher started on retry");
+                        emit_diagnostics(&app, &diagnostics);
+                        spawn_detection_consumers(
+                            &app,
+                            Arc::clone(&adapters),
+                            environment.clone(),
+                            Arc::clone(&database),
+                            jobs.clone(),
+                            watcher,
+                        );
+                        true
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "agent filesystem detection watcher retry failed (attempt {})",
+                            index + 1
+                        );
+                        false
+                    }
+                }
+            },
+        );
+    });
+}
+
+/// How often a cancellable backoff wait re-checks the stop flag.
+const RETRY_STOP_POLL: Duration = Duration::from_millis(25);
+
+/// Sleeps for `delay` unless `stopped` turns true first; returns whether it stopped.
+fn wait_unless_stopped(delay: Duration, stopped: &impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        if stopped() {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep((deadline - now).min(RETRY_STOP_POLL));
+    }
+}
+
+/// Calls `attempt` until it returns `true` or `stopped` turns true, waiting `delays` between
+/// attempts; the last delay repeats. The first attempt runs after `delays[0]`, because the
+/// caller already tried once. A stop is observed within [`RETRY_STOP_POLL`] of the signal, so a
+/// dropped service or a quitting app never leaves the thread sleeping through a backoff step.
+fn retry_with_backoff(
+    delays: &[Duration],
+    stopped: impl Fn() -> bool,
+    mut attempt: impl FnMut(usize) -> bool,
+) {
+    let mut index = 0usize;
+    loop {
+        if wait_unless_stopped(delays[index.min(delays.len() - 1)], &stopped) {
+            return;
+        }
+        if stopped() {
+            return;
+        }
+        if attempt(index) {
+            return;
+        }
+        index += 1;
+    }
+}
+
+/// The scan worker and the watcher event consumer, shared by the initial start and retries.
+fn spawn_detection_consumers(
+    app: &AppHandle,
+    adapters: Arc<AgentAdapterRegistry>,
+    environment: AgentEnvironment,
+    database: Arc<Mutex<Database>>,
+    jobs: super::jobs::JobsControl,
+    watcher: WatchService,
+) {
     let schedule: Arc<DetectionSchedule> =
         Arc::new((Mutex::new(PendingDetection::default()), Condvar::new()));
     let scan_schedule = Arc::clone(&schedule);
     let scan_jobs = jobs.clone();
+    let scan_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // Keep the initial pass on the same worker so watcher requests cannot overlap it.
         if scan_jobs.window_is_paused(now_ms()) {
             scan_jobs.wait_until_window_active();
         }
-        detect_and_persist(&app, &adapters, &environment, &database);
+        detect_and_persist(&scan_app, &adapters, &environment, &database);
         let mut deferred_while_hidden = false;
         loop {
             let mut refresh = wait_for_detection(&scan_schedule);
@@ -310,8 +502,8 @@ pub fn start(
                 };
                 deferred_while_hidden = false;
             }
-            detect_and_persist(&app, &adapters, &environment, &database);
-            if let Err(error) = app.emit(EVENT_EXTERNAL_REFRESH, refresh) {
+            detect_and_persist(&scan_app, &adapters, &environment, &database);
+            if let Err(error) = scan_app.emit(EVENT_EXTERNAL_REFRESH, refresh) {
                 tracing::warn!(%error, "external refresh event emission failed");
             }
         }
@@ -330,7 +522,6 @@ pub fn start(
             }
         }
     });
-    Ok(())
 }
 
 /// Watch roots for the detected agents and AgenTuna stores.
@@ -560,6 +751,81 @@ mod tests {
             paths: paths.into_iter().collect(),
             full_rescan: false,
         }
+    }
+
+    #[test]
+    fn retry_with_backoff_repeats_until_the_attempt_succeeds() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&attempts);
+        retry_with_backoff(
+            &[Duration::from_millis(1), Duration::from_millis(1)],
+            || false,
+            |index| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                index >= 2
+            },
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "two failures then one success"
+        );
+    }
+
+    /// A starter whose watch is always refused, the condition the retry loop exists for.
+    struct AlwaysRefusing;
+
+    impl WatchStarter for AlwaysRefusing {
+        fn start(&mut self, roots: Vec<WatchRoot>) -> Result<WatchService, WatchError> {
+            let path = roots
+                .first()
+                .map(|root| root.path.clone())
+                .unwrap_or_default();
+            Err(WatchError::WatchFailed {
+                path,
+                source: std::io::Error::other("refused by the test starter").into(),
+            })
+        }
+    }
+
+    #[test]
+    fn retry_with_backoff_stops_within_one_backoff_step_when_cancelled() {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = Arc::clone(&stop);
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&attempts);
+        // The stop arrives while the thread is inside the long second backoff: the old loop
+        // slept through the whole delay and every later attempt.
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            signal.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let began = Instant::now();
+        retry_with_backoff(
+            &[Duration::from_millis(10), Duration::from_secs(30)],
+            || stop.load(std::sync::atomic::Ordering::SeqCst),
+            |_index| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut starter = AlwaysRefusing;
+                start_retaining_watchable_roots(
+                    vec![WatchRoot::dir(
+                        std::path::PathBuf::from("/nonexistent/agentuna-test-root"),
+                        WatchRootKind::SkillsDir,
+                    )],
+                    &mut starter,
+                )
+                .is_ok()
+            },
+        );
+        let elapsed = began.elapsed();
+        stopper.join().expect("join the stop signal");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the loop must exit within one poll step, took {elapsed:?}"
+        );
+        let attempted = attempts.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(attempted >= 1, "the failing starter ran before the stop");
+        assert_eq!(attempted, 1, "no attempt runs once the stop flag is set");
     }
 
     #[test]

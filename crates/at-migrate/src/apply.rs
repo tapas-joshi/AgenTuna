@@ -58,11 +58,22 @@ struct CanonicalMigrationItem {
     native_scope: at_model::Scope,
     slug: String,
     name: String,
-    source_path: PathBuf,
     store_path: PathBuf,
     content_hash: String,
     agents: Vec<at_model::AgentId>,
     target_path: PathBuf,
+    mode: &'static str,
+    /// One entry per native path (and agent) this store item is deployed at.
+    ///
+    /// Two agent links that resolve to one library folder share one store item but have two
+    /// deployment paths, and each needs its own row and its own observed mode.
+    deployments: Vec<CanonicalDeployment>,
+}
+
+/// One native deployment of a migrated store item.
+struct CanonicalDeployment {
+    agent: at_model::AgentId,
+    path: PathBuf,
     mode: &'static str,
 }
 
@@ -327,6 +338,15 @@ pub fn apply_plans_with_actor(
             return Err(ApplyPlanError::Plan(PlanError::StalePlan));
         }
     }
+    // The link entries are re-read once more immediately before the ChangeSet is submitted, so
+    // a retarget inside the statement between validation and apply is still refused.
+    for plan in plans {
+        for step in &plan.steps {
+            if let Some(link) = &step.planned_link {
+                link.verify()?;
+            }
+        }
+    }
     let created_at_unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ApplyPlanError::Clock)?
@@ -561,35 +581,20 @@ fn prepare_plan(
                         .with_name(item_name.clone()),
                     )
                     .map_err(|error| ApplyPlanError::Store(error.to_string()))?;
-                let deploy_step = plan.steps.iter().find(|candidate| {
-                    matches!(
-                        candidate.action,
-                        MigrationAction::WriteLink
-                            | MigrationAction::WriteCopy
-                            | MigrationAction::RecordWatched
-                    ) && candidate
-                        .source
-                        .as_ref()
-                        .is_some_and(|path| path == source || path == destination)
-                });
-                let (agents, target_path, mode) = deploy_step.map_or_else(
-                    || (Vec::new(), source.clone(), "native"),
-                    |candidate| {
-                        let mode = match candidate.action {
-                            MigrationAction::WriteCopy => "copy",
-                            MigrationAction::WriteLink => "symlink",
-                            _ => "native",
-                        };
-                        (
-                            candidate.agents.iter().cloned().collect(),
-                            candidate
-                                .destination
-                                .clone()
-                                .unwrap_or_else(|| source.clone()),
-                            mode,
-                        )
-                    },
-                );
+                // Every deployment step of this item is recorded, not just the first: two
+                // agents can link one library folder into two agent roots, and each path needs
+                // its own deployment row, observed mode and native adoption.
+                let deployments = canonical_deployments(plan, &item_name);
+                let agents = deployments
+                    .iter()
+                    .map(|deployment| deployment.agent.clone())
+                    .collect::<Vec<_>>();
+                let target_path = deployments
+                    .first()
+                    .map_or_else(|| source.clone(), |deployment| deployment.path.clone());
+                let mode = deployments
+                    .first()
+                    .map_or("native", |deployment| deployment.mode);
                 canonical_items.push(CanonicalMigrationItem {
                     id: item_id,
                     kind: ItemKind::Skill,
@@ -597,12 +602,12 @@ fn prepare_plan(
                     native_scope: step.scope,
                     slug: slug_text.to_owned(),
                     name: item_name,
-                    source_path: source.clone(),
                     store_path: destination.clone(),
                     content_hash: hash.to_owned(),
                     agents,
                     target_path,
                     mode,
+                    deployments,
                 });
                 manifest_changed = true;
                 sources.push((source.clone(), hash.to_owned()));
@@ -748,12 +753,12 @@ fn prepare_plan(
                         native_scope: step.scope,
                         slug: slug_text,
                         name: projection_item.item_name.clone(),
-                        source_path: projection_item.source_path.clone(),
                         store_path: destination.clone(),
                         content_hash,
                         agents: vec![projection_item.agent.clone()],
                         target_path: projection_item.source_path.clone(),
                         mode: "native",
+                        deployments: canonical_deployments(plan, &projection_item.item_name),
                     });
                 }
                 for write in &projections.canonical_writes {
@@ -810,6 +815,48 @@ fn prepare_plan(
     })
 }
 
+/// Every native deployment a plan records for one item name.
+///
+/// A normal item has one; two agents that link one library folder have one per agent path, each
+/// with its own planned mode. The plan's selected name may carry the user's spelling while a
+/// projection names the lowercased slug, so both spellings match.
+fn canonical_deployments(plan: &MigrationPlan, item_name: &str) -> Vec<CanonicalDeployment> {
+    let mut deployments: Vec<CanonicalDeployment> = Vec::new();
+    for candidate in plan.steps.iter().filter(|candidate| {
+        candidate
+            .item_name
+            .as_deref()
+            .is_some_and(|name| name == item_name || name.to_ascii_lowercase() == item_name)
+    }) {
+        let (mode, path) = match candidate.action {
+            MigrationAction::WriteCopy => ("copy", candidate.destination.as_ref()),
+            MigrationAction::WriteLink => ("symlink", candidate.destination.as_ref()),
+            MigrationAction::RecordWatched => ("native", candidate.source.as_ref()),
+            _ => continue,
+        };
+        let Some(path) = path else { continue };
+        let agents: Vec<at_model::AgentId> = if candidate.agents.is_empty() {
+            candidate.agent.iter().cloned().collect()
+        } else {
+            candidate.agents.iter().cloned().collect()
+        };
+        for agent in agents {
+            if deployments
+                .iter()
+                .any(|known| known.agent == agent && known.path == *path)
+            {
+                continue;
+            }
+            deployments.push(CanonicalDeployment {
+                agent,
+                path: path.clone(),
+                mode,
+            });
+        }
+    }
+    deployments
+}
+
 /// ChangeSet path for `path` inside one plan's store.
 ///
 /// A plan whose store owns the operation keeps relative paths, so a single-scope migration
@@ -835,6 +882,7 @@ fn record_migration_metadata(
         .transaction()
         .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
     let mut adopted_paths = std::collections::BTreeSet::new();
+    let mut warned_paths = std::collections::BTreeSet::new();
     let mut warnings = Vec::new();
     for item in items {
         let source_path = item.store_path.to_string_lossy();
@@ -865,11 +913,35 @@ fn record_migration_metadata(
                 item.id, stored_id, item.slug
             )));
         }
-        if let Some(agent_id) = item.agents.first() {
-            let native_path = item.source_path.to_string_lossy();
-            if adopted_paths.insert(native_path.to_string()) {
+        let store_path = item.store_path.to_string_lossy();
+        let store_hash = observed_store_hash(item);
+        // One deployment per native path: two agent links can share one store item while
+        // living at two different agent paths.
+        let deployments = if item.deployments.is_empty() {
+            vec![CanonicalDeployment {
+                agent: item
+                    .agents
+                    .first()
+                    .cloned()
+                    .unwrap_or(at_model::AgentId::ClaudeCode),
+                path: item.target_path.clone(),
+                mode: item.mode,
+            }]
+        } else {
+            item.deployments
+                .iter()
+                .map(|deployment| CanonicalDeployment {
+                    agent: deployment.agent.clone(),
+                    path: deployment.path.clone(),
+                    mode: deployment.mode,
+                })
+                .collect()
+        };
+        for deployment in &deployments {
+            if adopted_paths.insert(deployment.path.to_string_lossy().into_owned()) {
+                let native_path = deployment.path.to_string_lossy();
                 let native = at_db::native::NativeAdoptionPath {
-                    agent_id,
+                    agent_id: &deployment.agent,
                     scope: item.native_scope,
                     kind: item.kind,
                     name: &item.name,
@@ -879,20 +951,21 @@ fn record_migration_metadata(
                 at_db::native::adopt_paths(&transaction, &[native], &item.id)
                     .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
             }
-        }
-        let target_path = item.target_path.to_string_lossy();
-        let store_path = item.store_path.to_string_lossy();
-        let mode = observed_mode(item)?;
-        if item.mode == "symlink" && mode != "symlink" {
-            // The link was refused: the deployment row below records the mode that exists,
-            // and the caller is told instead of discovering a silent downgrade later.
-            warnings.push(MigrationWarning::CopyFallback {
-                path: item.target_path.clone(),
-                observed_mode: mode,
-            });
-        }
-        let (store_hash, target_hash) = observed_hashes(item);
-        for agent_id in &item.agents {
+            let target_path = deployment.path.to_string_lossy();
+            let mode = observed_mode(&deployment.path, deployment.mode)?;
+            if deployment.mode == "symlink"
+                && mode != "symlink"
+                && warned_paths.insert(deployment.path.clone())
+            {
+                // The link was refused: the deployment row below records the mode that exists,
+                // and the caller is told once per path instead of discovering a silent
+                // downgrade later. Two agents reading one path share one warning.
+                warnings.push(MigrationWarning::CopyFallback {
+                    path: deployment.path.clone(),
+                    observed_mode: mode,
+                });
+            }
+            let target_hash = observed_target_hash(item, &deployment.path);
             let state = if mode == "native" {
                 ItemState::Native
             } else {
@@ -903,9 +976,9 @@ fn record_migration_metadata(
                 Some(&target_hash),
                 Some(&target_hash),
             );
-            let mut deployment = at_db::deployments::DeploymentSpec::applied(
+            let mut row = at_db::deployments::DeploymentSpec::applied(
                 &item.id,
-                agent_id,
+                &deployment.agent,
                 item.scope,
                 state,
                 Some(mode),
@@ -914,12 +987,12 @@ fn record_migration_metadata(
             )
             .with_operation(operation_id);
             if let Some(id) = item_project_id {
-                deployment = deployment.with_project(id);
+                row = row.with_project(id);
             }
             if mode == "symlink" || mode == "junction" {
-                deployment = deployment.with_link_target(&store_path);
+                row = row.with_link_target(&store_path);
             }
-            at_db::deployments::upsert_deployment(&transaction, &deployment)
+            at_db::deployments::upsert_deployment(&transaction, &row)
                 .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?;
         }
     }
@@ -935,21 +1008,25 @@ fn record_migration_metadata(
 /// rendered native file (a managed block for a rule, the merged document for MCP, the tree or
 /// link target for a skill) and not the source hash the plan carried. A source hash made every
 /// migrated rule and MCP document look drifted immediately after a successful migration.
-fn observed_hashes(item: &CanonicalMigrationItem) -> (String, String) {
-    let store_hash = match item.kind {
+fn observed_store_hash(item: &CanonicalMigrationItem) -> String {
+    match item.kind {
         ItemKind::Skill => at_store::hash_skill_folder(&item.store_path)
             .map(|hash| hash.to_string())
             .unwrap_or_else(|_| item.content_hash.clone()),
         _ => fs::read(&item.store_path)
             .map(|bytes| at_fs::sha256_hex(&bytes))
             .unwrap_or_else(|_| item.content_hash.clone()),
-    };
+    }
+}
+
+/// Hash of one native deployment path as it exists after the apply.
+fn observed_target_hash(item: &CanonicalMigrationItem, target_path: &Path) -> String {
     let target = if item.kind == ItemKind::Skill {
-        fs::canonicalize(&item.target_path).unwrap_or_else(|_| item.target_path.clone())
+        fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf())
     } else {
-        item.target_path.clone()
+        target_path.to_path_buf()
     };
-    let target_hash = match item.kind {
+    match item.kind {
         ItemKind::Skill => at_store::hash_skill_folder(&target)
             .map(|hash| hash.to_string())
             .unwrap_or_else(|_| item.content_hash.clone()),
@@ -959,23 +1036,21 @@ fn observed_hashes(item: &CanonicalMigrationItem) -> (String, String) {
         _ => fs::read(&target)
             .map(|bytes| at_fs::sha256_hex(&bytes))
             .unwrap_or_else(|_| item.content_hash.clone()),
-    };
-    (store_hash, target_hash)
+    }
 }
 
-fn observed_mode(item: &CanonicalMigrationItem) -> Result<&'static str, ApplyPlanError> {
-    if item.mode != "symlink" {
-        return Ok(item.mode);
+fn observed_mode(path: &Path, planned: &'static str) -> Result<&'static str, ApplyPlanError> {
+    if planned != "symlink" {
+        return Ok(planned);
     }
-    let metadata =
-        fs::symlink_metadata(&item.target_path).map_err(|source| ApplyPlanError::SourceRead {
-            path: item.target_path.clone(),
-            source,
-        })?;
+    let metadata = fs::symlink_metadata(path).map_err(|source| ApplyPlanError::SourceRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
     if metadata.file_type().is_symlink() {
         return Ok("symlink");
     }
-    if at_fs::CopyManifest::read(&item.target_path)
+    if at_fs::CopyManifest::read(path)
         .map_err(|error| ApplyPlanError::Metadata(error.to_string()))?
         .is_some()
     {

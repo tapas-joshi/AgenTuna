@@ -55,8 +55,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use time::OffsetDateTime;
 
 use crate::atomic::WriteOutcome;
@@ -81,14 +80,32 @@ pub const DEFAULT_BURST_QUIET: Duration = Duration::from_secs(1);
 /// How long [`WatchService::stop`] waits for the worker thread to report completion.
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// How long [`WatchService::start`] waits for the watcher to be installed.
-pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long [`WatchService::start`] waits for the platform watches before reporting *started*
+/// and letting installation finish in the background.
+///
+/// Installing the watches is fast on a quiet filesystem (milliseconds). Right after a
+/// skill-manager run, though, the platform stream start can block for seconds while the OS
+/// catches up with the churn, so `start` never waits longer than this grace: the caller learns
+/// immediately that the service is coming up, and [`WatchService::status`] reports
+/// [`WatchStatus::Starting`] until the watches are in.
+pub const DEFAULT_READY_GRACE: Duration = Duration::from_millis(750);
+
+/// Upper bound on the files and directories indexed per watched root, including the trees
+/// behind symlinked skill entries.
+///
+/// A root beyond the bound is not indexed; it is reported as too large via
+/// [`WatchService::status`] and degrades to the periodic rescan the consumers already run on
+/// [`WatchEvent::RescanRequired`]. Watching never becomes unavailable because a tree is large.
+pub const DEFAULT_MAX_ENTRIES_PER_ROOT: usize = 20_000;
+
+/// Upper bound on symlinked skill entries per root whose target directory gets its own watch.
+///
+/// Beyond the bound the root stops gaining target watches and degrades to periodic rescan,
+/// exactly like [`DEFAULT_MAX_ENTRIES_PER_ROOT`].
+pub const DEFAULT_MAX_LINK_TARGETS_PER_ROOT: usize = 256;
 
 /// Upper bound on the inode index used to recognise renames.
 const PATH_INDEX_CAPACITY: usize = 100_000;
-/// Debouncer tick cap, limiting default event delivery to one additional 300 ms tick.
-const MAX_DEBOUNCE_TICK: Duration = Duration::from_millis(300);
-
 /// How often the worker re-stats a root while another root is missing.
 ///
 /// A missing root has no watch of its own, so its return is seen by the parent watch or by this
@@ -106,8 +123,65 @@ const MISSING_ROOT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// is still never re-walked.
 const ROOT_RECHECK_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Debouncer type used by the service.
-type FsDebouncer = Debouncer<RecommendedWatcher, RecommendedCache>;
+/// What one reconcile pass wants from the platform watcher.
+type WatchPlan = BTreeMap<PathBuf, RecursiveMode>;
+
+/// Installs a whole watch plan in **one** platform session.
+///
+/// macOS rebuilds the entire FSEvents stream on every individual watch change, and a long run
+/// of stop/start cycles can leave the stream dead, so a reconcile never calls `watch` per
+/// path: obsolete paths are removed and every new path added through one `paths_mut` session,
+/// and `commit` restarts the stream once.
+fn install_plan(
+    watcher: &mut RecommendedWatcher,
+    desired: &WatchPlan,
+    counters: &Counters,
+    policy: ReconcileMode,
+    watched: &mut HashMap<PathBuf, RecursiveMode>,
+    on_refused: &mut dyn FnMut(&Path, &notify::Error),
+) -> Result<(), WatchError> {
+    let obsolete: Vec<PathBuf> = watched
+        .iter()
+        .filter(|(path, mode)| desired.get(*path) != Some(*mode))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let adds: Vec<&PathBuf> = desired
+        .iter()
+        .filter(|(path, _)| !watched.contains_key(*path))
+        .map(|(path, _)| path)
+        .collect();
+    if obsolete.is_empty() && adds.is_empty() {
+        // Nothing to change: do not touch the stream. Recreating it would drop the events
+        // that arrive while the new stream spins up.
+        return Ok(());
+    }
+    let mut session = watcher.paths_mut();
+    for path in &obsolete {
+        if session.remove(path).is_err() {
+            // A vanished path makes the removal fail; the watch is gone either way.
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        watched.remove(path);
+    }
+    for (path, mode) in desired {
+        if watched.contains_key(path) {
+            continue;
+        }
+        if let Err(source) = session.add(path, *mode) {
+            if policy == ReconcileMode::Strict {
+                return Err(WatchError::WatchFailed {
+                    path: path.clone(),
+                    source,
+                });
+            }
+            on_refused(path, &source);
+        } else {
+            watched.insert(path.clone(), *mode);
+        }
+    }
+    session.commit().map_err(WatchError::Watcher)?;
+    Ok(())
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -701,15 +775,98 @@ pub enum WatchError {
     /// The worker thread could not be spawned.
     #[error("the watch worker could not be started: {0}")]
     Spawn(#[source] io::Error),
-    /// The watcher did not report readiness in time.
-    #[error("the watch service did not start within {DEFAULT_START_TIMEOUT:?}")]
-    StartTimeout,
     /// The worker ended before the service was ready.
     #[error("the watch worker ended before it was ready")]
     WorkerGone,
     /// The worker panicked.
     #[error("the watch worker panicked")]
     WorkerPanicked,
+}
+
+/// Why one watched root is not being watched as configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RootDegradation {
+    /// The platform refused the watch; the worker retries it on every root recheck.
+    WatchFailed(String),
+    /// The root holds more files or directories than the configured bound. It is not indexed
+    /// and falls back to the periodic rescan consumers run for
+    /// [`WatchEvent::RescanRequired`].
+    TooLarge,
+    /// A linked skill entry resolves outside every allowed link root, so it was not followed.
+    ///
+    /// The link entry itself is still watched; the directory it points at is not indexed or
+    /// watched, and changes inside that directory are covered by the periodic rescan only if
+    /// they also touch a watched path.
+    LinkTargetOutsideRoots {
+        /// The symlink entry inside the watched root.
+        link: PathBuf,
+        /// Canonical directory the link resolves to.
+        target: PathBuf,
+    },
+}
+
+impl std::fmt::Display for RootDegradation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WatchFailed(message) => write!(formatter, "watch refused: {message}"),
+            Self::TooLarge => write!(
+                formatter,
+                "root too large to index; covered by periodic rescan"
+            ),
+            Self::LinkTargetOutsideRoots { link, target } => write!(
+                formatter,
+                "{}: link target {} is outside the allowed roots; not followed",
+                link.display(),
+                target.display()
+            ),
+        }
+    }
+}
+
+/// One root that is not watched as configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DegradedRoot {
+    /// The configured root path.
+    pub path: PathBuf,
+    /// Why the root is degraded.
+    pub reason: RootDegradation,
+}
+
+/// What the service is currently doing, queried with [`WatchService::status`].
+///
+/// A start never fails because a tree is large or a platform stream is slow to come up: the
+/// worst case is [`WatchStatus::Degraded`], and the worker keeps retrying degraded roots on
+/// every root recheck.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WatchStatus {
+    /// The worker is running and the platform watches are not confirmed installed yet.
+    Starting,
+    /// Every root is watched as configured.
+    Watching,
+    /// Nothing could be watched. The worker stays alive and keeps retrying the install.
+    Failed(String),
+    /// Watching is up, but at least one root is degraded. Changes in the degraded roots are
+    /// covered by the periodic rescan, never lost.
+    Degraded(Vec<DegradedRoot>),
+}
+
+impl std::fmt::Display for WatchStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Starting => write!(formatter, "starting"),
+            Self::Watching => write!(formatter, "watching"),
+            Self::Failed(message) => write!(formatter, "not watching: {message}"),
+            Self::Degraded(roots) => {
+                write!(formatter, "watching with degraded roots:")?;
+                for root in roots {
+                    write!(formatter, " {} ({})", root.path.display(), root.reason)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Everything the caller must decide before the service starts.
@@ -725,6 +882,20 @@ pub struct WatchConfig {
     pub max_batch_paths: usize,
     /// How long a burst must be quiet before events flow again after a rescan.
     pub burst_quiet: Duration,
+    /// Largest number of files and directories indexed per root, including linked target
+    /// trees.
+    pub max_entries_per_root: usize,
+    /// Largest number of symlinked skill entries per root whose target gets its own watch.
+    pub max_link_targets_per_root: usize,
+    /// Roots a symlinked skill entry's target must resolve inside to be followed.
+    ///
+    /// Skill managers install skills as links into a central library, so a change inside the
+    /// library folder is a change to the skill. The service only follows a link whose canonical
+    /// target lies inside one of these roots; a link to any other directory (a link to `/`, an
+    /// escaping target, another user's home) is not walked or watched, and the root reports
+    /// [`RootDegradation::LinkTargetOutsideRoots`]. Empty (the default) follows no link target
+    /// at all: the link entry itself is still watched.
+    pub allowed_link_roots: Vec<PathBuf>,
     /// Paths, names and suffixes that never reach a batch.
     pub ignored: IgnoreRules,
     /// Registry of AgenTuna's own writes.
@@ -740,6 +911,9 @@ impl WatchConfig {
             debounce: DEFAULT_DEBOUNCE,
             capacity: DEFAULT_QUEUE_CAPACITY,
             max_batch_paths: DEFAULT_MAX_BATCH_PATHS,
+            max_entries_per_root: DEFAULT_MAX_ENTRIES_PER_ROOT,
+            max_link_targets_per_root: DEFAULT_MAX_LINK_TARGETS_PER_ROOT,
+            allowed_link_roots: Vec::new(),
             burst_quiet: DEFAULT_BURST_QUIET,
             ignored: IgnoreRules::standard(),
             registry: Arc::new(RecentWrites::new()),
@@ -774,6 +948,34 @@ impl WatchConfig {
         self
     }
 
+    /// Replaces the per-root bound on indexed files and directories.
+    #[must_use]
+    pub fn with_max_entries_per_root(mut self, max_entries_per_root: usize) -> Self {
+        self.max_entries_per_root = max_entries_per_root.max(1);
+        self
+    }
+
+    /// Replaces the per-root bound on watched symlink targets.
+    #[must_use]
+    pub fn with_max_link_targets_per_root(mut self, max_link_targets_per_root: usize) -> Self {
+        self.max_link_targets_per_root = max_link_targets_per_root.max(1);
+        self
+    }
+
+    /// Restricts link-target following to directories inside these roots.
+    ///
+    /// The roots should be canonical (the injected home and project root, for example); they
+    /// are canonicalized when the service builds its roots, and roots that cannot be
+    /// canonicalized are ignored. An empty list disables following entirely.
+    #[must_use]
+    pub fn with_allowed_link_roots(
+        mut self,
+        allowed_link_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        self.allowed_link_roots = allowed_link_roots.into_iter().collect();
+        self
+    }
+
     /// Replaces the ignore rules.
     #[must_use]
     pub fn with_ignored(mut self, ignored: IgnoreRules) -> Self {
@@ -789,7 +991,7 @@ impl WatchConfig {
     }
 }
 
-/// Watch service: one worker thread, one debouncer, one bounded queue.
+/// Watch service: one worker thread, one platform watcher, one bounded queue.
 #[derive(Debug)]
 pub struct WatchService {
     config: Arc<WatchConfig>,
@@ -819,6 +1021,7 @@ impl WatchService {
                 counters: Counters::default(),
                 registry,
                 wake_sender: Mutex::new(None),
+                status: Mutex::new(WatchStatus::Starting),
             }),
             run: Mutex::new(RunState::default()),
         }
@@ -844,16 +1047,24 @@ impl WatchService {
 
     /// Installs the watches and starts the worker.
     ///
+    /// `start` waits for the platform watches for [`DEFAULT_READY_GRACE`]. A refusal the
+    /// platform reports immediately is returned as [`WatchError::WatchFailed`]; when the
+    /// platform is simply slow (a busy stream start right after a skill-manager run), `start`
+    /// reports *started* after the grace and installation finishes in the background, with
+    /// [`WatchService::status`] reporting [`WatchStatus::Starting`] until the watches are in.
+    /// Seeding the change index always happens after `start` returns.
+    ///
     /// # Errors
     /// [`WatchError::AlreadyRunning`] when the service is already started;
     /// [`WatchError::Watcher`], [`WatchError::WatchFailed`], [`WatchError::Spawn`] and
-    /// [`WatchError::StartTimeout`] when the platform refuses to watch the configured roots.
+    /// [`WatchError::WorkerGone`] when the platform refuses to watch the configured roots.
     pub fn start(&self) -> Result<(), WatchError> {
         let mut run = lock(&self.run);
         if run.handle.is_some() {
             return Err(WatchError::AlreadyRunning);
         }
         self.shared.stop.store(false, Ordering::SeqCst);
+        self.shared.set_status(WatchStatus::Starting);
         {
             let mut queue = lock(&self.shared.queue);
             queue.events.clear();
@@ -867,7 +1078,7 @@ impl WatchService {
             .name("agentuna-watch".to_owned())
             .spawn(move || run_worker(&shared, &config, &ready_tx, &done_tx))
             .map_err(WatchError::Spawn)?;
-        match ready_rx.recv_timeout(DEFAULT_START_TIMEOUT) {
+        match ready_rx.recv_timeout(DEFAULT_READY_GRACE) {
             Ok(Ok(())) => {
                 run.handle = Some(handle);
                 run.done = Some(done_rx);
@@ -877,16 +1088,35 @@ impl WatchService {
                 let _ = handle.join();
                 Err(error)
             }
+            // Slow platform install: the service is coming up; the worker finishes the
+            // watches and the index in the background and keeps retrying refused roots.
             Err(RecvTimeoutError::Timeout) => {
-                self.shared.stop.store(true, Ordering::SeqCst);
-                let _ = handle.join();
-                Err(WatchError::StartTimeout)
+                run.handle = Some(handle);
+                run.done = Some(done_rx);
+                Ok(())
             }
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = handle.join();
                 Err(WatchError::WorkerGone)
             }
         }
+    }
+
+    /// What the service is currently doing.
+    ///
+    /// The status is maintained by the worker: [`WatchStatus::Starting`] until the platform
+    /// watches are confirmed, then [`WatchStatus::Watching`], [`WatchStatus::Degraded`] for
+    /// refused or oversized roots (which the worker keeps retrying), or
+    /// [`WatchStatus::Failed`] when nothing could be watched at all.
+    #[must_use]
+    pub fn status(&self) -> WatchStatus {
+        self.shared
+            .status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_else(|_| {
+                WatchStatus::Failed("the watch service status is unavailable".to_owned())
+            })
     }
 
     /// Stops the worker and releases the platform watcher.
@@ -902,7 +1132,9 @@ impl WatchService {
             let done = run.done.take();
             self.shared.stop.store(true, Ordering::SeqCst);
             if let Some(sender) = lock(&self.shared.wake_sender).as_ref() {
-                let _ = sender.send(Ok(Vec::new()));
+                // Wake the worker so `stop` is observed immediately; the empty event is
+                // discarded by the quiet-window collector.
+                let _ = sender.send(Ok(notify::Event::new(notify::EventKind::Other)));
             }
             (handle, done)
         };
@@ -1002,7 +1234,16 @@ struct Shared {
     capacity: usize,
     counters: Counters,
     registry: Arc<RecentWrites>,
-    wake_sender: Mutex<Option<mpsc::Sender<DebounceEventResult>>>,
+    wake_sender: Mutex<Option<mpsc::Sender<notify::Result<Event>>>>,
+    status: Mutex<WatchStatus>,
+}
+
+impl Shared {
+    fn set_status(&self, status: WatchStatus) {
+        if let Ok(mut current) = self.status.lock() {
+            *current = status;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1088,35 +1329,47 @@ fn run_worker(
     ready: &SyncSender<Result<(), WatchError>>,
     done: &SyncSender<()>,
 ) {
-    let (tx, rx) = mpsc::channel::<DebounceEventResult>();
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     *lock(&shared.wake_sender) = Some(tx.clone());
-    let mut debouncer = match new_debouncer(
-        config.debounce,
-        Some(config.debounce.min(MAX_DEBOUNCE_TICK)),
-        move |result| {
-            let _ = tx.send(result);
-        },
-    ) {
-        Ok(debouncer) => debouncer,
+    let mut watcher = match notify::recommended_watcher(move |result| {
+        let _ = tx.send(result);
+    }) {
+        Ok(watcher) => watcher,
         Err(source) => {
             let _ = ready.send(Err(WatchError::Watcher(source)));
             return;
         }
     };
-    let mut roots = Roots::build(&config.roots);
-    if let Err(error) = roots.reconcile(&mut debouncer, &shared.counters) {
-        let _ = ready.send(Err(error));
-        return;
-    }
+    let mut roots = Roots::build_with_link_roots(&config.roots, &config.allowed_link_roots);
+    // The first install reports per-root refusals synchronously through the ready channel,
+    // which keeps the historical contract for callers that drop refused roots. A refusal that
+    // arrives after the ready grace in `start` (the receiver is gone) degrades the service to
+    // per-root retries instead of aborting it.
+    let installed = roots.reconcile(&mut watcher, &shared.counters, ReconcileMode::Strict);
+    shared.set_status(roots.watch_status());
     let ignored = roots.ignore_rules(&config.ignored);
-    let mut index = PathIndex::new(PATH_INDEX_CAPACITY);
-    count_seed(shared);
-    index.seed(&roots, &ignored);
     let mut burst = BurstGuard::new(config.max_batch_paths, config.burst_quiet);
     let mut reseed = false;
-    if ready.send(Ok(())).is_err() {
+    let refused = installed.is_err();
+    let handshake = ready.send(installed);
+    if refused && handshake.is_ok() {
+        // The caller is still waiting on the handshake and learns about the refusal.
         return;
     }
+
+    // The index is seeded after `start` has returned: the platform watches are already
+    // installed (or retrying), so the caller never waits on a tree walk. Events queued by the
+    // platform during the seed are processed once it completes.
+    let mut index = PathIndex::new(PATH_INDEX_CAPACITY);
+    count_seed(shared);
+    index.seed(
+        &mut roots,
+        &ignored,
+        &shared.stop,
+        config.max_entries_per_root,
+        config.max_link_targets_per_root,
+    );
+    roots.finish_seed(&mut watcher, shared);
 
     loop {
         if shared.stop.load(Ordering::SeqCst) {
@@ -1124,6 +1377,8 @@ fn run_worker(
         }
         // A missing root has no watch of its own; everything else is event-driven except for the
         // stat-only root recheck, which is what makes `PathGone` independent of event delivery.
+        // The same recheck retries refused watches and unresolved linked skill targets, so a
+        // degraded service heals in the background with a fixed cadence.
         let idle_wait = if roots.has_missing() {
             MISSING_ROOT_RETRY_INTERVAL
         } else {
@@ -1132,8 +1387,15 @@ fn run_worker(
         let received = match rx.recv_timeout(idle_wait) {
             Ok(result) => Some(result),
             Err(RecvTimeoutError::Timeout) => {
-                if roots.poll(&mut debouncer, shared) {
-                    reseed_index(&mut index, &roots, &ignored, shared);
+                if roots.poll(&mut watcher, shared) {
+                    reseed_index(
+                        &mut index,
+                        &mut roots,
+                        &ignored,
+                        shared,
+                        config,
+                        &mut watcher,
+                    );
                 }
                 continue;
             }
@@ -1146,43 +1408,89 @@ fn run_worker(
             break;
         }
         if reseed {
-            reseed_index(&mut index, &roots, &ignored, shared);
+            reseed_index(
+                &mut index,
+                &mut roots,
+                &ignored,
+                shared,
+                config,
+                &mut watcher,
+            );
             reseed = false;
         }
         match result {
-            Ok(events) => {
+            Ok(event) => {
+                // Quiet window: fold everything that arrives within one debounce window into
+                // a single processing pass, so a burst of platform events still produces one
+                // classified batch.
+                let mut events = vec![event];
+                loop {
+                    match rx.recv_timeout(config.debounce) {
+                        Ok(Ok(more)) => events.push(more),
+                        Ok(Err(_)) => {}
+                        Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
                 let needs_rescan = process(
-                    events, shared, config, &ignored, &roots, &mut index, &mut burst,
+                    events,
+                    shared,
+                    config,
+                    &ignored,
+                    &mut roots,
+                    &mut index,
+                    &mut burst,
+                    &mut watcher,
                 );
                 reseed |= needs_rescan;
             }
-            Err(errors) => {
-                shared
-                    .counters
-                    .errors
-                    .fetch_add(errors.len() as u64, Ordering::Relaxed);
+            Err(error) => {
+                shared.counters.errors.fetch_add(1, Ordering::Relaxed);
                 shared.force_rescan(OffsetDateTime::now_utc());
                 reseed = true;
+                let _ = error;
             }
         }
         // Verify the roots after every batch, including batches delivered for an ancestor
         // watched on behalf of a root that is missing.
-        if roots.poll(&mut debouncer, shared) {
-            reseed_index(&mut index, &roots, &ignored, shared);
+        if roots.poll(&mut watcher, shared) {
+            reseed_index(
+                &mut index,
+                &mut roots,
+                &ignored,
+                shared,
+                config,
+                &mut watcher,
+            );
         }
     }
     *lock(&shared.wake_sender) = None;
-    drop(debouncer);
+    drop(watcher);
     let _ = done.send(());
 }
 
 /// Rebuilds the inode index from what is on disk now.
 ///
 /// Only a root that appeared again needs this: the tree behind the old paths no longer exists.
-fn reseed_index(index: &mut PathIndex, roots: &Roots, ignored: &IgnoreRules, shared: &Shared) {
+fn reseed_index(
+    index: &mut PathIndex,
+    roots: &mut Roots,
+    ignored: &IgnoreRules,
+    shared: &Shared,
+    config: &WatchConfig,
+    watcher: &mut RecommendedWatcher,
+) {
     count_seed(shared);
     let mut fresh = PathIndex::new(PATH_INDEX_CAPACITY);
-    fresh.seed(roots, ignored);
+    fresh.seed(
+        roots,
+        ignored,
+        &shared.stop,
+        config.max_entries_per_root,
+        config.max_link_targets_per_root,
+    );
+    roots.finish_seed(watcher, shared);
     *index = fresh;
 }
 
@@ -1195,31 +1503,52 @@ fn count_seed(shared: &Shared) {
 }
 
 /// Processes one debounce cycle. Returns whether the inode index has to be rebuilt.
+#[allow(clippy::too_many_arguments)]
 fn process(
-    events: Vec<notify_debouncer_full::DebouncedEvent>,
+    events: Vec<Event>,
     shared: &Shared,
     config: &WatchConfig,
     ignored: &IgnoreRules,
-    roots: &Roots,
+    roots: &mut Roots,
     index: &mut PathIndex,
     burst: &mut BurstGuard,
+    watcher: &mut RecommendedWatcher,
 ) -> bool {
-    let mut candidates: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut reported: BTreeSet<PathBuf> = BTreeSet::new();
     for event in events {
-        for path in event.event.paths {
-            candidates.insert(path);
+        for path in event.paths {
+            reported.insert(path);
+        }
+    }
+    // Events inside a watched link target are attributed to the link path before anything
+    // else: every downstream step (relevance, suppression, classification) then works in the
+    // spelling the agents and the deployment records use. Several agents can link the same
+    // library skill, so one target event becomes one candidate per link.
+    let mut candidates: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    for path in reported {
+        let attributed = roots.attribute_event(&path);
+        for link_path in attributed {
+            candidates.entry(link_path).or_insert_with(|| path.clone());
         }
     }
     let mut unrelated = 0usize;
-    candidates.retain(|path| {
-        if roots.is_present_directory_root(path) {
+    candidates.retain(|link_path, target_path| {
+        if roots.is_present_directory_root(link_path) {
             return false;
         }
-        if ignored.is_ignored(path) {
+        if ignored.is_ignored(link_path) {
             return false;
         }
-        if !roots.is_relevant(path) {
+        if !roots.is_relevant(link_path) {
             unrelated += 1;
+            return false;
+        }
+        // Self-writes are recorded under the canonical spelling AgenTuna wrote through, which
+        // for a linked skill is the library target; check both spellings.
+        if config.registry.should_suppress(link_path)
+            || config.registry.should_suppress(target_path)
+        {
+            index.refresh(link_path);
             return false;
         }
         true
@@ -1228,17 +1557,6 @@ fn process(
         .counters
         .ignored
         .fetch_add(unrelated as u64, Ordering::Relaxed);
-    if candidates.is_empty() {
-        return false;
-    }
-    candidates.retain(|path| {
-        if config.registry.should_suppress(path) {
-            index.refresh(path);
-            false
-        } else {
-            true
-        }
-    });
     if candidates.is_empty() {
         return false;
     }
@@ -1252,14 +1570,15 @@ fn process(
         Burst::Accept => {}
     }
     let mut changes = Vec::with_capacity(candidates.len());
+    let reported_paths: BTreeSet<PathBuf> = candidates.keys().cloned().collect();
     // Classify surviving paths first: a rename arrives as an event for each side, and the new
     // side has to be matched against the old inode before the old path is reported as removed.
     let mut existing = Vec::new();
     let mut missing = Vec::new();
-    for path in &candidates {
-        match fs::symlink_metadata(path) {
-            Ok(meta) => existing.push((path, meta)),
-            Err(_) => missing.push(path),
+    for link_path in candidates.keys() {
+        match fs::symlink_metadata(link_path) {
+            Ok(meta) => existing.push((link_path, meta)),
+            Err(_) => missing.push(link_path),
         }
     }
     for (path, meta) in existing {
@@ -1275,7 +1594,7 @@ fn process(
                 && index.discover_subtree(
                     path,
                     ignored,
-                    &candidates,
+                    &reported_paths,
                     &mut changes,
                     config.max_batch_paths,
                 )
@@ -1298,7 +1617,118 @@ fn process(
     if !batch.is_empty() {
         shared.push_batch(batch);
     }
+    // Link bookkeeping: resolve new or replaced skill links, forget removed ones. Runs after
+    // the batch is queued so the consumer sees the link change itself first.
+    update_links(roots, index, watcher, shared, config, &candidates);
     false
+}
+
+/// Registers and unregisters linked skill entries after a batch.
+///
+/// A created or renamed-to symlink that is a direct child of a watched root gains a target
+/// watch and a bounded link-space index walk; a removed or replaced link loses both. Root
+/// bounds still apply: a root past its link-target bound degrades to periodic rescan.
+fn update_links(
+    roots: &mut Roots,
+    index: &mut PathIndex,
+    watcher: &mut RecommendedWatcher,
+    shared: &Shared,
+    config: &WatchConfig,
+    candidates: &BTreeMap<PathBuf, PathBuf>,
+) {
+    let mut changed = false;
+    for link_path in candidates.keys() {
+        // A removed path classified above may still resolve if it was recreated within the
+        // same burst; the current state decides.
+        let state = fs::symlink_metadata(link_path);
+        if roots.registered_link(link_path).is_some() {
+            let still_symlink = state.as_ref().is_ok_and(|meta| meta.is_symlink());
+            if !still_symlink {
+                // The link is gone or was replaced by a real file or directory; the
+                // link-space index entries go with it.
+                roots.unregister_link(link_path);
+                index.remove_prefix(link_path);
+                changed = true;
+            }
+            continue;
+        }
+        let Ok(meta) = state else {
+            continue;
+        };
+        if !meta.is_symlink() {
+            continue;
+        }
+        // Only direct children of a watched root are registered as linked skills.
+        let Some(root_index) = roots.root_of_child(link_path) else {
+            continue;
+        };
+        if let Ok(target) = fs::canonicalize(link_path)
+            && target.is_dir()
+        {
+            // A link is the entry the agent loads, but the directory behind it is only walked
+            // and watched when the caller allowed that tree: a link to `/` or to another user's
+            // home must never turn into a recursive watch.
+            if !roots.allow_link_target(&target) {
+                roots.record_outside_link(
+                    root_index,
+                    link_path.clone(),
+                    target,
+                    config.max_link_targets_per_root,
+                );
+                changed = true;
+                continue;
+            }
+            if roots.register_link(
+                root_index,
+                link_path.clone(),
+                target.clone(),
+                config.max_link_targets_per_root,
+            ) {
+                let mut budget = WalkBudget::new(config.max_entries_per_root);
+                index.walk(
+                    &target,
+                    link_path,
+                    &config.ignored,
+                    roots,
+                    root_index,
+                    &mut budget,
+                    &shared.stop,
+                    config.max_link_targets_per_root,
+                    false,
+                );
+            } else {
+                roots.roots[root_index].too_large = true;
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        if roots
+            .reconcile(watcher, &shared.counters, ReconcileMode::Degrade)
+            .is_err()
+        {
+            shared.counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        shared.set_status(roots.watch_status());
+    }
+}
+
+/// A symlinked skill entry inside a watched root whose target directory is watched as well.
+///
+/// Policy: skill managers install skills as symlinks into the agent roots, so a change inside
+/// the linked library folder *is* a change to the skill. The service watches the resolved
+/// target directory (recursively, bounded by the per-root entry and link-target bounds) and
+/// attributes every event to the link path, so consumers see changes under the spelling the
+/// agents and the deployment records use. Links are registered only for direct children of a
+/// watched root; symlinked directories deeper inside a target tree are never followed, which
+/// keeps the walk finite and the watch set bounded. Changes missed that way are covered by the
+/// periodic rescan.
+#[derive(Debug)]
+struct LinkWatch {
+    /// The symlink entry, spelled under its canonical watched root.
+    link: PathBuf,
+    /// The canonical directory the link resolves to.
+    target: PathBuf,
 }
 
 /// One root as the worker tracks it.
@@ -1307,6 +1737,18 @@ struct RootRuntime {
     root: WatchRoot,
     present: bool,
     watch_path: Option<PathBuf>,
+    /// Files and directories indexed for this root, including linked target trees.
+    seed_entries: usize,
+    /// Symlinked entries of this root whose target directory is watched.
+    link_targets: usize,
+    /// A configured bound was exceeded; the root degrades to periodic rescan.
+    too_large: bool,
+    /// The platform refused a watch for this root; retried on every root recheck.
+    watch_failed: Option<String>,
+    /// Symlinked entries that did not resolve during seeding; retried on the root recheck.
+    pending_links: Vec<PathBuf>,
+    /// Linked entries whose target resolved outside every allowed link root.
+    outside_links: Vec<(PathBuf, PathBuf)>,
 }
 
 /// The configured roots plus the watches actually installed.
@@ -1314,10 +1756,37 @@ struct RootRuntime {
 struct Roots {
     roots: Vec<RootRuntime>,
     watched: HashMap<PathBuf, RecursiveMode>,
+    links: Vec<LinkWatch>,
+    /// Canonical roots a link target must resolve inside to be followed.
+    link_roots: Vec<PathBuf>,
+}
+
+/// The watch installation policy for one reconcile pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileMode {
+    /// A refused watch aborts the install (the pre-ready handshake contract).
+    Strict,
+    /// A refused watch is recorded per root and retried on the next root recheck.
+    Degrade,
 }
 
 impl Roots {
+    #[cfg(test)]
     fn build(roots: &[WatchRoot]) -> Self {
+        Self::build_with_link_roots(roots, &[])
+    }
+
+    /// Builds the runtimes with the link-target policy the caller configured.
+    fn build_with_link_roots(roots: &[WatchRoot], allowed_link_roots: &[PathBuf]) -> Self {
+        let mut link_roots = Vec::new();
+        for root in allowed_link_roots {
+            if let Ok(canonical) = fs::canonicalize(root)
+                && canonical.is_dir()
+                && !link_roots.contains(&canonical)
+            {
+                link_roots.push(canonical);
+            }
+        }
         let runtimes = roots
             .iter()
             .map(|root| {
@@ -1330,13 +1799,54 @@ impl Roots {
                     watch_path: desired_watch_path(&root, present),
                     root,
                     present,
+                    seed_entries: 0,
+                    link_targets: 0,
+                    too_large: false,
+                    watch_failed: None,
+                    pending_links: Vec::new(),
+                    outside_links: Vec::new(),
                 }
             })
             .collect();
         Self {
             roots: runtimes,
             watched: HashMap::new(),
+            links: Vec::new(),
+            link_roots,
         }
+    }
+
+    /// Whether a canonical link target may be walked and watched.
+    ///
+    /// With no configured roots nothing is followed: watching a link entry is safe, walking an
+    /// arbitrary directory behind it is not.
+    fn allow_link_target(&self, target: &Path) -> bool {
+        self.link_roots.iter().any(|root| target.starts_with(root))
+    }
+
+    /// Records a linked entry whose target resolved outside the allowed roots.
+    ///
+    /// Bounded by the same per-root link-target bound, so a root full of escaping links cannot
+    /// grow the status list without limit.
+    fn record_outside_link(
+        &mut self,
+        root_index: usize,
+        link: PathBuf,
+        target: PathBuf,
+        link_target_cap: usize,
+    ) {
+        let Some(runtime) = self.roots.get_mut(root_index) else {
+            return;
+        };
+        if runtime.outside_links.len() >= link_target_cap
+            || runtime
+                .outside_links
+                .iter()
+                .any(|(known, _)| *known == link)
+        {
+            return;
+        }
+        runtime.outside_links.push((link, target));
     }
 
     /// The configured rules plus the scratch directories of every watched store.
@@ -1370,6 +1880,94 @@ impl Roots {
         })
     }
 
+    /// The root index holding `path` as the root itself or as a direct child, if any.
+    ///
+    /// Symlinked skill entries are only registered for direct children of a watched root, so a
+    /// parent lookup is enough to attribute a discovered link.
+    fn root_of_child(&self, link: &Path) -> Option<usize> {
+        let parent = link.parent()?;
+        self.roots
+            .iter()
+            .position(|runtime| runtime.root.path == parent)
+    }
+
+    /// Registers a linked skill entry for event attribution and target watching.
+    ///
+    /// `link_target_cap` is the configured per-root bound. Returns `false` when the root
+    /// already watches its bound of link targets; the caller then degrades the root to
+    /// periodic rescan.
+    fn register_link(
+        &mut self,
+        root_index: usize,
+        link: PathBuf,
+        target: PathBuf,
+        link_target_cap: usize,
+    ) -> bool {
+        if self.links.iter().any(|known| known.link == link) {
+            return true;
+        }
+        // A target inside an already recursively watched root needs no watch of its own; the
+        // root walk covers it under the real spelling.
+        if self.is_relevant(&target) {
+            return true;
+        }
+        if self.roots[root_index].link_targets >= link_target_cap {
+            return false;
+        }
+        self.roots[root_index].link_targets += 1;
+        self.links.push(LinkWatch { link, target });
+        true
+    }
+
+    /// Forgets the link registration for `link`, if any. Returns the target that was watched.
+    fn unregister_link(&mut self, link: &Path) -> Option<PathBuf> {
+        let position = self.links.iter().position(|known| known.link == link)?;
+        let removed = self.links.remove(position);
+        if let Some(runtime) = self.root_of_child(&removed.link) {
+            self.roots[runtime].link_targets = self.roots[runtime].link_targets.saturating_sub(1);
+        }
+        Some(removed.target)
+    }
+
+    /// Drops every link registration; used before a full re-seed rebuilds them.
+    fn reset_links(&mut self) {
+        self.links.clear();
+        for runtime in &mut self.roots {
+            runtime.link_targets = 0;
+            runtime.pending_links.clear();
+            runtime.outside_links.clear();
+            runtime.seed_entries = 0;
+            runtime.too_large = false;
+        }
+    }
+
+    /// Link-space spellings of an event that happened inside a watched link target.
+    ///
+    /// Several agents can link the same library skill, so one target event becomes one
+    /// attributed path per link. A path outside every watched target maps to itself.
+    fn attribute_event(&self, path: &Path) -> Vec<PathBuf> {
+        let mut attributed = Vec::new();
+        for link in &self.links {
+            let relative = if path == link.target {
+                None
+            } else {
+                path.strip_prefix(&link.target).ok()
+            };
+            if let Some(relative) = relative {
+                attributed.push(link.link.join(relative));
+            }
+        }
+        if attributed.is_empty() {
+            attributed.push(path.to_path_buf());
+        }
+        attributed
+    }
+
+    /// The registered link that `link` belongs to, if any.
+    fn registered_link(&self, link: &Path) -> Option<&LinkWatch> {
+        self.links.iter().find(|known| known.link == link)
+    }
+
     fn desired(&self) -> BTreeMap<PathBuf, RecursiveMode> {
         let mut desired = BTreeMap::new();
         for runtime in &self.roots {
@@ -1390,50 +1988,138 @@ impl Roots {
                     }
                 })
                 .or_insert(mode);
-            if runtime.root.kind.is_directory()
-                && let Some(parent) = runtime.root.path.parent()
-                && fs::symlink_metadata(parent).is_ok()
-            {
-                desired
-                    .entry(parent.to_path_buf())
-                    .or_insert(RecursiveMode::NonRecursive);
-            }
+            // Directory roots deliberately get no parent watch: their disappearance and return
+            // are covered by the stat-only root recheck (`poll`), and every avoided watch is
+            // one fewer platform stream restart on macOS, where each `watch` call rebuilds the
+            // whole stream. File roots keep watching through their parent by construction
+            // (`desired_watch_path`).
+        }
+        // Linked skill targets are watched recursively so a change inside the linked library
+        // folder reaches the service and is attributed to the link path.
+        for link in &self.links {
+            desired
+                .entry(link.target.clone())
+                .and_modify(|existing| *existing = RecursiveMode::Recursive)
+                .or_insert(RecursiveMode::Recursive);
         }
         desired
     }
 
+    /// The watch installation policy for one pass.
     fn reconcile(
         &mut self,
-        debouncer: &mut FsDebouncer,
+        watcher: &mut RecommendedWatcher,
         counters: &Counters,
+        policy: ReconcileMode,
     ) -> Result<(), WatchError> {
         let desired = self.desired();
-        let obsolete: Vec<PathBuf> = self
-            .watched
-            .iter()
-            .filter(|(path, mode)| desired.get(*path) != Some(*mode))
-            .map(|(path, _)| path.clone())
-            .collect();
-        for path in obsolete {
-            // A vanished path makes unwatch fail; the watch is gone either way.
-            if debouncer.unwatch(&path).is_err() {
-                counters.errors.fetch_add(1, Ordering::Relaxed);
-            }
-            self.watched.remove(&path);
+        let mut refused: Vec<(PathBuf, String)> = Vec::new();
+        {
+            let watched = &mut self.watched;
+            install_plan(
+                watcher,
+                &desired,
+                counters,
+                policy,
+                watched,
+                &mut |path, source| {
+                    refused.push((path.to_path_buf(), source.to_string()));
+                },
+            )?;
         }
-        for (path, mode) in desired {
-            if self.watched.contains_key(&path) {
-                continue;
+        let refused_paths: BTreeSet<PathBuf> =
+            refused.iter().map(|(path, _)| path.clone()).collect();
+        for path in desired.keys() {
+            if !refused_paths.contains(path) {
+                self.clear_watch_failed(path);
             }
-            debouncer
-                .watch(&path, mode)
-                .map_err(|source| WatchError::WatchFailed {
-                    path: path.clone(),
-                    source,
-                })?;
-            self.watched.insert(path, mode);
+        }
+        for (path, message) in refused {
+            self.mark_watch_failed(&path, message);
         }
         Ok(())
+    }
+
+    /// Runtimes whose configured watch includes `path`.
+    fn runtimes_for_watch_path(&self, path: &Path) -> Vec<usize> {
+        self.roots
+            .iter()
+            .enumerate()
+            .filter(|(_, runtime)| {
+                runtime.watch_path.as_deref() == Some(path)
+                    || runtime.root.path == path
+                    || (runtime.root.kind.is_directory()
+                        && runtime.root.path.parent() == Some(path))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn mark_watch_failed(&mut self, path: &Path, message: String) {
+        for index in self.runtimes_for_watch_path(path) {
+            self.roots[index].watch_failed = Some(message.clone());
+        }
+    }
+
+    fn clear_watch_failed(&mut self, path: &Path) {
+        for index in self.runtimes_for_watch_path(path) {
+            self.roots[index].watch_failed = None;
+        }
+    }
+
+    /// The condition the service reports to its consumer.
+    fn watch_status(&self) -> WatchStatus {
+        let mut degraded: Vec<DegradedRoot> = Vec::new();
+        let mut first_failure = String::new();
+        for runtime in &self.roots {
+            if let Some(message) = &runtime.watch_failed {
+                degraded.push(DegradedRoot {
+                    path: runtime.root.path.clone(),
+                    reason: RootDegradation::WatchFailed(message.clone()),
+                });
+                if first_failure.is_empty() {
+                    first_failure.clone_from(message);
+                }
+            }
+            if runtime.too_large {
+                degraded.push(DegradedRoot {
+                    path: runtime.root.path.clone(),
+                    reason: RootDegradation::TooLarge,
+                });
+            }
+            for (link, target) in &runtime.outside_links {
+                degraded.push(DegradedRoot {
+                    path: runtime.root.path.clone(),
+                    reason: RootDegradation::LinkTargetOutsideRoots {
+                        link: link.clone(),
+                        target: target.clone(),
+                    },
+                });
+            }
+        }
+        if degraded.is_empty() {
+            return WatchStatus::Watching;
+        }
+        if self.watched.is_empty() {
+            // Nothing at all could be watched; the worker keeps retrying in the background.
+            return WatchStatus::Failed(first_failure);
+        }
+        WatchStatus::Degraded(degraded)
+    }
+
+    /// Installs watches for links discovered while seeding and reports the resulting
+    /// condition; oversized roots ask their consumer for a periodic rescan.
+    fn finish_seed(&mut self, watcher: &mut RecommendedWatcher, shared: &Shared) {
+        if self
+            .reconcile(watcher, &shared.counters, ReconcileMode::Degrade)
+            .is_err()
+        {
+            shared.counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.roots.iter().any(|runtime| runtime.too_large) {
+            shared.force_rescan(OffsetDateTime::now_utc());
+        }
+        shared.set_status(self.watch_status());
     }
 
     fn has_missing(&self) -> bool {
@@ -1442,10 +2128,12 @@ impl Roots {
 
     /// Re-stats every root and reports whether one of them came back.
     ///
-    /// Cheap by construction: one `symlink_metadata` per root, no tree walk. It runs after every
-    /// delivered batch and on the idle recheck, so a root that vanished without an event is still
-    /// reported as [`WatchEvent::PathGone`].
-    fn poll(&mut self, debouncer: &mut FsDebouncer, shared: &Shared) -> bool {
+    /// Cheap by construction: one `symlink_metadata` per root plus a bounded retry of links
+    /// that did not resolve when they were seeded. It runs after every delivered batch and on
+    /// the idle recheck, so a root that vanished without an event is still reported as
+    /// [`WatchEvent::PathGone`], and a refused watch or a late-materialising library is
+    /// retried in the background.
+    fn poll(&mut self, watcher: &mut RecommendedWatcher, shared: &Shared) -> bool {
         let mut changed = false;
         let mut returned = false;
         for runtime in &mut self.roots {
@@ -1464,10 +2152,34 @@ impl Roots {
                 returned = true;
             }
         }
-        if changed && self.reconcile(debouncer, &shared.counters).is_err() {
+        if changed
+            && self
+                .reconcile(watcher, &shared.counters, ReconcileMode::Degrade)
+                .is_err()
+        {
             shared.counters.errors.fetch_add(1, Ordering::Relaxed);
         }
+        if !returned && self.retry_pending_links() {
+            // A library materialised behind a dangling skill link; the caller re-seeds, which
+            // registers the link and watches its target.
+            returned = true;
+        }
         returned
+    }
+
+    /// Probes the links that did not resolve during the last seed.
+    ///
+    /// One `canonicalize` per pending link, bounded by the entries the seed walked; a hit
+    /// asks the caller for a re-seed, which registers the link and watches its target.
+    fn retry_pending_links(&mut self) -> bool {
+        let pending: Vec<PathBuf> = self
+            .roots
+            .iter()
+            .flat_map(|runtime| runtime.pending_links.iter().cloned())
+            .collect();
+        pending
+            .into_iter()
+            .any(|link| fs::canonicalize(&link).is_ok())
     }
 }
 
@@ -1535,6 +2247,29 @@ struct PathIndex {
     capacity: usize,
 }
 
+/// Bounds the seeding work per root: files and directories indexed for one root, including the
+/// trees behind its linked skill targets.
+struct WalkBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl WalkBudget {
+    fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
+
+    /// Takes one entry from the budget; `false` means the root exceeded the bound and the
+    /// caller marks it too large.
+    fn take(&mut self) -> bool {
+        if self.used >= self.limit {
+            return false;
+        }
+        self.used += 1;
+        true
+    }
+}
+
 /// A stable identity for a path across a rename, when the platform offers one.
 ///
 /// Unix pairs the device and inode. Windows `ReadDirectoryChangesW` reports a rename as one old
@@ -1566,24 +2301,74 @@ impl PathIndex {
         }
     }
 
-    fn seed(&mut self, roots: &Roots, ignored: &IgnoreRules) {
-        for runtime in &roots.roots {
-            let path = &runtime.root.path;
-            let Ok(meta) = fs::symlink_metadata(path) else {
+    /// Indexes every root for change classification.
+    ///
+    /// Symlinked skill entries that are direct children of a root are resolved and their
+    /// target tree is indexed under the *link* spelling, so events attributed to the link
+    /// classify against what is really inside the linked skill. The walk never follows a
+    /// symlink deeper inside a tree, which keeps it finite and bounded: once a root exhausts
+    /// its configured entry bound, the root is marked too large and degrades to periodic
+    /// rescan. Dangling links are recorded for the root recheck to retry.
+    fn seed(
+        &mut self,
+        roots: &mut Roots,
+        ignored: &IgnoreRules,
+        stop: &AtomicBool,
+        max_entries_per_root: usize,
+        max_link_targets_per_root: usize,
+    ) {
+        roots.reset_links();
+        for index in 0..roots.roots.len() {
+            let path = roots.roots[index].root.path.clone();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
                 continue;
             };
             if meta.is_dir() {
-                self.walk(path, ignored);
+                self.walk(
+                    &path,
+                    &path,
+                    ignored,
+                    roots,
+                    index,
+                    &mut WalkBudget::new(max_entries_per_root),
+                    stop,
+                    max_link_targets_per_root,
+                    true,
+                );
             } else {
+                roots.roots[index].seed_entries += 1;
                 self.insert(path.clone(), inode_key(&meta));
             }
         }
     }
 
-    fn walk(&mut self, root: &Path, ignored: &IgnoreRules) {
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
+    /// Walks one directory, inserting paths under `prefix`.
+    ///
+    /// `dir` and `prefix` differ only for linked skill targets, where `dir` is the resolved
+    /// library directory and `prefix` the link path the agents use. `register_links` is true
+    /// only for the top level of a watched root: symlinked skill entries are registered there,
+    /// never inside a target tree, which keeps the walk finite and the watch set bounded.
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        &mut self,
+        dir: &Path,
+        prefix: &Path,
+        ignored: &IgnoreRules,
+        roots: &mut Roots,
+        root_index: usize,
+        budget: &mut WalkBudget,
+        stop: &AtomicBool,
+        link_target_cap: usize,
+        register_links: bool,
+    ) {
+        let mut stack = vec![(dir.to_path_buf(), prefix.to_path_buf())];
+        while let Some((dir, prefix)) = stack.pop() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             if self.known.len() >= self.capacity {
+                // The global index is a memory bound, not a "root too large" signal; the
+                // per-root behaviour is governed by the walk budget.
                 break;
             }
             let Ok(entries) = fs::read_dir(&dir) else {
@@ -1597,14 +2382,78 @@ impl PathIndex {
                 let Ok(meta) = fs::symlink_metadata(&path) else {
                     continue;
                 };
-                self.insert(path.clone(), inode_key(&meta));
-                if meta.is_dir() {
-                    stack.push(path);
+                let insert_path = prefix.join(entry.file_name());
+                let is_symlink = meta.is_symlink();
+                if !budget.take() {
+                    roots.roots[root_index].too_large = true;
+                    return;
                 }
-                if self.known.len() >= self.capacity {
-                    break;
+                roots.roots[root_index].seed_entries += 1;
+                if is_symlink {
+                    self.insert(insert_path.clone(), None);
+                    if register_links {
+                        match fs::canonicalize(&path) {
+                            Ok(target) if target.is_dir() => {
+                                if !roots.allow_link_target(&target) {
+                                    // Refused with a typed reason instead of walking an
+                                    // arbitrary directory behind the entry.
+                                    roots.record_outside_link(
+                                        root_index,
+                                        insert_path,
+                                        target,
+                                        link_target_cap,
+                                    );
+                                    continue;
+                                }
+                                if roots.register_link(
+                                    root_index,
+                                    insert_path.clone(),
+                                    target.clone(),
+                                    link_target_cap,
+                                ) {
+                                    // Index the linked skill's content under the link
+                                    // spelling; bounded by the same budget.
+                                    self.walk(
+                                        &target,
+                                        &insert_path,
+                                        ignored,
+                                        roots,
+                                        root_index,
+                                        budget,
+                                        stop,
+                                        link_target_cap,
+                                        false,
+                                    );
+                                } else {
+                                    roots.roots[root_index].too_large = true;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(_) => roots.roots[root_index].pending_links.push(insert_path),
+                        }
+                    }
+                    continue;
+                }
+                self.insert(insert_path.clone(), inode_key(&meta));
+                if meta.is_dir() {
+                    stack.push((path, insert_path));
                 }
             }
+        }
+    }
+
+    /// Removes a subtree spelling from the index, for example a linked skill whose link was
+    /// replaced or removed.
+    fn remove_prefix(&mut self, prefix: &Path) {
+        let dropped: Vec<PathBuf> = self
+            .known
+            .iter()
+            .filter(|path| path == &prefix || path.starts_with(prefix))
+            .cloned()
+            .collect();
+        for path in dropped {
+            self.known.remove(&path);
+            self.by_inode.retain(|_, known| known != &path);
         }
     }
 
@@ -1863,18 +2712,18 @@ mod tests {
             counters: Counters::default(),
             registry: Arc::new(RecentWrites::new()),
             wake_sender: Mutex::new(None),
+            status: Mutex::new(WatchStatus::Starting),
         };
-        let mut debouncer =
-            new_debouncer(Duration::from_millis(50), None, |_| {}).expect("debouncer");
+        let mut watcher = notify::recommended_watcher(|_| {}).expect("platform watcher");
         let mut roots = Roots::build(&[WatchRoot::dir(&store, WatchRootKind::UserStore)]);
         roots
-            .reconcile(&mut debouncer, &shared.counters)
+            .reconcile(&mut watcher, &shared.counters, ReconcileMode::Strict)
             .expect("watch the store");
 
         // No watcher event takes part in this check: it stats the root itself, which is the
         // guarantee a platform that never reports a removed root's removal must still meet.
         assert!(
-            !roots.poll(&mut debouncer, &shared),
+            !roots.poll(&mut watcher, &shared),
             "a present root reports nothing"
         );
         assert!(
@@ -1883,7 +2732,7 @@ mod tests {
         );
 
         fs::remove_dir_all(&store).expect("delete the store");
-        assert!(!roots.poll(&mut debouncer, &shared), "nothing returned");
+        assert!(!roots.poll(&mut watcher, &shared), "nothing returned");
         let event = lock(&shared.queue)
             .events
             .pop_front()
@@ -1902,7 +2751,7 @@ mod tests {
         // The return is noticed the same way and asks for a fresh index.
         fs::create_dir_all(&store).expect("recreate the store");
         assert!(
-            roots.poll(&mut debouncer, &shared),
+            roots.poll(&mut watcher, &shared),
             "a returned root asks for an index re-seed"
         );
         assert!(!roots.has_missing(), "the root is present again");
@@ -2119,9 +2968,15 @@ mod tests {
         let dir = TempDir::new().expect("temp");
         let root = dir.path();
         let rules = IgnoreRules::standard();
-        let roots = Roots::build(&[WatchRoot::dir(root, WatchRootKind::UserStore)]);
+        let mut roots = Roots::build(&[WatchRoot::dir(root, WatchRootKind::UserStore)]);
         let mut index = PathIndex::new(1000);
-        index.seed(&roots, &rules);
+        index.seed(
+            &mut roots,
+            &rules,
+            &AtomicBool::new(false),
+            DEFAULT_MAX_ENTRIES_PER_ROOT,
+            DEFAULT_MAX_LINK_TARGETS_PER_ROOT,
+        );
 
         let first = root.join("a.json");
         touch(&first);
@@ -2163,9 +3018,13 @@ mod tests {
         let link = root.join("link.json");
         symlink(&target, &link).expect("symlink");
         let mut index = PathIndex::new(100);
+        let mut roots = Roots::build(&[WatchRoot::dir(root, WatchRootKind::UserStore)]);
         index.seed(
-            &Roots::build(&[WatchRoot::dir(root, WatchRootKind::UserStore)]),
+            &mut roots,
             &IgnoreRules::standard(),
+            &AtomicBool::new(false),
+            DEFAULT_MAX_ENTRIES_PER_ROOT,
+            DEFAULT_MAX_LINK_TARGETS_PER_ROOT,
         );
         // The link exists and is known, so it is a modification of a known path.
         fs::remove_file(&link).expect("remove");

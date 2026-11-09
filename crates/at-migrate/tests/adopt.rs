@@ -11,7 +11,7 @@ use at_migrate::adopt::{
     preview_adopt,
 };
 use at_migrate::apply::{UndoOperationRequest, UndoOutcome, undo_operation};
-use at_migrate::scan::{Ownership, ParseStatus, ScanItem, ScanReport};
+use at_migrate::scan::{DiscoveryState, Ownership, ParseStatus, ScanItem, ScanReport};
 use at_model::{AgentId, ItemKind, Scope};
 use tempfile::TempDir;
 
@@ -58,6 +58,9 @@ fn skill_item(fixture: &Fixture, relative: &str, name: &str, agent: AgentId) -> 
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     }
 }
 
@@ -269,6 +272,9 @@ fn adopting_an_mcp_server_patches_only_that_entry_and_keeps_comments() {
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     };
     let scan = report(vec![item.clone()]);
     let authorized = roots(&fixture);
@@ -545,4 +551,206 @@ fn adopt_initialises_a_missing_store() {
     .expect("manifest");
     assert_eq!(manifest.manifest.items().len(), 1);
     let _ = BTreeMap::<String, String>::new();
+}
+
+/// A scan row for a library skill installed as a link into an agent root.
+#[cfg(unix)]
+fn linked_skill_item(link: &Path, library: &Path, name: &str, agents: &[AgentId]) -> ScanItem {
+    let resolved = fs::canonicalize(library).expect("canonical library");
+    let normalized = at_store::manifest::hash_skill_folder(&resolved)
+        .expect("skill hash")
+        .to_string();
+    ScanItem {
+        kind: ItemKind::Skill,
+        name: name.to_owned(),
+        agents: agents.iter().cloned().collect(),
+        path: link.to_path_buf(),
+        scope: Scope::User,
+        content_hash: Some(at_fs::sha256_hex(b"raw tree")),
+        normalized_hash: Some(normalized),
+        mcp_summary: None,
+        parse_status: ParseStatus::Parsed,
+        store_link: false,
+        ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Valid,
+        link_target: Some(fs::read_link(link).expect("link text")),
+        resolved: Some(resolved),
+    }
+}
+
+#[cfg(unix)]
+fn write_library(fixture: &Fixture, relative: &str) -> PathBuf {
+    let library = fixture.root.join(relative);
+    fs::create_dir_all(&library).expect("library folder");
+    // Content depends only on the skill name, so two folders can hold identical bytes.
+    let name = library
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("skill folder name");
+    fs::write(library.join("SKILL.md"), format!("# {name}\nbody\n")).expect("skill document");
+    fs::canonicalize(library).expect("canonical library")
+}
+
+#[cfg(unix)]
+fn link_into_agent_root(fixture: &Fixture, relative_link: &str, target: &Path) -> PathBuf {
+    let link = fixture.root.join(relative_link);
+    fs::create_dir_all(link.parent().expect("agent root")).expect("agent root");
+    std::os::unix::fs::symlink(target, &link).expect("link");
+    link
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scanned_link_retargeted_after_the_preview_is_refused() {
+    let mut fixture = fixture();
+    let library = write_library(&fixture, "library/demo");
+    let link = link_into_agent_root(&fixture, "claude/skills/demo", &library);
+    let item = linked_skill_item(&link, &library, "demo", &[AgentId::ClaudeCode]);
+    let scan = report(vec![item.clone()]);
+    let authorized = roots(&fixture);
+
+    // The preview is valid; the user then retargets the link to an identical copy, which no
+    // content hash can distinguish.
+    let preview = preview_adopt(&AdoptPreviewRequest {
+        scan: &scan,
+        path: &link,
+        name: None,
+        store_root: &fixture.store,
+        backup_root: &fixture.backups,
+        authorized_roots: &authorized,
+        scope: Scope::User,
+        handling: AdoptHandling::Link,
+    })
+    .expect("preview");
+    assert_eq!(preview.slug, "demo");
+    let copy = write_library(&fixture, "library-copy/demo");
+    assert_eq!(
+        at_store::hash_skill_folder(&copy)
+            .expect("hash")
+            .to_string(),
+        item.normalized_hash.clone().expect("scanned hash")
+    );
+    fs::remove_file(&link).expect("remove the reviewed link");
+    std::os::unix::fs::symlink(&copy, &link).expect("retarget");
+
+    let error = adopt_item(AdoptRequest {
+        scan: &scan,
+        path: &link,
+        name: None,
+        store_root: &fixture.store,
+        backup_root: &fixture.backups,
+        authorized_roots: &authorized,
+        database: &mut fixture.database,
+        scope: Scope::User,
+        handling: AdoptHandling::Link,
+        project_id: None,
+    })
+    .expect_err("the retargeted link is refused");
+    assert!(
+        matches!(
+            error,
+            AdoptError::Plan(at_migrate::plan::PlanError::StalePlan)
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_link(&link).expect("link"),
+        copy,
+        "the link is untouched"
+    );
+    assert!(
+        !fixture.store.join("skills/demo").exists(),
+        "nothing was written to the store"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scanned_link_replaced_by_an_outside_link_is_refused() {
+    let mut fixture = fixture();
+    let library = write_library(&fixture, "library/outside-demo");
+    let link = link_into_agent_root(&fixture, "claude/skills/outside-demo", &library);
+    let item = linked_skill_item(&link, &library, "outside-demo", &[AgentId::ClaudeCode]);
+    let scan = report(vec![item]);
+    let authorized = roots(&fixture);
+
+    let outside = write_library(&fixture, "outside/outside-demo");
+    fs::remove_file(&link).expect("remove the reviewed link");
+    std::os::unix::fs::symlink(&outside, &link).expect("outside retarget");
+
+    let error = adopt_item(AdoptRequest {
+        scan: &scan,
+        path: &link,
+        name: None,
+        store_root: &fixture.store,
+        backup_root: &fixture.backups,
+        authorized_roots: &authorized,
+        database: &mut fixture.database,
+        scope: Scope::User,
+        handling: AdoptHandling::Link,
+        project_id: None,
+    })
+    .expect_err("the outside link is refused");
+    assert!(
+        matches!(
+            error,
+            AdoptError::Plan(at_migrate::plan::PlanError::StalePlan)
+        ),
+        "{error}"
+    );
+    assert_eq!(fs::read_link(&link).expect("link"), outside);
+    assert!(!fixture.store.join("skills/outside-demo").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn adopting_one_library_link_shared_by_two_agents_writes_and_backs_up_once() {
+    let mut fixture = fixture();
+    let library = write_library(&fixture, "library/shared-demo");
+    let link = link_into_agent_root(&fixture, "agents/skills/shared-demo", &library);
+    // One physical entry, read by two agents: the scan collapses it into one item.
+    let item = linked_skill_item(
+        &link,
+        &library,
+        "shared-demo",
+        &[AgentId::ClaudeCode, AgentId::Codex],
+    );
+    let scan = report(vec![item.clone()]);
+    let authorized = roots(&fixture);
+    let outcome = adopt_item(AdoptRequest {
+        scan: &scan,
+        path: &link,
+        name: None,
+        store_root: &fixture.store,
+        backup_root: &fixture.backups,
+        authorized_roots: &authorized,
+        database: &mut fixture.database,
+        scope: Scope::User,
+        handling: AdoptHandling::Link,
+        project_id: None,
+    })
+    .expect("adopt the shared link");
+
+    let store_item = fixture.store.join("skills/shared-demo");
+    assert_eq!(
+        fs::canonicalize(&link).expect("deployed link"),
+        fs::canonicalize(&store_item).expect("store item"),
+        "the one native path points at the store"
+    );
+    let create_steps = outcome
+        .plan
+        .steps
+        .iter()
+        .filter(|step| step.action == at_migrate::plan::MigrationAction::CreateStoreItem)
+        .count();
+    assert_eq!(create_steps, 1, "the content is written once");
+    let detail = ops::operation_detail(fixture.database.connection(), &outcome.operation_id)
+        .expect("operation detail")
+        .expect("operation row");
+    let backups = detail
+        .files
+        .iter()
+        .filter(|file| file.backup_id.is_some())
+        .count();
+    assert_eq!(backups, 1, "the one replaced original has one backup entry");
 }

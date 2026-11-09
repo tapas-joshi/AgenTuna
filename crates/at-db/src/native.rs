@@ -127,6 +127,13 @@ pub struct NativeItem {
     pub adopted_item_id: Option<String>,
     /// Lifecycle status.
     pub status: NativeStatus,
+    /// Folder a symbolic link resolved to, after the target passed the root check.
+    pub link_target: Option<String>,
+    /// What the last scan observed about the entry itself (`valid`, `invalid`, `broken_link`,
+    /// `unreadable`), when the scan reported one.
+    pub discovery_state: Option<String>,
+    /// Short, path-free reason for a refused or broken entry.
+    pub discovery_note: Option<String>,
 }
 
 /// One path a scan found, as [`replace_scan`] consumes it.
@@ -143,6 +150,12 @@ pub struct NativeScanEntry<'a> {
     pub path: &'a str,
     /// Content hash the scanner computed, when available.
     pub content_hash: Option<&'a str>,
+    /// Folder a symbolic link resolved to, when the scan validated the target.
+    pub link_target: Option<&'a str>,
+    /// What the scan observed about the entry itself.
+    pub discovery_state: Option<&'a str>,
+    /// Short reason for a refused or broken entry.
+    pub discovery_note: Option<&'a str>,
 }
 
 impl<'a> NativeScanEntry<'a> {
@@ -154,6 +167,9 @@ impl<'a> NativeScanEntry<'a> {
             name,
             path,
             content_hash: None,
+            link_target: None,
+            discovery_state: None,
+            discovery_note: None,
         }
     }
 
@@ -161,6 +177,21 @@ impl<'a> NativeScanEntry<'a> {
     #[must_use]
     pub const fn with_content_hash(mut self, content_hash: &'a str) -> Self {
         self.content_hash = Some(content_hash);
+        self
+    }
+
+    /// Sets the folder a validated symbolic link resolved to.
+    #[must_use]
+    pub const fn with_link_target(mut self, target: &'a str) -> Self {
+        self.link_target = Some(target);
+        self
+    }
+
+    /// Sets what the scan observed about the entry, with a short reason when it is not `valid`.
+    #[must_use]
+    pub const fn with_discovery(mut self, state: &'a str, note: Option<&'a str>) -> Self {
+        self.discovery_state = Some(state);
+        self.discovery_note = note;
         self
     }
 }
@@ -256,14 +287,18 @@ pub fn replace_scan(
         let id = format!("nat_{}", Ulid::generate());
         transaction.execute(
             "INSERT INTO native_items \
-                 (id, agent_id, scope, kind, name, path, content_hash, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'new') \
+                 (id, agent_id, scope, kind, name, path, content_hash, link_target, \
+                  discovery_state, discovery_note, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'new') \
              ON CONFLICT(path) DO UPDATE SET \
                  agent_id = excluded.agent_id, \
                  scope = excluded.scope, \
                  kind = excluded.kind, \
                  name = excluded.name, \
                  content_hash = excluded.content_hash, \
+                 link_target = excluded.link_target, \
+                 discovery_state = excluded.discovery_state, \
+                 discovery_note = excluded.discovery_note, \
                  last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
                  status = CASE \
                      WHEN native_items.status = 'missing' THEN \
@@ -278,6 +313,9 @@ pub fn replace_scan(
                 entry.name,
                 entry.path,
                 entry.content_hash,
+                entry.link_target,
+                entry.discovery_state,
+                entry.discovery_note,
             ],
         )?;
         report.upserted += 1;
@@ -405,7 +443,8 @@ pub fn list_native_items(
 ) -> Result<Vec<NativeItem>, DbError> {
     let mut sql = String::from(
         "SELECT id, agent_id, scope, kind, name, path, content_hash, first_seen_at, \
-                last_seen_at, adopted_item_id, status FROM native_items WHERE 1 = 1",
+                last_seen_at, adopted_item_id, status, link_target, discovery_state, \
+                discovery_note FROM native_items WHERE 1 = 1",
     );
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(scope) = filter.scope {
@@ -446,7 +485,8 @@ pub fn native_item_by_path(
     connection
         .query_row(
             "SELECT id, agent_id, scope, kind, name, path, content_hash, first_seen_at, \
-                    last_seen_at, adopted_item_id, status \
+                    last_seen_at, adopted_item_id, status, link_target, discovery_state, \
+                    discovery_note \
                FROM native_items WHERE path = ?1",
             [path],
             native_item_from_row,
@@ -545,6 +585,9 @@ fn native_item_from_row(row: &Row<'_>) -> rusqlite::Result<NativeItem> {
                     }),
                 )
             })?,
+        link_target: row.get(11)?,
+        discovery_state: row.get(12)?,
+        discovery_note: row.get(13)?,
     })
 }
 
@@ -564,9 +607,9 @@ mod tests {
         let connection = database.connection();
         let statements = [
             "SELECT path FROM native_items WHERE agent_id = ?1 AND scope = ?2 AND status = 'missing'",
-            "INSERT INTO native_items (id, agent_id, scope, kind, name, path, content_hash, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'new') ON CONFLICT(path) DO UPDATE SET agent_id = excluded.agent_id, scope = excluded.scope, kind = excluded.kind, name = excluded.name, content_hash = excluded.content_hash, last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), status = CASE WHEN native_items.status = 'missing' THEN CASE WHEN native_items.adopted_item_id IS NULL THEN 'new' ELSE 'adopted' END ELSE native_items.status END",
-            "SELECT id, agent_id, scope, kind, name, path, content_hash, first_seen_at, last_seen_at, adopted_item_id, status FROM native_items WHERE 1 = 1 ORDER BY agent_id ASC, scope ASC, kind ASC, name ASC, path ASC",
-            "SELECT id, agent_id, scope, kind, name, path, content_hash, first_seen_at, last_seen_at, adopted_item_id, status FROM native_items WHERE path = ?1",
+            "INSERT INTO native_items (id, agent_id, scope, kind, name, path, content_hash, link_target, discovery_state, discovery_note, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'new') ON CONFLICT(path) DO UPDATE SET agent_id = excluded.agent_id, scope = excluded.scope, kind = excluded.kind, name = excluded.name, content_hash = excluded.content_hash, link_target = excluded.link_target, discovery_state = excluded.discovery_state, discovery_note = excluded.discovery_note, last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), status = CASE WHEN native_items.status = 'missing' THEN CASE WHEN native_items.adopted_item_id IS NULL THEN 'new' ELSE 'adopted' END ELSE native_items.status END",
+            "SELECT id, agent_id, scope, kind, name, path, content_hash, first_seen_at, last_seen_at, adopted_item_id, status, link_target, discovery_state, discovery_note FROM native_items WHERE 1 = 1 ORDER BY agent_id ASC, scope ASC, kind ASC, name ASC, path ASC",
+            "SELECT id, agent_id, scope, kind, name, path, content_hash, first_seen_at, last_seen_at, adopted_item_id, status, link_target, discovery_state, discovery_note FROM native_items WHERE path = ?1",
             "UPDATE native_items SET status = 'missing' WHERE agent_id = ?1 AND scope = ?2 AND status != 'missing'",
             "UPDATE native_items SET status = 'missing' WHERE agent_id = ? AND scope = ? AND status != 'missing' AND path NOT IN (?)",
         ];

@@ -360,3 +360,108 @@ fn an_unwatchable_root_is_reported_and_remaining_roots_keep_working() {
     );
     service.stop().expect("stop the watch service");
 }
+
+/// Builds the app-level stress layout synthetically: four skills roots whose entries are
+/// symlinks into a central library (nested content, some very large), dangling links and MCP
+/// configuration files — never the real HOME.
+struct LargeLayout {
+    _dir: TempDir,
+    library: PathBuf,
+    roots: Vec<PathBuf>,
+}
+
+impl LargeLayout {
+    fn build(entries_per_root: usize) -> Self {
+        let dir = TempDir::new().expect("temporary directory");
+        let home = fs::canonicalize(dir.path()).expect("canonical layout root");
+        let library = home.join("library").join("skills");
+        for skill in 0..entries_per_root * 4 {
+            let skill_dir = library.join(format!("skill-{skill:04}"));
+            fs::create_dir_all(skill_dir.join("references")).expect("skill references");
+            fs::create_dir_all(skill_dir.join("scripts")).expect("skill scripts");
+            fs::write(skill_dir.join("SKILL.md"), "# skill\n").expect("skill doc");
+            for file in 0..(5 + (skill % 36)) {
+                fs::write(
+                    skill_dir.join("references").join(format!("ref-{file}.md")),
+                    format!("reference {file}\n"),
+                )
+                .expect("reference file");
+            }
+            fs::write(skill_dir.join("scripts").join("run.sh"), "#!/bin/sh\n").expect("script");
+            if skill % 10 == 0 {
+                let bulk = skill_dir.join("assets").join("bulk");
+                fs::create_dir_all(&bulk).expect("bulk dir");
+                for file in 0..1_000 {
+                    fs::write(bulk.join(format!("part-{file:04}.txt")), "x".repeat(64))
+                        .expect("bulk file");
+                }
+            }
+        }
+        let mut roots = Vec::new();
+        for root_index in 0..4 {
+            let root = home.join(format!("agent-{root_index}")).join("skills");
+            fs::create_dir_all(&root).expect("skills root");
+            for skill in 0..entries_per_root {
+                let global = skill + root_index * entries_per_root;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(
+                    library.join(format!("skill-{global:04}")),
+                    root.join(format!("skill-{skill:04}")),
+                )
+                .expect("skill link");
+            }
+            roots.push(root);
+        }
+        Self {
+            _dir: dir,
+            library,
+            roots,
+        }
+    }
+
+    fn watch_roots(&self) -> Vec<WatchRoot> {
+        let mut roots = self
+            .roots
+            .iter()
+            .map(|root| WatchRoot::dir(root, WatchRootKind::SkillsDir))
+            .collect::<Vec<_>>();
+        roots.push(WatchRoot::dir(
+            self.library
+                .parent()
+                .expect("library parent")
+                .parent()
+                .expect("home"),
+            WatchRootKind::Other,
+        ));
+        roots
+    }
+}
+
+#[test]
+fn app_level_start_returns_within_the_bound_for_a_thousand_linked_entries() {
+    let _platform = watch_test_lock();
+    let layout = LargeLayout::build(250);
+    let total = layout.roots.len() * 250;
+    std::thread::sleep(Duration::from_millis(1_500));
+    let registry = Arc::new(RecentWrites::new());
+    let mut starter = PlatformWatcher::new(Arc::clone(&registry));
+    let began = Instant::now();
+    let (service, diagnostics) =
+        start_retaining_watchable_roots(layout.watch_roots(), &mut starter)
+            .expect("the app-level watcher start succeeds");
+    let elapsed = began.elapsed();
+    println!("app-level start entries={total} elapsed={elapsed:?} diagnostics={diagnostics:?}");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "start with {total} entries must never block on indexing: {elapsed:?}"
+    );
+    let condition = service.status();
+    assert!(
+        matches!(
+            condition,
+            at_fs::WatchStatus::Watching | at_fs::WatchStatus::Degraded(_)
+        ),
+        "a large setup is watching or degraded, never unavailable: {condition:?}"
+    );
+    service.stop().expect("stop the watch service");
+}

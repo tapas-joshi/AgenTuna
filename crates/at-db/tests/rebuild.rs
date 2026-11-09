@@ -183,7 +183,7 @@ fn setup_fixture_tree(temp: &TempDir) -> RebuildPaths {
     fs::write(home.join(".codex/AGENTS.md"), b"# Codex instructions")
         .expect("write codex agents.md");
 
-    fs::create_dir_all(home.join(".omp/agent/skills")).expect("mkdir omp");
+    fs::create_dir_all(home.join(".omp/agent/managed-skills")).expect("mkdir omp");
     fs::write(home.join(".omp/agent/mcp.json"), br#"{"servers":{}}"#).expect("write omp mcp");
     fs::write(home.join(".omp/agent/AGENTS.md"), b"# Omp instructions")
         .expect("write omp agents.md");
@@ -203,7 +203,7 @@ fn setup_fixture_tree(temp: &TempDir) -> RebuildPaths {
     let _ = symlink(&user_skill_12, &codex_deploy);
 
     let proj_skill_26 = project_store.join("skills/skill-26");
-    let omp_deploy = home.join(".omp/agent/skills/skill-26");
+    let omp_deploy = home.join(".omp/agent/managed-skills/skill-26");
     let _ = symlink(&proj_skill_26, &omp_deploy);
 
     RebuildPaths::new(&home, &user_store)

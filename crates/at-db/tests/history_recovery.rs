@@ -89,7 +89,7 @@ impl Sandbox {
         fs::create_dir_all(self.home.join(".codex")).expect("codex dir");
         fs::write(self.home.join(".codex/config.toml"), b"[mcp_servers]").expect("codex config");
         fs::write(self.home.join(".codex/AGENTS.md"), b"# Codex instructions").expect("codex rule");
-        fs::create_dir_all(self.home.join(".omp/agent/skills")).expect("omp skills");
+        fs::create_dir_all(self.home.join(".omp/agent/managed-skills")).expect("omp skills");
         fs::write(self.home.join(".omp/agent/mcp.json"), br#"{"servers":{}}"#).expect("omp mcp");
         fs::write(
             self.home.join(".omp/agent/AGENTS.md"),
@@ -126,7 +126,7 @@ impl Sandbox {
             .join(format!("skills/skill-{}", ITEMS_PER_SCOPE * 2));
         let _ = std::os::unix::fs::symlink(
             &project_skill,
-            self.home.join(".omp/agent/skills/skill-project"),
+            self.home.join(".omp/agent/managed-skills/skill-project"),
         );
     }
 
@@ -409,7 +409,11 @@ fn corrupt_index_is_quarantined_and_readable_history_survives_in_the_quarantine(
     );
     assert_eq!(
         recovered.schema_version().expect("fresh schema"),
-        9,
+        at_db::migrations::SHIPPED_MIGRATIONS
+            .iter()
+            .map(|migration| migration.version())
+            .max()
+            .expect("at least one migration ships"),
         "a fresh database replaced the damaged file"
     );
     sandbox.rebuild(&mut recovered);

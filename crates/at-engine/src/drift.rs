@@ -249,13 +249,18 @@ pub fn targets_from_index(connection: &rusqlite::Connection) -> Result<Vec<Drift
 }
 
 /// Creates a watcher config with the shared RecentWrites registry and drift debounce.
+///
+/// `allowed_link_roots` are the directories a linked skill target may resolve inside (the
+/// injected home and project root, for example). An empty list follows no link target.
 #[must_use]
 pub fn drift_watch_config(
     roots: impl IntoIterator<Item = WatchRoot>,
     registry: std::sync::Arc<RecentWrites>,
+    allowed_link_roots: Vec<std::path::PathBuf>,
 ) -> WatchConfig {
     WatchConfig::new(roots)
         .with_debounce(DRIFT_DEBOUNCE)
+        .with_allowed_link_roots(allowed_link_roots)
         .with_registry(registry)
 }
 

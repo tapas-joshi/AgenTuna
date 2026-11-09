@@ -1691,6 +1691,9 @@ mod plan_tests {
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership: Ownership::NotInAgenTuna,
+            discovery: at_migrate::scan::DiscoveryState::Valid,
+            link_target: None,
+            resolved: None,
         }
     }
 
@@ -1915,6 +1918,9 @@ mod scan_view_tests {
             parse_status: ParseStatus::Parsed,
             store_link: false,
             ownership,
+            discovery: at_migrate::scan::DiscoveryState::Valid,
+            link_target: None,
+            resolved: None,
         }
     }
 

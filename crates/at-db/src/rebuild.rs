@@ -421,6 +421,12 @@ pub struct DiscoveredNativeItem {
     pub status: String,
     /// Associated canonical item id if adopted.
     pub adopted_item_id: Option<String>,
+    /// Folder a symbolic link resolved to, when recorded.
+    pub link_target: Option<String>,
+    /// What the scan observed about the entry itself.
+    pub discovery_state: Option<String>,
+    /// Short reason for a refused or broken entry.
+    pub discovery_note: Option<String>,
 }
 
 /// One deployment cell discovered for rebuild.
@@ -929,9 +935,9 @@ fn apply_rebuild_transaction(
 
     // Insert native items.
     let mut stmt_nat = tx.prepare(
-        "INSERT INTO native_items (id, agent_id, scope, kind, name, path, content_hash, first_seen_at, last_seen_at, adopted_item_id, status) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?8, ?9) \
-         ON CONFLICT(path) DO UPDATE SET name = excluded.name, content_hash = excluded.content_hash, last_seen_at = excluded.last_seen_at, status = excluded.status"
+        "INSERT INTO native_items (id, agent_id, scope, kind, name, path, content_hash, first_seen_at, last_seen_at, adopted_item_id, status, link_target, discovery_state, discovery_note) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?8, ?9, ?10, ?11, ?12) \
+         ON CONFLICT(path) DO UPDATE SET name = excluded.name, content_hash = excluded.content_hash, last_seen_at = excluded.last_seen_at, status = excluded.status, link_target = excluded.link_target, discovery_state = excluded.discovery_state, discovery_note = excluded.discovery_note"
     )?;
     for nat in &input.native_items {
         stmt_nat.execute(params![
@@ -944,6 +950,9 @@ fn apply_rebuild_transaction(
             nat.content_hash,
             nat.adopted_item_id,
             nat.status,
+            nat.link_target,
+            nat.discovery_state,
+            nat.discovery_note,
         ])?;
     }
     drop(stmt_nat);
@@ -2086,7 +2095,7 @@ fn scan_native_and_deployments(
             AgentId::Omp,
             Scope::User,
             None,
-            home.join(".omp/agent/skills"),
+            home.join(".omp/agent/managed-skills"),
         ),
         (
             AgentId::Cursor,
@@ -2118,7 +2127,9 @@ fn scan_native_and_deployments(
             AgentId::Omp,
             Scope::Project,
             proj_id.clone(),
-            proj.join(".omp/agent/skills"),
+            // The adapter declares `<project>/.agents/skills` primary, which Codex already
+            // covers; this row records omp's secondary root so one path never claims two agents.
+            proj.join(".agent/skills"),
         ));
         skill_dirs.push((
             AgentId::Cursor,
@@ -2182,6 +2193,13 @@ fn scan_native_and_deployments(
                 } else {
                     fs::read(&path).ok().map(|b| sha256_hex(&b))
                 };
+                // A manager-installed skill stays a native row at its link path; record the
+                // folder it resolves to so the screen can show the link and its target.
+                let link_target = path
+                    .is_symlink()
+                    .then(|| fs::canonicalize(&path).ok())
+                    .flatten()
+                    .map(|target| target.to_string_lossy().to_string());
 
                 let nat_id = format!("nat_{}", Ulid::generate());
                 input.native_items.push(DiscoveredNativeItem {
@@ -2194,6 +2212,9 @@ fn scan_native_and_deployments(
                     content_hash: hash,
                     status: "new".to_string(),
                     adopted_item_id: None,
+                    link_target,
+                    discovery_state: None,
+                    discovery_note: None,
                 });
             }
         }

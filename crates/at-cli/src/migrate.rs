@@ -323,6 +323,9 @@ fn scan_item_record(item: &at_migrate::scan::ScanItem) -> Value {
             _ => "unknown",
         },
         "content_hash": item.content_hash,
+        "link_target": item.link_target.as_ref().map(|target| target.display().to_string()),
+        "resolved": item.resolved.as_ref().map(|target| target.display().to_string()),
+        "discovery": item.discovery.as_str(),
         "store_link": item.store_link,
         "parse_error": match &item.parse_status {
             at_migrate::scan::ParseStatus::Parsed => None,

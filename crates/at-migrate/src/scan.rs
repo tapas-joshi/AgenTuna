@@ -126,6 +126,43 @@ pub struct ScanItem {
     pub store_link: bool,
     /// Ownership relative to the supplied store inventory.
     pub ownership: Ownership,
+    /// How the entry itself fared, independent of its content parse.
+    pub discovery: DiscoveryState,
+    /// Link target as written, when the entry is a symbolic link.
+    pub link_target: Option<PathBuf>,
+    /// Canonical folder a validated link resolves to; hashing and migration read this path.
+    pub resolved: Option<PathBuf>,
+}
+
+/// How one discovered entry fared, beyond whether its content parses.
+///
+/// A skill installed by a manager tool is a link to a central library. The link is the entry the
+/// agent loads, so it stays listed whether or not its content is readable: a refuse-and-hide
+/// scan is what made installed skills look absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum DiscoveryState {
+    /// The entry is readable; its content parsed or reported a parse error.
+    Valid,
+    /// The entry resolves but its content is refused or invalid (frontmatter, escaping link).
+    Invalid,
+    /// The entry is a dangling or looping symbolic link.
+    BrokenLink,
+    /// The entry exists but cannot be read (permissions).
+    Unreadable,
+}
+
+impl DiscoveryState {
+    /// Wire name stored in the index and printed by the CLI.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::BrokenLink => "broken_link",
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 /// A discovery root or agent configuration file that could not be read.
@@ -383,7 +420,14 @@ pub fn scan_with(
                         );
                         continue;
                     }
-                    scan_skill(&mut report, &mut physical, skill, &request, &agent);
+                    scan_skill(
+                        &mut report,
+                        &mut physical,
+                        skill,
+                        &request,
+                        &allowed_roots,
+                        &agent,
+                    );
                 }
             }
         }
@@ -660,30 +704,47 @@ fn record_root_failure(
 }
 
 /// Adds one native skill, preserving physical deduplication across shared roots.
+///
+/// Entries are deduplicated by the path the agent reads, so two agents sharing `.agents/skills`
+/// collapse into one item. Distinct links that point at the same library folder stay separate
+/// entries: each agent loads its own link, and the identity of the physical skill is its resolved
+/// target, which the index and the Skills screen group by.
 fn scan_skill(
     report: &mut ScanReport,
     physical: &mut BTreeMap<PathBuf, usize>,
     skill: at_adapters::native_skills::NativeSkill,
     request: &ScanRequest<'_>,
+    allowed_roots: &[PathBuf],
     agent: &AgentId,
 ) {
-    let canonical = fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
-    if let Some(index) = physical.get(&canonical).copied() {
+    if let Some(index) = physical.get(&skill.path).copied() {
         report.items[index].agents.insert(agent.clone());
         return;
     }
-    // Invalid links may point outside the sandbox; never hash their targets.
-    let digest = if skill.valid {
-        hash_skill_folder(&skill.path)
-            .ok()
-            .map(|hash| hash.to_string())
+    // A manager-installed skill is a link to a library folder. The adapter resolved it and
+    // checked the target is inside the roots this scan may read; hash and copy that folder,
+    // never the entry. A real folder is hashed directly. Both refuse a link inside the tree.
+    let content_root = skill.resolved.as_deref().unwrap_or(&skill.path);
+    let mut problem: Option<String> = None;
+    let (digest, raw_digest) = if skill.valid {
+        match hash_skill_folder_or_resolved(content_root, allowed_roots, skill.resolved.is_some()) {
+            Ok(hash) => {
+                let digest = hash.to_string();
+                match raw_skill_hash(content_root) {
+                    Ok(raw) => (Some(digest), Some(raw)),
+                    Err(_) => {
+                        problem = Some(String::from("unreadable skill content"));
+                        (Some(digest), None)
+                    }
+                }
+            }
+            Err(error) => {
+                problem = Some(hash_problem(&error));
+                (None, None)
+            }
+        }
     } else {
-        None
-    };
-    let raw_digest = if skill.valid {
-        raw_skill_hash(&skill.path).ok()
-    } else {
-        None
+        (None, None)
     };
     let is_store_link = skill.target.as_ref().is_some_and(|target| {
         let resolved = if target.is_absolute() {
@@ -700,15 +761,29 @@ fn scan_skill(
             resolved.starts_with(root)
         })
     });
+    let mut discovery = match skill.state {
+        at_adapters::native_skills::NativeSkillState::Valid => DiscoveryState::Valid,
+        at_adapters::native_skills::NativeSkillState::Invalid => DiscoveryState::Invalid,
+        at_adapters::native_skills::NativeSkillState::Broken => DiscoveryState::BrokenLink,
+        at_adapters::native_skills::NativeSkillState::PermissionDenied => {
+            DiscoveryState::Unreadable
+        }
+        _ => DiscoveryState::Invalid,
+    };
+    // A folder the adapter read but the hash refused (a link inside the tree, an oversized
+    // file) is not usable content, so the entry is reported as invalid with the reason.
+    if problem.is_some() && discovery == DiscoveryState::Valid {
+        discovery = DiscoveryState::Invalid;
+    }
     let status = if skill.valid && digest.is_some() && raw_digest.is_some() {
         ParseStatus::Parsed
     } else {
         report.partial = true;
-        let reason = skill
-            .error
-            .unwrap_or_else(|| "unreadable skill content".to_owned());
+        let reason = problem
+            .or_else(|| skill.error.clone())
+            .unwrap_or_else(|| String::from("unreadable skill content"));
         ParseStatus::Error(if reason.starts_with("invalid YAML frontmatter:") {
-            "invalid YAML frontmatter".to_owned()
+            String::from("invalid YAML frontmatter")
         } else {
             reason
         })
@@ -723,7 +798,7 @@ fn scan_skill(
             request.store_items,
         )
     };
-    physical.insert(canonical, report.items.len());
+    physical.insert(skill.path.clone(), report.items.len());
     report.items.push(ScanItem {
         kind: ItemKind::Skill,
         name: skill.name,
@@ -736,7 +811,41 @@ fn scan_skill(
         parse_status: status,
         store_link: is_store_link,
         ownership,
+        discovery,
+        link_target: skill.target,
+        resolved: skill.resolved,
     });
+}
+
+/// Hashes a skill folder, taking the resolved-folder path only when the adapter produced it.
+fn hash_skill_folder_or_resolved(
+    root: &Path,
+    allowed_roots: &[PathBuf],
+    resolved: bool,
+) -> Result<at_store::manifest::ContentHash, at_store::manifest::HashError> {
+    if resolved {
+        // The root was resolved from a link; it is re-validated here so a target swapped for an
+        // outside symlink after the adapter checked it is refused instead of hashed.
+        let allowed = allowed_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let validated = at_store::manifest::ValidatedSkillRoot::new(root, &allowed)?;
+        at_store::hash_skill_folder_resolved(&validated)
+    } else {
+        hash_skill_folder(root)
+    }
+}
+
+/// A short message for a folder hash failure that names only what the user can fix.
+fn hash_problem(error: &at_store::manifest::HashError) -> String {
+    match error {
+        at_store::manifest::HashError::Symlink {
+            relative: Some(relative),
+            ..
+        } => format!("symlink inside skill folder: {}", relative.display()),
+        _ => String::from("unreadable skill content"),
+    }
 }
 
 /// Counts distinct rows against the adapter candidates, not against inferred item parents.
@@ -973,6 +1082,9 @@ fn item_error(
         parse_status: ParseStatus::Error(error),
         store_link: false,
         ownership: Ownership::NotInAgenTuna,
+        discovery: DiscoveryState::Unreadable,
+        link_target: None,
+        resolved: None,
     }
 }
 
@@ -1027,6 +1139,9 @@ fn scan_rule(
         parse_status: ParseStatus::Parsed,
         store_link: false,
         ownership: ownership(ItemKind::Rule, &name, Some(&normalized_hash), stores),
+        discovery: DiscoveryState::Valid,
+        link_target: None,
+        resolved: None,
     });
 }
 
@@ -1074,6 +1189,9 @@ fn scan_mcp(
                             Some(&hash.to_string()),
                             stores,
                         ),
+                        discovery: DiscoveryState::Valid,
+                        link_target: None,
+                        resolved: None,
                     }),
                     Err(error) => {
                         report.partial = true;

@@ -1676,8 +1676,9 @@ pub fn mcp_identity_key(value: &serde_json::Value) -> Option<&'static str> {
 /// inode numbers and the folder name are not. `SKILL.md` hashes normalize CRLF and sort
 /// straightforward valid frontmatter fields; other files retain byte-exact content.
 ///
-/// The walk never follows a symlink and refuses one inside the tree. It bounds the number
-/// of files, each file's size, the total content and the nesting depth.
+/// The root itself must be a real directory: a symlink at `folder` is refused. The walk never
+/// follows a symlink and refuses one inside the tree. It bounds the number of files, each
+/// file's size, the total content and the nesting depth.
 ///
 /// # Errors
 /// [`HashError`] for a missing or non-directory root, a symlink, an unsupported file type,
@@ -1690,6 +1691,7 @@ pub fn hash_skill_folder(folder: &Path) -> Result<ContentHash, HashError> {
     if meta.file_type().is_symlink() {
         return Err(HashError::Symlink {
             path: folder.to_path_buf(),
+            relative: None,
         });
     }
     if !meta.is_dir() {
@@ -1697,6 +1699,154 @@ pub fn hash_skill_folder(folder: &Path) -> Result<ContentHash, HashError> {
             path: folder.to_path_buf(),
         });
     }
+    hash_skill_tree(folder)
+}
+
+/// A skill-content root a caller has authorized, with the roots it must stay inside.
+///
+/// A manager-installed skill is a link whose content lives in a central library, so the content
+/// is hashed at the link's resolved target rather than at the entry. That target is a path an
+/// attacker or a careless tool can swap between the moment a scan validated it and the moment a
+/// later step hashes or copies it. This type makes the validation travel with the path:
+///
+/// * it is only constructed through [`ValidatedSkillRoot::new`], which requires the path to be an
+///   already-canonical real directory (no symlink at the root, no symlink component) beneath one
+///   of the allowed roots, or through [`ValidatedSkillRoot::from_trusted_scan`] for a path whose
+///   containment an earlier validated scan already established;
+/// * [`hash_skill_folder_resolved`] re-runs the structural checks at use, so a target swapped for
+///   a symlink after construction is refused instead of followed.
+///
+/// Every link *inside* the tree is still refused by the walk, so a library folder cannot smuggle
+/// content in through a nested link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSkillRoot {
+    path: PathBuf,
+    allowed_roots: Vec<PathBuf>,
+}
+
+impl ValidatedSkillRoot {
+    /// Accepts `path` only when it is a canonical real directory inside an allowed root.
+    ///
+    /// `allowed_roots` are canonicalized; a root that cannot be canonicalized or is not a
+    /// directory is ignored. An empty list (or one that canonicalizes to nothing) refuses the
+    /// path: a resolved root without a configured boundary is never trusted.
+    ///
+    /// # Errors
+    /// [`HashError::Read`] for a missing path or an unresolvable allowed root,
+    /// [`HashError::Symlink`] for a link at the root, [`HashError::NotADirectory`] for a file,
+    /// [`HashError::NotCanonical`] for a path with a symlinked component, and
+    /// [`HashError::OutsideAllowedRoots`] when the path is not inside any allowed root.
+    pub fn new(path: &Path, allowed_roots: &[&Path]) -> Result<Self, HashError> {
+        let mut roots = Vec::new();
+        for root in allowed_roots {
+            if let Ok(canonical) = fs::canonicalize(root)
+                && canonical.is_dir()
+                && !roots.contains(&canonical)
+            {
+                roots.push(canonical);
+            }
+        }
+        if roots.is_empty() {
+            return Err(HashError::OutsideAllowedRoots {
+                path: path.to_path_buf(),
+            });
+        }
+        let validated = Self {
+            path: path.to_path_buf(),
+            allowed_roots: roots,
+        };
+        validated.verify()?;
+        Ok(validated)
+    }
+
+    /// Accepts a canonical path whose containment a validated scan already established.
+    ///
+    /// The structural checks still apply at construction and at every use, so a path replaced by
+    /// a symlink is refused. This constructor exists for the migration planner, which rebuilds a
+    /// plan from an existing [`ScanReport`](../at_migrate/scan/index.html) and re-verifies the
+    /// native link entry separately; new code that knows its allowed roots must call
+    /// [`ValidatedSkillRoot::new`] instead.
+    ///
+    /// # Errors
+    /// As [`ValidatedSkillRoot::new`], without the containment check.
+    pub fn from_trusted_scan(path: &Path) -> Result<Self, HashError> {
+        let validated = Self {
+            path: path.to_path_buf(),
+            allowed_roots: Vec::new(),
+        };
+        validated.verify()?;
+        Ok(validated)
+    }
+
+    /// The canonical path to hash.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Re-runs every structural check; a root that changed since construction is refused.
+    ///
+    /// # Errors
+    /// As [`ValidatedSkillRoot::new`].
+    pub fn verify(&self) -> Result<(), HashError> {
+        let meta = fs::symlink_metadata(&self.path).map_err(|source| HashError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(HashError::Symlink {
+                path: self.path.clone(),
+                relative: None,
+            });
+        }
+        if !meta.is_dir() {
+            return Err(HashError::NotADirectory {
+                path: self.path.clone(),
+            });
+        }
+        let canonical = fs::canonicalize(&self.path).map_err(|source| HashError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        if canonical != self.path {
+            return Err(HashError::NotCanonical {
+                path: self.path.clone(),
+            });
+        }
+        if !self.allowed_roots.is_empty()
+            && !self
+                .allowed_roots
+                .iter()
+                .any(|root| self.path.starts_with(root))
+        {
+            return Err(HashError::OutsideAllowedRoots {
+                path: self.path.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Hashes the folder a validated link resolves to.
+///
+/// The root is re-validated by [`ValidatedSkillRoot::verify`] before any content is read, so a
+/// target swapped for a symlink (or moved outside the roots its scan was allowed to read) after
+/// validation is refused instead of followed.
+///
+/// Callers must never pass an entry path taken straight from an untrusted discovery root: that
+/// is what [`hash_skill_folder`] is for.
+///
+/// # Errors
+/// [`HashError`] for a root that is no longer canonical, not a directory, a symlink or outside
+/// its allowed roots; a symlink inside the tree; an unsupported file type; an unreadable file; a
+/// file that changed mid-read; or an exceeded bound.
+pub fn hash_skill_folder_resolved(root: &ValidatedSkillRoot) -> Result<ContentHash, HashError> {
+    root.verify()?;
+    hash_skill_tree(root.path())
+}
+
+/// Hashes one real directory tree; the caller has already accepted the root itself.
+fn hash_skill_tree(folder: &Path) -> Result<ContentHash, HashError> {
     let mut files: Vec<(String, u64, String)> = Vec::new();
     let mut total: u64 = 0;
     walk_skill(folder, folder, 1, &mut files, &mut total)?;
@@ -1743,7 +1893,10 @@ fn walk_skill(
         })?;
         let file_type = meta.file_type();
         if file_type.is_symlink() {
-            return Err(HashError::Symlink { path });
+            // Name the entry inside the folder, not the folder: a manager library can hold one
+            // link while the rest of the skill is readable, and the user needs to know which.
+            let relative = path.strip_prefix(root).ok().map(Path::to_path_buf);
+            return Err(HashError::Symlink { path, relative });
         }
         if file_type.is_dir() {
             walk_skill(root, &path, depth + 1, files, total)?;
@@ -1838,15 +1991,32 @@ pub enum HashError {
         /// Underlying I/O error.
         source: io::Error,
     },
-    /// A symlink was found inside the tree.
-    #[error("{}: symlink inside a skill folder; refusing to follow it", .path.display())]
+    /// A symbolic link was found where the walk refuses to follow one.
+    ///
+    /// `relative` is `None` when the root itself is the link; the error then refuses the folder.
+    /// It names the entry relative to the hashed folder when the link sits inside the tree.
+    #[error("{}", symlink_error_message(.path, .relative.as_deref()))]
     Symlink {
         /// Symlink path.
         path: PathBuf,
+        /// Entry path relative to the hashed folder, when the link is inside the tree.
+        relative: Option<PathBuf>,
     },
     /// The root is not a directory.
     #[error("{}: skill folder is not a directory", .path.display())]
     NotADirectory {
+        /// Offending path.
+        path: PathBuf,
+    },
+    /// The root is not an already-canonical path, so a component is a symbolic link.
+    #[error("{}: skill folder is not a canonical path", .path.display())]
+    NotCanonical {
+        /// Offending path.
+        path: PathBuf,
+    },
+    /// The root is not inside any root the caller allowed.
+    #[error("{}: skill folder is outside the allowed roots", .path.display())]
+    OutsideAllowedRoots {
         /// Offending path.
         path: PathBuf,
     },
@@ -1902,4 +2072,12 @@ pub enum HashError {
         /// Offending file.
         path: PathBuf,
     },
+}
+
+/// Display text for [`HashError::Symlink`]: the entry inside the folder, or the folder itself.
+fn symlink_error_message(path: &Path, relative: Option<&Path>) -> String {
+    match relative {
+        Some(relative) => format!("symlink inside skill folder: {}", relative.display()),
+        None => format!("{}: symbolic link; refusing to follow it", path.display()),
+    }
 }

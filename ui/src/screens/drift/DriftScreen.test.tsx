@@ -9,14 +9,28 @@ const ipc = vi.hoisted(() => ({
   calls: [] as { command: string; args: unknown }[],
   reply: (_command: string, _args: unknown): Promise<unknown> => Promise.resolve(undefined),
 }));
+const watcherEvents = vi.hoisted(() => ({
+  handlers: [] as Array<(event: { payload: unknown }) => void>,
+  emit(payload: unknown): void {
+    for (const handler of [...this.handlers]) handler({ payload });
+  },
+}));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args?: unknown) => {
     ipc.calls.push({ command, args });
     return ipc.reply(command, args);
   },
 }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (_event: string, handler: (event: { payload: unknown }) => void) => {
+    watcherEvents.handlers.push(handler);
+    return Promise.resolve(() => {
+      watcherEvents.handlers = watcherEvents.handlers.filter((known) => known !== handler);
+    });
+  },
+}));
 
-afterEach(() => { cleanup(); ipc.calls.length = 0; });
+afterEach(() => { cleanup(); ipc.calls.length = 0; watcherEvents.handlers = []; });
 
 const driftRow = {
   event_id: 17,
@@ -205,7 +219,7 @@ describe("DriftScreen", () => {
     };
     renderScreen();
     expect(await screen.findByText("/sandbox/blocked")).toBeTruthy();
-    const watcherError = await screen.findByText("File watching is unavailable.");
+    const watcherError = await screen.findByText(/Not watching: permission denied/);
     fireEvent.click(within(watcherError.closest('[role="alert"]') as HTMLElement).getByRole("button", { name: "Rescan" }));
     expect(await screen.findByText("Watching")).toBeTruthy();
     expect(ipc.calls.some(({ command }) => command === "drift_rescan")).toBe(true);
@@ -224,5 +238,61 @@ describe("DriftScreen", () => {
     expect(restoreCall?.args).toEqual({
       request: { backup_id: backup.id, preview_id: "bkpv1_fixture", destination_hash: null },
     });
+  });
+
+  test("a not-watching banner names the reason and retry restarts the watcher", async () => {
+    ipc.reply = async (command) => {
+      if (command === "drift_snapshot") return {
+        rows: [],
+        in_sync_count: 0,
+        watched_count: 1,
+        watcher: { status: "error", path: "/sandbox/blocked", error: "watch refused: operation not permitted" },
+      };
+      if (command === "drift_watcher_set_paused") return { status: "starting", path: null, error: null };
+      return null;
+    };
+    renderScreen();
+
+    const banner = await screen.findByText(/Not watching: watch refused: operation not permitted/);
+    fireEvent.click(within(banner.closest('[role="alert"]') as HTMLElement).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Starting…")).toBeTruthy();
+    expect(ipc.calls).toContainEqual({ command: "drift_watcher_set_paused", args: { paused: false } });
+  });
+
+  test("a degraded watcher still reports watching and offers a rescan", async () => {
+    ipc.reply = async (command) => {
+      if (command === "drift_snapshot") return {
+        rows: [],
+        in_sync_count: 1,
+        watched_count: 2,
+        watcher: { status: "degraded", path: null, error: "root too large to index; covered by periodic rescan" },
+      };
+      return null;
+    };
+    renderScreen();
+
+    expect(await screen.findByText("Watching (degraded)")).toBeTruthy();
+    expect(await screen.findByText(/Watching with reduced coverage: root too large to index/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Rescan now" }));
+    expect(ipc.calls.some(({ command }) => command === "drift_rescan")).toBe(true);
+  });
+
+  test("a watcher status event updates the badge without a reload", async () => {
+    ipc.reply = async (command) => {
+      if (command === "drift_snapshot") return {
+        rows: [],
+        in_sync_count: 1,
+        watched_count: 2,
+        watcher: { status: "starting", path: null, error: null },
+      };
+      return null;
+    };
+    renderScreen();
+
+    expect(await screen.findByText("Starting…")).toBeTruthy();
+    watcherEvents.emit({ status: "active", path: null, error: null });
+    expect(await screen.findByText("Watching")).toBeTruthy();
+    watcherEvents.emit({ status: "error", path: "/sandbox/blocked", error: "watch refused: operation not permitted" });
+    expect(await screen.findByText("Not watching")).toBeTruthy();
   });
 });

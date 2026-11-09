@@ -206,6 +206,9 @@ fn shadowed_badge_wins_over_available_update() {
         update_available: true,
         updated_at: String::new(),
         description: None,
+        native_link_target: None,
+        native_state: None,
+        native_problem: None,
     };
     let row = at_engine::skills::SkillIndexRow {
         skill: item,
