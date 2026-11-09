@@ -9,9 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use at_store::PortablePlatform;
-use at_store::paths::{
-    AppPaths, DEFAULT_GLOBAL_STORE, GlobalStoreSource, PathEnvironment, PathError, PathOverrides,
-};
+use at_store::default_global_store;
+use at_store::paths::{AppPaths, GlobalStoreSource, PathEnvironment, PathError, PathOverrides};
 
 fn injected(home: &str) -> PathEnvironment {
     PathEnvironment::default().with_home(home)
@@ -57,13 +56,33 @@ fn macos_snapshot_of_every_root() {
 }
 
 #[test]
-fn global_store_default_is_documented_and_machine_wide() {
-    assert_eq!(
-        DEFAULT_GLOBAL_STORE,
-        "/Library/Application Support/AgenTuna/global"
+fn global_store_default_is_platform_specific_and_machine_wide() {
+    for (platform, expected) in [
+        (
+            PortablePlatform::MacOs,
+            "/Library/Application Support/AgenTuna/global",
+        ),
+        (PortablePlatform::Linux, "/var/lib/agentuna/global"),
+        (PortablePlatform::Windows, r"C:\ProgramData\AgenTuna\global"),
+    ] {
+        assert_eq!(
+            default_global_store(platform),
+            expected,
+            "the Global store default for {platform:?}"
+        );
+    }
+    let platform = PortablePlatform::current();
+    let expected = Path::new(default_global_store(platform));
+    assert!(
+        expected.is_absolute(),
+        "the Global default must be absolute: {expected:?}"
+    );
+    assert!(
+        !expected.starts_with("/Users/tester"),
+        "the Global default must not live under the user's home: {expected:?}"
     );
     let paths = resolve(&injected("/Users/tester"));
-    assert_eq!(paths.global_store(), Path::new(DEFAULT_GLOBAL_STORE));
+    assert_eq!(paths.global_store(), expected);
 }
 
 #[test]
@@ -129,7 +148,10 @@ fn global_store_resolution_is_environment_then_settings_then_default() {
 
     // Clearing the setting falls back to the documented default.
     assert!(paths.apply_settings_global_store(None));
-    assert_eq!(paths.global_store(), Path::new(DEFAULT_GLOBAL_STORE));
+    assert_eq!(
+        paths.global_store(),
+        Path::new(default_global_store(PortablePlatform::current()))
+    );
     assert_eq!(paths.global_store_source(), GlobalStoreSource::Default);
     assert!(!paths.apply_settings_global_store(None));
 }
