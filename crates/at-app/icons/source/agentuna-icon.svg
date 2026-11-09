@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    AgenTuna app icon: three toggle switches (green on, slate off, blue on) on the deep-navy tile.
+    The macOS artwork follows Apple's 1024 template (824 px tile, 100 px margin, soft shadow);
+    colours are the design-system tokens (accent #22c55e, surface #0f172a, scope blue #38bdf8).
+    Regenerate every raster with scripts/render-icons.mjs.
+  -->
+  <defs>
+    <filter id="tile-shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity="0.32"/>
+    </filter>
+    <filter id="knob-shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16213a"/>
+      <stop offset="1" stop-color="#0b1220"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#tile-shadow)"/>
+  <!-- on: green, knob right -->
+  <rect x="232" y="228" width="560" height="156" rx="78" fill="#22c55e"/>
+  <circle cx="714" cy="306" r="62" fill="#ffffff" filter="url(#knob-shadow)"/>
+  <!-- off: slate, knob left -->
+  <rect x="232" y="434" width="560" height="156" rx="78" fill="#64748b"/>
+  <circle cx="310" cy="512" r="62" fill="#ffffff" filter="url(#knob-shadow)"/>
+  <!-- on: blue (User scope), knob right -->
+  <rect x="232" y="640" width="560" height="156" rx="78" fill="#38bdf8"/>
+  <circle cx="714" cy="718" r="62" fill="#ffffff" filter="url(#knob-shadow)"/>
+</svg>
