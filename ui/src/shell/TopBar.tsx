@@ -98,7 +98,7 @@ export function TopBar({
         aria-keyshortcuts="Meta+["
         disabled={!canGoBack}
         onClick={onBack}
-        className="inline-flex h-[28px] shrink-0 items-center rounded-6 border border-border px-8 text-12 text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex h-[28px] shrink-0 items-center rounded-6 border border-border px-8 optical-label-center text-12 text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span aria-hidden="true">←</span>
         <span className="sr-only">Back</span>
@@ -120,7 +120,7 @@ export function TopBar({
             : `Project: ${projectLabel}. Choose a different project`
         }
         className={cn(
-          "flex h-[28px] w-[160px] max-[1023px]:w-[140px] min-w-0 shrink-0 items-center gap-[6px] rounded-6 border px-8 text-12",
+          "flex h-[28px] w-[160px] max-[1023px]:w-[140px] min-w-0 shrink-0 items-center gap-[6px] rounded-6 border px-8 optical-label-center text-12",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
           projectLabel === null
             ? "border-border bg-raised text-text-muted hover:bg-overlay hover:text-text"
@@ -165,7 +165,7 @@ export function TopBar({
         aria-keyshortcuts={paletteModifier === "meta" ? "Meta+K" : "Control+K"}
         aria-label={`Open command palette (${paletteHint})`}
         className={cn(
-          "ml-auto flex h-[28px] w-[220px] shrink-0 items-center gap-8 rounded-6 border border-border bg-raised px-8 max-[1439px]:w-[40px] max-[1439px]:justify-center",
+          "ml-auto flex h-[28px] w-[220px] shrink-0 items-center gap-8 rounded-6 border border-border bg-raised px-8 optical-label-center max-[1439px]:w-[40px] max-[1439px]:justify-center",
           "text-12 text-text-muted",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
           "hover:border-text-muted hover:text-text-secondary",

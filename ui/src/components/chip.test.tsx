@@ -37,6 +37,8 @@ describe("Chip", () => {
 
     expect(chip.getAttribute("aria-pressed")).toBe("true");
     expect(chip.dataset["state"]).toBe("on");
+    expect(chip.className).toContain("optical-label-center");
+    expect(chip.className).toContain("h-32");
     expect(chip.className).toContain("data-[state=on]:border-text");
   });
 

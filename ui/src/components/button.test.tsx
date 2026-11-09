@@ -37,11 +37,15 @@ describe("Button", () => {
     expect(screen.getByRole("button").className).toContain("bg-transparent");
   });
 
-  test("sizes change the control height token", () => {
+  test("applies the shared optical-centering utility and preserves fixed control heights", () => {
     const { rerender } = render(<Button size="sm">Act</Button>);
+    expect(screen.getByRole("button").className).toContain("items-center");
+    expect(screen.getByRole("button").className).toContain("optical-label-center");
     expect(screen.getByRole("button").className).toContain("h-24");
+    rerender(<Button size="md">Act</Button>);
+    expect(screen.getByRole("button").className).toContain("h-32");
     rerender(<Button size="lg">Act</Button>);
-    expect(screen.getByRole("button").className).toContain("text-14");
+    expect(screen.getByRole("button").className).toContain("h-32");
   });
 
   test("click reports one interaction and never changes its own props", async () => {

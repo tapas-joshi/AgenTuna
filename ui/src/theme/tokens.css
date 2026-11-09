@@ -179,3 +179,50 @@ body {
   outline: 2px solid var(--at-color-focus);
   outline-offset: 2px;
 }
+
+/*
+ * Safari 16 in the macOS 13 deployment baseline lacks @font-face metric
+ * overrides (MDN: https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/%40font-face/ascent-override
+ * and https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/%40font-face/descent-override).
+ * Keep optical centering as a layout fallback.
+ */
+:root {
+  --optical-label-shift: 1px;
+}
+
+@utility optical-label-center {
+  padding-block-end: var(--optical-label-shift);
+}
+
+@layer utilities {
+  /* Inter 14px ink needs a 3x correction; measured button boxes stay 32px. */
+  .optical-label-center.text-14 {
+    padding-block-end: calc(var(--optical-label-shift) * 3);
+  }
+
+  .optical-label-center.font-mono {
+    padding-block-end: 0;
+  }
+
+  .optical-label-center[role="menuitem"] {
+    padding-block-start: calc(var(--spacing) * 4 - var(--optical-label-shift) / 2);
+    padding-block-end: calc(var(--spacing) * 4 + var(--optical-label-shift) / 2);
+  }
+}
+
+@layer utilities {
+  .optical-label-center[data-optical-padding="6"] {
+    padding-block-start: calc(var(--spacing) * 6 - var(--optical-label-shift) / 2);
+    padding-block-end: calc(var(--spacing) * 6 + var(--optical-label-shift) / 2);
+  }
+
+  .optical-label-center[data-optical-padding="2"] {
+    padding-block-start: calc(var(--spacing) * 2 - var(--optical-label-shift) / 2);
+    padding-block-end: calc(var(--spacing) * 2 + var(--optical-label-shift) / 2);
+  }
+
+  .optical-label-center[data-optical-padding="3"] {
+    padding-block-start: calc(var(--spacing) * 3 - var(--optical-label-shift) / 2);
+    padding-block-end: calc(var(--spacing) * 3 + var(--optical-label-shift) / 2);
+  }
+}
